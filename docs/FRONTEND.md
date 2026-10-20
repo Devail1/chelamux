@@ -11,11 +11,13 @@ The dashboard is a Flask API (`chela/dashboard/app.py`) serving one page,
 
 | | Where | Built? |
 |---|---|---|
-| **Legacy** | `chela/dashboard/static/js/*.js`, plain ES modules, entry `main.js` | Vite, bundled with React (CMX-215) |
+| **Legacy** | `chela/dashboard/static/js/*.js`, plain ES modules, booted by `src/boot.ts` | Vite, bundled with React (CMX-215) |
 | **React** | `chela/dashboard/frontend/src/`, TypeScript + React 19 | Vite, into `static/app/` |
 
 Both reach the browser as ONE bundle: the build's entry `src/main.tsx` imports the islands,
-then `../../static/js/main.js`, so a legacy module can `import` a `.ts` one directly.
+then `src/boot.ts` (which imports the legacy graph), so a legacy module can `import` a `.ts`
+one directly. Legacy imports are extensionless (`'./util'`, not `'./util.js'`), so a module
+converted to TypeScript renames no importer.
 
 The React side is a Vite single-page build, **not** Next.js: no server components, no
 `"use client"`, no file routing, no `next/*`. Tests are Vitest + React Testing Library in
@@ -55,7 +57,7 @@ everything else and keeps working untouched.
 How the page loads them: `app.py`'s `app_entry()` reads the build's
 `static/app/manifest.json` once at import and finds the entry `src/main.tsx` compiled to
 (`app/assets/main-<hash>.js`). `index()` renders it as the page's one versioned
-`<script type="module">`. `main.tsx` imports `islands.tsx` **before** legacy `main.js`, and
+`<script type="module">`. `main.tsx` imports `islands.tsx` **before** `boot.ts`, and
 imports run in order, so the state bridge below exists before any legacy module publishes to
 it. There is no unbundled fallback: a missing or unreadable manifest logs an error and the
 page loads with no JS.
@@ -88,12 +90,14 @@ same value notifies nobody, so always publish a NEW array or object, never one m
 dependency, and it renders a consistent value even during concurrent rendering. A library
 (zustand) would add selectors and middleware nobody needs for two values; Redux is ruled out.
 
-Legacy is in the Vite graph since CMX-215, but it still reaches the stores through
-`window.chelaBridge` until P03 (`FRONTEND_PORT_PLAN.md`) turns these into imports:
+Since CMX-217 the page's state is `src/shared/store/`, one file per slice (`view.ts`, the
+active view; `agents.ts`, the bridge's `agents` store). Legacy imports those objects through
+`util.js`, whose `currentTab` and `_agentsCache` are a facade over them: the store is the
+truth, the live bindings mirror it. `sidebarLayout` still goes through `window.chelaBridge`:
 
 ```js
-publish('agents', rows);                  // util.js: a no-op when the islands did not load
-window.chelaBridge?.agents.get();         // read
+setAgentsCache(rows);                     // util.js: writes the agents store
+publish('sidebarLayout', layout);         // util.js: a no-op when the islands did not load
 ```
 
 In React:
@@ -104,6 +108,21 @@ const agents = useStore(installBridge(window).agents);   // the page's one bridg
 
 To add a store: add it to `Bridge` and `createBridge()` in `src/shared/bridge/index.ts`, and
 call `publish('<name>', value)` wherever legacy changes it.
+
+## Polls, pushes and the boot config
+
+- **`src/shared/api`**: `api()`, `BASE_PATH`, `staticUrl()` and `BOOT`, the config Flask renders
+  into index.html as one JSON block (`#chela-boot`: `assetVersion`, `terminalsEnabled`,
+  `wallTileDispatched`). A missing or malformed field runs as its default.
+- **`src/shared/scheduler`**: the 30 s refresh loop. A feature adds a poll with
+  `registerLane(name, tick => ..., phase)` from its own module. Lanes are independent (one
+  that throws is logged, the rest run), share ONE `/api/agents/context` read per tick
+  (`tick.context`), and the active view's tick starts once a lane calls
+  `tick.paneListKnown()` (CMX-166). `phase` is `'tick'` (awaited), `'detached'` (not awaited,
+  e.g. the update check) or `'settled'` (after every `'tick'` lane).
+- **`src/shared/events`**: the page's one `EventSource` on `/api/events`. A feature subscribes
+  with `onEvent(name, data => ...)` for the events it owns (`hello`, `windows`, `runs`, `log`,
+  `term-ready`, `orchestrator`, `overrides`). Frames are notifications: a handler refetches.
 
 ## Adding a component, with its test
 

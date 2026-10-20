@@ -70,9 +70,8 @@ beforeAll(async () => {
     };
     globalThis.window.chela = globalThis.window.chela || {};
     globalThis.setInterval = () => 0;
-    globalThis.TERMINALS_ENABLED = dom.window.TERMINALS_ENABLED = true;
 
-    await import('../chela/dashboard/static/js/main.js');
+    await import('../chela/dashboard/frontend/src/boot.ts');
     // Same cached module instance main.js already evaluated (Node's ESM cache is keyed
     // by resolved URL) — this just hands back its exports, it does not re-run work.js.
     ({ pollWork, toggleDispatchHold } = await import('../chela/dashboard/static/js/work.js'));

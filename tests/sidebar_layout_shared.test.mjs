@@ -15,14 +15,11 @@
 // Run: pnpm exec vitest run tests/sidebar_layout_shared.test.mjs  (pytest runs it via tests/test_js_suites.py)
 import { afterAll, beforeAll, beforeEach, test } from 'vitest';
 import assert from 'node:assert/strict';
-import { cpSync, mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { dirname, join } from 'node:path';
-import { fileURLToPath, pathToFileURL } from 'node:url';
-import { activateDom, bootDashboardDom, flush } from './js_helpers/dashboard_dom.mjs';
+import { join } from 'node:path';
+import { activateDom, bootDashboardDom, copyDashboard, flush } from './js_helpers/dashboard_dom.mjs';
 import { fakeArchiveServer } from './js_helpers/fake_archive.mjs';
-
-const STATIC = join(dirname(fileURLToPath(import.meta.url)), '..', 'chela', 'dashboard', 'static');
 
 const BODY = `
 <aside class="sidebar">
@@ -58,13 +55,12 @@ function fetchImpl(url, opts) {
 const tmp = mkdtempSync(join(tmpdir(), 'chela-cmx82-'));
 afterAll(() => rmSync(tmp, { recursive: true, force: true }));
 
-// A device: its own copy of static/js (+ the collab module it imports), its own window.
+// A device: its own copy of the front end (copyDashboard), its own window.
 async function bootDevice(name) {
-    const root = join(tmp, name);
-    for (const d of ['js', 'collab']) cpSync(join(STATIC, d), join(root, d), { recursive: true });
+    const jsRoot = copyDashboard(join(tmp, name));
     const { dom, modules } = await bootDashboardDom({
         body: BODY, canvasStub: true, terminalsEnabled: false, fetchImpl,
-        jsRoot: pathToFileURL(join(root, 'js') + '/').href,
+        jsRoot,
         extraModules: ['util.js', 'nav.js'],
     });
     const dev = { name, dom, nav: modules.nav, util: modules.util };

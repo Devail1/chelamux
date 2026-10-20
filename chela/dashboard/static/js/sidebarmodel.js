@@ -17,7 +17,7 @@
 // None), the sorts (Last activity / Name / Created) and the empty groups. A row's
 // `badge` slot stays the renderer's to fill (the PR badge, CMX-67's judge progress).
 
-import { batteryState } from './wallmodel.js';
+import { batteryState } from './wallmodel';
 
 export const OTHER_KEY = '~other';
 export const DISPATCHED_KEY = '~dispatched';

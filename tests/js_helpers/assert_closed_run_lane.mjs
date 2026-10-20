@@ -5,21 +5,22 @@
 // as a real `dispatcher.tick()`-reconciled `closed` row in Python and ends here, fed
 // straight into the REAL renderKanban() the browser runs.
 //
-// Usage: node assert_closed_run_lane.mjs <path-to-/api/dispatcher-JSON> <closed-task-id>
-// Exit 0 + nothing on stdout when every assertion holds; exit 1 + a message otherwise.
+// CMX-217: run by Vitest (the legacy graph imports TypeScript now, which plain `node` cannot
+// load) through its own config, closed_run_lane.config.mjs, with the inputs in the env:
+//   CLOSED_RUN_PAYLOAD=<path-to-/api/dispatcher-JSON> CLOSED_RUN_TASK=<closed-task-id> \
+//     node node_modules/vitest/vitest.mjs run --config tests/js_helpers/closed_run_lane.config.mjs
+// Exit 0 when every assertion holds; nonzero, with the failed assertion in the report, otherwise.
 //
 // Same jsdom bootstrap as tests/kanban_flatten.test.mjs — shared via
-// dashboard_dom.mjs (CMX-290), module-graph import of main.js so kanban.js's
+// dashboard_dom.mjs (CMX-290), booting the page's real entry so kanban.js's
 // window.chela wiring evaluates against a real window.
 import { readFileSync } from 'node:fs';
 import assert from 'node:assert/strict';
+import { test } from 'vitest';
 import { bootDashboardDom } from './dashboard_dom.mjs';
 
-const [, , payloadPath, closedTaskId] = process.argv;
-if (!payloadPath || !closedTaskId) {
-    console.error('usage: node assert_closed_run_lane.mjs <payload.json> <closed-task-id>');
-    process.exit(2);
-}
+const { CLOSED_RUN_PAYLOAD: payloadPath, CLOSED_RUN_TASK: closedTaskId } = process.env;
+if (!payloadPath || !closedTaskId) throw new Error('CLOSED_RUN_PAYLOAD and CLOSED_RUN_TASK must be set');
 const payload = JSON.parse(readFileSync(payloadPath, 'utf8'));
 
 const BODY = `
@@ -32,12 +33,10 @@ const BODY = `
   <div id="kanban-empty" class="work-empty" style="display:none;"></div>
 </div>`;
 
-const { modules: { kanban: { renderKanban } } } = await bootDashboardDom({
-    // Plain `node` (test_dispatcher_worktree_gc.py), so no .tsx: the legacy graph alone.
-    body: BODY, extraModules: ['kanban.js'], islands: false,
-});
-
-try {
+test('the closed run renders in the Archived lane, labelled, never as done', async () => {
+    const { modules: { kanban: { renderKanban } } } = await bootDashboardDom({
+        body: BODY, extraModules: ['kanban.js'],
+    });
     renderKanban(payload);
 
     const archivedCol = document.querySelector('.kanban-col-archived');
@@ -64,8 +63,4 @@ try {
     assert.ok(stateChip, 'the closed card has no .kanban-state-chip pill at all');
     assert.match(stateChip.textContent, /closed, not merged/,
         `closed card's status pill has no readable label text — got: "${stateChip.textContent}"`);
-} catch (err) {
-    console.error(err.message || String(err));
-    process.exit(1);
-}
-process.exit(0);
+});

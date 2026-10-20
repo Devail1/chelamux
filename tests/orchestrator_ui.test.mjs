@@ -81,7 +81,6 @@ let terminals, orchestrator;
 beforeAll(async () => {
     const dom = new JSDOM(`<!doctype html><html><body>${PANEL}</body></html>`,
         { url: 'http://localhost:5005/', pretendToBeVisual: true });
-    dom.window.TERMINALS_ENABLED = true;
     for (const k of ['window', 'document', 'localStorage', 'navigator', 'HTMLElement',
         'Element', 'Node', 'Event', 'MouseEvent', 'KeyboardEvent', 'CustomEvent',
         'getComputedStyle', 'requestAnimationFrame', 'cancelAnimationFrame']) {
@@ -107,7 +106,7 @@ beforeAll(async () => {
     // Same cyclic-import order as the browser (index.html -> main.js -> everything
     // else) — main.js's top-level initSSE() is what wires the real `orchestrator`
     // listener onto our FakeEventSource.
-    await import('../chela/dashboard/static/js/main.js');
+    await import('../chela/dashboard/frontend/src/boot.ts');
     const util = await import('../chela/dashboard/static/js/util.js');
     terminals = await import('../chela/dashboard/static/js/terminals.js');
     orchestrator = await import('../chela/dashboard/static/js/orchestrator.js');

@@ -2,7 +2,7 @@
 // `started` reply is followed by a bounded poll of /api/update/status, so a click always
 // ends in an outcome ("Restarted …", the error, a reload, or "couldn't confirm"), never an
 // endless spinner.
-import { api } from './util.js';
+import { api } from './util';
 
 const POLL_MS = 2000;
 // How long a page follows one click; past it, "couldn't confirm" — unknown is never success.

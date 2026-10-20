@@ -140,9 +140,13 @@ def _pnpm(cwd, script, *args):
 
 
 def _violating_copy(tmp_path, script):
-    """The frontend as committed, plus `script`'s fixture tree on top of it."""
-    tree = tmp_path / "frontend"
+    """The frontend as committed, plus `script`'s fixture tree on top of it. Beside a copy of
+    the legacy static/js (+ the collab modules it imports), which src/boot.ts imports
+    (CMX-217), as in the repo."""
+    tree = tmp_path / "dashboard" / "frontend"
     shutil.copytree(FRONTEND, tree, ignore=shutil.ignore_patterns("node_modules", "dist"))
+    for d in ("js", "collab"):
+        shutil.copytree(FRONTEND.parent / "static" / d, tmp_path / "dashboard" / "static" / d)
     (tree / "node_modules").symlink_to(FRONTEND / "node_modules")
     shutil.copytree(GATE_FIXTURES / script.replace(":", "_"), tree, dirs_exist_ok=True)
     return tree
@@ -213,7 +217,7 @@ def test_test_fails_on_a_failing_spec_and_still_runs_the_real_ones(tmp_path):
     code, out, _ = _pnpm(_violating_copy(tmp_path, "test"), "test")
     assert code != 0, _shown(out, 4000)
     plain = re.sub(r"\x1b\[[0-9;]*m", "", out.decode())   # CI colours vitest's summary
-    assert re.search(r"Tests\s+1 failed \| 12 passed \(13\)", plain), _shown(out, 4000)
+    assert re.search(r"Tests\s+1 failed \| 35 passed \(36\)", plain), _shown(out, 4000)
 
 
 def test_the_frontend_is_a_pnpm_workspace_member_with_exact_pins():

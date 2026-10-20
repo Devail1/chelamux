@@ -91,7 +91,6 @@ let pillShownByRefresh = false;
 beforeAll(async () => {
     const dom = new JSDOM(`<!doctype html><html><body>${PANEL}</body></html>`,
         { url: 'http://localhost:5005/', pretendToBeVisual: true, runScripts: 'dangerously' });
-    dom.window.TERMINALS_ENABLED = true;
     for (const k of ['window', 'document', 'localStorage', 'navigator', 'HTMLElement',
         'Element', 'Node', 'Event', 'MouseEvent', 'KeyboardEvent', 'CustomEvent',
         'getComputedStyle', 'requestAnimationFrame', 'cancelAnimationFrame']) {
@@ -109,7 +108,7 @@ beforeAll(async () => {
     globalThis.window.chela = globalThis.window.chela || {};
     globalThis.setInterval = () => 0;
 
-    await import('../chela/dashboard/static/js/main.js');
+    await import('../chela/dashboard/frontend/src/boot.ts');
     // refresh() awaits a chain of polls before tickApprovals(); let them settle. Only the
     // page's own load is allowed to show the pill — nothing below has run yet.
     for (let i = 0; i < 40 && document.getElementById('btn-approvals').hidden; i++) await flush();

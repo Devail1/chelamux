@@ -58,7 +58,10 @@ export function renderShell() {
     const html = readFileSync(TEMPLATE, 'utf8')
         .replace(/\{\{\s*app_src\s*\}\}/g, `static/v/${ASSET_VERSION}/app/${entry}`)
         .replace(/\{\{\s*asset_path\('([^']+)'\)\s*\}\}/g, (_, rel) => `static/v/${ASSET_VERSION}/${rel}`)
-        .replace(/\{\{\s*asset_version\|tojson\s*\}\}/g, JSON.stringify(ASSET_VERSION));
+        .replace(/\{\{\s*boot\|tojson\s*\}\}/g, JSON.stringify({
+            assetVersion: ASSET_VERSION, terminalsEnabled: flags.terminals_enabled,
+            wallTileDispatched: flags.wall_tile_dispatched,
+        }));
     const rendered = renderTemplateIfs(html, flags);
     if (/\{%|\{\{/.test(rendered)) throw new Error('renderShell: unrendered Jinja left in templates/index.html');
     return rendered;
