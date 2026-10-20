@@ -333,10 +333,37 @@ def test_hand_in_tier_unknown_is_core(tmp_path, repo, case):
     elif case != "no-run":
         _insert("t1", repo, wf)
     if case == "raises":
-        with patch.object(judge, "_changed_files", side_effect=RuntimeError("boom")):
+        with patch.object(judge, "_changed_files", side_effect=RuntimeError("boom")), \
+                patch.object(dispatcher.log, "warning") as warn:
             assert dispatcher.hand_in_tier("t1") == risktier.CORE
+        assert "boom" in str(warn.call_args)   # an unreadable tier is logged, not silent
     else:
         assert dispatcher.hand_in_tier("t1") == risktier.CORE
+
+
+@pytest.mark.parametrize("case", ["no-run", "no-worktree", "no-workflow"])
+def test_hand_in_tier_with_nothing_on_record_never_reads_the_tier(tmp_path, repo, case,
+                                                                   caplog):
+    """The guard, not the catch-all under it: a run with no row, worktree or workflow is
+    CORE BEFORE the workflow or git is touched, and nothing is logged as a failure. The
+    ``except`` below the guard also lands on CORE (a ``None`` path raises a TypeError), so
+    the return value alone cannot tell the two apart — which code path answered can."""
+    _git("checkout", "-b", "work", cwd=repo)
+    (repo / "chela" / "app.py").write_text("VALUE = 3\n")
+    _git("commit", "-am", "work", cwd=repo)
+    if case == "no-worktree":
+        _insert("t1", None, _wf_file(tmp_path))
+    elif case == "no-workflow":
+        with dispatcher._db() as conn:   # the column is NOT NULL; an empty path is the gap
+            _insert("t1", repo, _wf_file(tmp_path))
+            conn.execute("UPDATE runs SET workflow_path='' WHERE task_id='t1'")
+    with patch.object(dispatcher, "load_workflow") as load, \
+            patch.object(judge, "_changed_files", return_value=["chela/app.py"]) as changed, \
+            caplog.at_level("WARNING", logger=dispatcher.log.name):
+        assert dispatcher.hand_in_tier("t1") == risktier.CORE
+    load.assert_not_called()
+    changed.assert_not_called()
+    assert not [r for r in caplog.records if "could not read the tier" in r.getMessage()]
 
 
 # --- verify_standard_hand_in: lint, then ONE suite, from the workflow --------------------
@@ -376,6 +403,15 @@ def test_standard_runs_lint_then_the_suite_in_the_runs_worktree(tmp_path):
     assert result == {"ok": True, "steps": [
         {"name": "lint", "cmd": "ruff check chela", "passed": True, "detail": ""},
         {"name": "suite", "cmd": "pytest -q", "passed": True, "detail": ""}]}
+
+
+def test_an_unreadable_workflow_fails_the_hand_in_without_running_anything(tmp_path):
+    _std_run(tmp_path, "ruff check chela", "pytest -q")
+    (tmp_path / "WORKFLOW.md").unlink()
+    with patch.object(judge, "run_suite") as run:
+        result = dispatcher.verify_standard_hand_in("t1")
+    run.assert_not_called()
+    assert result["ok"] is False and "could not be read" in result["error"]
 
 
 def test_a_red_lint_stops_before_the_suite(tmp_path):
