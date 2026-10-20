@@ -595,7 +595,17 @@ def _no_live_state(monkeypatch):
                 "code at the per-test scratch dir (the CHELA_DIR fixtures in "
                 "tests/conftest.py), or hand it the path you want it to use."
             )
-        return real_connect(database, *args, **kwargs)
+        conn = real_connect(database, *args, **kwargs)
+        # ⏱️ CMX-295: a test DB is scratch, so skip the per-commit fsync (147 s → 3 s on
+        # test_contract + test_dispatcher_reopen). A ``mode=ro`` open takes it fine; the
+        # pragma is refused only by a file that is not a database, or by an
+        # ``autocommit=False`` connection already in a transaction — those keep the
+        # default, and the error surfaces where the product code would see it.
+        try:
+            conn.execute("PRAGMA synchronous=OFF")
+        except sqlite3.DatabaseError:
+            pass
+        return conn
 
     monkeypatch.setattr(sqlite3, "connect", guarded_connect)
 
