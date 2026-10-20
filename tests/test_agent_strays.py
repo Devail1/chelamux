@@ -71,6 +71,23 @@ def test_only_the_orphaned_tree_is_signalled_cont_term_then_kill(tmp_path, caplo
     assert "pid 21 outlived SIGTERM by 1.0s: SIGKILLed" in caplog.text
 
 
+def test_the_caller_and_its_ancestors_are_spared_without_a_claude_among_them(tmp_path, monkeypatch):
+    """🔴 GUARD — a `chela` CLI run from inside the worktree (e.g. `rework-disputed`) must never
+    signal itself or its shell, even when no `claude` sits above it to spare the chain.
+    Empty the caller's own ancestor set ⇒ pids 500/501 signalled ⇒ RED."""
+    root = tmp_path / "worktrees"
+    wt = _linked(root / "CMX-1")
+    proc = _proc(tmp_path, {
+        501: ("bash", "S", str(wt), 1), 500: ("chela", "S", str(wt), 501),
+        20: ("pytest", "R", str(wt), 1)})
+    monkeypatch.setattr(worktree.os, "getpid", lambda: 500)
+    kills = []
+    got = worktree.reap_strays_in(wt, root, proc_root=proc, kill=_killer(proc, {20}, kills),
+                                  grace=0.25, sleep=lambda _s: None)
+    assert got == [20]
+    assert {pid for pid, _sig in kills} == {20}
+
+
 def test_a_tree_that_dies_on_term_is_never_killed_and_the_wait_ends_early(tmp_path):
     root, wt, proc = _table(tmp_path)
     kills, sleeps = [], []
