@@ -406,7 +406,7 @@ body {
    so mobile's forced single mode at <768px is untouched). The WORD here plus
    the `.gs-dot` SHAPE carry the state (Liav is red-weak); the Okabe-Ito
    colour below is decoration on top, never the sole signal. `tileState`
-   (wallmodel.js) is the one source of the word/class pair; this file only
+   (wallmodel.ts) is the one source of the word/class pair; this file only
    paints it.
    CMX-393: a SOFT pill with the WORD only (the mockup's) — a tint of the
    state colour behind it, no border and no glyph. The shape lives once, on
@@ -1156,7 +1156,7 @@ body.pane-is-maximized .grid-stack-item:not(:has(.pane-maximized)) {
    4 shapes, AND used the wrong shape per state — see the per-state comments
    below). Every one of these elements wears the SAME `.term-status-dot
    <state>` pair; _colorTermDots (terminals.js) computes `<state>` from the
-   SAME tileState() (wallmodel.js) the pane's `.gs-state` word pill already
+   SAME tileState() (wallmodel.ts) the pane's `.gs-state` word pill already
    used, so the dot and the pill can never disagree, and nav.js's sidebar row
    computes the same four class names off its own status predicates. Exact
    spec (Liav-approved mockup 2026-09-28, `renderVals()`'s palette): working =
@@ -1368,8 +1368,8 @@ body.term-dragging { overflow: hidden; }
     background: rgba(0, 0, 0, 0.15); transform: scale(1.15);
 }
 /* In a room: a 3px stripe in the room's colour along the TOP of the header —
-   PAIRED WITH A NON-HUE CUE (the badge below carries the room's own name + a 🔌
-   glyph), because hue is never the only signal here.
+   PAIRED WITH A NON-HUE CUE (the badge below carries the room's own name + a plug
+   icon), because hue is never the only signal here.
    CMX-104: a stripe, not a whole-pane ring. The old room-coloured border + 1px
    outer ring was a third ring style beside focus and waiting, and was read as
    focus (or as an ownership marker). Inset on the header itself, so it paints
@@ -1384,6 +1384,7 @@ body.term-dragging { overflow: hidden; }
     color: var(--text); background: color-mix(in srgb, var(--room-accent, var(--accent)) 22%, transparent);
     border: 1px solid var(--room-accent, var(--accent));
 }
+.gs-room svg { vertical-align: -2px; margin-right: 3px; }
 .gs-room:hover { background: color-mix(in srgb, var(--room-accent, var(--accent)) 40%, transparent); }
 /* On-screen key bar: sticky bottom dock, collapsible, grouped + inverted-T D-pad */
 #term-stage { padding-bottom: 4px; }

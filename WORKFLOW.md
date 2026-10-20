@@ -94,13 +94,14 @@ agent:
 # tests vs base_branch) unless the agent passes `--oversize-reason`. `size_exclude` = fnmatch
 # globs that do not count (default: docs/*, *.md, changelog.d/*, images, video).
 # hand_in:
-#   max_pr_lines: 300   (the code default; this workflow sets 800 below, Liav 2026-10-20)
+#   max_pr_lines: 300   (the code default; this workflow effectively disables it below, Liav 2026-10-20)
 #   size_exclude: ["docs/*", "*.md", "changelog.d/*", "*.png", "*.jpg", "*.gif", "*.svg", "*.mp4", "*.webm"]
-# Liav 2026-10-20: 800, not 300. Every PR pays ~3 h of fixed pipeline cost (hand-in check +
-# judge), so per line shipped, 300-1200-line PRs were 2-3x cheaper than <300 ones on the
-# 42 merged dispatched PRs, despite more rework rounds. Core / risk:high briefs still ask ≤300.
+# Liav 2026-10-20: no line cap ("I'm not limiting my model to max lines changes"). Every PR
+# pays a fixed pipeline cost, so a cap only multiplies PRs. The gate has no off switch (an
+# unreadable limit refuses by design), so it is set beyond any real diff. One coherent change
+# per PR is the rule; risk:high core briefs may still ask for small slices.
 hand_in:
-  max_pr_lines: 800
+  max_pr_lines: 1000000
 
 judge:
   test_cmd: CHELA_REQUIRE_JS_TESTS=1 uv run pytest -q
@@ -236,7 +237,9 @@ A classifier or hook denial is final; never relaunch the same action in another 
    mirror the style of the existing `skills/chela-setup`, `skills/orchestrate`, and
    `skills/telegram-send` skills.
 2. **Validate — this repo's CI gates on ruff.** Run `uv run ruff check chela tests`
-   (MUST pass — pytest-green is NOT sufficient) and `uv run pytest -q`; fix what you broke.
+   (MUST pass — pytest-green is NOT sufficient) and `timeout 2400 uv run pytest -q`; fix what
+   you broke. ⏳ CMX-274: always run the suite under `timeout <judge.suite_timeout_seconds>`
+   — a Bash call that times out or is backgrounded otherwise leaves pytest running for hours.
    ⛔ **Before writing "pre-existing on {{base_branch}}" or "reproduces on unmodified
    {{base_branch}}" anywhere — in a PR body, a comment, your own reasoning — confirm it on
    a checkout you did not create, not by re-reading this window's own red output.** This
@@ -339,13 +342,9 @@ A classifier or hook denial is final; never relaunch the same action in another 
      It is recorded on the run, shown to the judge and appended to your PR body — the judge
      treats it as a claim to test, so a wrong one comes straight back. A note for a line
      that did not survive is refused.
-   - **📏 CMX-126: `task-finished` measures your diff first** (code + tests vs `dev`; docs,
-     media and changelog excluded) and REFUSES it over `hand_in.max_pr_lines` (800) before
-     any sweep runs. Product/UI work (dashboard, port slices) may use up to 800 lines; work on
-     chela's core (dispatcher, judge, merge gate, workflow, sources) and any `risk:high` task
-     stays at ≤300 lines, as its brief says. Only a diff that truly cannot be split
-     may pass `--oversize-reason '<why>'` — recorded on the run, shown to the judge and in
-     your PR body.
+   - **📏 PR size: no line cap** (Liav 2026-10-20). Ship ONE coherent change per PR, as big
+     as that change is. Don't split a task to fit a number. If your brief (a `risk:high` core
+     task) asks for small slices, follow the brief.
    - **Optional: `--handoff "<note>"`** — a short note for your reviewer (what changed, what
      to look at first, what you assumed). It is shown in the orchestrator's inbox notice and
      on the Dispatch board. Informational only — it never gates anything.

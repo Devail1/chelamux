@@ -13,7 +13,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path, PurePosixPath
 from typing import NamedTuple
 
-from chela import basesync, concurrency, critic, envutil, epoch, event_log, fleet, generated, hold, judge, memcap, mergegate, reviewgate, risktier, sizegate, sweep
+from chela import basesync, concurrency, critic, envutil, epoch, event_log, fleet, flaky, generated, hold, judge, memcap, mergegate, reviewgate, risktier, sizegate, sweep
 from chela.config import (
     CHELA_DIR,
     TMUX_SESSION,
@@ -55,6 +55,7 @@ from chela.worktree import (
     ensure_worktree,
     is_inside_root,
     reap_run_worktree,
+    reap_strays_in,
     remove_worktree,
 )
 
@@ -1395,6 +1396,9 @@ def ensure_schema(conn: sqlite3.Connection) -> sqlite3.Connection:
         # live process, or interrupted when its daemon died (`pm2 restart` mid-launch) — then
         # the trigger relaunches it as the same round (`_judge_launch_interrupted`).
         ("judge_launch_owner", "ALTER TABLE runs ADD COLUMN judge_launch_owner TEXT"),
+        # ⚖️🪜 CMX-288: the `chela.risktier` tier of the head the judge was last spawned on —
+        # `judge run` holds nothing out on a `standard` one. NULL ⇒ never stamped (full judge).
+        ("risk_tier", "ALTER TABLE runs ADD COLUMN risk_tier TEXT"),
         # 🤫 CMX-97. The judge's OWN tmux window — `_spawn_judge` calls `_launch_agent` with
         # `judge_window=True` (the run's `window_id` must stay the RUN's window, not a
         # judge that will be gone in twenty minutes; see `_launch_agent`'s docstring), which
@@ -1479,6 +1483,13 @@ def ensure_schema(conn: sqlite3.Connection) -> sqlite3.Connection:
         ("ci_rerun_note", "ALTER TABLE runs ADD COLUMN ci_rerun_note TEXT"),
         ("ci_rerun_at", "ALTER TABLE runs ADD COLUMN ci_rerun_at TEXT"),
         ("ci_flakes", "ALTER TABLE runs ADD COLUMN ci_flakes TEXT"),
+        # 🧪 CMX-282. `ci_flake_reruns` counts the extra re-runs of a red that failed ONLY on
+        # registered flaky tests (`tests/flaky.toml`, ≤ flaky.FLAKE_RERUNS per sha); still red,
+        # `ci_known_flake` is the JSON `{sha, tests: [{test, issue}]}` and `ci_known_flake_sha`
+        # lets the judge take that head as CI-passing-with-known-flake.
+        ("ci_flake_reruns", "ALTER TABLE runs ADD COLUMN ci_flake_reruns INTEGER DEFAULT 0"),
+        ("ci_known_flake", "ALTER TABLE runs ADD COLUMN ci_known_flake TEXT"),
+        ("ci_known_flake_sha", "ALTER TABLE runs ADD COLUMN ci_known_flake_sha TEXT"),
         # 🔀 CMX-262. `conflict_sha` is the head sha whose CONFLICTING was already handled
         # (once per sha); `conflict_reworks` counts the conflict reworks, each one a round
         # that is NOT charged against the cap (see `effective_rework_cap`).
@@ -2425,6 +2436,25 @@ def _record_ci_flake(conn: sqlite3.Connection, row, sha: str) -> None:
     log.warning("CI flake on %s (%s): re-run green — %s", row["task_id"], sha[:12], note)
 
 
+def _record_known_flake(conn: sqlite3.Connection, row, sha: str, known: list[dict]) -> None:
+    """🧪 CMX-282: red ONLY on registered flaky tests after every re-run. Burn the sha (this
+    red is delivered), record ``ci_known_flake`` and say so, naming the issues."""
+    from chela import inbox
+    conn.execute(
+        "UPDATE runs SET ci_failed_sha=?, ci_rerun_state='known_flake', ci_known_flake=?, "
+        "ci_known_flake_sha=? WHERE task_id=?",
+        (sha, json.dumps({"sha": sha, "tests": known}), sha, row["task_id"]))
+    conn.commit()
+    note = ", ".join(f"{k['test']} ({k['issue']})" for k in known)
+    log.warning("CI on %s (%s) is red only on known flakes — %s; to the judge, not rework",
+                row["task_id"], sha[:12], note)
+    try:
+        inbox.ci_flake(dict(row), sha=sha, note=note, known=True)
+    except Exception:  # noqa: BLE001 — the inbox is advisory
+        log.warning("CI: could not queue the known-flake notice for %s", row["task_id"],
+                    exc_info=True)
+
+
 def _inbox_ci_flake(row, sha: str) -> None:
     """🔁 CMX-255: "CI flake, re-run green" — once, best-effort, never costs the tick."""
     from chela import inbox
@@ -2832,6 +2862,15 @@ def _kill_window(window_name: str) -> None:
         ["tmux", "kill-window", "-t", f"{TMUX_SESSION}:{window_name}"],
         capture_output=True,
     )
+
+
+def _end_agent(window_name: str | None, row) -> None:
+    """Kill a run's agent window, then reap what its tool calls left running in its worktree
+    (CMX-274: a timed-out Bash call's pytest tree outlives the call AND the window)."""
+    if window_name:
+        _kill_window(window_name)
+    if row["worktree_path"]:
+        reap_run_worktree(row["worktree_path"], row["workflow_path"], graceful=True)
 
 
 def _kill_windows_named(window_name: str) -> None:
@@ -3385,8 +3424,7 @@ def mark_awaiting_review(
             if not ok:
                 log.warning("Task %s: sweep-equivalent notes not added to the PR body — %s",
                             task_id, detail)
-        if window_name:
-            _kill_window(window_name)
+        _end_agent(window_name, row)
         return {
             "ok": True,
             "task_id": task_id,
@@ -3832,8 +3870,7 @@ def mark_rework_disputed(task_id: str, reason: str) -> dict:
                 (_now(), text, json.dumps(reviews), task_id),
             )
         conn.commit()
-        if window_name:
-            _kill_window(window_name)
+        _end_agent(window_name, fresh)
     repo_dir = str(Path(wf_path).parent) if wf_path else None
     posted, detail = _post_pr_comment(pr_url, repo_dir, text)
     if head_moved:
@@ -4944,6 +4981,7 @@ def close_run(ident: str, reason: str, *, force: bool = False, close_pr: bool = 
     if run.get("window_name") and live_wid:
         _kill_windows_named(run["window_name"])
         window_killed = True
+    _end_agent(None, run)
 
     wf_path = run.get("workflow_path")
     repo_dir = str(Path(wf_path).parent) if wf_path else None
@@ -5359,7 +5397,7 @@ def _refused(error: str | None, refused: bool = False) -> dict:
         "dispatched": 0,
         "pr_state_refreshed": 0, "watchdog_renudged": 0, "tracker_struck": 0,
         "reworked": 0, "escalated": 0, "ci_failed": 0, "ci_infra_failed": 0,
-        "ci_rerun": 0, "ci_flake": 0, "base_merged": 0, "base_conflict": 0,
+        "ci_rerun": 0, "ci_flake": 0, "ci_known_flake": 0, "base_merged": 0, "base_conflict": 0,
         "judged": 0, "judge_cancelled": 0, "judge_lost": 0, "judge_stranded": 0,
         "trial_ledger": 0, "disk_budget_exceeded": False, "window_reaped": 0,
         "blocked": True, "error": error, "held": False, "hold_expired": False,
@@ -5536,6 +5574,7 @@ def tick(workflow_path: str | Path) -> dict:
         "ci_infra_failed": 0,
         "ci_rerun": 0,
         "ci_flake": 0,
+        "ci_known_flake": 0,
         "base_merged": 0,
         "base_conflict": 0,
         "judged": 0,
@@ -5733,8 +5772,7 @@ def tick(workflow_path: str | Path) -> dict:
                 # the very tick it lands. The tracker strike happens in 1b, after
                 # this transition is durable — if it fails, this row stays `done`
                 # and the strike is simply retried on the next tick.
-                if row["window_name"]:
-                    _kill_window(row["window_name"])
+                _end_agent(row["window_name"], row)
                 # ⚖️🕳️ CMX-358 (#480): a merge can land while a judge was never even
                 # SCHEDULED for this row — `judge_state` is still the initial `''`
                 # sentinel, indistinguishable from "not yet judged". Stamp a distinct
@@ -5818,8 +5856,7 @@ def tick(workflow_path: str | Path) -> dict:
                 # matters: it does not fire `hooks.after_done` (see above) and it renders
                 # in its own `archived` board lane, never Review or Done — kanban.js's
                 # STATUS_CHIPS['closed'] pill + kanbanlanemodel.js's STATUS_LANE map.
-                if row["window_name"]:
-                    _kill_window(row["window_name"])
+                _end_agent(row["window_name"], row)
                 conn.execute(
                     "UPDATE runs SET status='closed' WHERE task_id=?", (row["task_id"],)
                 )
@@ -5972,8 +6009,7 @@ def tick(workflow_path: str | Path) -> dict:
                 wf_path = row["workflow_path"]
                 pr_url = row["pr_url"] or _read_pr_url(
                     row["window_name"], str(Path(wf_path).parent) if wf_path else None)
-                if row["window_name"]:
-                    _kill_window(row["window_name"])
+                _end_agent(row["window_name"], row)
                 conn.execute(
                     "UPDATE runs SET status='done', pr_url=COALESCE(?, pr_url) WHERE task_id=?",
                     (pr_url, row["task_id"]),
@@ -6002,8 +6038,7 @@ def tick(workflow_path: str | Path) -> dict:
                 if pr_state != "merged" and effective_pr_url:
                     pr_state, _mergeable = _read_pr_status(effective_pr_url, repo_dir)
                 if pr_state == "merged":
-                    if row["window_name"]:
-                        _kill_window(row["window_name"])
+                    _end_agent(row["window_name"], row)
                     conn.execute(
                         "UPDATE runs SET status='done', ended_at=?, pr_url=COALESCE(?, pr_url), "
                         "pr_state=COALESCE(?, pr_state) WHERE task_id=?",
@@ -6347,7 +6382,7 @@ def tick(workflow_path: str | Path) -> dict:
                 if _rerun_failed_jobs(wf_dir, ci.run_ids if ci else ()):
                     conn.execute(
                         "UPDATE runs SET ci_rerun_sha=?, ci_rerun_state='pending', "
-                        "ci_rerun_note=?, ci_rerun_at=? WHERE task_id=?",
+                        "ci_rerun_note=?, ci_rerun_at=?, ci_flake_reruns=0 WHERE task_id=?",
                         (sha, note, _now(), task_id),
                     )
                     conn.commit()
@@ -6355,9 +6390,27 @@ def tick(workflow_path: str | Path) -> dict:
                     log.warning("CI is RED on %s (%s) — %s; waiting on that before any "
                                 "rework", row["pr_url"] or "?", sha[:12], note)
                     continue
-            elif row["ci_rerun_state"] in ("pending", "started"):
-                conn.execute("UPDATE runs SET ci_rerun_state='red' WHERE task_id=?",
-                             (task_id,))
+            else:
+                # 🧪 CMX-282: red again, but ONLY on registered flaky tests ⇒ re-run up to
+                # FLAKE_RERUNS more times, then proceed to the judge — never a rework round.
+                # Only ONE failed Actions run: the log tail is `run_ids[0]`'s alone.
+                known = flaky.classify(wf, log_tail) if len(ci.run_ids) == 1 else None
+                if (known and (row["ci_flake_reruns"] or 0) < flaky.FLAKE_RERUNS
+                        and _rerun_failed_jobs(wf_dir, ci.run_ids)):
+                    conn.execute(
+                        "UPDATE runs SET ci_rerun_state='pending', ci_rerun_at=?, "
+                        "ci_flake_reruns=COALESCE(ci_flake_reruns, 0) + 1 WHERE task_id=?",
+                        (_now(), task_id))
+                    conn.commit()
+                    summary["ci_rerun"] += 1
+                    continue
+                if known:
+                    _record_known_flake(conn, row, sha, known)
+                    summary["ci_known_flake"] += 1
+                    continue
+                if row["ci_rerun_state"] in ("pending", "started"):
+                    conn.execute("UPDATE runs SET ci_rerun_state='red' WHERE task_id=?",
+                                 (task_id,))
             body = _ci_verdict_body(ci, log_tail, row["pr_url"])
             if row["ci_rerun_sha"] == sha:
                 body += (f"\n_{row['ci_rerun_note']} — and it failed AGAIN on the re-run, so "
@@ -7371,6 +7424,10 @@ def _launch_agent(
 
     Returns the window target (the ``@id``, or the bare name if the id was unreadable).
     """
+    # CMX-274: a respawn starts clean of the last round's strays — before the hooks, which
+    # may start something of their own in the worktree.
+    if not judge_window:
+        reap_strays_in(Path(worktree), resolve_workspace_root(wf))
     if fresh_worktree:
         after_create = wf.get("hooks", "after_create")
         if after_create:
@@ -7670,6 +7727,7 @@ def _escalate(conn: sqlite3.Connection, row: sqlite3.Row, reason: str, *,
         (_now(), text, row["task_id"]),
     )
     conn.commit()
+    _end_agent(None, row)                   # CMX-274: its strays, not its worktree
     log.warning(
         "Task %s → needs_human: %s (branch %s and worktree %s preserved; slot freed)",
         row["task_id"], text, row["branch_name"], row["worktree_path"],
@@ -7960,7 +8018,7 @@ that SURVIVES **blocks this PR at every risk level** — it is never downgraded 
      survivor still BLOCKS, but the PR comment and the rework prompt only ever say HOW MANY
      held-out guards survived, never which. That is what stops a rework from patching just
      the listed cases instead of fixing the guard. ⛔ Never mention a held-out experiment in
-     `notes` — notes are posted to the PR.
+     `notes` — notes are posted to the PR.{{held_out_note}}
 
 4. Run **`{{judge_cmd}}`** — your last step. `--detach` starts the battery in its own
    process group and returns AT ONCE (it can take far longer than your Bash tool allows);
@@ -7978,13 +8036,17 @@ def judge_prompt_vars(
     branch_name: str, base_branch: str, workspace_path: str, repo_path: str,
     project_key: str, task_number, pr_url: str, head_sha: str, experiments_path: str,
     judge_cmd: str, judge_log: str, test_cmd: str, diff_cmd: str, pr_view_cmd: str,
-    sweep_equivalents: str = "",
+    sweep_equivalents: str = "", tier: str = "",
 ) -> dict:
     """📏 CMX-408. EVERY variable :data:`JUDGE_PROMPT` renders with — the one map both the
     live judge (:func:`_judge_vars`) and the offline eval (``chela.judge_eval.design``)
     build, so the eval can never drift from the prompt the judge actually sees. The
     caller-specific values are keyword-only and required (a caller that forgets one fails
     loudly); what a risk level and the workflow's judge knobs buy is derived HERE, once."""
+    # ⚖️🙈 CMX-395: the held-out quota the judge is asked to meet — 0 on a STANDARD tier
+    # (CMX-288), whose `judge run` clears any held-out tag anyway.
+    pct = 0 if tier == risktier.STANDARD else round(
+        (judge.judge_held_out_fraction(wf) if wf is not None else judge.HELD_OUT_FRACTION) * 100)
     return {
         # ⚖️🎚️ CMX-405: the run's risk level (from the tracker, via the run row) and what
         # it buys — the experiment cap `chela judge run` enforces, and how to spend it.
@@ -8009,10 +8071,13 @@ def judge_prompt_vars(
         "judge_cmd": judge_cmd,
         "judge_log": judge_log,
         "test_cmd": test_cmd,
-        # ⚖️🙈 CMX-395: the held-out quota the judge is asked to meet.
-        "held_out_pct": round((judge.judge_held_out_fraction(wf) if wf is not None
-                               else judge.HELD_OUT_FRACTION) * 100),
+        "held_out_pct": pct,
         "held_out_min": judge.HELD_OUT_MIN_EXPERIMENTS,
+        # ⚖️🪜 CMX-288: a STANDARD-tier PR holds nothing out; "" on every other tier.
+        "held_out_note": (
+            "\n     ⛔ **This PR's risk tier is `standard`: hold NOTHING out.** Every experiment"
+            " is visible;\n     `chela judge run` runs any `\"held_out\"` tag as visible anyway."
+            if tier == risktier.STANDARD else ""),
         "diff_cmd": diff_cmd,
         "pr_view_cmd": pr_view_cmd,
         # ⚖️🧹 CMX-88: the agent's `--sweep-equivalent` claims — survivors of its own
@@ -8026,6 +8091,7 @@ def judge_prompt_vars(
 
 def _judge_vars(
     wf: WorkflowDef, row: sqlite3.Row, worktree: Path, sha: str, task: Task | None = None,
+    tier: str = "",
 ) -> dict:
     number = _pr_number(row["pr_url"])
     base = wf.get("workspace", "base_branch", default="master")
@@ -8053,6 +8119,7 @@ def _judge_vars(
         pr_view_cmd=(f"gh pr view {number} --comments" if number
                      else "gh pr view --comments   # no PR url on the run row"),
         sweep_equivalents=_judge_sweep_equivalents(row) + _judge_size_gate(row),
+        tier=tier,
     )
 
 
@@ -8251,7 +8318,8 @@ def _spawn_judge(
     # ⚖️🪜 CMX-208: a PROSE-only PR (`chela.risktier`) skips the judge round outright and is
     # merge-ready like `clean` on this head. Checked first; an unknown file list is not prose.
     files = judge._changed_files(worktree, base)
-    skip = risktier.classify(files, risktier.always_human(wf))[0] == risktier.PROSE
+    tier = risktier.classify(files, risktier.always_human(wf), risktier.core(wf))[0]
+    skip = tier == risktier.PROSE
     if skip:
         set_judge_state(task_id, judge.J_PROSE_ONLY, judge.PROSE_ONLY_DETAIL, sha=sha)
         log.info("judge: %s: prose-only PR on %s — no judge round", task_id, sha[:12])
@@ -8268,17 +8336,17 @@ def _spawn_judge(
         return False
 
     # 🔁⚖️ CMX-263: from here to the clear below, a dead launcher means an interrupted launch.
-    conn.execute("UPDATE runs SET judge_launch_owner=? WHERE task_id=?",
-                 (json.dumps(judge.owner_identity(os.getpid())), task_id))
+    conn.execute("UPDATE runs SET judge_launch_owner=?, risk_tier=? WHERE task_id=?",
+                 (json.dumps(judge.owner_identity(os.getpid())), tier, task_id))
     conn.commit()
     try:
         prompt = render_prompt(
             wf.get("agent", "judge_prompt", default=None) or JUDGE_PROMPT,
-            _judge_vars(wf, row, worktree, sha, task),
+            _judge_vars(wf, row, worktree, sha, task, tier),
         )
         _launch_agent(
             wf, task_id, judge.judge_window_name(branch), worktree, prompt, conn,
-            hook_vars=_judge_vars(wf, row, worktree, sha, task),
+            hook_vars=_judge_vars(wf, row, worktree, sha, task, tier),
             fresh_worktree=created,
             # 🤫 CMX-97 (race closed CMX-136). The judge is NOT this run's agent — `window_id`
             # is the run's own window (the Feed keys its lane on it, the inbox addresses
@@ -8351,7 +8419,7 @@ def _judge_candidates(conn: sqlite3.Connection, wf: WorkflowDef) -> list[sqlite3
     return conn.execute(
         "SELECT * FROM runs WHERE workflow_path=? AND status='awaiting_review' "
         "AND pr_state='open' AND pr_head_sha IS NOT NULL "
-        "AND pr_checks IN ({}) AND ("
+        "AND (pr_checks IN ({}) OR (pr_checks=? AND ci_known_flake_sha=pr_head_sha)) AND ("
         "  judge_sha IS NULL OR judge_sha != pr_head_sha"
         "  OR (judge_state=? AND COALESCE(judge_cannot_verify_tries, 0) < ?"
         "      AND COALESCE(judge_unknown_final, 0) = 0)"
@@ -8359,7 +8427,7 @@ def _judge_candidates(conn: sqlite3.Connection, wf: WorkflowDef) -> list[sqlite3
         "  OR judge_state=?"
         ")"
         .format(",".join("?" * len(JUDGE_TRIGGER_CHECKS))),
-        (str(wf.path), *JUDGE_TRIGGER_CHECKS,
+        (str(wf.path), *JUDGE_TRIGGER_CHECKS, CI_FAILING,
          judge.J_CANNOT_VERIFY, judge_max_unknown_retries(), judge.J_RUNNING,
          judge.J_CANCELLED),
     ).fetchall()

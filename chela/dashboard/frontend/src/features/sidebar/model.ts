@@ -74,10 +74,10 @@ export interface SessionRecord {
 
 export type Wants = (a: AgentRow) => boolean;
 
-// CMX-40's battery reading, as static/js/wallmodel.js `batteryState` has it. A copy, so this
-// module builds alone (the frontend tree imports nothing outside it); CMX-212 P22 ports
-// wallmodel to TypeScript and leaves one.
-function batteryState(a: AgentRow | null | undefined): { word: string; cls: string } | null {
+// CMX-40's battery reading: the ONE copy. Here, not in static/js/wallmodel.ts, because the
+// frontend tree imports nothing outside it, while legacy may import from it; wallmodel's
+// tileState reads it from here (CMX-236).
+export function batteryState(a: AgentRow | null | undefined): { word: string; cls: string } | null {
     const b = a && a.judge_battery;
     if (!b) return null;
     if (b.state === 'testing' || b.state === 'died') return { word: b.label ?? '', cls: b.state };

@@ -77,8 +77,11 @@ def dashboard_copy(text: str) -> str:
 
 
 def test_dashboard_copy_has_no_em_dash():
-    files = [DASHBOARD / "templates" / "index.html", *sorted((DASHBOARD / "static" / "js").glob("*.js"))]
+    js = DASHBOARD / "static" / "js"
+    files = [DASHBOARD / "templates" / "index.html", *sorted([*js.glob("*.js"), *js.glob("*.ts")])]
     assert len(files) > 20, "the dashboard sources moved; point this guard at them"
+    # CMX-236: a module converted to TypeScript in place keeps its copy under this guard.
+    assert js / "wallmodel.ts" in files, "static/js/*.ts left the guard"
     bad = [f"{p.name}: {line.strip()[:100]}" for p in files
            for line in dashboard_copy(p.read_text(encoding="utf-8")).splitlines() if DASH.search(line)]
     assert not bad, f"rewrite the visible copy (period, colon, comma, parentheses): {bad[:5]}"

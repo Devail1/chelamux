@@ -2058,7 +2058,7 @@ def ci_red(run: dict, *, sha: str, failing: tuple[str, ...] | list[str],
     return True
 
 
-def ci_flake(run: dict, *, sha: str, note: str) -> bool:
+def ci_flake(run: dict, *, sha: str, note: str, known: bool = False) -> bool:
     """🔁 CMX-255 ``run_ci_flake`` — a red CI's one re-run of its failed jobs came back GREEN.
     Said once per (run, head sha): the dispatcher calls this only on its own ``pending →
     green`` transition of ``runs.ci_rerun_state``. Nothing was sent back for rework, and the
@@ -2072,10 +2072,12 @@ def ci_flake(run: dict, *, sha: str, note: str) -> bool:
         wid = run_wid(run, None, epoch.current())
     except Exception:  # noqa: BLE001 — attribution is best-effort
         wid = None
+    # 🧪 CMX-282 ``known``: still red after every re-run, but ONLY on registered flakes.
+    what = ("CI red only on known flakes" if known else "CI flake, re-run green")
     event = _event(
-        "run_ci_flake",
-        f"🟡 {_label(run)} CI flake, re-run green on {sha[:7]} — {note} — NOT sent back "
-        f"for rework — {_ref(run)}",
+        "run_ci_known_flake" if known else "run_ci_flake",
+        f"🟡 {_label(run)} {what} on {sha[:7]} — {note} — NOT sent back for rework"
+        f"{', on to the judge' if known else ''} — {_ref(run)}",
         _run_payload(run, ci_sha=sha, note=note), wid=wid)
     with locked_store() as store:
         store["queue"].append(event)
