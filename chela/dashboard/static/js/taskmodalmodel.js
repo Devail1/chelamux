@@ -6,7 +6,7 @@
 // (tests/taskmodal_model.test.mjs), same split resourcesmodel.js/runstate.js
 // draw for their own surfaces.
 // ---------------------------------------------------------------------------
-import { knMd } from './knowledge.js';
+import { knMd } from './knowledge';
 
 // Which field actually has the task's brief, in priority order:
 //   1. `item.brief`  — a run's persisted brief (dispatcher._spawn copies it at

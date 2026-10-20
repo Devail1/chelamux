@@ -225,8 +225,10 @@ def index():
         "index.html",
         terminals_enabled=config.TERMINALS_ENABLED,
         wall_tile_dispatched=config.WALL_TILE_DISPATCHED,
-        asset_version=ASSET_VERSION,
         asset_path=asset_path,
+        # CMX-217: the page's boot config, one JSON block (frontend/src/shared/api readBoot).
+        boot={"assetVersion": ASSET_VERSION, "terminalsEnabled": config.TERMINALS_ENABLED,
+              "wallTileDispatched": config.WALL_TILE_DISPATCHED},
         app_src=asset_path(APP_ENTRY) if APP_ENTRY else None,
     ))
     # The HTML names the versioned assets, so it must be revalidated on every load.

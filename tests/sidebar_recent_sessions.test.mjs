@@ -81,7 +81,6 @@ let nav, util;
 beforeAll(async () => {
     const dom = new JSDOM(`<!doctype html><html><body>${BODY}</body></html>`,
         { url: 'http://localhost:5005/', pretendToBeVisual: true });
-    dom.window.TERMINALS_ENABLED = true;
     for (const k of ['window', 'document', 'localStorage', 'navigator', 'HTMLElement',
         'Element', 'Node', 'Event', 'MouseEvent', 'KeyboardEvent', 'CustomEvent',
         'getComputedStyle', 'requestAnimationFrame', 'cancelAnimationFrame']) {
@@ -100,7 +99,7 @@ beforeAll(async () => {
     globalThis.alert = () => {};
 
     // nav.js/main.js are a cycle — main.js is the real entry point (see sidebar.test.mjs).
-    await import('../chela/dashboard/static/js/main.js');
+    await import('../chela/dashboard/frontend/src/boot.ts');
     util = await import('../chela/dashboard/static/js/util.js');
     nav = await import('../chela/dashboard/static/js/nav.js');
 });

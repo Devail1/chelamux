@@ -28,9 +28,9 @@
 // sidebar Sessions list, the Wall, or the palette), no nav item of its own.
 // See viewreg.js for the entry shape.
 // ---------------------------------------------------------------------------
-import { renderAgentDetail } from './nav.js';
-import { renderTerminals, startTermTimer, stopTermTimer } from './terminals.js';
-import { pollWork } from './work.js';
+import { renderAgentDetail } from './nav';
+import { renderTerminals, startTermTimer, stopTermTimer } from './terminals';
+import { pollWork } from './work';
 
 export const VIEWS = [
     {

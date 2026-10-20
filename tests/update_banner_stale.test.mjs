@@ -4,13 +4,14 @@
 import { beforeAll, beforeEach, test } from 'vitest';
 import assert from 'node:assert/strict';
 import { JSDOM } from 'jsdom';
+import { bootBlock } from './js_helpers/dashboard_dom.mjs';
 
 let applyStale, applyVersion, checkForUpdate, restartStale, staleOffer;
 let versionPayload, statusPayload, applyPayload, fetchCalls;
 
 beforeAll(async () => {
-    const dom = new JSDOM('<!doctype html><html><body></body></html>', { url: 'http://localhost:5005/' });
-    dom.window.CHELA_ASSET_VERSION = 'aaaaaaaaaaaa';
+    const dom = new JSDOM(`<!doctype html><html><body>${bootBlock({ assetVersion: 'aaaaaaaaaaaa' })}</body></html>`,
+        { url: 'http://localhost:5005/' });
     for (const k of ['window', 'document']) {
         Object.defineProperty(globalThis, k, { value: dom.window[k], writable: true, configurable: true });
     }

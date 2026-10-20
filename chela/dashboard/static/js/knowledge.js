@@ -1,5 +1,5 @@
 // --- Stage 0: ES-module imports ---
-import { attrEsc, escHtml } from './util.js';
+import { attrEsc, escHtml } from './util';
 
 // ---------------------------------------------------------------------------
 // Markdown rendering — the OKF viewer's Knowledge tab (browse/search/graph over

@@ -1,6 +1,8 @@
 // CMX-178 — the legacy side of the React state bridge: util.js and nav.js publish what they
-// still own (the agents list, the sidebar layout) to window.chelaBridge, the stores the
-// islands read (chela/dashboard/frontend/src/shared/bridge). The real modules, in jsdom.
+// still own (the agents list, the sidebar layout) to the stores the islands read
+// (chela/dashboard/frontend/src/shared/bridge). CMX-217: util.js's `_agentsCache` and
+// `currentTab` are a facade over the store's `agents` and `view` slices, imported, not looked
+// up on window.chelaBridge; the sidebar layout still goes through it. The real modules, in jsdom.
 //
 // Run: pnpm exec vitest run tests/react_bridge_publish.test.mjs  (pytest runs it via tests/test_js_suites.py)
 import { beforeAll, beforeEach, test } from 'vitest';
@@ -16,7 +18,7 @@ function fetchImpl(url, opts) {
     return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve(body) });
 }
 
-let util, nav;
+let util, nav, agents, view;
 const sets = { agents: [], sidebarLayout: [] };
 const recorder = name => ({ set: v => sets[name].push(v) });
 
@@ -25,6 +27,9 @@ beforeAll(async () => {
         body: '<aside class="sidebar"><div class="side-list" id="sidebar-agents"></div></aside><div id="agent-detail"></div>',
         canvasStub: true, terminalsEnabled: false, fetchImpl, extraModules: ['util.js', 'nav.js'],
     }));
+    ({ agents } = await import('../chela/dashboard/frontend/src/shared/store/agents.ts'));
+    ({ view } = await import('../chela/dashboard/frontend/src/shared/store/view.ts'));
+    agents.subscribe(() => sets.agents.push(agents.get()));
     for (let i = 0; i < 8; i++) await flush();
 });
 
@@ -38,25 +43,38 @@ test('setAgentsCache publishes the very list it caches to the agents store', () 
     util.setAgentsCache(rows);
     assert.equal(sets.agents.length, 1);
     assert.equal(sets.agents[0], rows);
+    assert.equal(util._agentsCache, rows);
     assert.equal(sets.sidebarLayout.length, 0);
 });
 
-test('a non-array agents value (a failed fetch\'s body) publishes an empty list, never the body', () => {
-    const body = { error: 'boom' };
-    util.setAgentsCache(body);
-    assert.equal(util._agentsCache, body);
+test('a non-array agents value (a failed fetch\'s body) caches an empty list, never the body', () => {
+    util.setAgentsCache([{ window_id: '@8' }]);
+    util.setAgentsCache({ error: 'boom' });
+    assert.deepEqual(util._agentsCache, []);
     util.setAgentsCache(null);
-    assert.deepEqual(sets.agents, [[], []]);
+    assert.deepEqual(sets.agents, [[{ window_id: '@8' }], [], []]);
 });
 
-test('with no bridge (the build did not load) publishing is a no-op and the cache still updates', () => {
+test('the facade follows the store: a write by a ported module reaches the legacy bindings', () => {
+    const rows = [{ window_id: '@11' }];
+    agents.set(rows);
+    assert.equal(util._agentsCache, rows);
+    view.set('agent-detail');
+    assert.equal(util.currentTab, 'agent-detail');
+    util.setCurrentTab('work');
+    assert.equal(view.get(), 'work');
+    assert.equal(util.currentTab, 'work');
+});
+
+test('with no bridge on window, the layout publish is a no-op and the agents cache still updates', () => {
     delete window.chelaBridge;
     const rows = [{ window_id: '@10' }];
     util.setAgentsCache(rows);
     assert.equal(util._agentsCache, rows);
-    window.chelaBridge = { agents: null };
-    util.setAgentsCache([]);
-    assert.deepEqual(sets.agents, []);
+    assert.equal(agents.get(), rows);
+    window.chelaBridge = { sidebarLayout: null };
+    nav.viewMenuAction('group:none');
+    assert.deepEqual(sets.sidebarLayout, []);
 });
 
 test('a layout read from the server is published whole, loaded, without the private gen counter', async () => {

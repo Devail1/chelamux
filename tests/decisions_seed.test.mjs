@@ -82,7 +82,6 @@ class FakeEventSource {
 beforeAll(async () => {
     const dom = new JSDOM(`<!doctype html><html><body>${PANEL}</body></html>`,
         { url: 'http://localhost:5005/', pretendToBeVisual: true });
-    dom.window.TERMINALS_ENABLED = true;
     for (const k of ['window', 'document', 'localStorage', 'navigator', 'HTMLElement',
         'Element', 'Node', 'Event', 'MouseEvent', 'KeyboardEvent', 'CustomEvent',
         'getComputedStyle', 'requestAnimationFrame', 'cancelAnimationFrame']) {
@@ -106,7 +105,7 @@ beforeAll(async () => {
     // currentTab defaults to 'agents' (util.js) and main.js's top-level
     // selectView('terminals') only changes it to 'terminals' — never 'personas' —
     // so nothing here ever opens the tab that used to gate this render pre-cmx-107.
-    await import('../chela/dashboard/static/js/main.js');
+    await import('../chela/dashboard/frontend/src/boot.ts');
 
     // Flush the seed fetch's microtask chain (fetch -> res.json() -> render)
     // without dispatching any SSE frame or opening any tab.
@@ -114,7 +113,7 @@ beforeAll(async () => {
     await new Promise(resolve => setTimeout(resolve, 0));
 });
 
-test('main.js seeds the Decisions sidebar section on load, with no tab-open and no SSE frame', () => {
+test('the boot seeds the Decisions sidebar section on load, with no tab-open and no SSE frame', () => {
     const rows = document.querySelectorAll('#decisions-list .feed-row');
     assert.equal(rows.length, 1,
         'the durable log already had a decision logged before page load, but the ' +

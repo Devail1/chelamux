@@ -19,8 +19,8 @@
 // The "Cost | Usage" toggle lives here too: refreshCostTab() is what the tab
 // rail calls, and it refreshes whichever view is showing.
 // ---------------------------------------------------------------------------
-import { $, $$, api, escHtml } from './util.js';
-import { refreshCost } from './cost.js';
+import { $, $$, api, escHtml } from './util';
+import { refreshCost } from './cost';
 
 const VIEWS = ['cost', 'usage'];
 const VIEW_KEY = 'chela_cost_view';

@@ -7,6 +7,7 @@
 import { beforeAll, test } from 'vitest';
 import assert from 'node:assert/strict';
 import { JSDOM } from 'jsdom';   // needs `pnpm install` — tests/test_js_suites.py enforces it
+import { bootBlock } from './js_helpers/dashboard_dom.mjs';
 
 const PAGE_VERSION = 'aaaaaaaaaaaa';     // what index.html was rendered with
 const SERVER_VERSION = 'bbbbbbbbbbbb';   // what the restarted dashboard now reports
@@ -71,10 +72,8 @@ class FakeEventSource {
 }
 
 beforeAll(async () => {
-    const dom = new JSDOM(`<!doctype html><html><body>${PANEL}</body></html>`,
+    const dom = new JSDOM(`<!doctype html><html><body>${bootBlock({ assetVersion: PAGE_VERSION })}${PANEL}</body></html>`,
         { url: 'http://localhost:5005/', pretendToBeVisual: true });
-    dom.window.TERMINALS_ENABLED = true;
-    dom.window.CHELA_ASSET_VERSION = PAGE_VERSION;
     for (const k of ['window', 'document', 'localStorage', 'navigator', 'HTMLElement',
         'Element', 'Node', 'Event', 'MouseEvent', 'KeyboardEvent', 'CustomEvent',
         'getComputedStyle', 'requestAnimationFrame', 'cancelAnimationFrame']) {
@@ -94,7 +93,7 @@ beforeAll(async () => {
     globalThis.window.chela = globalThis.window.chela || {};
     globalThis.setInterval = () => 0;
 
-    await import('../chela/dashboard/static/js/main.js');
+    await import('../chela/dashboard/frontend/src/boot.ts');
     // refresh() awaits a chain of polls before the version check; let them all settle.
     for (let i = 0; i < 20 && !document.getElementById('update-banner'); i++) {
         await new Promise(resolve => setTimeout(resolve, 5));
