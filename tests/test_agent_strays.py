@@ -11,9 +11,11 @@ import signal
 from pathlib import Path
 from unittest.mock import patch
 
+import pytest
+
 from chela import dispatcher, worktree
 from tests.test_agent_env_strip import _launch
-from tests.test_dispatcher_rework import _row
+from tests.test_dispatcher_rework import _FakeTmux, _row, _Source, _status, _wf
 from tests.test_worktree import _linked
 
 CONT, TERM, KILL = signal.SIGCONT, signal.SIGTERM, signal.SIGKILL
@@ -182,3 +184,100 @@ def test_a_pid_recycled_outside_the_worktree_during_the_grace_is_not_killed(tmp_
     worktree.reap_strays_in(wt, root, proc_root=proc, kill=_killer(proc, set(), kills),
                             grace=0.25, sleep=sleep)
     assert (20, KILL) in kills and (21, KILL) not in kills
+
+
+# --- wiring: EVERY `_end_agent` call site reaps (judge round 4: each one swapped for a bare
+# `_kill_window` survived). The spy sits on the reap STEP, not on `_end_agent`, so ANY way of
+# ending the agent without reaping goes red — not only the one the mutation happened to pick.
+
+def _graceful_reaps(monkeypatch, tmp_path) -> list:
+    """Every ``_end_agent`` reap, as (worktree, workflow). Only ``_end_agent`` passes
+    ``graceful=True``; the worktree-removal reap (CMX-151) does not, and is not counted."""
+    monkeypatch.setattr(dispatcher, "DB_PATH", tmp_path / "scheduler.db")
+    reaped: list = []
+    monkeypatch.setattr(dispatcher, "reap_run_worktree", lambda wt, wf, graceful=False: (
+        reaped.append((wt, wf)) if graceful else None) or [])
+    return reaped
+
+
+def _tick(wf, source, fake, pr_status, read_pr_url=None):
+    with patch.object(dispatcher, "load_workflow_cached", return_value=_status(wf)), \
+         patch.object(dispatcher, "get_source", return_value=source), \
+         patch.object(dispatcher, "_claim_order", return_value=[]), \
+         patch.object(dispatcher, "_read_pr_url", return_value=read_pr_url), \
+         patch.object(dispatcher, "_read_pr_status", return_value=(pr_status, "MERGEABLE")), \
+         patch.object(dispatcher, "_strike_merged_tasks", return_value=1), \
+         patch.object(dispatcher.subprocess, "run", side_effect=fake.run):
+        return dispatcher.tick(wf.path)
+
+
+def test_close_run_reaps_the_runs_strays(tmp_path, monkeypatch):
+    reaped = _graceful_reaps(monkeypatch, tmp_path)
+    with dispatcher._db() as conn:
+        _row(conn, status="failed", worktree_path="/wt/closed", workflow_path="/r/WF.md",
+             pr_url=None, pr_state=None)
+    with patch.object(dispatcher.subprocess, "run", side_effect=_FakeTmux().run):
+        assert dispatcher.close_run("abc123", "superseded")["ok"]
+    assert dispatcher.resolve_run("abc123")["status"] == "closed"
+    assert reaped == [("/wt/closed", "/r/WF.md")]
+
+
+def test_a_disputed_rework_reaps_the_runs_strays(tmp_path, monkeypatch):
+    reaped = _graceful_reaps(monkeypatch, tmp_path)
+    with dispatcher._db() as conn:
+        _row(conn, status="running", rework_count=1, worktree_path="/wt/disputed",
+             workflow_path="/r/WF.md")
+    with patch.object(dispatcher.subprocess, "run", side_effect=_FakeTmux().run):
+        assert dispatcher.mark_rework_disputed("abc123", "already fixed")["ok"]
+    assert dispatcher.resolve_run("abc123")["status"] == "needs_human"
+    assert reaped == [("/wt/disputed", "/r/WF.md")]
+
+
+@pytest.mark.parametrize("status", ["awaiting_review", "running"])
+def test_tick_reconciling_a_merged_pr_reaps_the_runs_strays(tmp_path, monkeypatch, status):
+    """The merged branch (task still open in the tracker; phase 0 sees the merge)."""
+    reaped = _graceful_reaps(monkeypatch, tmp_path)
+    wf = _wf(tmp_path)
+    with dispatcher._db() as conn:
+        _row(conn, workflow_path=str(wf.path), status=status, worktree_path="/wt/merged")
+    _tick(wf, _Source("abc123"), _FakeTmux(), "merged")
+    assert dispatcher.resolve_run("abc123")["status"] == "done"
+    assert reaped == [("/wt/merged", str(wf.path))]
+
+
+def test_tick_reconciling_a_closed_pr_reaps_the_runs_strays(tmp_path, monkeypatch):
+    reaped = _graceful_reaps(monkeypatch, tmp_path)
+    wf = _wf(tmp_path)
+    with dispatcher._db() as conn:
+        _row(conn, workflow_path=str(wf.path), status="awaiting_review",
+             worktree_path="/wt/rejected")
+    _tick(wf, _Source("abc123"), _FakeTmux(), "closed")
+    assert dispatcher.resolve_run("abc123")["status"] == "closed"
+    assert reaped == [("/wt/rejected", str(wf.path))]
+
+
+def test_tick_reconciling_a_review_row_that_left_the_tracker_reaps_its_strays(
+        tmp_path, monkeypatch):
+    reaped = _graceful_reaps(monkeypatch, tmp_path)
+    wf = _wf(tmp_path)
+    with dispatcher._db() as conn:
+        _row(conn, workflow_path=str(wf.path), status="awaiting_review",
+             worktree_path="/wt/struck")
+    _tick(wf, _Source(), _FakeTmux(), "open")
+    assert dispatcher.resolve_run("abc123")["status"] == "done"
+    assert reaped == [("/wt/struck", str(wf.path))]
+
+
+def test_tick_reconciling_a_running_row_that_left_the_tracker_merged_reaps_its_strays(
+        tmp_path, monkeypatch):
+    """The `tracker_gone` + merged-PR branch: a `running` row with NO stored pr_url, so
+    phase 0 never refreshes it and the merged branch above cannot take it — only this
+    branch's own PR lookup finds the merge."""
+    reaped = _graceful_reaps(monkeypatch, tmp_path)
+    wf = _wf(tmp_path)
+    with dispatcher._db() as conn:
+        _row(conn, workflow_path=str(wf.path), status="running", worktree_path="/wt/gone",
+             pr_url=None, pr_state=None)
+    _tick(wf, _Source(), _FakeTmux(), "merged", read_pr_url="https://github.com/o/r/pull/80")
+    assert dispatcher.resolve_run("abc123")["status"] == "done"
+    assert reaped == [("/wt/gone", str(wf.path))]
