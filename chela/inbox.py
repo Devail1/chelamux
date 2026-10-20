@@ -1515,6 +1515,11 @@ def run_events(runs: list[dict], seen: dict[str, str],
                     "run_judge_clean",
                     f"📄 {label} — prose-only, merged on green CI (no judge round) — {ref}"
                     f"{' · ' + snippet if snippet else ''}", payload, wid=wid))
+            elif judge_state == judge.J_STANDARD_NO_JUDGE:
+                out.append(_event(
+                    "run_judge_clean",
+                    f"🪜 {label} — standard tier, merge-ready on green CI (no judge round) — "
+                    f"{ref}{' · ' + snippet if snippet else ''}", payload, wid=wid))
             elif run.get("judge_retry_after"):
                 # ⚖️🌩️ CMX-379: the judge was reaped for a classifier outage, not for
                 # anything about the PR, and the dispatcher re-judges it on its own once the

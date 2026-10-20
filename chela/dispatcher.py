@@ -3070,6 +3070,69 @@ def verify_sweep(task_id: str) -> dict:
     return sweep.run_sweep(row["worktree_path"], workflow_path=row["workflow_path"])
 
 
+def hand_in_tier(task_id: str) -> str:
+    """⚖️🪜 CMX-296: the ``chela.risktier`` tier of the run's OWN worktree diff vs
+    ``origin/<base>`` — what ``task-finished`` checks. Anything it cannot read is CORE: an
+    unknown never earns the lighter standard hand-in."""
+    with _db() as conn:
+        row = conn.execute("SELECT * FROM runs WHERE task_id=?", (task_id,)).fetchone()
+    if row is None or not row["worktree_path"] or not row["workflow_path"]:
+        return risktier.CORE
+    try:
+        wf = load_workflow(row["workflow_path"])
+        files = judge._changed_files(Path(row["worktree_path"]),
+                                     wf.get("workspace", "base_branch", default="master"))
+    except Exception as e:  # noqa: BLE001 — an unreadable tier is core, never a crash
+        log.warning("hand-in: %s: could not read the tier: %s", task_id, e)
+        return risktier.CORE
+    return risktier.classify(files, risktier.always_human(wf), risktier.core(wf))[0]
+
+
+def hand_in_checks(tier: str, *, experiments: bool) -> tuple[str, ...]:
+    """⚖️🪜 CMX-296: the checks ``task-finished`` runs, in order. A STANDARD run gets lint and
+    ONE full-suite run — no experiment battery, no sweep (it gets no judge round either). Every
+    other tier keeps the self-check (when an experiments file was given) and the sweep."""
+    if tier == risktier.STANDARD:
+        return ("lint", "suite")
+    return ("self_check", "sweep") if experiments else ("sweep",)
+
+
+def verify_standard_hand_in(task_id: str) -> dict:
+    """⚖️🪜 CMX-296: a STANDARD run's hand-in — the workflow's ``hand_in.lint_cmd``, then its
+    ``judge.test_cmd`` once, under ``judge.suite_timeout_seconds``, in the run's OWN worktree.
+    ``{"ok", "steps": [{name, cmd, passed, detail}]}``; ``ok`` is False when a step ran red
+    or could not run. An unset lint is skipped, and says so; an unset suite fails CLOSED —
+    a standard PR gets no judge round, so its one suite run is the only measurement."""
+    with _db() as conn:
+        row = conn.execute("SELECT * FROM runs WHERE task_id=?", (task_id,)).fetchone()
+    if row is None or not row["worktree_path"] or not row["workflow_path"]:
+        return {"ok": False, "error": f"no run with a worktree on record for {task_id}"}
+    try:
+        wf = load_workflow(row["workflow_path"])
+    except Exception as e:
+        return {"ok": False, "error": f"{row['workflow_path']} could not be read: {e}"}
+    lint = wf.get("hand_in", "lint_cmd", default=None)
+    lint = lint.strip() if isinstance(lint, str) else ""
+    timeout = judge.judge_suite_timeout(wf)
+    steps = []
+    for name, cmd in (("lint", lint), ("suite", judge.judge_test_cmd(wf))):
+        if not cmd and name == "suite":
+            steps.append({"name": name, "cmd": "", "passed": False,
+                          "detail": "the workflow sets no `judge.test_cmd` — nothing to run"})
+            return {"ok": False, "steps": steps}
+        if not cmd:
+            steps.append({"name": name, "cmd": "", "passed": None,
+                          "detail": "the workflow sets no `hand_in.lint_cmd` — skipped"})
+            continue
+        res = judge.run_suite(cmd, Path(row["worktree_path"]), timeout=timeout)
+        passed = res.ok and res.exit_code == 0
+        detail = res.detail or ("" if passed else f"exit {res.exit_code}\n{res.tail[-2000:]}")
+        steps.append({"name": name, "cmd": cmd, "passed": passed, "detail": detail})
+        if not passed:
+            return {"ok": False, "steps": steps}
+    return {"ok": True, "steps": steps}
+
+
 def check_base_sync(task_id: str, allow_behind: bool = False) -> dict:
     """🔀 CMX-189: run FIRST in task-finished. Refuses a branch conflicting with, or (without
     ``allow_behind``) behind, a fresh ``origin/<base>``; fails CLOSED when git cannot say.
@@ -8272,13 +8335,11 @@ def _spawn_judge(
     # True parks: an unknown (`None`) is judged normally, as a code+docs PR is.
     # ⚖️🪜 CMX-208: a PROSE-only PR (`chela.risktier`) skips the judge round outright and is
     # merge-ready like `clean` on this head. Checked first; an unknown file list is not prose.
+    # CMX-296: so does a STANDARD-tier one; an unknown file list is CORE, never standard.
     files = judge._changed_files(worktree, base)
     tier = risktier.classify(files, risktier.always_human(wf), risktier.core(wf))[0]
-    skip = tier == risktier.PROSE
-    if skip:
-        set_judge_state(task_id, judge.J_PROSE_ONLY, judge.PROSE_ONLY_DETAIL, sha=sha)
-        log.info("judge: %s: prose-only PR on %s — no judge round", task_id, sha[:12])
-    elif judge.docs_only_diff(worktree, base) is True:
+    skip = _stamp_tier_verdict(task_id, tier, sha)
+    if not skip and judge.docs_only_diff(worktree, base) is True:
         skip = True
         park_final_unknown(task_id, judge.DOCS_ONLY_PARK_REASON, conn=conn)
         log.warning("judge: %s: docs-only PR on %s — parked for a human, no judge spawned",
@@ -8335,7 +8396,8 @@ def _spawn_judge(
 
 
 def _stamp_prose_only(wf: WorkflowDef, row: sqlite3.Row) -> bool:
-    """⚖️🪜 CMX-265: stamp ``prose_only`` on a PROSE PR's head BEFORE the judge slot gate.
+    """⚖️🪜 CMX-265: stamp ``prose_only`` on a PROSE PR's head BEFORE the judge slot gate —
+    and (CMX-296) ``standard_no_judge`` on a STANDARD one.
 
     Seen 2026-10-19: a docs-only PR sat an hour "queued for the judge" behind two running
     judges, because the CMX-208 check lived in :func:`_spawn_judge`, past the slot gate and a
@@ -8356,10 +8418,29 @@ def _stamp_prose_only(wf: WorkflowDef, row: sqlite3.Row) -> bool:
     except (OSError, ValueError) as e:   # git missing, a NUL in the sha: queue, never abort the tick
         log.warning("judge: %s: could not read the PR's files: %s", row["task_id"], e)
         return False
-    if risktier.classify(files, risktier.always_human(wf))[0] != risktier.PROSE:
+    tier = risktier.classify(files, risktier.always_human(wf), risktier.core(wf))[0]
+    return _stamp_tier_verdict(row["task_id"], tier, sha)
+
+
+# ⚖️🪜 CMX-208/CMX-296: the tiers that get no judge round — the verdict each is stamped with.
+_NO_JUDGE_VERDICTS = {
+    risktier.PROSE: (judge.J_PROSE_ONLY, judge.PROSE_ONLY_DETAIL),
+    risktier.STANDARD: (judge.J_STANDARD_NO_JUDGE, judge.STANDARD_NO_JUDGE_DETAIL),
+}
+
+
+def _stamp_tier_verdict(task_id: str, tier: str, sha: str) -> bool:
+    """Stamp a PROSE or STANDARD head's no-judge verdict (and the tier) on the run; ``False``
+    for every other tier, which gets a judge round."""
+    if tier not in _NO_JUDGE_VERDICTS:
         return False
-    set_judge_state(row["task_id"], judge.J_PROSE_ONLY, judge.PROSE_ONLY_DETAIL, sha=sha)
-    log.info("judge: %s: prose-only PR on %s — no judge round", row["task_id"], sha[:12])
+    state, detail = _NO_JUDGE_VERDICTS[tier]
+    # The tier first: a crash between the two leaves a tier with no verdict, re-stamped next
+    # tick — never a merge-ready verdict carrying another round's tier.
+    with _db() as conn:
+        conn.execute("UPDATE runs SET risk_tier=? WHERE task_id=?", (tier, task_id))
+    set_judge_state(task_id, state, detail, sha=sha)
+    log.info("judge: %s: %s PR on %s — no judge round", task_id, tier, sha[:12])
     return True
 
 

@@ -40,10 +40,16 @@ def test_an_always_human_path_wins_even_when_it_is_itself_prose(files):
 
 CORE = ["chela/dispatcher.py", "chela/judge.py", "chela/judge_select.py", "chela/workflow.py",
         "chela/workflow_lint.py", "chela/sources/linear.py", "chela/sources/x/y.py",
-        "chela/context.py"]
+        "chela/context.py",
+        # CMX-296: the rest of the merge/containment machinery, and agent instructions
+        "chela/automerge.py", "chela/overrides.py", "chela/gateanswer.py", "chela/reviewgate.py",
+        "chela/sizegate.py", "chela/basesync.py", "chela/sweep.py", "chela/sweep_github.py",
+        "chela/toolconfig.py", "chela/sandbox.py", "chela/sandbox_status.py",
+        "chela/procguard.py", "CLAUDE.md", "AGENTS.md", "web/CLAUDE.md", "docs/sub/AGENTS.md"]
 STANDARD = ["app.py", "chela/dashboard/app.py", "web/src/App.tsx", "chela/judgement.txt",
             "chela/contexts.py", "chela/sources.py", "chela/dispatcher.pyi", "xchela/judge.py",
-            "docs/helper.py"]
+            "docs/helper.py", "LICENSE", "chela/automerge.pyi", "chela/sweeper.txt",
+            "CLAUDE.md.py", "web/CLAUDE.mdx"]
 
 
 # ⚖️🪜 CMX-288 — every category, and each membership rule's boundary.
@@ -86,7 +92,10 @@ def test_workflow_paths_add_to_never_replace_the_defaults(merge, extra):
 def test_workflow_core_paths_add_to_never_replace_the_defaults(merge, extra):
     wf = WorkflowDef(path=Path("WORKFLOW.md"), config={"merge": merge}, prompt_template="")
     defaults = ("chela/dispatcher.py", "chela/judge*.py", "chela/workflow*.py",
-                "chela/sources/**", "chela/context.py")
+                "chela/sources/**", "chela/context.py", "chela/automerge.py",
+                "chela/overrides.py", "chela/gateanswer.py", "chela/reviewgate.py",
+                "chela/sizegate.py", "chela/basesync.py", "chela/sweep*.py",
+                "chela/toolconfig.py", "chela/sandbox*.py", "chela/procguard.py")
     assert risktier.core(wf) == defaults + extra and risktier.core(None) == defaults
     core = risktier.core(wf)
     assert risktier.classify(["web/api/a.ts"], D, core)[0] == ("core" if extra else "standard")

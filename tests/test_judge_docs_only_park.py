@@ -104,6 +104,10 @@ def _run_row(conn, repo: Path, sha: str, task_id="abc123", **over):
     conn.commit()
 
 
+# ⚖️🪜 CMX-296: a workflow whose every path is core — a standard-tier PR gets no judge round.
+CORE_ALL = {"core": ["*"]}
+
+
 def _spawn(tmp_path, repo, sha, monkeypatch, merge: dict | None = None) -> tuple[bool, list]:
     """`_spawn_judge` for real (real git worktree, real diff), with the agent launch faked."""
     launched: list = []
@@ -204,7 +208,8 @@ def test_docs_only_pr_parks_once_in_needs_human_with_one_notice(tmp_path, repo, 
     # LICENSE is docs but not PROSE (CMX-208): an all-prose PR takes the prose-only tier.
     sha = _pr(repo, {"docs/guide.md": "# guide\n\nmore\n", "LICENSE": "MIT-ish\n"})
 
-    spawned, launched = _spawn(tmp_path, repo, sha, monkeypatch)
+    # CMX-296: a non-prose docs diff is STANDARD (no judge round) unless the workflow cores it.
+    spawned, launched = _spawn(tmp_path, repo, sha, monkeypatch, CORE_ALL)
 
     assert spawned is False
     assert not launched, "a docs-only PR must not spawn a judge agent"
@@ -227,7 +232,7 @@ def test_docs_only_pr_parks_once_in_needs_human_with_one_notice(tmp_path, repo, 
 def test_code_plus_docs_pr_is_judged_normally(tmp_path, repo, monkeypatch):
     sha = _pr(repo, {"docs/guide.md": "# guide\n\nmore\n", "app.py": "VALUE = 2\n"})
 
-    spawned, launched = _spawn(tmp_path, repo, sha, monkeypatch)
+    spawned, launched = _spawn(tmp_path, repo, sha, monkeypatch, CORE_ALL)
 
     assert launched == [1], "code alongside docs must take the normal judge path"
     assert spawned is True
@@ -241,7 +246,7 @@ def test_a_py_under_docs_is_not_treated_as_docs(tmp_path, repo, monkeypatch):
     sha = _pr(repo, {"docs/helper.py": "VALUE = 3\n",
                      "app.py": "from docs.helper import VALUE\n"})
 
-    spawned, launched = _spawn(tmp_path, repo, sha, monkeypatch)
+    spawned, launched = _spawn(tmp_path, repo, sha, monkeypatch, CORE_ALL)
 
     assert launched == [1] and spawned is True
     assert dispatcher.resolve_run("abc123")["status"] == "awaiting_review"
@@ -279,7 +284,7 @@ def test_spawn_judge_clears_the_final_flag(tmp_path, repo, monkeypatch):
     with dispatcher._db() as conn:
         _run_row(conn, repo, sha, judge_sha="old", judge_unknown_final=1)
         row = conn.execute("SELECT * FROM runs WHERE task_id='abc123'").fetchone()
-        assert dispatcher._spawn_judge(_wf(repo, tmp_path), row, sha, conn) is True
+        assert dispatcher._spawn_judge(_wf(repo, tmp_path, CORE_ALL), row, sha, conn) is True
     assert dispatcher.resolve_run("abc123")["judge_unknown_final"] == 0
 
 
@@ -395,7 +400,7 @@ def test_no_test_cmd_is_a_final_unknown(tmp_path, monkeypatch):
 
 @pytest.mark.parametrize("files, unreadable, judged", [
     ({"docs/guide.md": "# more\n", "changelog.d/CMX-208.md": "- x\n"}, False, False),
-    ({"docs/guide.md": "# more\n", "app.py": "VALUE = 2\n"}, False, True),   # one code file
+    ({"docs/guide.md": "# more\n", "chela/context.py": "V = 2\n"}, False, True),  # core file
     ({"docs/guide.md": "# more\n", "WORKFLOW.md": "# wf\n"}, False, True),   # always-human
     ({"docs/guide.md": "# more\n"}, True, True),                             # unknown diff
 ])
