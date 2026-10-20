@@ -574,7 +574,7 @@ def test_judge_prompt_points_at_the_defeat_shapes_catalog(tmp_path):
             "workspace_path": str(tmp_path), "diff_cmd": "git diff", "pr_view_cmd": "gh pr view",
             "experiments_path": str(tmp_path / "experiments.json"), "judge_cmd": "chela judge run",
             "judge_log": str(tmp_path / "judge.log"),            # ⏱️ CMX-411
-            "held_out_pct": 30, "held_out_min": 3,     # ⚖️🙈 CMX-395
+            "held_out_pct": 30, "held_out_min": 3, "held_out_note": "",  # ⚖️🙈 CMX-395, 288
             "risk": "normal", "max_experiments": 8, "risk_guidance": "focused",
             "sweep_equivalents": "",                   # ⚖️🧹 CMX-88
             "generated_paths": "`uv.lock`",            # 🏭 CMX-284

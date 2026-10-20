@@ -1395,6 +1395,9 @@ def ensure_schema(conn: sqlite3.Connection) -> sqlite3.Connection:
         # live process, or interrupted when its daemon died (`pm2 restart` mid-launch) — then
         # the trigger relaunches it as the same round (`_judge_launch_interrupted`).
         ("judge_launch_owner", "ALTER TABLE runs ADD COLUMN judge_launch_owner TEXT"),
+        # ⚖️🪜 CMX-288: the `chela.risktier` tier of the head the judge was last spawned on —
+        # `judge run` holds nothing out on a `standard` one. NULL ⇒ never stamped (full judge).
+        ("risk_tier", "ALTER TABLE runs ADD COLUMN risk_tier TEXT"),
         # 🤫 CMX-97. The judge's OWN tmux window — `_spawn_judge` calls `_launch_agent` with
         # `judge_window=True` (the run's `window_id` must stay the RUN's window, not a
         # judge that will be gone in twenty minutes; see `_launch_agent`'s docstring), which
@@ -7960,7 +7963,7 @@ that SURVIVES **blocks this PR at every risk level** — it is never downgraded 
      survivor still BLOCKS, but the PR comment and the rework prompt only ever say HOW MANY
      held-out guards survived, never which. That is what stops a rework from patching just
      the listed cases instead of fixing the guard. ⛔ Never mention a held-out experiment in
-     `notes` — notes are posted to the PR.
+     `notes` — notes are posted to the PR.{{held_out_note}}
 
 4. Run **`{{judge_cmd}}`** — your last step. `--detach` starts the battery in its own
    process group and returns AT ONCE (it can take far longer than your Bash tool allows);
@@ -7978,13 +7981,17 @@ def judge_prompt_vars(
     branch_name: str, base_branch: str, workspace_path: str, repo_path: str,
     project_key: str, task_number, pr_url: str, head_sha: str, experiments_path: str,
     judge_cmd: str, judge_log: str, test_cmd: str, diff_cmd: str, pr_view_cmd: str,
-    sweep_equivalents: str = "",
+    sweep_equivalents: str = "", tier: str = "",
 ) -> dict:
     """📏 CMX-408. EVERY variable :data:`JUDGE_PROMPT` renders with — the one map both the
     live judge (:func:`_judge_vars`) and the offline eval (``chela.judge_eval.design``)
     build, so the eval can never drift from the prompt the judge actually sees. The
     caller-specific values are keyword-only and required (a caller that forgets one fails
     loudly); what a risk level and the workflow's judge knobs buy is derived HERE, once."""
+    # ⚖️🙈 CMX-395: the held-out quota the judge is asked to meet — 0 on a STANDARD tier
+    # (CMX-288), whose `judge run` clears any held-out tag anyway.
+    pct = 0 if tier == risktier.STANDARD else round(
+        (judge.judge_held_out_fraction(wf) if wf is not None else judge.HELD_OUT_FRACTION) * 100)
     return {
         # ⚖️🎚️ CMX-405: the run's risk level (from the tracker, via the run row) and what
         # it buys — the experiment cap `chela judge run` enforces, and how to spend it.
@@ -8009,10 +8016,13 @@ def judge_prompt_vars(
         "judge_cmd": judge_cmd,
         "judge_log": judge_log,
         "test_cmd": test_cmd,
-        # ⚖️🙈 CMX-395: the held-out quota the judge is asked to meet.
-        "held_out_pct": round((judge.judge_held_out_fraction(wf) if wf is not None
-                               else judge.HELD_OUT_FRACTION) * 100),
+        "held_out_pct": pct,
         "held_out_min": judge.HELD_OUT_MIN_EXPERIMENTS,
+        # ⚖️🪜 CMX-288: a STANDARD-tier PR holds nothing out; "" on every other tier.
+        "held_out_note": (
+            "\n     ⛔ **This PR's risk tier is `standard`: hold NOTHING out.** Every experiment"
+            " is visible;\n     `chela judge run` runs any `\"held_out\"` tag as visible anyway."
+            if tier == risktier.STANDARD else ""),
         "diff_cmd": diff_cmd,
         "pr_view_cmd": pr_view_cmd,
         # ⚖️🧹 CMX-88: the agent's `--sweep-equivalent` claims — survivors of its own
@@ -8026,6 +8036,7 @@ def judge_prompt_vars(
 
 def _judge_vars(
     wf: WorkflowDef, row: sqlite3.Row, worktree: Path, sha: str, task: Task | None = None,
+    tier: str = "",
 ) -> dict:
     number = _pr_number(row["pr_url"])
     base = wf.get("workspace", "base_branch", default="master")
@@ -8053,6 +8064,7 @@ def _judge_vars(
         pr_view_cmd=(f"gh pr view {number} --comments" if number
                      else "gh pr view --comments   # no PR url on the run row"),
         sweep_equivalents=_judge_sweep_equivalents(row) + _judge_size_gate(row),
+        tier=tier,
     )
 
 
@@ -8251,7 +8263,8 @@ def _spawn_judge(
     # ⚖️🪜 CMX-208: a PROSE-only PR (`chela.risktier`) skips the judge round outright and is
     # merge-ready like `clean` on this head. Checked first; an unknown file list is not prose.
     files = judge._changed_files(worktree, base)
-    skip = risktier.classify(files, risktier.always_human(wf))[0] == risktier.PROSE
+    tier = risktier.classify(files, risktier.always_human(wf), risktier.core(wf))[0]
+    skip = tier == risktier.PROSE
     if skip:
         set_judge_state(task_id, judge.J_PROSE_ONLY, judge.PROSE_ONLY_DETAIL, sha=sha)
         log.info("judge: %s: prose-only PR on %s — no judge round", task_id, sha[:12])
@@ -8268,17 +8281,17 @@ def _spawn_judge(
         return False
 
     # 🔁⚖️ CMX-263: from here to the clear below, a dead launcher means an interrupted launch.
-    conn.execute("UPDATE runs SET judge_launch_owner=? WHERE task_id=?",
-                 (json.dumps(judge.owner_identity(os.getpid())), task_id))
+    conn.execute("UPDATE runs SET judge_launch_owner=?, risk_tier=? WHERE task_id=?",
+                 (json.dumps(judge.owner_identity(os.getpid())), tier, task_id))
     conn.commit()
     try:
         prompt = render_prompt(
             wf.get("agent", "judge_prompt", default=None) or JUDGE_PROMPT,
-            _judge_vars(wf, row, worktree, sha, task),
+            _judge_vars(wf, row, worktree, sha, task, tier),
         )
         _launch_agent(
             wf, task_id, judge.judge_window_name(branch), worktree, prompt, conn,
-            hook_vars=_judge_vars(wf, row, worktree, sha, task),
+            hook_vars=_judge_vars(wf, row, worktree, sha, task, tier),
             fresh_worktree=created,
             # 🤫 CMX-97 (race closed CMX-136). The judge is NOT this run's agent — `window_id`
             # is the run's own window (the Feed keys its lane on it, the inbox addresses
