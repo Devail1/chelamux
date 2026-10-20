@@ -1384,6 +1384,12 @@ def run_events(runs: list[dict], seen: dict[str, str],
         # different status, has never had the plain `run_review` event fire either.)
         prev_status = (prev_mark or "").split(":", 1)[0]
         was_already_awaiting_review = prev_status == "awaiting_review"
+        # ⚖️🔁 CMX-280: was THIS judge round already announced? Its verdict stays on the row
+        # through every later status change (needs_human → running → needs_human, measured
+        # on CMX-251 10-19), and each new `status:judge_state` mark re-fired the same old
+        # round's notice. A round is new only when the judge part of the mark changes —
+        # every fresh judgement passes through `running` first.
+        round_announced = bool(judge_state) and (prev_mark or "").partition(":")[2] == judge_state
         fresh[task_id] = mark
         if prev_mark == mark:
             continue                      # already announced at this status (+judge verdict)
@@ -1423,6 +1429,7 @@ def run_events(runs: list[dict], seen: dict[str, str],
                 f"{judge_state or 'never ran'!r}, no approved override) — {ref}"
                 f"{' · ' + snippet if snippet else ''}", payload, wid=wid))
         elif (judge_state == judge.J_CANNOT_VERIFY and status != "awaiting_review"
+              and not round_announced
               and not (status == "needs_human" and run.get("judge_unknown_final"))):
             # ⚖️🧱 CMX-19: ...except a final unknown the judge PARKED in `needs_human` itself
             # (`dispatcher.park_final_unknown`). That is not the CAS race — nothing moved
@@ -1452,7 +1459,7 @@ def run_events(runs: list[dict], seen: dict[str, str],
                 f"while it was working) — needs a human look"
                 f"{': ' + detail if detail else ''} — {ref}"
                 f"{' · ' + snippet if snippet else ''}", payload, wid=wid))
-        elif judge_state == judge.J_BLOCKED_RACE:
+        elif judge_state == judge.J_BLOCKED_RACE and not round_announced:
             # ⚖️🧊 CMX-239. The twin of the CANNOT_VERIFY branch above, for the CAS-refused
             # race on a BLOCKING verdict: the run left `awaiting_review` (a human merged it,
             # or CI got there first) WHILE the judge was mid-run, so `request_changes`'s CAS
@@ -1482,8 +1489,8 @@ def run_events(runs: list[dict], seen: dict[str, str],
                 f"(check whether this already shipped)"
                 f"{': ' + detail if detail else ''} — {ref}"
                 f"{' · ' + snippet if snippet else ''}", payload, wid=wid))
-        elif status == "awaiting_review" and judge_state in (*judge.MERGE_READY,
-                                                             judge.J_CANNOT_VERIFY):
+        elif (status == "awaiting_review" and not round_announced
+              and judge_state in (*judge.MERGE_READY, judge.J_CANNOT_VERIFY)):
             # The judge settled while `status` sat still. This is the ONLY place either
             # verdict becomes visible to the orchestrator — `comment_body` already posted
             # it to the PR, but a PR comment is not a push, and CMX-195/196 both sat mute
