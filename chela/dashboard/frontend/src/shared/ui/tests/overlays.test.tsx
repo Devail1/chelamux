@@ -41,6 +41,8 @@ test('the Dialog is named by its title and drawn with .modal-overlay / .modal', 
   expect(dialog.className).toBe('modal modal-newtask');
   expect(dialog.parentElement?.className).toBe('modal-overlay active');
   expect(dialog.querySelector('h3')?.textContent).toBe('New task');
+  // No description: no aria-describedby pointing at an element that is not there.
+  expect(dialog.hasAttribute('aria-describedby')).toBe(false);
 });
 
 test('focus moves into the Dialog, Escape closes it, and focus returns to the opener', async () => {
@@ -139,4 +141,15 @@ test('Toast lands in the .run-toast-stack as a .run-toast, and leaves on close',
     </ToastProvider>,
   );
   expect(stack.querySelector('.run-toast')).toBeNull();
+});
+
+test('a Toast with no body renders its title alone', () => {
+  render(
+    <ToastProvider>
+      <Toast open onOpenChange={() => {}} title="Saved" />
+    </ToastProvider>,
+  );
+  const toast = must(document.querySelector('.run-toast'));
+  expect(toast.children).toHaveLength(1);
+  expect(toast.textContent).toBe('Saved');
 });

@@ -46,7 +46,7 @@ export function Dialog({ open, onOpenChange, title, description, className, chil
               opener.current = document.activeElement;
             }}
             onCloseAutoFocus={(e) => {
-              if (opener.current instanceof HTMLElement && opener.current.isConnected) {
+              if (opener.current instanceof HTMLElement) {
                 e.preventDefault();
                 opener.current.focus();
               }

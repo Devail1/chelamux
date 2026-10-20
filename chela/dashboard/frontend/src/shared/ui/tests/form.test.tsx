@@ -121,6 +121,17 @@ test('a control locked by an env var is disabled and says which var, on focus', 
   expect(screen.getByRole('tooltip').textContent).toBe('Set by CHELA_PROJECTS; env wins, unset it to edit here');
 });
 
+test('an env-locked NumberInput and Select are disabled too', () => {
+  render(
+    <>
+      <NumberInput label="Poll" value={3} lockedBy="CHELA_POLL" onChange={() => {}} />
+      <Select label="Model" value="a" options={[{ value: 'a', label: 'Alpha' }]} lockedBy="CHELA_MODEL" onChange={() => {}} />
+    </>,
+  );
+  expect((screen.getByRole('spinbutton', { name: 'Poll' }) as HTMLInputElement).disabled).toBe(true);
+  expect((screen.getByRole('combobox', { name: 'Model' }) as HTMLButtonElement).disabled).toBe(true);
+});
+
 test('an unlocked TextInput is editable and reports its text', () => {
   const onChange = vi.fn();
   render(<TextInput label="Name" value="" onChange={onChange} />);
