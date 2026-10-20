@@ -74,7 +74,6 @@ let orchestrator;
 beforeAll(async () => {
     const dom = new JSDOM(`<!doctype html><html><body>${PANEL}</body></html>`,
         { url: 'http://localhost:5005/', pretendToBeVisual: true });
-    dom.window.TERMINALS_ENABLED = true;
     for (const k of ['window', 'document', 'localStorage', 'navigator', 'HTMLElement',
         'Element', 'Node', 'Event', 'MouseEvent', 'KeyboardEvent', 'CustomEvent',
         'getComputedStyle', 'requestAnimationFrame', 'cancelAnimationFrame']) {
@@ -100,7 +99,7 @@ beforeAll(async () => {
     // it has not resolved yet), and main.js's own trailing refreshOrchestratorStatus()
     // call is what must repaint it afterward, with nothing else in this test
     // triggering a second read.
-    await import('../chela/dashboard/static/js/main.js');
+    await import('../chela/dashboard/frontend/src/boot.ts');
     const util = await import('../chela/dashboard/static/js/util.js');
     orchestrator = await import('../chela/dashboard/static/js/orchestrator.js');
     util.setAgentsCache(AGENTS);
@@ -111,7 +110,7 @@ beforeAll(async () => {
     await new Promise(resolve => setTimeout(resolve, 0));
 });
 
-test('main.js seeds orchestrator state on load, with no tab-open and no SSE frame', () => {
+test('the boot seeds orchestrator state on load, with no tab-open and no SSE frame', () => {
     assert.equal(orchestrator.orchestratorState().wid, '@2',
         'the page loaded with @2 already the live owner, but shared orchestrator ' +
         'state was never seeded — refreshOrchestratorStatus() on main.js\'s load ' +

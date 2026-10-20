@@ -24,7 +24,7 @@ BUILT = ROOT / "chela" / "dashboard" / "static" / "app"
 # The committed bundle, by its full path: the judge's test selection runs a test file that
 # NAMES a mutated file, so a mutation of the bundle runs THIS file (seconds), not the whole
 # suite. Its name is a content hash, so a rebuild renames it: update this line with it.
-BUNDLE = "chela/dashboard/static/app/assets/main-Vl-lqVCb.js"
+BUNDLE = "chela/dashboard/static/app/assets/main-DXioX6gK.js"
 
 
 def _need_vite():
@@ -50,8 +50,8 @@ def test_the_committed_build_matches_a_fresh_build_of_src():
 
 
 def _copy_dashboard(tmp_path: Path) -> Path:
-    """The frontend beside a copy of the static/ it bundles (CMX-215: main.tsx imports
-    ../../static/js/main.js, which reaches collab/ too), so a test can change either
+    """The frontend beside a copy of the static/ it bundles (CMX-215: main.tsx boots
+    ../../static/js through boot.ts, which reaches collab/ too), so a test can change either
     without touching the repo."""
     tree = tmp_path / "dashboard" / "frontend"
     shutil.copytree(FRONTEND, tree, ignore=shutil.ignore_patterns("node_modules"))
@@ -63,7 +63,7 @@ def _copy_dashboard(tmp_path: Path) -> Path:
 
 @pytest.mark.parametrize("changed,old,new", [
     ("src/features/version/lib/VersionBadge.tsx", "build {version}", "v{version}"),
-    ("../static/js/util.js", "CHELA_ASSET_VERSION", "CHELA_ASSET_VERSION_X"),   # CMX-215
+    ("../static/js/util.js", "lucideIcon: unknown icon", "lucideIcon: unknown glyph"),   # CMX-215
 ], ids=["island", "legacy"])
 def test_a_source_change_without_a_rebuild_is_stale(tmp_path, changed, old, new):
     """Negative control: the same check over a copy of the frontend is green as copied, and

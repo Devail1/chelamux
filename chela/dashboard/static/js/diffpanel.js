@@ -7,8 +7,8 @@
 // no dependency on the dispatcher (works for a plain attended checkout the
 // same as a dispatched worktree).
 // ---------------------------------------------------------------------------
-import { $, $$, api, attrEsc, closeModal, escHtml, showModal } from './util.js';
-import { patchLineClass, statusMeta, summaryLabel } from './diffpanelmodel.js';
+import { $, $$, api, attrEsc, closeModal, escHtml, showModal } from './util';
+import { patchLineClass, statusMeta, summaryLabel } from './diffpanelmodel';
 
 // The wid the currently-open modal is showing — set on open, cleared on
 // close. A single flight target: opening a second diff modal before closing

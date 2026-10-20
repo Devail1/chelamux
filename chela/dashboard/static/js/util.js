@@ -1,6 +1,12 @@
 /* chela dashboard — client-side JS */
 
-import { ICONS } from './icons.js';
+import { ICONS } from './icons';
+// CMX-217: api/BASE_PATH/staticUrl/ASSET_VERSION are TypeScript now; re-exported below so
+// their importers need no edit.
+import { ASSET_VERSION, BASE_PATH, BOOT, api, staticUrl } from '../../frontend/src/shared/api';
+import { onEvent } from '../../frontend/src/shared/events';
+import { agents as agentsStore } from '../../frontend/src/shared/store/agents';
+import { view as viewStore } from '../../frontend/src/shared/store/view';
 
 // Inline Lucide icons (https://lucide.dev), vendored as SVG path strings — NO CDN,
 // matching the topbar's inline SVGs and terminals.js _lockGlyph. One shared set so
@@ -101,23 +107,23 @@ function icon(meaning, size = 16) {
 }
 
 const REFRESH_MS = 30000;
-// 'work' when terminals are off — matches main.js's own fallback (the Wall is
-// selected explicitly on load when TERMINALS_ON).
-let currentTab = 'work';
+// CMX-217: a facade over the page's store (frontend/src/shared/store), kept so the modules
+// reading these live bindings need no edit: the store is the truth, these mirror it. The view
+// is 'work' until one is selected (boot.ts selects the Wall when TERMINALS_ON).
+let currentTab = viewStore.get();
+viewStore.subscribe(() => { currentTab = viewStore.get(); });
 let msgTargetAgent = '';
-let _agentsCache = [];  // cache for populating schedule dropdown
+let _agentsCache = agentsStore.get();
+agentsStore.subscribe(() => { _agentsCache = agentsStore.get(); });
+// The window set changed (an agent window appeared or vanished): any render refetches it.
+onEvent('windows', () => setAgentsCache([]));
 
-// Embedded terminals feature flag, bootstrapped inline by the template before
-// this file loads (see index.html). When false the Terminals tab + panel are
-// never emitted, so every terminals code path here must no-op cleanly: the
-// terminals DOM (#term-stage etc.) does not exist. Defaults to true if the
-// bootstrap is somehow absent, preserving prior behavior.
-const TERMINALS_ON = window.TERMINALS_ENABLED !== false;
-
-// Wall lazy-tiles opt-out (CHELA_WALL_TILE_DISPATCHED), bootstrapped the same way:
-// true = a dispatched worker gets a full tile on spawn, like a human's session.
-// Default false = it opens minimized and pops out when it blocks. See terminals.js.
-const WALL_TILE_DISPATCHED = window.WALL_TILE_DISPATCHED === true;
+// The boot config (index.html's #chela-boot block). With terminals off the template draws no
+// Wall, so every terminals code path must no-op cleanly: #term-stage etc. do not exist.
+const TERMINALS_ON = BOOT.terminalsEnabled;
+// CHELA_WALL_TILE_DISPATCHED: true = a dispatched worker gets a full tile on spawn, like a
+// human's session. Default false = it opens minimized and pops out when it blocks.
+const WALL_TILE_DISPATCHED = BOOT.wallTileDispatched;
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -258,19 +264,6 @@ function _drawFavicon(n) {
     link.href = cv.toDataURL('image/png');
 }
 
-const BASE_PATH = window.location.pathname.replace(/\/$/, '');
-// CMX-426: the deploy's asset version (app.py ASSET_VERSION), rendered into index.html.
-// A static URL built in JS goes through staticUrl() so it carries it too — a bare
-// '/static/…' would keep serving the browser's cached copy from before the deploy.
-// Relative ES imports need nothing: they resolve against the versioned module URL.
-const ASSET_VERSION = window.CHELA_ASSET_VERSION || '';
-function staticUrl(path) {
-    return BASE_PATH + '/static/' + (ASSET_VERSION ? 'v/' + ASSET_VERSION + '/' : '') + path;
-}
-async function api(path, opts) {
-    const res = await fetch(BASE_PATH + path, opts);
-    return res.json();
-}
 
 // Modal show/hide — the .modal-overlay shows on `.active` (see style.css). The
 // Add-Schedule and Send-Message modals rely on these; the sidebar refactor
@@ -329,10 +322,10 @@ function humanSchedule(type, value) {
 
 
 // --- Stage 0: setters for cross-module mutable state (imported bindings are read-only) ---
-function setCurrentTab(v) { currentTab = v; }
+function setCurrentTab(v) { viewStore.set(v); }
 function setMsgTarget(v) { msgTargetAgent = v; }
-// The bridge's agents store is typed Agent[]: a failed fetch's non-array body publishes [].
-function setAgentsCache(v) { _agentsCache = v; publish('agents', Array.isArray(v) ? v : []); }
+// The agents store is typed Agent[]: a failed fetch's non-array body caches [].
+function setAgentsCache(v) { agentsStore.set(Array.isArray(v) ? v : []); }
 
 // CMX-178: hand a value legacy still owns to the React islands' store of that name
 // (frontend/src/shared/bridge; docs/FRONTEND.md). No bridge (the build did not load) is a no-op.

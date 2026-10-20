@@ -20,10 +20,12 @@
 // and not three. Schedules keeps its own endpoint (/api/schedules — a different
 // dataset), fetched only while its segment is showing.
 // ---------------------------------------------------------------------------
-import { $$, BASE_PATH, api, currentTab } from './util.js';
-import { renderDispatcher } from './dispatcher.js';
-import { renderKanban } from './kanban.js';
-import { refreshSchedules } from './schedules.js';
+import { $, $$, BASE_PATH, api, attrEsc, currentTab, escHtml } from './util';
+import { onEvent } from '../../frontend/src/shared/events';
+import { RUN_TOAST_KINDS, runToastKind } from './runtoast';
+import { renderDispatcher } from './dispatcher';
+import { renderKanban } from './kanban';
+import { refreshSchedules } from './schedules';
 
 const WORK_REFRESH_MS = 30000;
 
@@ -190,7 +192,7 @@ async function pollWork() {
     if (_segment === 'schedules') refreshSchedules();
 }
 
-// Started once at boot (main.js). The badges live in the always-visible sidebar,
+// Started once at boot (frontend/src/boot.ts). The badges live in the always-visible sidebar,
 // so this cannot be a per-view timer — and being app-level is precisely what lets
 // the board, the runs table and the badges share it instead of racing each other.
 function startWorkPoll() {
@@ -221,6 +223,71 @@ async function postWorkDelete(payload) {
     return null;
 }
 
+
+// --- Run-state toasts, off the SSE `runs` frame -----------------------------
+// A dispatcher run's status / PR state changed: fire any run-state toasts (whatever the
+// view), then redraw. pollWork() refetches /api/dispatcher ONCE and feeds the board, the
+// runs tables and the sidebar badges from that one payload.
+//
+// Per-run last-seen status, so the toast is EDGE-TRIGGERED (fires only on the transition,
+// not on every frame that carries an unrelated pr_state change). Primed from the SSE
+// `hello` baseline so a run already in awaiting_review when the page loads / reconnects is
+// recorded, not re-toasted.
+const _prevRunStatus = new Map();
+
+function _primeRunStatus(d) {
+    (d && d.runs || []).forEach(r => {
+        if (r && r.task_id) _prevRunStatus.set(r.task_id, r.status);
+    });
+}
+
+function _runToastsMuted() {
+    // Hung off the Notifications settings entry; persisted like other prefs.
+    try { return localStorage.getItem('chela_mute_run_toasts') === '1'; }
+    catch (e) { return false; }
+}
+
+function _runStateToasts(d) {
+    (d && d.runs || []).forEach(r => {
+        if (!r || !r.task_id) return;
+        const prev = _prevRunStatus.get(r.task_id);
+        _prevRunStatus.set(r.task_id, r.status);
+        const kind = runToastKind(prev, r.status);
+        if (!kind || _runToastsMuted()) return;
+        _runReviewToast(r, kind);
+    });
+}
+
+function _runReviewToast(r, kind) {
+    // Floating, click-to-dismiss toast reusing the .kanban-toast surface, stacked
+    // bottom-right via #run-toast-stack so several transitions don't overlap. The
+    // PR link (when present) lets the viewer jump straight to review.
+    const meta = RUN_TOAST_KINDS[kind];
+    let stack = $('#run-toast-stack');
+    if (!stack) {
+        stack = document.createElement('div');
+        stack.id = 'run-toast-stack';
+        stack.className = 'run-toast-stack';
+        document.body.appendChild(stack);
+    }
+    const label = r.label || r.task_id || 'run';
+    const toast = document.createElement('div');
+    toast.className = 'run-toast';
+    let html = `${meta.icon} <strong>${escHtml(label)}</strong> → ${escHtml(meta.text)}`;
+    if (r.pr_url) {
+        // Link click dismisses on its own navigation; stop it re-triggering the
+        // toast's click-to-dismiss so the href actually opens.
+        html += ` · <a href="${attrEsc(r.pr_url)}" target="_blank" rel="noopener"
+                       onclick="event.stopPropagation()">PR</a>`;
+    }
+    toast.innerHTML = html;
+    toast.onclick = () => toast.remove();
+    stack.appendChild(toast);
+    setTimeout(() => { toast.remove(); }, 15000);
+}
+
+onEvent('hello', d => _primeRunStatus(d));
+onEvent('runs', d => { _runStateToasts(d); pollWork(); });
 
 // --- Stage 0: ES-module exports ---
 export { pollWork, postWorkDelete, startWorkPoll, toggleDispatchHold, workBadgeCounts };

@@ -10,10 +10,11 @@
 //
 // State lives HERE, not per-caller: terminals.js (the pane toggle) and
 // decisions.js (the owner chip) both read the SAME `_status` and both react to
-// the SAME SSE `orchestrator` delta (sse.js) — one fact, rendered twice, never
+// the SAME SSE `orchestrator` delta (below) — one fact, rendered twice, never
 // two copies that can disagree about who currently owns the role.
 // ---------------------------------------------------------------------------
-import { api } from './util.js';
+import { api } from './util';
+import { onEvent } from '../../frontend/src/shared/events';
 
 let _status = { wid: null, name: null, state: 'unregistered', why: '', queued: 0 };
 const _listeners = new Set();
@@ -75,6 +76,16 @@ async function orchestratorRelease(wid) {
     if (data && data.ok) _apply(data);
     return data || { ok: false, error: 'empty response' };
 }
+
+// The SSE `orchestrator` frame: who owns the pane-title toggle changed. A NOTIFICATION
+// carrying only the new wid, so refetch the full state (state/why/queued), on every view: a
+// takeover must repaint the Wall's pane buttons and the decisions chip alike.
+onEvent('orchestrator', () => { refreshOrchestratorStatus(); });
+// CMX-139: `hello` opens EVERY connection, reconnects included (a dashboard restart drops the
+// stream and the browser re-opens it). The server primes its baseline from the CURRENT pin
+// without emitting, so a pin that moved while we were disconnected never arrives as a delta:
+// re-fetch here, or the ring stays on the old pane until a reload.
+onEvent('hello', () => { refreshOrchestratorStatus(); });
 
 // --- Stage 0: ES-module exports ---
 export { onOrchestratorChange, orchestratorRelease, orchestratorState, orchestratorSubscribe, refreshOrchestratorStatus };

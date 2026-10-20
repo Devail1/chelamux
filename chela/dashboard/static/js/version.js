@@ -11,8 +11,9 @@
 // CMX-129: the same banner carries "N services run old code — Restart" (a control only in
 // Settings is how merged code sat unrestarted for a day). One banner, never two stacked, each
 // fact with its own button. Restart POSTs the one existing route (/api/update/apply).
-import { ASSET_VERSION, api } from './util.js';
-import { followUpdate, staleOffer } from './updateflow.js';
+import { ASSET_VERSION, api } from './util';
+import { followUpdate, staleOffer } from './updateflow';
+import { registerLane } from '../../frontend/src/shared/scheduler';
 
 const PAGE_VERSION = ASSET_VERSION;
 
@@ -157,3 +158,8 @@ async function checkStale(doc = document) {
 }
 
 export { PAGE_VERSION, applyStale, applyVersion, checkForUpdate, checkStale, reloadOffered, restartStale };
+
+// CMX-426: a deploy since this page loaded? Offer a reload (never forces one). On boot it waits
+// for the active view's first paint: /api/update/status is the slowest boot read (~0.8 s) and
+// only contends with the wall for the server.
+registerLane('update', t => (t.boot ? t.viewPainted.then(() => checkForUpdate()) : checkForUpdate()), 'detached');
