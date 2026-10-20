@@ -57,6 +57,16 @@ def test_the_page_loads_the_entry_as_its_one_module_script_and_has_the_version_s
     assert html.count('<span id="version-island"></span>') == 1
 
 
+def test_the_version_slot_is_in_the_settings_modal_not_the_sidebar(monkeypatch):
+    # CMX-291: in the sidebar foot the badge drew over the CPU/RAM/Disk strip.
+    html = _page(monkeypatch, "app/assets/main-Abc123.js")
+    sidebar = html[html.index('<aside class="sidebar"'):html.index("</aside>")]
+    foot = html[html.index('<div class="settings-modal-foot">'):]
+    foot = foot[:foot.index("</div>")]
+    assert "version-island" not in sidebar
+    assert '<span id="version-island"></span>' in foot
+
+
 def test_without_an_entry_the_page_loads_no_module_script(monkeypatch):
     html = _page(monkeypatch, None)
     assert "static/v/" in html and "/app/" not in html
