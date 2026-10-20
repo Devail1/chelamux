@@ -3389,10 +3389,13 @@ a.kanban-tracker-link:focus-visible { text-decoration: underline; }
     flex: 0 0 auto; display: flex; align-items: center; gap: 8px; flex-wrap: nowrap;
     padding: 10px 14px; border-top: 1px solid var(--border);
 }
-.sidebar-foot .res-strip { min-width: 0; }
+/* CMX-291: three 100% readouts need ~187px; the 264px column leaves the strip 189px beside
+   the gear, so the strip drops its own side padding and tightens its gap here. */
+.sidebar-foot .res-strip { min-width: 0; gap: 6px; padding: 0; }
 .sidebar-foot #btn-primary-menu { margin-left: auto; flex: 0 0 auto; }
-/* CMX-178: the version island (React). Muted and shrinkable: it gives way before the menu. */
-.sidebar-foot #version-island { min-width: 0; overflow: hidden; }
+/* CMX-178: the version island (React). CMX-291: it lives in the Settings modal's foot now,
+   a quiet line under the source offer; selectable, so a build can be copied into a report. */
+.settings-modal-foot #version-island { display: block; margin-top: 4px; user-select: text; }
 .version-badge {
     display: block; font-size: 10.5px; color: var(--muted, #7d8590); font-variant-numeric: tabular-nums;
     white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
@@ -3806,7 +3809,6 @@ a.kanban-tracker-link:focus-visible { text-decoration: underline; }
     body.sidebar-collapsed .sidebar-foot #btn-primary-menu { margin-left: 0; }
     body.sidebar-collapsed .sidebar-head .brand span { display: none; }
     body.sidebar-collapsed #resources-strip { display: none; }
-    body.sidebar-collapsed #version-island { display: none; }
     /* CMX-404: inside this desktop block, like every other rail rule. The class is
        persisted per browser, so an unscoped hide leaked into the phone drawer and
        took the New session + Jump row with it. */
