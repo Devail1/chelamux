@@ -96,6 +96,9 @@ def is_claude_running(window_id: str) -> bool:
         pane_pid = result.stdout.strip()
         if not pane_pid:
             return False
+        from chela import sessions  # lazy: sessions.py imports us back
+        if sessions.pane_root_is_claude(int(pane_pid)):
+            return True                # launched as `claude …`, no shell (CMX-198)
         check = subprocess.run(
             ["pgrep", "-P", pane_pid, "-f", "claude"],
             capture_output=True, timeout=5,
@@ -584,7 +587,8 @@ def claude_pid(window_id: str) -> int | None:
     Inside a :func:`chela.probecache.batch` this is read from the shared pane snapshot's
     :attr:`chela.sessions.Pane.direct_claude_pid` — the same ``pgrep -P <pane_pid> -f
     claude`` answer, computed once per refresh for every window instead of two spawns per
-    window per call (CMX-17).
+    window per call (CMX-17). A pane whose own process is claude (launched with no shell)
+    answers with that pid, ahead of any child, on both paths (CMX-198).
     """
     batch = probecache.active()
     if batch is not None:
@@ -598,6 +602,9 @@ def claude_pid(window_id: str) -> int | None:
         pane_pid = result.stdout.strip()
         if result.returncode != 0 or not pane_pid:
             return None
+        from chela import sessions  # lazy: sessions.py imports us back
+        if sessions.pane_root_is_claude(int(pane_pid)):
+            return int(pane_pid)       # launched as `claude …`, no shell (CMX-198)
         check = subprocess.run(
             ["pgrep", "-P", pane_pid, "-f", "claude"],
             capture_output=True, text=True, timeout=5,

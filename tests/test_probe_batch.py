@@ -55,7 +55,7 @@ def _fresh_caches(monkeypatch):
 class Fleet:
     """A private tmux server whose windows run known process shapes."""
 
-    KINDS = ("direct", "wrapped", "server", "shell")
+    KINDS = ("direct", "wrapped", "server", "shell", "root")
 
     def __init__(self, sock: str, scripts: Path, root: Path):
         assert sock.startswith("chelatest-")
@@ -74,6 +74,8 @@ class Fleet:
                 # non-interactive sh keeps its child in its own process group, so tmux
                 # would report the foreground command as `sh`.
                 "server": f"exec {self.scripts}/node -c 'import time; time.sleep(600)'",
+                # CMX-198: claude IS the pane process — tmux launched it with no shell.
+                "root": f"exec {self.scripts}/claude -c 'import time; time.sleep(600)'",
                 "shell": "exec sh"}[kind]
 
     def add(self, kind: str) -> str:
@@ -99,8 +101,9 @@ class Fleet:
         deadline = time.time() + 15
         while True:
             wins = discovery.get_all_windows()
-            ready = all((agent_manager.claude_pid(wid) is not None) == name.endswith("-direct")
-                        and (name.endswith(("-direct", "-shell"))
+            ready = all((agent_manager.claude_pid(wid) is not None)
+                        == name.endswith(("-direct", "-root"))
+                        and (name.endswith(("-direct", "-shell", "-root"))
                              or agent_manager.pane_command(wid) == "node"
                              or name.endswith("-wrapped") and _grandchild_up(wid))
                         for name, wid in wins.items())
@@ -128,6 +131,7 @@ def fleet(tmp_path, monkeypatch):
     (scripts / "k_inner.sh").write_text(f"{sleeper} claude; true\n")
     (scripts / "k_wrapped.sh").write_text(f"sh {scripts}/k_inner.sh; true\n")
     (scripts / "node").symlink_to(sys.executable)
+    (scripts / "claude").symlink_to(sys.executable)
 
     shim = tmp_path / "shim"
     shim.mkdir()
@@ -258,11 +262,12 @@ def test_golden_batched_output_is_byte_identical_to_the_per_window_probe(
     assert kinds["wrapped"][0] is False          # the wrapper case: pgrep semantics kept
     assert kinds["shell"] == (False, "shell")
     assert kinds["server"] == (False, "server")
+    assert kinds["root"] == (True, "claude")     # CMX-198: no shell, still a claude
     assert {a["session_status"] for a in agents if a["claude_running"]} <= {"busy", "idle",
                                                                               "waiting"}
     assert any(a["session_status"] for a in agents)
     ctx = json.loads(after["/api/agents/context"])
-    assert ctx and all(r["name"].endswith("-direct") for r in ctx)
+    assert ctx and all(r["name"].endswith(("-direct", "-root")) for r in ctx)
     orch = json.loads(after["/api/orchestrator/status"])
     assert orch["wid"] and orch["state"]
 
