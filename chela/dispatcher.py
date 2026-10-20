@@ -88,6 +88,9 @@ PUSH_REQUEST_MAX_ATTEMPTS = 5
 # consequence for the rework loop is the load-bearing one — a run re-entering `running`
 # RE-CONSUMES a slot and must respect concurrency.max like any other work.
 ACTIVE_STATUSES = ("claimed", "running")
+# ⏹️⚖️ CMX-286: where a send-back (conflict, CI red, request-changes) leaves a run — and the
+# rework it re-spawns. A judge still running there is grading a head that can never merge.
+SENT_BACK_STATUSES = ("changes_requested", *ACTIVE_STATUSES)
 
 # A PR is open and the verdict is out of the agent's hands. `changes_requested` is a
 # rework the dispatcher will pick up; `needs_human` is a rework that hit the cap and
@@ -3336,8 +3339,16 @@ def mark_awaiting_review(
         pr_url = row["pr_url"] or _read_pr_url(window_name, repo_dir)
         effective_pr_url = pr_url
         pr_state, pr_mergeable = _read_pr_status(effective_pr_url, repo_dir)
+        # ⚖️🔀 CMX-280: `pr_head_sha=NULL` — the head is UNKNOWN until tick step 0b reads it.
+        # A `running` row's checks are never polled, so the column still holds the head from
+        # BEFORE this round's push; kept, it equals the old round's `judge_sha`, and the
+        # same tick's 1e′ escalated a rework of a spent `cannot_verify` on the OLD head's
+        # verdict and try count (CMX-251, 10-19) — the new head was never judged. NULL
+        # matches neither the judge trigger nor 1e′ until the next tick's poll fills it in
+        # (an unreadable poll just retries, like any CI UNKNOWN); the merge gate is not
+        # affected — `contract.merge` compares the verdict to the head GitHub reports.
         conn.execute(
-            "UPDATE runs SET status='awaiting_review', ended_at=?, "
+            "UPDATE runs SET status='awaiting_review', ended_at=?, pr_head_sha=NULL, "
             "pr_url=COALESCE(?, pr_url), pr_state=COALESCE(?, pr_state), "
             "pr_mergeable=COALESCE(?, pr_mergeable) WHERE task_id=?",
             (_now(), pr_url, pr_state, pr_mergeable, task_id),
@@ -4226,6 +4237,7 @@ def adopt_pr(pr_ident: str, workflow_path: str | Path, *, reason: str = "") -> d
 
 def request_changes(
     ident: str, body: str, *, post_comment: bool = True, mutations: list[dict] | None = None,
+    judge_state: str | None = None,
 ) -> dict:
 
     """FAIL a PR under review: the run goes to ``changes_requested`` and the loop turns.
@@ -4285,10 +4297,14 @@ def request_changes(
         # while the reviewer was typing) in between, an unconditional UPDATE would RESURRECT
         # a merged run — and the next tick would dutifully re-spawn an agent onto a branch
         # whose PR is closed. The row moves only if it is still the row we judged.
+        # ⏹️⚖️ CMX-286: ``judge_state`` (the judge's own send-back) moves in the SAME write,
+        # so the row is never `changes_requested` under a `running` judge that
+        # `_cancel_moot_judges` would read as sent back by someone else and kill mid-verdict.
         cur = conn.execute(
-            "UPDATE runs SET status='changes_requested', review_history=? "
+            "UPDATE runs SET status='changes_requested', review_history=?, "
+            "judge_state=COALESCE(?, judge_state) "
             "WHERE task_id=? AND status='awaiting_review'",
-            (json.dumps(reviews), task_id),
+            (json.dumps(reviews), judge_state, task_id),
         )
         conn.commit()
         if cur.rowcount == 0:
@@ -5344,7 +5360,7 @@ def _refused(error: str | None, refused: bool = False) -> dict:
         "pr_state_refreshed": 0, "watchdog_renudged": 0, "tracker_struck": 0,
         "reworked": 0, "escalated": 0, "ci_failed": 0, "ci_infra_failed": 0,
         "ci_rerun": 0, "ci_flake": 0, "base_merged": 0, "base_conflict": 0,
-        "judged": 0, "judge_lost": 0, "judge_stranded": 0,
+        "judged": 0, "judge_cancelled": 0, "judge_lost": 0, "judge_stranded": 0,
         "trial_ledger": 0, "disk_budget_exceeded": False, "window_reaped": 0,
         "blocked": True, "error": error, "held": False, "hold_expired": False,
         "refused": refused,
@@ -5523,6 +5539,7 @@ def tick(workflow_path: str | Path) -> dict:
         "base_merged": 0,
         "base_conflict": 0,
         "judged": 0,
+        "judge_cancelled": 0,
         "judge_lost": 0,
         "judge_stranded": 0,
         "trial_ledger": 0,
@@ -6485,6 +6502,9 @@ def tick(workflow_path: str | Path) -> dict:
         # from being stuck believing it is under review. ⛔ A judge that died is CANNOT
         # VERIFY — it does NOT block and it does NOT approve; the run stays exactly where it
         # was, and a human is told why.
+        # ⏹️⚖️ CMX-286: FIRST, stop a judge whose run was sent back (1c above, or a human)
+        # or whose head moved — else the watchdog below holds its slot up to its wall.
+        summary["judge_cancelled"] = _cancel_moot_judges(conn, wf)
         summary["judge_lost"] = _judge_watchdog(conn, wf, live_windows)
 
         # 1e′. ⚖️🧊 CMX-253: a `cannot_verify` that SPENT its retry budget on the CURRENT
@@ -8336,10 +8356,12 @@ def _judge_candidates(conn: sqlite3.Connection, wf: WorkflowDef) -> list[sqlite3
         "  OR (judge_state=? AND COALESCE(judge_cannot_verify_tries, 0) < ?"
         "      AND COALESCE(judge_unknown_final, 0) = 0)"
         "  OR (judge_state=? AND judge_launch_owner IS NOT NULL)"
+        "  OR judge_state=?"
         ")"
         .format(",".join("?" * len(JUDGE_TRIGGER_CHECKS))),
         (str(wf.path), *JUDGE_TRIGGER_CHECKS,
-         judge.J_CANNOT_VERIFY, judge_max_unknown_retries(), judge.J_RUNNING),
+         judge.J_CANNOT_VERIFY, judge_max_unknown_retries(), judge.J_RUNNING,
+         judge.J_CANCELLED),
     ).fetchall()
 
 
@@ -8497,6 +8519,64 @@ def _judge_run_status(task_id: str) -> dict | None:
 
 JUDGE_RETRY_MESSAGE = ("resume: a fleet pause froze you mid-call, so your last model or tool "
                        "call failed. Retry it once and continue; it is not a verdict.")
+
+
+def _cancel_moot_judges(conn: sqlite3.Connection, wf: WorkflowDef) -> int:
+    """⏹️⚖️ CMX-286: stop every live judge whose round can no longer produce a usable verdict.
+
+    Seen twice on 10-19/20: CMX-264's conflict handling sent a PR back while its judge kept
+    running on the obsolete head — the watchdog's "still alive — holding" kept one of the
+    judge slots for up to an hour, and the first ended ``cannot_verify … run already moved
+    to running``. A round is moot once its run is in :data:`SENT_BACK_STATUSES`, or is still
+    under review on a head other than the one judged (both shas known). The row is CAS'd to
+    ``cancelled`` on THIS round first (a verdict that landed meanwhile is left alone), which
+    frees the slot and announces nothing; then the round-end reaper the watchdog uses runs:
+    window, detached run (:func:`judge.cancel_judge_run`), worktree. A launch still in flight
+    in another process is left to it — the next tick sees its run. Returns how many."""
+    cancelled = 0
+    for row in conn.execute(
+        "SELECT * FROM runs WHERE workflow_path=? AND judge_state=?",
+        (str(wf.path), judge.J_RUNNING),
+    ).fetchall():
+        task_id, status = row["task_id"], row["status"]
+        judged, head = row["judge_sha"], row["pr_head_sha"]
+        if status in SENT_BACK_STATUSES:
+            reason = f"its run was sent back (now {status!r})"
+        elif status == "awaiting_review" and judged and head and judged != head:
+            reason = f"its PR head moved ({judged[:12]} → {head[:12]})"
+        else:
+            continue
+        if _judge_launch_owner(row) is not None and not _judge_launch_interrupted(row):
+            continue
+        cur = conn.execute(
+            "UPDATE runs SET judge_state=?, judge_detail=?, judge_launch_owner=NULL "
+            "WHERE task_id=? AND judge_state=? AND judge_started_at IS ?",
+            (judge.J_CANCELLED, f"judge cancelled: {reason}", task_id, judge.J_RUNNING,
+             row["judge_started_at"]),
+        )
+        conn.commit()
+        if cur.rowcount == 0:
+            continue
+        worktree = judge.judge_worktree_path(wf, task_id)
+        try:
+            _kill_windows_named(judge.judge_window_name(row["branch_name"] or ""))
+            pids = judge.cancel_judge_run(task_id, worktree)
+        except OSError as e:                # the row is already off `running`: never re-read
+            log.error("judge cancel for %s: could not stop the judge: %s", task_id, e)
+            pids = []
+        try:
+            remove_worktree(wf.path.parent, worktree, resolve_workspace_root(wf))
+        except NotAWorktree as e:                      # CMX-320 — never crash the reaper
+            log.error("judge cancel for %s: REFUSED to remove %s", task_id, e)
+        event_log.append(
+            "judge_cancelled", f"{task_id}: judge stopped — {reason}; its slot is free",
+            payload={"task_id": task_id, "reason": reason, "status": status,
+                     "judge_sha": judged, "pr_head_sha": head, "pids": pids},
+        )
+        log.warning("judge: %s: CANCELLED — %s (signalled %d pid(s))", task_id, reason,
+                    len(pids))
+        cancelled += 1
+    return cancelled
 
 
 def _judge_watchdog(conn: sqlite3.Connection, wf: WorkflowDef, live_windows: set[str]) -> int:
