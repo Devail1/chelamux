@@ -27,7 +27,7 @@ import os
 import subprocess
 from datetime import datetime, timezone
 
-from chela import agent_manager, discovery, judge, sandbox_status, sessions, transcripts
+from chela import agent_manager, context, discovery, judge, sandbox_status, sessions, transcripts
 
 # Per-turn character cap for the tail/query digests — enough to read intent
 # without dumping a whole essay per turn. `--all` is uncapped (full read).
@@ -105,6 +105,11 @@ def peek(wid: str) -> dict | None:
     path = sessions.transcript_for_window(wid)
     summary = transcripts.summary_for_path(path)
     ctx = transcripts.latest_context_usage(path) if path is not None else None
+    if ctx and ctx.get("used_tokens"):
+        # CMX-292: the same window the dashboard's bar sizes against — the session's
+        # own statusLine-reported size, else the estimated default.
+        w = context.window_for(ctx["used_tokens"], ctx.get("session_id"), win["name"])
+        ctx.update(total_k=w["total_k"], used_pct=w["used_pct"], estimated=w["estimated"])
 
     return {
         "wid": wid,
@@ -171,7 +176,13 @@ def format_peek(p: dict) -> str:
     ctx = p.get("context")
     if ctx and ctx.get("used_tokens"):
         model = f" ({ctx['model']})" if ctx.get("model") else ""
-        lines.append(f"  context: ~{ctx['used_tokens'] // 1000}K tokens{model}")
+        line = f"  context: ~{ctx['used_tokens'] // 1000}K"
+        if ctx.get("total_k"):
+            est = ", est" if ctx.get("estimated") else ""
+            line += f" / {ctx['total_k']:g}K tokens ({ctx['used_pct']}%{est})"
+        else:
+            line += " tokens"
+        lines.append(line + model)
     if p.get("pr"):
         pr = p["pr"]
         lines.append(f"  PR:      {pr.get('url') or pr.get('title') or pr}")

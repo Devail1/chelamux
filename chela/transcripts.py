@@ -504,12 +504,15 @@ def iter_turns(path: Path, include_sidechain: bool = False) -> Iterator[dict]:
 def latest_context_usage(path: Path) -> dict | None:
     """Context-window token usage from the most recent assistant message.
 
-    Returns ``{"used_tokens": int, "model": str | None}`` where ``used_tokens``
-    is ``input + cache_read + cache_creation`` of the last assistant turn — i.e.
-    everything resident in the context window on that turn. None if no assistant
-    message with a usage block is found. This is the zero-setup fallback for the
-    context bar; the statusLine payload (when installed) is authoritative and
-    also carries the exact window size, which the transcript does not record.
+    Returns ``{"used_tokens": int, "model": str | None, "session_id": str}`` where
+    ``used_tokens`` is ``input + cache_read + cache_creation`` of the last assistant
+    turn — i.e. everything resident in the context window on that turn — and
+    ``session_id`` is the session the transcript belongs to (its file stem). None if
+    no assistant message with a usage block is found. This is the zero-setup fallback
+    for the context bar; the statusLine payload (when installed) is authoritative and
+    also carries the exact window size, which the transcript does not record (CMX-292:
+    ``session_id`` is what lets the fallback recover that size from the session's own
+    cache once it has gone stale).
     """
     rec = latest_record(
         path,
@@ -525,7 +528,7 @@ def latest_context_usage(path: Path) -> dict | None:
         + (u.get("cache_read_input_tokens") or 0)
         + (u.get("cache_creation_input_tokens") or 0)
     )
-    return {"used_tokens": used, "model": rec["message"].get("model")}
+    return {"used_tokens": used, "model": rec["message"].get("model"), "session_id": path.stem}
 
 
 def agent_context_from_transcript(agent_name: str, window_id: str | None = None) -> dict | None:
