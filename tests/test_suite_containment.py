@@ -387,6 +387,51 @@ def test_any_gh_a_test_runs_by_name_meets_the_failing_stub():
     assert os.environ["GH_CONFIG_DIR"] == str(conftest.GH_STUB_DIR / "config")
 
 
+_IMPORT_TWICE = """\
+import os, sys
+sys.path.insert(0, "tests")
+import conftest
+first = os.environ["PATH"]
+try:
+    {second}
+except ImportError as e:
+    print(e)
+print(os.environ["PATH"] == first, os.environ["PATH"].split(os.pathsep)[0]
+      == str(conftest.GH_STUB_DIR), "tests.conftest" in sys.modules)
+"""
+
+
+@pytest.mark.parametrize("second, out", [
+    ("import tests.conftest", "True True False"),
+    ("import importlib; importlib.import_module('tests.conftest')", "True True False"),
+    ("pass", "True True False"),                                         # control
+])
+def test_a_second_import_of_conftest_is_refused_before_it_moves_PATH(second, out):
+    """CMX-281: ``tests.conftest`` is a SECOND copy of the module pytest loaded as
+    ``conftest``; running it prepended a second gh fence, and every later test in that
+    xdist worker saw PATH[0] != ``conftest.GH_STUB_DIR``. The copy is refused (loudly,
+    naming the fix) before it touches PATH."""
+    script = _IMPORT_TWICE.format(second=second)
+    cp = subprocess.run([sys.executable, "-c", script], cwd=Path(conftest.__file__).parent.parent,
+                        capture_output=True, text=True, timeout=60)
+    assert cp.returncode == 0, cp.stderr
+    lines = cp.stdout.strip().splitlines()
+    assert lines[-1] == out
+    if second != "pass":
+        assert lines[-2] == ("tests/conftest.py imported a second time as 'tests.conftest': "
+                             "import it as `conftest`, the module pytest already loaded")
+
+
+def test_conftest_alone_under_another_name_still_imports():
+    """The refusal is for a SECOND copy only: with no ``conftest`` loaded yet, the file
+    imports under any name (the guard keys on both conditions)."""
+    cp = subprocess.run([sys.executable, "-c", "import tests.conftest as c; print(c.__name__)"],
+                        cwd=Path(conftest.__file__).parent.parent, capture_output=True,
+                        text=True, timeout=60)
+    assert cp.returncode == 0, cp.stderr
+    assert cp.stdout.strip() == "tests.conftest"
+
+
 def test_an_explicit_env_without_PATH_is_resolved_against_the_default_path(tmp_path,
                                                                             monkeypatch):
     """``Popen(env={...})`` with no PATH execs against ``os.defpath`` — so that is where the
