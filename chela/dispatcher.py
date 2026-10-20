@@ -8535,15 +8535,27 @@ def _judge_watchdog(conn: sqlite3.Connection, wf: WorkflowDef, live_windows: set
             _epoch_dt(live_run.get("run_started_at")) if live_run else None
         )
         started = run_started or _parse_ts(row["judge_started_at"])
+        # ⏸️⚖️ CMX-214: a frozen judge is left alone (10-18/19: three were reaped as "stuck"),
+        # and once thawed its wall skips the frozen time and its progress clock restarts.
+        freeze = judge.read_freeze(row["task_id"])
+        if not freeze.get("intervals") or freeze.get("round") != row["judge_started_at"]:
+            freeze = {}
+        if freeze and freeze["intervals"][-1][1] is None:
+            log.info("judge watchdog: %s: frozen by a fleet pause — holding", row["task_id"])
+            continue
         # ⏳⚖️ CMX-431: once the run has started, its wall scales with its battery and only a
         # run whose progress STOPPED is reaped past it (see `judge_overdue`). Before that the
         # agent is bounded by the flat JUDGE_TIMEOUT_SECONDS from its spawn, as always.
         timeout_reason = None
         if started is not None and now is not None:
-            elapsed = (now - started).total_seconds()
+            elapsed = (now - started).total_seconds() - judge.frozen_since(
+                row["task_id"], started.timestamp(), rec=freeze)
             if run_started is not None:
-                timeout_reason = judge_overdue(
-                    elapsed, _judge_run_status(row["task_id"]), now.timestamp())
+                status = _judge_run_status(row["task_id"])
+                if status and freeze:
+                    status["progress_at"] = max(_num(status.get("progress_at")) or 0.0,
+                                                freeze["intervals"][-1][1])
+                timeout_reason = judge_overdue(elapsed, status, now.timestamp())
             elif elapsed >= JUDGE_TIMEOUT_SECONDS:
                 timeout_reason = (f"the judge did not finish in {JUDGE_TIMEOUT_SECONDS // 60}"
                                   "min — it is stuck, not thinking")

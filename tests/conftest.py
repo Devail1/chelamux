@@ -56,19 +56,21 @@ import shutil
 import signal
 import sqlite3
 import subprocess
+import sys
 import tempfile
 import time
 from pathlib import Path
 
 import pytest
 
-# tests/ has no __init__.py, so pytest imports this file as the top-level ``conftest``.
-# ``import tests.conftest`` would run it a SECOND time — re-minting every sandbox dir below
-# and repointing PM2_HOME for the rest of that xdist worker, which then fails whichever
-# isolation test `--dist loadfile` happens to put after it (CMX-274's CI). Refuse it here,
-# in the importing test, on every worker.
-if __name__ != "conftest":
-    raise ImportError(f"import ``conftest``, not {__name__!r} — a second copy re-mints the sandbox")
+# CMX-281: tests/ has no __init__.py, so pytest imports this file as the top-level module
+# ``conftest``. Importing it as ``tests.conftest`` as well runs everything below a SECOND
+# time — a second sandbox, a second gh fence prepended to PATH — and every test after it in
+# that worker sees PATH, CHELA_DIR … point at the copy, not at the module it asserts
+# against. Refuse the copy before any of that runs.
+if __name__ != "conftest" and "conftest" in sys.modules:
+    raise ImportError(f"tests/conftest.py imported a second time as {__name__!r}: "
+                      "import it as `conftest`, the module pytest already loaded")
 
 os.environ.setdefault("CHELA_ENV_FILE", "")
 
