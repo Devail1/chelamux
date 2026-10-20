@@ -15,7 +15,7 @@ import { fakeArchiveServer } from './js_helpers/fake_archive.mjs';
 import {
     DISPATCHED_KEY, OTHER_KEY, VIEW_DEFAULTS, activityTs, createdTs, dateBucket, groupSidebar, isLive, itemKinds, itemState, buildItems,
     normalizeView, windowKind,
-} from '../chela/dashboard/static/js/sidebarmodel.js';
+} from '../chela/dashboard/frontend/src/features/sidebar/model.ts';
 
 const BODY = `
 <aside class="sidebar">
@@ -92,9 +92,16 @@ const groupByLabel = label => [...host().querySelectorAll('.side-group')]
 const rowsUnder = label => [...groupByLabel(label).querySelectorAll('.agent-row')].map(r => r.dataset.agent);
 const view = act => nav.viewMenuAction(act);
 
+// CMX-276: the rows and groups are the React island's (no inline attribute: React listens at
+// its root), so on them fire a REAL bubbling event; legacy markup keeps its inline handler.
 function fire(el, attr = 'onclick') {
     assert.ok(el, `no element to fire ${attr} on`);
     const code = el.getAttribute(attr);
+    if (el.closest('#sidebar-agents')) {
+        assert.equal(code, null, 'an island element carries no inline handler');
+        el.dispatchEvent(new window.MouseEvent(attr.replace(/^on/, ''), { bubbles: true, cancelable: true }));
+        return undefined;
+    }
     assert.ok(code, `the element has no ${attr} attribute`);
     const ev = { target: el, currentTarget: el, stopPropagation() {}, preventDefault() {} };
     return new Function('chela', 'event', code).call(el, window.chela, ev);
@@ -466,7 +473,9 @@ test('CMX-74: under Custom groups, tapping "Move to group…" SHOWS its page and
     view('group:custom');
     nav.newCustomGroup('Infra');
     const plain = host().querySelector('.agent-row[data-agent="a1"]');
-    assert.ok(plain.getAttribute('oncontextmenu'), 'a plain row has no right-click menu under Custom groups');
+    fire(plain, 'oncontextmenu');
+    assert.equal(menu('row-menu').style.display, 'block', 'a plain row has no right-click menu under Custom groups');
+    window.chela.hideSideMenus();
     fire(plain.querySelector('.row-more'));
     assert.deepEqual(menuRows('row-menu').map(r => r.label), ['Move to group…', 'Archive']);
     tap('row-menu', 'Move to group…');

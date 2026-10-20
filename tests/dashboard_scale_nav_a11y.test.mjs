@@ -594,9 +594,25 @@ test('non-hue cue — sidebar .ar-state: idle/working/waiting each map to a real
     }
 });
 
-test('non-hue cue — sidebar .ar-state: the rendered row interpolates the WORD into the element, not just a colour class', () => {
-    assert.match(NAV, /<span class="ar-state \$\{stCls\}">\$\{stWord\}<\/span>/,
-        '_agentRowHtml no longer renders stWord as the .ar-state text — a red-weak reader would see only the colour class');
+// CMX-276: the rows are the React island's now (frontend/src/features/sidebar), and CMX-121
+// moved the word off the row face into the dot's accessible name. Read the REAL rendered row.
+const SIDEBAR_BODY = '<aside class="sidebar"><div class="side-list" id="sidebar-agents"></div></aside>';
+async function sidebarRows(rows, ctx = []) {
+    const { modules: { nav } } = await bootDashboardDom({ body: SIDEBAR_BODY, canvasStub: true, extraModules: ['nav.js'] });
+    nav.updateCtxCache(ctx);
+    nav.renderSidebarAgents(rows);
+    return name => document.querySelector(`#sidebar-agents .agent-row[data-agent="${name}"]`);
+}
+
+test('non-hue cue — sidebar row: the rendered dot NAMES the state word, not just a colour class', async () => {
+    const row = await sidebarRows(['busy', 'waiting', 'idle'].map((st, i) =>
+        ({ name: `r-${st}`, window_id: `@${i + 1}`, cwd: '/x/p', session_status: st })));
+    for (const [st, want] of [['busy', 'working'], ['waiting', 'waiting'], ['idle', 'idle']]) {
+        const dot = row(`r-${st}`).querySelector('.term-status-dot');
+        assert.ok(dot.classList.contains(want), dot.className);
+        assert.equal(dot.getAttribute('aria-label'), `Session: ${want}`,
+            'the dot no longer names its state: a red-weak reader would get only its colour');
+    }
 });
 
 // 3c. The Work board's closest real analogue of "error": a failed task. The
@@ -652,9 +668,11 @@ test('WIRING: a REAL rendered kanban card shows its status chip word AND its err
 // --- GUARD 4: a context-% threshold is never colour-only — the exact number
 // (and, on the wall, the raw token count too) renders as text alongside the
 // warn/danger class.
-test('context-% threshold non-hue cue — sidebar .ar-ctx renders the numeric percentage as text, class is reinforcement only', () => {
-    assert.match(NAV, /class="ar-ctx \$\{cls\}"[^>]*>\$\{p\}%<\/span>/,
-        'the sidebar context chip no longer interpolates the numeric percentage as text');
+test('context-% threshold non-hue cue — sidebar .ar-ctx renders the numeric percentage as text, class is reinforcement only', async () => {
+    const row = await sidebarRows([{ name: 'hot', window_id: '@7', cwd: '/x/p' }], [{ window_id: '@7', used_pct: 87 }]);
+    const chip = row('hot').querySelector('.ar-ctx');
+    assert.equal(chip.textContent, '87%', 'the sidebar context chip no longer shows the numeric percentage as text');
+    assert.ok(chip.classList.contains('danger'), chip.className);
 });
 
 test('context-% threshold non-hue cue — the wall .gs-ctx chip renders "N% · used/total" as text, class is reinforcement only', () => {

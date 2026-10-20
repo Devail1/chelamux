@@ -1870,6 +1870,19 @@ def _judge_hit_classifier_outage(wf: WorkflowDef, row: sqlite3.Row) -> bool:
     return path is not None and _transcript_shows_classifier_outage(path)
 
 
+def _judge_model_call_failed(wf: WorkflowDef, row: sqlite3.Row) -> bool:
+    """⏸️⚖️ CMX-214: an IDLE judge whose last model call failed: an API error (a timed-out
+    request is one) or the CMX-379 classifier outage, the auto-mode model call."""
+    if _agent_status(row["judge_window_id"] or "") != "idle":
+        return False
+    path = _judge_transcript(wf, row)
+    if path is None:
+        return False
+    last = transcripts.latest_record(path, lambda o: o.get("type") in ("user", "assistant"))
+    return bool(last) and (last.get("isApiErrorMessage") is True
+                           or _transcript_shows_classifier_outage(path))
+
+
 def _dismiss_input_block(window_id: str) -> None:
     """Send Escape to a window whose agent is blocked on an input dialog.
 
@@ -8504,6 +8517,10 @@ def _judge_run_status(task_id: str) -> dict | None:
     return status
 
 
+JUDGE_RETRY_MESSAGE = ("resume: a fleet pause froze you mid-call, so your last model or tool "
+                       "call failed. Retry it once and continue; it is not a verdict.")
+
+
 def _cancel_moot_judges(conn: sqlite3.Connection, wf: WorkflowDef) -> int:
     """⏹️⚖️ CMX-286: stop every live judge whose round can no longer produce a usable verdict.
 
@@ -8658,6 +8675,17 @@ def _judge_watchdog(conn: sqlite3.Connection, wf: WorkflowDef, live_windows: set
                 row["task_id"], live_run.get("pid"),
             )
             continue
+        if (alive and not timed_out and not login_expired and freeze.get("retry")
+                and _judge_model_call_failed(wf, row)):
+            # ⏸️⚖️ CMX-214: a model call the freeze cut off is not an outage. ONE is forgiven
+            # per thaw: the token is spent BEFORE the send, so a second failure reaps as
+            # before, and a send that fails falls through to the arms below. Re-read, not
+            # `freeze`: a pause that landed since must keep its open interval.
+            judge.write_freeze(row["task_id"], {**judge.read_freeze(row["task_id"]), "retry": 0})
+            if _send_seed(row["judge_window_id"], JUDGE_RETRY_MESSAGE, row["task_id"]):
+                log.warning("judge watchdog: %s: a model call failed after a fleet pause — "
+                            "told it to retry", row["task_id"])
+                continue
         # ⚖️🌩️ CMX-379: the auto-mode classifier outage is the same kind of never-got-a-
         # chance failure. Measured 2026-09-28 on PR #529: every Bash call failed, the judge
         # stopped after the harness's 10-in-a-row limit and sat idle, holding the only judge

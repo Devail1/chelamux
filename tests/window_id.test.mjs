@@ -22,6 +22,7 @@ import { beforeAll, test } from 'vitest';
 import assert from 'node:assert/strict';
 import { JSDOM } from 'jsdom';
 import { resolveWindowId, windowIdQuery } from '../chela/dashboard/static/js/windowid.ts';
+import { mountIslands } from './js_helpers/dashboard_dom.mjs';
 
 const LONG = 'a-very-long-session-name-that-goes-on-and-on-well-past-any-pane-width-' + 'x'.repeat(80);
 
@@ -99,6 +100,7 @@ beforeAll(async () => {
     });
     globalThis.window.chela = globalThis.window.chela || {};
     globalThis.setInterval = () => 0;
+    await mountIslands(dom.window);   // CMX-276: the sidebar island draws #sidebar-agents
     await import('../chela/dashboard/frontend/src/boot.ts');
     util = await import('../chela/dashboard/static/js/util.js');
     nav = await import('../chela/dashboard/static/js/nav.js');
@@ -155,28 +157,29 @@ test('⭐ a window with a very long name still shows its id in the footer and th
 
 // --- 2. the sidebar row carries the id ------------------------------------------
 
-test('the sidebar row shows its window id on its second line and in its tooltip', () => {
+test('the sidebar row shows its window id at the end of its metadata and in its tooltip', () => {
     const row = sidebarRow('alpha');
     assert.ok(row, 'no sidebar row for alpha');
-    const wid = row.querySelector('.ar-sub .ar-wid');
-    assert.ok(wid, 'no .ar-wid on the row\'s second line');
+    const wid = row.querySelector('.ar-meta .ar-wid');
+    assert.ok(wid, 'no .ar-wid in the row\'s metadata');
     assert.equal(wid.textContent, '@3');
-    // The sub-line ENDS with this row's own id (not merely contains an "@3").
-    assert.match(row.querySelector('.ar-sub').textContent, / · @3$/);
+    // The metadata ENDS with this row's own id (not merely contains an "@3").
+    assert.match(row.querySelector('.ar-meta').textContent, /@3$/);
 });
 
 // The two tooltip branches, each read back EXACTLY (modulo the on-wall suffix):
-// "<label> · @N" heads the tooltip whether or not an ai_title/recap line follows.
+// "<label> · @N" heads the tooltip whether or not an ai_title/recap line follows; CMX-121's
+// state word (gone from the row face) is the line under it.
 const tooltip = row => row.title.replace(/ \(open on the wall\)$/, '');
 
 test('a row WITH an ai_title/recap: the tooltip heads with "<label> · @N", then the extras', () => {
     const row = sidebarRow('alpha');
-    assert.equal(tooltip(row), 'alpha · @3\nRefactor the flux capacitor, Tests green, PR open');
+    assert.equal(tooltip(row), 'alpha · @3\nidle\nRefactor the flux capacitor, Tests green, PR open');
 });
 
-test('a row WITHOUT extras: the tooltip is exactly "<label> · @N" — even for a very long name', () => {
+test('a row WITHOUT extras: the tooltip is exactly "<label> · @N" and its state — even for a very long name', () => {
     const row = sidebarRow(LONG);
-    assert.equal(tooltip(row), `${LONG} · @32`);
+    assert.equal(tooltip(row), `${LONG} · @32\nidle`);
 });
 
 // --- 3. the palette resolves "@N" exactly ---------------------------------------

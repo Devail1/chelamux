@@ -14,7 +14,7 @@
 // Run: pnpm exec vitest run tests/term_last_pane.test.mjs  (pytest runs it via tests/test_js_suites.py)
 import { beforeAll, beforeEach, test } from 'vitest';
 import assert from 'node:assert/strict';
-import { clickOnclick } from './js_helpers/dashboard_dom.mjs';
+import { clickIsland } from './js_helpers/dashboard_dom.mjs';
 import { KEY, bootPhone, pane, sel, settle, shown, stored } from './js_helpers/term_pane_fixture.mjs';
 
 const SIDEBAR = ['/srv/code/beta', '/srv/code/gamma', '/srv/code/alpha'];   // sidebar rows: @202, @203, @201
@@ -70,7 +70,7 @@ test('a stored wid with no name or session id to compare is trusted', async () =
 test('a sidebar tap stores its pane, and a reload opens it', async () => {
     localStorage.setItem(KEY, stored('@202', 's-b', 'b'));
     await reload();
-    clickOnclick(document.querySelector('#sidebar-agents .agent-row[data-item="w:@201"]'));
+    clickIsland(document.querySelector('#sidebar-agents .agent-row[data-item="w:@201"]'));
     await settle();
     assert.equal(shown(), '@201');
     assert.deepEqual(JSON.parse(localStorage.getItem(KEY)), { wid: '@201', session_id: 's-a', name: 'a' });
@@ -106,7 +106,7 @@ test('localStorage throwing still renders a pane (the top sidebar row)', async (
     try {
         await reload();
         assert.deepEqual(pane(), { value: '@202', shown: '@202' });
-        clickOnclick(document.querySelector('#sidebar-agents .agent-row[data-item="w:@203"]'));
+        clickIsland(document.querySelector('#sidebar-agents .agent-row[data-item="w:@203"]'));
         await settle();
         assert.equal(shown(), '@203', 'a switch still works when the write throws');
     } finally {

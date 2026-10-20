@@ -16,7 +16,7 @@ import { bootDashboardDom, flush } from './js_helpers/dashboard_dom.mjs';
 import { fakeArchiveServer } from './js_helpers/fake_archive.mjs';
 import {
     DISPATCHED_KEY, OTHER_KEY, buildItems, folderKey, folderLabels, groupSidebar, isArchivable, moveGroup, orderGroups, runState,
-} from '../chela/dashboard/static/js/sidebarmodel.js';
+} from '../chela/dashboard/frontend/src/features/sidebar/model.ts';
 
 const BODY = `
 <aside class="sidebar">
@@ -77,15 +77,11 @@ const groupKeys = () => [...host().querySelectorAll('.side-group')].map(g => g.d
 const rowsIn = key => [...group(key).querySelectorAll('.agent-row')].map(r => r.dataset.agent);
 const labelOf = key => group(key).querySelector('.group-name').textContent;
 
-// Run a rendered element's inline handler the way a real event would: `this` is the
-// element, and `event` is a real-enough event (stopPropagation / preventDefault /
-// currentTarget), since the group and row handlers call both.
+// CMX-276: the rows and group heads are the React island's, so fire a REAL bubbling event
+// on them (`onclick` → click, `oncontextmenu` → contextmenu), the way a user's click lands.
 function fire(el, attr = 'onclick') {
     assert.ok(el, `no element to fire ${attr} on`);
-    const code = el.getAttribute(attr);
-    assert.ok(code, `the element has no ${attr} attribute`);
-    const ev = { target: el, currentTarget: el, stopPropagation() {}, preventDefault() {} };
-    return new Function('chela', 'event', code).call(el, window.chela, ev);
+    el.dispatchEvent(new window.MouseEvent(attr.replace(/^on/, ''), { bubbles: true, cancelable: true }));
 }
 const menu = id => document.getElementById(id);
 const menuItems = id => [...menu(id).querySelectorAll('.popover-item')].map(i => ({
@@ -605,7 +601,9 @@ test('an agent window and its judge window are ONE row per run, labelled "CMX-N 
     const r37 = group(DISPATCHED_KEY).querySelector('.agent-row[data-run="CMX-37"]');
     assert.equal(r37.dataset.agent, 'liavacc/cmx-37-theme', 'a click must open the AGENT pane');
     assert.equal(r37.querySelector('.agent-row-name').textContent, 'CMX-37 · Theme hover text on the wall');
-    assert.equal(r37.querySelector('.ar-state').textContent, 'judging');
+    // CMX-121: the state is the dot's SHAPE, its word in the dot's accessible name only
+    assert.equal(r37.querySelector('.term-status-dot').getAttribute('aria-label'), 'Dispatched run: judging');
+    assert.ok(!r37.textContent.includes('judging'), 'the row text carries no status word');
     assert.ok(r37.querySelector('.term-status-dot').classList.contains('judging'), 'the state has a shape, not just a word');
     assert.equal(host().querySelector('.agent-row[data-agent="judge-liavacc/cmx-37-theme"]'), null,
         'the judge rendered as its own row — it is a state of the run');
@@ -653,11 +651,12 @@ test('model: a run\'s state reads as a word AND a shape', () => {
 
 // --- 5. row content ----------------------------------------------------------------
 
-test('row content follows CMX-62\'s label and keeps the state word + ctx', () => {
+test('row content follows CMX-62\'s label; the state word is in the dot\'s aria-label, not the row text', () => {
     render([win('shell-1', { cwd: '/srv/code/alpha', ai_title: 'Fix the reconcile loop', session_status: 'busy' })]);
     const row = host().querySelector('.agent-row[data-agent="shell-1"]');
     assert.equal(row.querySelector('.agent-row-name').textContent, 'Fix the reconcile loop');
-    assert.equal(row.querySelector('.ar-state').textContent, 'working');
+    assert.equal(row.querySelector('.term-status-dot').getAttribute('aria-label'), 'Session: working');
+    assert.ok(!row.textContent.includes('working'));
     assert.ok(row.querySelector('.term-status-dot').classList.contains('working'));
 });
 
@@ -712,6 +711,7 @@ test('model: Move up / down stops at the ends and keeps off-screen groups in the
 
 // CMX-106: once any order is saved (moveGroup persists the whole visible order, so
 // Dispatched is in it), a folder created later must still land among the folders.
+// CMX-276 (Liav, 10-19): Dispatched is ALWAYS the last group, whatever the stored order.
 const G = key => ({ key, label: key === DISPATCHED_KEY ? 'Dispatched' : key === OTHER_KEY ? 'Other' : key });
 const ordered = (keys, stored) => orderGroups(keys.map(G), stored).map(g => g.key);
 
@@ -720,21 +720,22 @@ test('CMX-106: a new folder lands after the stored folders and BEFORE a stored D
         ['liavedunix', 'tradeplan', DISPATCHED_KEY]);
 });
 
-test('CMX-106: Dispatched moved ABOVE the folders stays there; the new folder follows the last stored folder', () => {
+test('CMX-276: a stored Dispatched ABOVE the folders still renders last; the folders keep their stored order', () => {
     assert.deepEqual(ordered(['liavedunix', DISPATCHED_KEY, 'tradeplan'], [DISPATCHED_KEY, 'liavedunix']),
-        [DISPATCHED_KEY, 'liavedunix', 'tradeplan']);
+        ['liavedunix', 'tradeplan', DISPATCHED_KEY]);
+    assert.deepEqual(ordered(['b', DISPATCHED_KEY, 'a'], ['b', DISPATCHED_KEY, 'a']), ['b', 'a', DISPATCHED_KEY]);
 });
 
-test('CMX-106: an unstored Other stays last, an unstored Dispatched after the folders', () => {
+test('CMX-276: Dispatched is below Other too; an unstored Other stays below the folders', () => {
     assert.deepEqual(ordered([OTHER_KEY, DISPATCHED_KEY, 'beta', 'alpha'], ['beta']),
-        ['beta', 'alpha', DISPATCHED_KEY, OTHER_KEY]);
+        ['beta', 'alpha', OTHER_KEY, DISPATCHED_KEY]);
     assert.deepEqual(ordered([OTHER_KEY, 'zeta', DISPATCHED_KEY, 'alpha'], ['alpha', DISPATCHED_KEY]),
-        ['alpha', 'zeta', DISPATCHED_KEY, OTHER_KEY]);
+        ['alpha', 'zeta', OTHER_KEY, DISPATCHED_KEY]);
 });
 
 test('CMX-106: a new folder with only Dispatched stored goes above it; nothing stored = default order', () => {
     assert.deepEqual(ordered([DISPATCHED_KEY, 'tradeplan'], [DISPATCHED_KEY]), ['tradeplan', DISPATCHED_KEY]);
-    assert.deepEqual(ordered([OTHER_KEY, DISPATCHED_KEY, 'b', 'a'], []), ['a', 'b', DISPATCHED_KEY, OTHER_KEY]);
+    assert.deepEqual(ordered([OTHER_KEY, DISPATCHED_KEY, 'b', 'a'], []), ['a', 'b', OTHER_KEY, DISPATCHED_KEY]);
 });
 
 test('model: sort by name is NUMERIC — CMX-100 sorts after CMX-37, not between CMX-10 and CMX-11', () => {

@@ -16,7 +16,7 @@
 import { beforeAll, beforeEach, test } from 'vitest';
 import assert from 'node:assert/strict';
 import { bootDashboardDom } from './js_helpers/dashboard_dom.mjs';
-import { buildItems, DISPATCHED_KEY, runState } from '../chela/dashboard/static/js/sidebarmodel.js';
+import { buildItems, DISPATCHED_KEY, runState } from '../chela/dashboard/frontend/src/features/sidebar/model.ts';
 
 const BODY = `
 <aside class="sidebar">
@@ -87,10 +87,17 @@ test('a live battery shows its progress on the run\'s ONE row: "⚖️ testing �
     const row = runRow('CMX-81');
     assert.ok(row, 'no run row for CMX-81');
     assert.equal(host().querySelectorAll('.agent-row[data-run="CMX-81"]').length, 1, 'the run must stay ONE row');
-    assert.equal(row.querySelector('.ar-state').textContent, '⚖️ testing · 3/6 · 15m');
+    // CMX-121: the count is a flask icon + `3/6` on the row, the elapsed time in its tooltip;
+    // the battery's whole word is the dot's accessible name
+    const judge = row.querySelector('.ar-meta [data-meta="judging"]');
+    assert.equal(judge.textContent, '3/6');
+    assert.ok(judge.querySelector('svg.lucide-flask-conical'), 'the judging chip has no flask icon');
+    assert.equal(judge.title, 'Judge testing · 3/6 · 15m');
+    assert.equal(row.querySelector('.term-status-dot').getAttribute('aria-label'), 'Dispatched run: ⚖️ testing · 3/6 · 15m');
     assert.ok(row.querySelector('.term-status-dot').classList.contains('judging'), row.querySelector('.term-status-dot').className);
-    // control: the same run shape with no battery is plain "judging"
-    assert.equal(runRow('CMX-82').querySelector('.ar-state').textContent, 'judging');
+    // control: the same run shape with no battery is plain "judging", with no count
+    assert.equal(runRow('CMX-82').querySelector('.term-status-dot').getAttribute('aria-label'), 'Dispatched run: judging');
+    assert.equal(runRow('CMX-82').querySelector('[data-meta="judging"]'), null);
 });
 
 test('the run row never names the experiment running now — counts and elapsed only', () => {
@@ -102,7 +109,7 @@ test('a battery whose pid died before a verdict reads "judge run died" — never
     // status awaiting_review + no judge_state would read "awaiting review" without the battery
     render([...judgedRun('CMX-85', DIED, { judge_state: '' })]);
     const row = runRow('CMX-85');
-    const word = row.querySelector('.ar-state').textContent;
+    const word = row.querySelector('.term-status-dot').getAttribute('aria-label');
     assert.match(word, /judge run died/);
     assert.ok(!/idle|awaiting review/.test(word), word);
     assert.ok(row.querySelector('.term-status-dot').classList.contains('waiting'),
