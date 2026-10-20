@@ -161,7 +161,7 @@ are logged as FLAKY in 12 of the judge logs (about 4 distinct flips, 10-01 to 10
 |---|---|---|---|---|
 | `test_update_apply_route::test_unread_service_freshness_refuses_instead_of_saying_up_to_date` | 7 (dev pushes 10-16 to 10-19) | git | Red on dev repeatedly: likely environment-dependent, maybe a real regression (suspect: CMX-127 #680) | **open** |
 | `test_ops_scan::test_leaked_proc_reads_argv_paths_and_skips_unreadable_procs` | 3 + 3 `ci_flakes` | none (reads the real `/proc`) | real host state | fixed, CMX-273 |
-| `test_suite_containment::test_any_gh_a_test_runs_by_name_meets_the_failing_stub` | 3 + 1 `ci_flakes` | gh, sh | process-global PATH | **open**, CMX-281 |
+| `test_suite_containment::test_any_gh_a_test_runs_by_name_meets_the_failing_stub` | 3 + 1 `ci_flakes` | gh, sh | process-global PATH | fixed, CMX-281 (#792, merged after these measurements) |
 | `test_demo_gate::test_make_repo_rebuilds_its_own_root_from_scratch` | 4 | git | a vanishing lock file | fixed, CMX-254 |
 | `test_env_leak_hardening::test_supervisor_heal_create_from_a_polluted_env_is_clean` | 3 | tmux server, agent-terminals.sh | real daemon + timing | **open** |
 | JS browser/DOM suites (`dashboard`, `wall_toolbar_row`, `sidebar_move_to_group` ×2, `sidebar_view`, `mobile_pills_sidebar_order`) | 6 | node via procguard | timing under load | **open** |
@@ -437,7 +437,7 @@ Scope: test_update_apply_route::test_unread_service_freshness_refuses_instead_of
   tmux + agent-terminals.sh); test_pm2_home_isolation's two. Each gets the event-not-deadline
   rule (§4.4) or a narrower real dependency.
 Files: those test files; production code only if the first one is a real bug
-Blocked by: none. CMX-281 (any_gh) is already its own issue and is NOT in this slice.
+Blocked by: none. CMX-281 (any_gh) was fixed separately (#792).
 Tests: each fixed test passes 50× in a row under `stress-ng --cpu 20` (or the box's real load ≥16),
   stated in the PR
 Risk: normal. ≈100 lines.
