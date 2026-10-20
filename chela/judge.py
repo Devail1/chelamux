@@ -86,7 +86,7 @@ from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
 from typing import NamedTuple
 
-from chela import envutil, generated, judge_select, procguard, toolconfig
+from chela import envutil, generated, judge_select, procguard, risktier, toolconfig
 
 log = logging.getLogger(__name__)
 
@@ -1544,6 +1544,7 @@ def run_experiments(
     tool_config: tuple[str, ...] = toolconfig.DEFAULT_GLOBS,
     progress=None,
     heartbeat=None,
+    held_out: bool = True,
 ) -> Report:
     """Execute every proposed experiment IN THIS WORKTREE and adjudicate each one.
 
@@ -1611,13 +1612,17 @@ def run_experiments(
     nothing; a report whose ONLY survivors are flaky becomes CANNOT VERIFY, naming them —
     never clean, because a flip is an unknown, and the operator decides. ``0`` (the default)
     skips it; ``judge_run`` passes the workflow's ``judge.consistency_sample``.
+
+    ⚖️🪜 CMX-288: ``held_out=False`` (a STANDARD-tier run) plans no held-out experiment —
+    see :func:`plan_experiments`.
     """
     started = time.monotonic()
     report = _run_experiments(worktree, test_cmd, raw, timeout=timeout,
                               base_branch=base_branch, select_tests=select_tests,
                               consistency_sample=consistency_sample,
                               max_experiments=max_experiments, risk=risk,
-                              tool_config=tool_config, progress=progress, heartbeat=heartbeat)
+                              tool_config=tool_config, progress=progress, heartbeat=heartbeat,
+                              held_out=held_out)
     report.battery_seconds = time.monotonic() - started
     log.info("judge: mutation battery took %s (%d experiment(s))",
              _duration(report.battery_seconds), len(report.outcomes))
@@ -1632,10 +1637,26 @@ def _drop_generated(items: list) -> tuple[list, int]:
     return kept, len(items) - len(kept)
 
 
+def plan_experiments(items: list, cap: int, tool_config: tuple[str, ...], *,
+                     held_out: bool = True) -> tuple[list, int]:
+    """``(planned, dropped)`` — the experiments a run will execute, in order, capped at ``cap``.
+
+    ⚖️🪜 CMX-288: with ``held_out=False`` (a STANDARD-tier run) nothing is held out — every
+    ``"held_out": true`` the judge wrote anyway is cleared, so it runs and reports as visible.
+    """
+    items = toolconfig.code_first(items, tool_config)
+    dropped = max(0, len(items) - cap)
+    items = items[:cap]
+    if not held_out:
+        items = [dict(i, held_out=False) if isinstance(i, dict) else i for i in items]
+    return items, dropped
+
+
 def _run_experiments(
     worktree: Path, test_cmd: str, raw: dict, *, timeout: float, base_branch: str,
     select_tests: bool, consistency_sample: int, max_experiments: int, risk: str,
     tool_config: tuple[str, ...] = toolconfig.DEFAULT_GLOBS, progress=None, heartbeat=None,
+    held_out: bool = True,
 ) -> Report:
     report = Report(risk=risk, cap=max(1, int(max_experiments)))
     items = raw.get("experiments") if isinstance(raw, dict) else None
@@ -1687,10 +1708,7 @@ def _run_experiments(
         report.cannot_verify_final = True
         return report
 
-    items = toolconfig.code_first(items, tool_config)
-    if len(items) > report.cap:
-        report.dropped = len(items) - report.cap
-        items = items[:report.cap]
+    items, report.dropped = plan_experiments(items, report.cap, tool_config, held_out=held_out)
 
     # ⛔ CMX-80: PROVISION BEFORE MEASURING. A missing dependency and a broken guard both
     # come out of the suite as "exit 1", and the judge used to report the first as the
@@ -2086,7 +2104,7 @@ def held_out_quota(n: int, fraction: float = HELD_OUT_FRACTION) -> int:
     1 once there are :data:`HELD_OUT_MIN_EXPERIMENTS`, else none (holding out one of two would
     leave the rework almost nothing to read). Recorded against what the judge actually tagged;
     chela never re-tags on the judge's behalf — the held-out choice is the judge's."""
-    if n < HELD_OUT_MIN_EXPERIMENTS:
+    if n < HELD_OUT_MIN_EXPERIMENTS or fraction <= 0:   # CMX-288: a 0 fraction asks for none
         return 0
     return max(1, round(n * max(0.0, min(1.0, fraction))))
 
@@ -2712,6 +2730,12 @@ def judge_run(
     # never from anything the judged agent wrote. They size the battery only.
     risk = run_risk(run.get("risk"))
     exp_cap = config.judge_max_experiments(risk)
+    # ⚖️🪜 CMX-288: only a STANDARD run skips held-out, and only while the head `_spawn_judge`
+    # classified (`judge_sha`) is still the PR's head — an unstamped or stale tier is never
+    # assumed standard.
+    tier = run.get("risk_tier") or ""
+    held_out = not (tier == risktier.STANDARD and run.get("judge_sha")
+                    and run.get("judge_sha") == run.get("pr_head_sha"))
     repo_dir = str(wf.path.parent)
     pr_url = run.get("pr_url")
 
@@ -2793,7 +2817,7 @@ def judge_run(
                     base_branch=base_branch, select_tests=judge_cfg.select_tests,
                     consistency_sample=judge_cfg.consistency_sample,
                     max_experiments=exp_cap, risk=risk, tool_config=judge_cfg.tool_config,
-                    progress=_progress, heartbeat=_heartbeat,
+                    progress=_progress, heartbeat=_heartbeat, held_out=held_out,
                 )
         else:
             report = run_experiments(
@@ -2801,7 +2825,7 @@ def judge_run(
                 base_branch=base_branch, select_tests=judge_cfg.select_tests,
                 consistency_sample=judge_cfg.consistency_sample,
                 max_experiments=exp_cap, risk=risk, tool_config=judge_cfg.tool_config,
-                progress=_progress, heartbeat=_heartbeat,
+                progress=_progress, heartbeat=_heartbeat, held_out=held_out,
             )
         report.risk, report.cap = risk, exp_cap
         report.total_seconds = _since(run.get("judge_started_at"))
@@ -2875,8 +2899,9 @@ def judge_run(
                                     + report.cannot_verify)
             result["cannot_verify"] = report.cannot_verify
         record_private(
-            task_id, report, raw if isinstance(raw, dict) else {}, judge_cfg.held_out_fraction,
-            sha=verified_sha, stale=stale_head, pr_url=pr_url,
+            task_id, report, raw if isinstance(raw, dict) else {},
+            judge_cfg.held_out_fraction if held_out else 0.0,
+            sha=verified_sha, stale=stale_head, pr_url=pr_url, tier=tier,
         )
 
         if stale_head:
@@ -3066,7 +3091,7 @@ def heldout_store_path(task_id: str) -> Path:
 
 def record_private(
     task_id: str, report: Report, raw: dict, held_out_fraction: float = HELD_OUT_FRACTION, *,
-    sha: str | None = None, stale: bool = False, pr_url: str | None = None,
+    sha: str | None = None, stale: bool = False, pr_url: str | None = None, tier: str = "",
 ) -> Path | None:
     """Append this round to the operator's private record. Never raises — a record that
     could not be written (or even assembled) must not take a verdict down with it; it is
@@ -3074,7 +3099,7 @@ def record_private(
     building the record is the same "no record" outcome."""
     try:
         return _record_private(task_id, report, raw, held_out_fraction,
-                               sha=sha, stale=stale, pr_url=pr_url)
+                               sha=sha, stale=stale, pr_url=pr_url, tier=tier)
     except Exception as e:  # noqa: BLE001 — by contract, nothing escapes into the verdict
         log.warning("judge: %s: could not record the private held-out round: %s", task_id, e)
         return None
@@ -3082,7 +3107,7 @@ def record_private(
 
 def _record_private(
     task_id: str, report: Report, raw: dict, held_out_fraction: float, *,
-    sha: str | None, stale: bool, pr_url: str | None,
+    sha: str | None, stale: bool, pr_url: str | None, tier: str = "",
 ) -> Path | None:
     items = raw.get("experiments") if isinstance(raw, dict) else None
     proposed = len(items) if isinstance(items, list) else 0
@@ -3096,7 +3121,7 @@ def _record_private(
     rec = {
         "at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         "task_id": task_id, "sha": sha or "", "pr_url": pr_url or "",
-        "state": report.state, "stale": bool(stale),
+        "state": report.state, "stale": bool(stale), "tier": tier,
         "cannot_verify": report.cannot_verify,
         "suite_logs": list(report.suite_logs),
         "baseline_flakes": list(report.baseline_flakes),

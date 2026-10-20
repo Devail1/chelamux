@@ -170,13 +170,17 @@ outside chela's gate`) — once.
 ### Risk tiers (CMX-208)
 
 `chela merge` also reads the PR's changed files live (`gh pr diff --name-only`) and sorts the PR
-into one of three tiers (`chela/risktier.py`):
+into one of four tiers (`chela/risktier.py`):
 
 | Tier | When | What merges it |
 |---|---|---|
 | **prose** | every changed file is prose: text under `docs/` (`.md`/`.mdx`/`.rst`/`.txt`/`.jsonl`), a `changelog.d/` fragment, a top-level `*.md`, or an image/video. A file named `WORKFLOW.md`, `CLAUDE.md` or `AGENTS.md` is never prose, at any depth. The gate reads the PR's file list from GitHub with both sides of every rename, so moving a file into `docs/` does not hide where it came from | no judge round. The dispatcher records the verdict `prose_only` against the head, and the inbox says "prose-only, merged on green CI". `chela merge` accepts it like `clean` once CI is green and GitHub says MERGEABLE, after checking that the live diff is still prose-only. |
 | **always-human** | any file matches an ALWAYS-HUMAN path: `WORKFLOW.md`, `.github/workflows/**`, `plugin/**`, `chela/mergegate.py`, `chela/contract.py`, `chela/risktier.py`, `chela/release.py`, `scripts/release*` | `chela merge` refuses even with a clean judge and names the path. Only an operator-approved `--override` merges it, and the override question names the path too. |
-| **judge** | everything else | unchanged: judge `clean` on the head, CI green, MERGEABLE. |
+| **core** (CMX-288) | any file matches a CORE path — the gate's own machinery: `chela/dispatcher.py`, `chela/judge*.py`, `chela/workflow*.py`, `chela/sources/**`, `chela/context.py` | the full judge round, held-out experiments included; then judge `clean` on the head, CI green, MERGEABLE. |
+| **standard** (CMX-288) | everything else: product and UI work | a judge round with **no held-out experiments**: the judge is asked for none, and `chela judge run` runs any it tags anyway as visible. Experiment caps still come from the task's `risk:` label. Then judge `clean` on the head, CI green, MERGEABLE. |
+
+The dispatcher stamps the tier on the run when it spawns the judge (`risk_tier`), and
+`chela judge show` prints it. A run with no stamped tier is judged as core.
 
 A workflow can add paths to the always-human set in its front matter. It can never remove a
 default:
@@ -184,13 +188,14 @@ default:
 ```yaml
 merge:
   always_human: ["deploy/**", "infra/*.tf"]
+  core: ["server/auth/**"]     # CMX-288: adds to the core set the same way
 ```
 
 A pattern ending `/**` matches everything under that directory. Any other pattern is a shell glob
 over the whole repo-relative path, and its `*` also matches `/`.
 
 ⛔ An unknown file list is never prose. If the dispatcher's `git diff` fails or comes back empty,
-the PR goes to the judge. If `chela merge` cannot read the list live, it refuses.
+the PR goes to the full (core) judge. If `chela merge` cannot read the list live, it refuses.
 
 ---
 

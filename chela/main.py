@@ -3034,6 +3034,9 @@ def cmd_judge_show(args) -> None:
     to_clean = (f"{m['rounds_to_clean']}" if m["rounds_to_clean"]
                 else f"not clean yet ({m['rounds']} round(s))")
     print(f"⚖️ {task_id} — {m['rounds']} judge round(s)")
+    # ⚖️🪜 CMX-288: the run's risk tier (stamped at judge spawn), else the latest round's.
+    tier = (run or {}).get("risk_tier") or records[-1].get("tier") or "unknown"
+    print(f"  risk tier:              {tier}")
     print(f"  rounds-to-clean:        {to_clean}")
     print(f"  visible survival rate:  {pct(m['visible'])}")
     print(f"  held-out survival rate: {pct(m['held_out'])}")
