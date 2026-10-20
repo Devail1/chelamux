@@ -175,8 +175,8 @@ not from `classic.PreToolUse`, so that the denied calls are posted too.
 ## 6. Version floor, cost of adoption, and what was not measured
 
 * **Floor: Claude Code 2.1.301**, the first build with Mods, `classic.*` hooks and
-  `$.http.fetch`. The shell plugin works from the 2.1.152-era hook set, with MessageDisplay
-  as its newest dependency. Migrating would break every adopter on an older Claude Code.
+  `$.http.fetch`. The shell plugin works from the 2.1.152-era hook set (it used
+  MessageDisplay until CMX-266 retired it). Migrating would break every adopter on an older Claude Code.
   Keeping both layers means maintaining two implementations of the same hooks.
 * **Not covered by this run:** idle hours, compaction (`PreCompact`/`PostCompact`),
   subagents, PermissionRequest's 120 s gate wait (the Telegram answer path),
@@ -209,10 +209,9 @@ CMX-181 shipped item 1 of §7.2: the status line through `$.ui.status`, with the
 context cache written through the same `scripts/cache-statusline.sh`
 ([`mods/chela-hooks/README.md`](../mods/chela-hooks/README.md)).
 
-CMX-182 shipped item 2: the terminal-wall timestamps as a band above the prompt. While it
-is on, the Mod marks each `MessageDisplay` payload and the daemon stops writing the
-`displayContent` marker, so a reply shows its time in one place
-([`mods/chela-hooks/README.md`](../mods/chela-hooks/README.md#turn-timestamps-cmx-182)).
+CMX-182 shipped item 2, the terminal-wall timestamps as a band above the prompt. CMX-266
+retired it, with the `displayContent` marker and `CHELA_TERMINAL_TIMESTAMPS`: Claude Code's
+own turn footer now prints the completion time ("done HH:MM") on every reply.
 
 ### 8.1 Soak: NOT RUN yet
 

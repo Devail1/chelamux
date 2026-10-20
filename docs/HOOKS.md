@@ -511,10 +511,9 @@ The hook is a `curl` into the same endpoint every other hook POSTs to:
 
 Being a `command` hook buys a second thing (CMX-160): it runs as a child of the agent's own
 `claude` process, so it inherits that process's environment: `$CHELA_WID`, exported into
-the pane's shell ahead of every chela-managed launch. Every hook but SessionStart and
-MessageDisplay rides `http` (Claude Code's own client, which sends only the payload);
-MessageDisplay is also a `command` hook (CMX-303) but carries no `$CHELA_WID` header, as
-nothing it returns is agent-specific. SessionStart stays the one hook that can just *say*
+the pane's shell ahead of every chela-managed launch. The other hooks carry only Claude
+Code's payload: the gated tool-event `command` hooks send no `$CHELA_WID` header, and the
+rest ride `http`, Claude Code's own client. SessionStart stays the one hook that can just *say*
 which window it is rather than have chela infer it from `/proc` and tmux panes, which also
 makes it the one hook whose window resolution needs no `/proc` at all, macOS included.
 The header is validated (shape, and that it names a currently live window) before it is

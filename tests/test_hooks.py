@@ -416,13 +416,10 @@ def test_the_slug_is_resolved_once_and_cached(monkeypatch):
 
 # --- $CHELA_WID: the agent SAYING which window it is (CMX-160) -----------------------
 #
-# Every hook but SessionStart and MessageDisplay rides `http` — Claude Code's own client,
-# carrying only the payload, none of the agent's env. SessionStart is a `command` hook and
-# so inherits the process env, letting the agent short-circuit inference entirely via an
-# `X-Chela-Wid` header (MessageDisplay is also `command`, CMX-303, but carries no such
-# header — nothing it returns is agent-specific). Still not trusted blind: malformed,
-# empty, or naming a window that is not live
-# right now must fall through to the SAME inference as if no header had ever been sent.
+# The other hooks carry only the payload — none of the agent's env reaches the daemon.
+# SessionStart is a `command` hook and so inherits the process env, letting the agent
+# short-circuit inference entirely via an `X-Chela-Wid` header. Still not trusted blind:
+# malformed, empty, or naming a window that is not live right now must fall through to the SAME inference as if no header had ever been sent.
 
 def test_explicit_wid_short_circuits_correlation_that_would_otherwise_fail(monkeypatch):
     """The header is checked FIRST — it wins even where the origin-based inference below
@@ -648,23 +645,6 @@ def test_recap_command_carries_the_window_id_as_a_shell_expanded_header():
     assert "$CHELA_WID" not in command.replace("${CHELA_WID:-}", "")
 
 
-def test_message_display_command_relays_into_the_same_http_endpoint():
-    """CMX-303: `MessageDisplay` moved off `http` (a live fleet never rendered what the
-    daemon returned there) onto the SAME curl-relay shape as `SessionStart` — a curl into
-    the identical `/hooks/MessageDisplay` route, printing the daemon's own response as its
-    stdout, and failing open exactly like the recap command.
-
-    Port is 6001, NOT config.DEFAULT_DASHBOARD_PORT (5001): a hardcoded-5001 command would
-    satisfy a same-as-default port just as well as a real one, so pinning it at a port that
-    ISN'T the default is what makes this assert the ``port`` argument actually got plumbed
-    through, rather than merely rendering something with 5001 in it somewhere
-    (docs/DEFEAT_SHAPES.md)."""
-    command = hooks.message_display_command(port=6001)
-    assert "http://127.0.0.1:6001/hooks/MessageDisplay" in command
-    assert "--fail" in command and command.endswith("|| true")
-    assert "X-Chela-Wid" not in command
-
-
 # --- CMX-319: gating a hook's command on $CHELA_WID --------------------------------
 #
 # The plugin is enabled user-wide (`~/.claude/settings.json`'s `enabledPlugins`), so a
@@ -678,11 +658,6 @@ def test_recap_command_is_gated_on_chela_wid():
     """SessionStart's own curl must not fire at all for a session chela did not launch —
     not merely send an empty header."""
     command = hooks.recap_command(port=5001)
-    assert command.startswith('[ -n "${CHELA_WID:-}" ] && curl')
-
-
-def test_message_display_command_is_gated_on_chela_wid():
-    command = hooks.message_display_command(port=5001)
     assert command.startswith('[ -n "${CHELA_WID:-}" ] && curl')
 
 
@@ -723,7 +698,6 @@ def test_tool_event_command_leaves_headroom_under_its_declared_timeout():
 
 _GATED_COMMANDS: dict[str, str] = {
     "SessionStart": hooks.recap_command(port=5001),
-    "MessageDisplay": hooks.message_display_command(port=5001),
     **{event: hooks.tool_event_command(event, port=5001)
        for event in hooks.TOOL_EVENTS},
 }
@@ -777,104 +751,6 @@ def test_gate_lets_exactly_one_curl_through_when_chela_wid_is_set(event, command
     assert _curl_invocations(log) == 1
 
 
-# --- live terminal timestamps (CMX-277, mechanism swapped in CMX-285) --------------
-
-def test_timestamp_events_is_exactly_message_display():
-    """The one event the inline-timestamp feature answers now — the assistant-message
-    display boundary, not the ``UserPromptSubmit``/``Stop`` pair CMX-277 used."""
-    assert hooks.TIMESTAMP_EVENTS == frozenset({"MessageDisplay"})
-
-
-def test_message_display_response_stamps_only_the_first_batch():
-    """``MessageDisplay`` fires once per streamed batch of an assistant message — stamp
-    only ``index == 0`` so the marker appears exactly once per reply, not before every
-    chunk. A later batch gets the empty-object "display unchanged" shape."""
-    first = hooks.message_display_response(
-        {"hook_event_name": "MessageDisplay", "index": 0, "delta": "Sure, on it."})
-
-    assert first == {"hookSpecificOutput": {
-        "hookEventName": "MessageDisplay",
-        "displayContent": first["hookSpecificOutput"]["displayContent"],
-    }}
-    content = first["hookSpecificOutput"]["displayContent"]
-    assert content.startswith("**[")
-    assert content.endswith(" Sure, on it.")
-    stamp = content.removesuffix(" Sure, on it.")
-    # ``**[HH:MM]**`` — 11 chars. The ``**`` pair is markdown emphasis Claude Code
-    # renders as SGR-1 bold; losing it silently downgrades the marker to plain text.
-    assert len(stamp) == 11 and stamp.startswith("**[") and stamp.endswith("]**")
-    assert stamp[5] == ":"
-
-    later = hooks.message_display_response(
-        {"hook_event_name": "MessageDisplay", "index": 1, "delta": " and it's done."})
-    assert later == {}
-
-
-def test_message_display_response_asks_the_module_clock_not_a_fixed_string(monkeypatch):
-    """A fixed string like ``"00:00"`` satisfies the HH:MM shape check above just as
-    well as a real clock — that gap is exactly what let a frozen-clock mutation survive
-    (docs/DEFEAT_SHAPES.md). Monkeypatching ``hooks.time.strftime`` and asserting the exact
-    rendered value pins THAT the module's own clock was asked, but a stub of the form
-    ``lambda fmt: "12:34"`` accepts and discards ``fmt`` — so it does not pin WHAT was
-    asked for, and ``time.strftime("%d:%m")`` (a date, not a time) satisfies both the
-    stub and the HH:MM shape check equally well (docs/DEFEAT_SHAPES.md shape 18).
-    Capturing the ``fmt`` argument closes that: it pins the format string itself, not
-    merely the stubbed return value."""
-    captured_fmt = []
-    monkeypatch.setattr(hooks.time, "strftime",
-                         lambda fmt: captured_fmt.append(fmt) or "12:34")
-
-    resp = hooks.message_display_response(
-        {"hook_event_name": "MessageDisplay", "index": 0, "delta": "hi"})
-
-    assert captured_fmt == ["%H:%M"]
-    assert resp["hookSpecificOutput"]["displayContent"] == "**[12:34]** hi"
-
-
-def test_the_bold_marker_survives_a_delta_that_opens_with_markdown():
-    """🔴 GUARD (2026-08-19): the marker is prepended to the assistant's OWN text, so its
-    closing ``**`` sits directly against whatever that message starts with. A reply opening
-    with markdown of its own — a heading, a list bullet, a code fence, or more emphasis — is
-    the case where the two could interact and the bold run could be swallowed or extended.
-
-    ⭐ Measured, not assumed: Claude Code markdown-renders ``displayContent`` (probed on
-    2.1.233 — ``**x**`` arrives as a real SGR-1 run), which is exactly why the marker's own
-    delimiters have to stay intact and adjacent to the timestamp rather than merging into
-    the delta's syntax.
-
-    Seen to go red: dropping either ``**`` from the emitter, or separating the marker from
-    its stamp — both leave the timestamp rendering as plain text with stray asterisks.
-    """
-    for opener in ("# A heading", "- a list item", "```python", "**already bold**",
-                   "*emphasis*", "> a quote", "|table|"):
-        resp = hooks.message_display_response(
-            {"hook_event_name": "MessageDisplay", "index": 0, "delta": opener})
-        content = resp["hookSpecificOutput"]["displayContent"]
-        marker, _, rest = content.partition(" ")
-        assert marker.startswith("**[") and marker.endswith("]**"), (
-            f"delta {opener!r} broke the marker's own delimiters: {content!r}")
-        assert len(marker) == 11, f"marker is not **[HH:MM]** for delta {opener!r}: {marker!r}"
-        # ⛔ The delta must arrive UNCHANGED — the marker may not eat or reflow it.
-        assert rest == opener, f"delta {opener!r} was altered to {rest!r}"
-
-
-def test_message_display_response_tolerates_a_missing_or_non_string_delta():
-    """The real payload always carries a string ``delta``, but a malformed one must
-    degrade to an empty delta, not get stringified into the message a human reads.
-    An f-string never raises on ``None``/``42``/a list, so a bare ``startswith`` check
-    would pass just as well whether the bad value was dropped OR silently rendered as
-    the literal text ``"None"`` — pinning the exact trailing content is what actually
-    proves the type guard ran."""
-    for delta in (None, 42, ["oops"]):
-        resp = hooks.message_display_response(
-            {"hook_event_name": "MessageDisplay", "index": 0, "delta": delta})
-        content = resp["hookSpecificOutput"]["displayContent"]
-        assert content.startswith("**[")
-        stamp = content[:-1]
-        assert len(stamp) == 11 and stamp[5] == ":" and stamp.endswith("]**")
-        assert content == f"{stamp} "  # a trailing "None"/"42"/"['oops']" fails this
-
-
 # --- the endpoint ----------------------------------------------------------------
 
 def test_endpoint_appends_and_answers_nothing_that_nobody_answered(client):
@@ -920,166 +796,50 @@ def test_endpoint_rejects_an_unknown_event(client):
     assert event_log.read()["events"] == []
 
 
-def test_endpoint_stamps_a_timestamp_on_the_message_display_hook(client, monkeypatch):
-    """``CHELA_TERMINAL_TIMESTAMPS`` defaults OFF (adopter-facing, needs Claude Code
-    2.1.152+) — exercise the stamping path by opting in explicitly, the same way an
-    adopter who wants it would."""
-    monkeypatch.setattr(dash.config, "TERMINAL_TIMESTAMPS", True)
-    resp = client.post("/hooks/MessageDisplay", json=_body(
-        hook_event_name="MessageDisplay", index=0, delta="On it."))
+# --- CMX-266: the terminal timestamps are retired ----------------------------------
+#
+# Claude Code's own turn footer prints "done HH:MM" on every reply, so the MessageDisplay
+# marker (CMX-277/283/285) and its CHELA_TERMINAL_TIMESTAMPS switch are gone. MessageDisplay
+# existed only for that marker, so the hook went with it.
 
-    assert resp.status_code == 200
-    body = resp.get_json()
-    content = body["hookSpecificOutput"]["displayContent"]
-    assert body["hookSpecificOutput"]["hookEventName"] == "MessageDisplay"
-    assert content.startswith("**[")
-    assert content.endswith(" On it.")
-
-    # UNLIKE every other hook: never ingested. `MessageDisplay` fires once per streamed
-    # batch of every assistant reply — logging it would flood the event log with a
-    # firehose of near-duplicate "message display" records nobody would read.
-    assert event_log.read()["events"] == []
-
-
-def test_the_timestamp_can_be_turned_off(client, monkeypatch):
-    """``CHELA_TERMINAL_TIMESTAMPS=false`` is the escape hatch an adopter on a Claude Code
-    version that renders the field badly must be able to flip without code changes."""
-    monkeypatch.setattr(dash.config, "TERMINAL_TIMESTAMPS", False)
-
-    resp = client.post("/hooks/MessageDisplay", json=_body(
-        hook_event_name="MessageDisplay", index=0, delta="On it."))
-
-    assert resp.get_json() == {}
-    assert event_log.read()["events"] == []
+def _chela_files_mentioning(name: str) -> list[str]:
+    hits = []
+    for path in (REPO / "chela").rglob("*"):
+        if not path.is_file() or "node_modules" in path.parts:
+            continue
+        try:
+            text = path.read_text(encoding="utf-8")
+        except (UnicodeDecodeError, OSError):
+            continue
+        if name in text:
+            hits.append(str(path.relative_to(REPO)))
+    return sorted(hits)
 
 
-def test_terminal_timestamps_defaults_off_with_no_env_var_set(monkeypatch):
-    """CMX-277's rework round: this writes a visible line at every message boundary in
-    EVERY adopter's terminal, on a mechanism whose own spike names rendering reliability
-    across Claude Code versions as unverified — so it must ship OFF, opt-in per install,
-    not on-by-default-with-an-escape-hatch. Reloads the real module against a clean env,
-    not just a monkeypatched attribute, so a `"true"` fallback string reintroduced into
-    :data:`chela.config.TERMINAL_TIMESTAMPS`'s ``os.environ.get`` default is caught here
-    even though every other test in this file monkeypatches the attribute directly."""
-    monkeypatch.delenv("CHELA_TERMINAL_TIMESTAMPS", raising=False)
-    reloaded = importlib.reload(config)
-    try:
-        assert reloaded.TERMINAL_TIMESTAMPS is False
-    finally:
-        importlib.reload(config)  # restore whatever env the rest of the suite expects
+def test_chela_terminal_timestamps_is_read_nowhere_under_chela():
+    """🔴 GUARD: no file under ``chela/`` names the retired switch, so nothing can read it."""
+    assert _chela_files_mentioning("CHELA_TERMINAL_TIMESTAMPS") == []
+    assert _chela_files_mentioning("TERMINAL_TIMESTAMPS") == []
+    # Positive control: the scan really walks chela/ and finds a live switch's read.
+    assert "chela/config.py" in _chela_files_mentioning('"CHELA_STATUS_LINE"')
 
 
-def test_timestamps_on_does_not_steal_the_post_tool_use_gate_resolution(client, monkeypatch):
-    """CMX-277 rework round 5 (still true after CMX-285's mechanism swap): the
-    ``MessageDisplay`` branch returns EARLY, ahead of ``hooks.ingest`` and every
-    event-specific branch below it — including the ``PostToolUse`` one that calls
-    ``gateanswer.gate_resolved``. If ``hooks.TIMESTAMP_EVENTS`` were ever widened to also
-    match ``PostToolUse`` (docs/DEFEAT_SHAPES.md shape 12), that widened branch would
-    return before ``gate_resolved`` is ever reached, so a held gate would wait out its
-    whole wait budget (the CMX-54 regression) instead of being torn down. No other test in
-    this file POSTs ``PostToolUse`` with timestamps ON, so nothing else would catch it.
-    Pin both halves at once: the body is the empty-object shape a non-timestamp event
-    gets, AND the resolution side effect the ``PostToolUse`` branch is responsible for
-    still ran.
-    """
-    monkeypatch.setattr(dash.config, "TERMINAL_TIMESTAMPS", True)
-    resolved = []
-    monkeypatch.setattr(dash.gateanswer, "gate_resolved", lambda tuid: resolved.append(tuid))
-
-    resp = client.post("/hooks/PostToolUse", json=_body(hook_event_name="PostToolUse",
-                                                          tool_use_id="toolu_123"))
-
-    assert resp.status_code == 200
-    assert resp.get_json() == {}
-    assert resolved == ["toolu_123"]
-
-
-# Every event other than the two timestamp boundaries — derived from `hooks.HOOK_EVENTS`
-# itself, not hand-copied, so an event Claude Code adds later is exercised automatically.
-_NON_TIMESTAMP_EVENTS = [e for e in hooks.HOOK_EVENTS if e not in hooks.TIMESTAMP_EVENTS]
-
-
-@pytest.mark.parametrize("event", _NON_TIMESTAMP_EVENTS)
-def test_timestamps_on_leaves_every_non_boundary_event_unchanged(client, monkeypatch, event):
-    """CMX-283: the test above pins exactly one hole a judge mutation happened to find —
-    widening the membership test to also swallow ``PostToolUse``. That chases the
-    short-circuit one event at a time: the next event a widened condition happens to pick
-    up (``PermissionRequest``, ``SessionStart``, or an event Claude Code adds tomorrow)
-    would need its own dedicated round, forever one step behind whatever the judge finds
-    next. Assert the property the short-circuit actually promises, exhaustively instead:
-    for every event other than the two timestamp boundaries, whether
-    ``CHELA_TERMINAL_TIMESTAMPS`` is on or off must make NO difference to that event's
-    response — the branch is a true no-op outside its own two events. A membership test
-    widened to also catch this event returns ``hooks.timestamp_response(event)`` in place
-    of its real body once the flag is on, which a same-event on/off comparison catches
-    directly, without needing to know what that event's real body is or mock its handler's
-    side effects. Parametrized off ``hooks.HOOK_EVENTS`` (see `_NON_TIMESTAMP_EVENTS`
-    above), so covering a future event needs no new test, only a wider tuple.
-
-    CMX-285 rework round 2 (docs/DEFEAT_SHAPES.md shape 26): the on/off comparison alone
-    is not enough once the timestamp branch sits ABOVE ``hooks.ingest`` (CMX-285 moved it
-    there so the streamed ``MessageDisplay`` firehose never reaches the log). A widened
-    membership test now returns ``{}`` for BOTH flag states — the response comparison
-    stays green precisely because the event was swallowed identically either way, and the
-    thing actually lost — the event never reaching ``hooks.ingest`` at all — is invisible
-    to a response-shape assertion. Restore the property CMX-277's own endpoint test used to
-    pin per-event (the ``assert event_log.read()["events"][0]["type"] == "hook.stop"``
-    line CMX-285 dropped when it deleted the ``Stop``-specific test): for every
-    non-timestamp event, ingest must actually have run, independent of what the HTTP
-    response looks like.
-    """
-    body = _body(hook_event_name=event, tool_name="Bash", tool_use_id=f"toolu_{event}")
-
-    monkeypatch.setattr(dash.config, "TERMINAL_TIMESTAMPS", False)
-    resp_off = client.post(f"/hooks/{event}", json=body)
-
-    monkeypatch.setattr(dash.config, "TERMINAL_TIMESTAMPS", True)
-    resp_on = client.post(f"/hooks/{event}", json=body)
-
-    assert resp_off.status_code == resp_on.status_code == 200
-    assert resp_on.data == resp_off.data
-
-    # Both POSTs must have reached hooks.ingest — one record per call, both typed for
-    # THIS event. A short-circuit that swallows the event (with the flag on, off, or
-    # both) leaves this list short instead of merely changing what the HTTP body says.
-    types = [e["type"] for e in event_log.read()["events"]]
-    assert types == [hooks.event_type(event), hooks.event_type(event)]
-
-
-def test_endpoint_message_display_survives_a_malformed_body(client, monkeypatch):
-    """CMX-285 rework round 2: ``message_display_response`` calls ``body.get(...)`` — a
-    non-dict body (unparseable JSON, an empty POST, a bare JSON list) would raise
-    ``AttributeError`` inside it and turn into a 500 into a live, blocked agent, exactly
-    the failure ``test_endpoint_does_not_fail_a_blocked_agent`` pins for ``PreToolUse``.
-    That test never exercises ``MessageDisplay`` with the flag on, so the ``isinstance``
-    guard on this branch's early-return path — the one place a malformed payload actually
-    meets ``message_display_response`` — had nothing watching it (the endpoint's own
-    docstring promise: "200 and an empty object, every time").
-    """
-    monkeypatch.setattr(dash.config, "TERMINAL_TIMESTAMPS", True)
-    for data in (b"{not json", b"", b"[1,2,3]"):
-        resp = client.post("/hooks/MessageDisplay", data=data,
-                           content_type="application/json")
-        assert resp.status_code == 200
-        assert resp.get_json() == {}
-    assert event_log.read()["events"] == []
-
-
-def test_terminal_timestamps_turns_on_with_the_env_var_set_to_true(monkeypatch):
-    """CMX-277 rework round 4: the mirror of the OFF-default test above. Every other
-    ON-state test in this file monkeypatches the `TERMINAL_TIMESTAMPS` attribute directly,
-    which never exercises the `os.environ.get(...)` parse that actually reads
-    `CHELA_TERMINAL_TIMESTAMPS` — so `TERMINAL_TIMESTAMPS = False and os.environ.get(...)`
-    (a dead-coded knob that can never turn ON, however the env var is set) left every
-    attribute-monkeypatched test green. Reload the real module against a real env var, the
-    same shape as the OFF-default test, so the parse path itself is what's pinned."""
+def test_the_retired_switch_turns_nothing_on(client, monkeypatch):
+    """Setting the old variable does not bring the switch, the hook or the marker back."""
     monkeypatch.setenv("CHELA_TERMINAL_TIMESTAMPS", "true")
     try:
         reloaded = importlib.reload(config)
-        assert reloaded.TERMINAL_TIMESTAMPS is True
+        assert not hasattr(reloaded, "TERMINAL_TIMESTAMPS")
+        assert "MessageDisplay" not in hooks.HOOK_EVENTS
+        assert "MessageDisplay" not in hooks.hooks_spec(port=5001)["hooks"]
+        resp = client.post("/hooks/MessageDisplay",
+                           json={"hook_event_name": "MessageDisplay", "index": 0,
+                                 "delta": "Done.\n"})
+        assert resp.status_code == 404
+        assert event_log.read()["events"] == []
     finally:
         monkeypatch.delenv("CHELA_TERMINAL_TIMESTAMPS", raising=False)
-        importlib.reload(config)  # restore whatever env the rest of the suite expects
+        importlib.reload(config)
 
 
 def test_endpoint_will_not_read_an_oversized_body(client):
@@ -1113,16 +873,6 @@ def test_hooks_spec_registers_every_event():
             # rendered, so widening or removing the timeout moves undetected — pin the
             # literal too.
             assert hooks.RECAP_TIMEOUT == 5, hooks.RECAP_TIMEOUT
-            continue
-        if event == "MessageDisplay":
-            # CMX-303: the other command hook — a live fleet never rendered this event's
-            # `http` response, so it rides the identical curl-relay shape SessionStart
-            # already proved Claude Code actually acts on. Same fail-open shape, no header.
-            assert hook["type"] == "command"
-            assert "url" not in hook
-            assert "http://127.0.0.1:5001/hooks/MessageDisplay" in hook["command"]
-            assert "--fail" in hook["command"] and hook["command"].endswith("|| true")
-            assert hook["timeout"] == hooks.HOOK_TIMEOUT <= 2
             continue
         if event in hooks.TOOL_EVENTS:
             # CMX-319: gated on $CHELA_WID so a session chela did not launch (a headless

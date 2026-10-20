@@ -23,9 +23,8 @@ constraint:
 
 * the transport is ``http`` for most events — no shell script, no process spawn per tool
   call, no PATH assumption, and no way for a chatty ``.bashrc`` to corrupt the JSON
-  contract — except ``SessionStart`` and ``MessageDisplay``, each forced onto ``command``
-  for its own measured reason (see :func:`recap_command` and
-  :func:`message_display_command`), and :data:`TOOL_EVENTS`, forced onto ``command`` so
+  contract — except ``SessionStart``, forced onto ``command`` for its own measured reason
+  (see :func:`recap_command`), and :data:`TOOL_EVENTS`, forced onto ``command`` so
   they can be gated on ``$CHELA_WID`` (CMX-319, see :func:`tool_event_command`) — the
   plugin is enabled user-wide in ``~/.claude/settings.json``, so without this a headless
   ``claude -p`` call from some unrelated tool would post into the fleet's event log with
@@ -61,13 +60,12 @@ log = logging.getLogger(__name__)
 
 # Every hook event Claude Code emits (measured on 2.1.207 — `AskUserQuestion` and
 # `ExitPlanMode` are NOT events, they are TOOLS, and arrive as PreToolUse /
-# PermissionRequest carrying `tool_name` + the full `tool_input`). `MessageDisplay`
-# is newer (2.1.152+, per CMX-285) and absent on an older pin — Claude Code simply never
-# fires a hook it doesn't have, so an adopter on an old version sees no line, never a
-# broken one.
+# PermissionRequest carrying `tool_name` + the full `tool_input`). `MessageDisplay` is
+# deliberately absent (CMX-266): its only use was chela's own reply timestamp, retired
+# once Claude Code's turn footer started printing "done HH:MM" itself.
 HOOK_EVENTS: tuple[str, ...] = (
     "PreToolUse", "PostToolUse", "PermissionRequest", "PermissionDenied",
-    "UserPromptSubmit", "SessionStart", "SessionEnd", "Stop", "MessageDisplay",
+    "UserPromptSubmit", "SessionStart", "SessionEnd", "Stop",
     "SubagentStart", "SubagentStop", "Notification",
     "PreCompact", "PostCompact", "Elicitation",
 )
@@ -124,14 +122,12 @@ GATE_TIMEOUT = 120
 # Being a `command` hook buys a second thing (CMX-160): it runs as a child of the claude
 # process itself, so it inherits that process's environment — `$CHELA_WID`, exported into
 # the pane's shell ahead of every chela-managed launch (`agent_manager.wid_env_prefix`,
-# `spawn.py`). Every hook but SessionStart and MessageDisplay rides `http` (Claude Code's
-# own client, which sends the payload and nothing of the agent's env); MessageDisplay is
-# also a `command` hook (CMX-303) but carries no `$CHELA_WID` header (see
-# `message_display_command`) — nothing it returns is agent-specific, so SessionStart stays
-# the one place the agent can just SAY which window it is rather than have chela infer it
-# from `/proc` and tmux panes — and the one place cross-platform, since inference needs
-# `/proc` and this does not. See
-# `recap_command` and `_explicit_wid`.
+# `spawn.py`). The other hooks ride `http` (Claude Code's own client, which sends the
+# payload and nothing of the agent's env) or the gated `command` of
+# :func:`tool_event_command`, which carries no header — so SessionStart stays the one
+# place the agent can just SAY which window it is rather than have chela infer it from
+# `/proc` and tmux panes — and the one place cross-platform, since inference needs `/proc`
+# and this does not. See `recap_command` and `_explicit_wid`.
 RECAP_TIMEOUT = 5
 
 
@@ -142,61 +138,6 @@ def hook_timeout(event: str) -> int:
     if event == "SessionStart":
         return RECAP_TIMEOUT
     return HOOK_TIMEOUT
-
-
-# The event "timestamps on messages in the live terminal" maps to now (CMX-285,
-# correcting CMX-277's own mechanism — see docs/archive/SPIKE_LIVE_TERMINAL_TIMESTAMPS.md).
-# CMX-277 used `systemMessage` on `UserPromptSubmit`/`Stop`, which Claude Code renders as
-# its OWN separate `<Line>` above/below the message — visible, but not what Liav meant by
-# "timestamps": his verdict on the shipped version was that it "doesn't seem to be
-# presented like it does for zoharbabin/claude-code-message-timestamps," and that plugin's
-# actual mechanism is `MessageDisplay`, not `systemMessage`. `MessageDisplay` fires once
-# per streamed batch of an assistant message (`index` 0-based, `delta` the newly-completed
-# text), and its `displayContent` response field replaces the delta ON SCREEN ONLY — the
-# stored transcript and what the model sees are untouched (Claude Code's own schema:
-# "Display-only: replaces the delta on screen without changing the stored message"). That
-# is what lets the marker sit INSIDE the message's own text — genuinely inline — instead
-# of arriving as a second, separately-rendered line. Requires Claude Code 2.1.152+.
-TIMESTAMP_EVENTS: frozenset[str] = frozenset({"MessageDisplay"})
-
-
-def message_display_response(body: dict) -> dict:
-    """The ``MessageDisplay`` response that stamps ``body``'s delta with a local-time
-    marker — but only on the message's FIRST streamed batch (``index == 0``), so the
-    marker appears exactly once per assistant reply, not before every chunk.
-
-    Every later batch returns ``{}``: Claude Code's own schema treats an absent
-    ``displayContent`` as "display the original," so a later chunk's text renders exactly
-    as it would have without this hook at all.
-
-    Local time, ``**[HH:MM]**`` — no seconds (the marker's job is "roughly when did this
-    land," not a stopwatch) and no emoji (a variable-width glyph at the start of every
-    message; brackets are narrower, monospace-stable, and read as a marker rather than as
-    content). CMX-297; the format CMX-277's ``timestamp_response`` (superseded by this)
-    used ``HH:MM:SS``.
-
-    ⭐ The ``**`` is MARKDOWN, not ANSI, and that choice is measured rather than stylistic.
-    Claude Code markdown-renders ``displayContent``, so ``**[HH:MM]**`` arrives as a real
-    SGR-1 bold run. Raw escapes are NOT a reliable alternative: probing this build, ANSI
-    bold (SGR 1) and italic (SGR 3) survived but ANSI *dim* (SGR 2) was stripped — the
-    sanitizer has an allowlist, and an allowlist can change under us. Asking the renderer
-    for emphasis does not depend on which escapes happen to be permitted today.
-
-    ⛔ Bold, not colour: colour is impossible on this path at all. ``systemMessage`` does
-    preserve full SGR, but renders on its own line prefixed ``<Event> says:`` — the
-    presentation CMX-285 moved away from precisely to get the marker INLINE.
-
-    CMX-182: a body carrying ``chela_timestamp_owner: "mod"`` gets ``{}``. That is the
-    opt-in Mod (``mods/chela-hooks``) saying it draws the time in its own band above the
-    prompt, so the reply is not stamped in both places.
-    """
-    if body.get("index") != 0 or body.get("chela_timestamp_owner") == "mod":
-        return {}
-    delta = body.get("delta")
-    delta = delta if isinstance(delta, str) else ""
-    ts = time.strftime("%H:%M")
-    return {"hookSpecificOutput": {"hookEventName": "MessageDisplay",
-                                    "displayContent": f"**[{ts}]** {delta}"}}
 
 
 # CMX-319: `enabledPlugins` in `~/.claude/settings.json` is USER-WIDE — every `claude`
@@ -232,46 +173,10 @@ def recap_command(port: int | None = None, host: str = "127.0.0.1") -> str:
             f"{hook_url('SessionStart', port, host)} 2>/dev/null || true")
 
 
-# CMX-303: `MessageDisplay` shipped a correct daemon response (CMX-285/CMX-297,
-# `message_display_response` above) on the `http` transport every hook except
-# `SessionStart` rides — and on a live fleet (Claude Code 2.1.233, `TERMINAL_TIMESTAMPS`
-# on, the hook confirmed present in the loaded manifest, `curl`ing the endpoint directly
-# and getting back a correct `{"hookSpecificOutput": {..., "displayContent": "[18:01]
-# …"}}`) zero `[HH:MM]` markers appeared across 2000 lines of scrollback. Every layer
-# this repo controls was measured correct; the one layer it does not — how Claude Code's
-# own client applies an `http` hook's JSON response versus a `command` hook's stdout,
-# despite the docs describing both as sharing one schema — is the remaining suspect, and
-# `SessionStart` above is this repo's own prior, working precedent for a hook that needed
-# `command` for Claude Code to actually act on what it returns (there for a different,
-# already-diagnosed reason — CMX-41, `http` never fires it at all). Moving
-# `MessageDisplay` onto the identical curl-relay shape changes only the transport, not the
-# daemon logic: the command curls the SAME endpoint `message_display_response` already
-# answers correctly, and prints that response body verbatim as the command's own stdout
-# for Claude Code to parse.
-def message_display_command(port: int | None = None, host: str = "127.0.0.1") -> str:
-    """The ``MessageDisplay`` command hook: relay the payload to the daemon and print its
-    response, fail open — see the module comment above for why this event needs
-    ``command`` at all.
-
-    No ``$CHELA_WID`` header: unlike the room recap, nothing ``message_display_response``
-    returns is agent-specific, so there is nothing here worth the extra header.
-    ``--max-time 1``, under :data:`HOOK_TIMEOUT`\\ 's 2s: this event fires tens of times
-    per assistant reply (CMX-285's own measurement), so a hung curl must lose the race
-    against Claude Code's own hook timeout, not tie it. Gated on :data:`_WID_GATE`
-    (CMX-319): a session chela did not launch fires this tens of times per reply too, and
-    none of them should reach the daemon.
-    """
-    return (f"{_WID_GATE} && curl -s --fail --max-time 1 -X POST "
-            "-H 'Content-Type: application/json' "
-            "--data-binary @- "
-            f"{hook_url('MessageDisplay', port, host)} 2>/dev/null || true")
-
-
 # CMX-319: `PreToolUse`/`PostToolUse` alone are ~78% of the log's volume (see the module
 # docstring), and `PermissionRequest` is the hook that can hold a live agent for up to
 # :data:`GATE_TIMEOUT` seconds — the two shapes named in the bug report this fixes. Moved
-# off `http` onto the same gated-`command` shape as :func:`recap_command` and
-# :func:`message_display_command`: the daemon-side logic is unchanged (still the SAME
+# off `http` onto the same gated-`command` shape as :func:`recap_command`: the daemon-side logic is unchanged (still the SAME
 # route, still ingest-then-maybe-answer), only the transport gains the `$CHELA_WID` check
 # an `http` hook cannot express. `PermissionDenied` rides along for symmetry with
 # `PermissionRequest` — both are rare, but a hook a headless caller can still trip is not a
@@ -383,15 +288,13 @@ def hook_url(event: str, port: int | None = None, host: str = "127.0.0.1") -> st
 def hooks_spec(port: int | None = None) -> dict:
     """The plugin's ``hooks/hooks.json`` — one hook per event, POSTing to the daemon.
 
-    Most events ride ``http`` (no shell, no spawn per tool call). Four exceptions:
+    Most events ride ``http`` (no shell, no spawn per tool call). The exceptions:
     ``SessionStart`` never fires over ``http`` at all and its stdout is the recap (see
-    :data:`RECAP_TIMEOUT`); ``MessageDisplay`` fires over ``http`` but a live fleet never
-    rendered what it returned there (CMX-303 — see the comment above
-    :func:`message_display_command`); and :data:`TOOL_EVENTS` (``PreToolUse``,
+    :data:`RECAP_TIMEOUT`); and :data:`TOOL_EVENTS` (``PreToolUse``,
     ``PostToolUse``, ``PermissionRequest``, ``PermissionDenied``) are gated on
     ``$CHELA_WID`` so a session chela did not launch — a headless ``claude -p`` call by
     some other tool, say — never reaches the daemon at all (CMX-319, see
-    :func:`tool_event_command`). All four curl the SAME endpoint every other event POSTs to
+    :func:`tool_event_command`). Both curl the SAME endpoint every other event POSTs to
     and print its response verbatim as their own stdout, so the daemon-side logic is
     identical either way — only the transport differs.
 
@@ -408,12 +311,6 @@ def hooks_spec(port: int | None = None) -> dict:
             entry["hooks"] = [{
                 "type": "command",
                 "command": recap_command(port),
-                "timeout": hook_timeout(event),
-            }]
-        elif event == "MessageDisplay":
-            entry["hooks"] = [{
-                "type": "command",
-                "command": message_display_command(port),
                 "timeout": hook_timeout(event),
             }]
         elif event in TOOL_EVENTS:
@@ -480,9 +377,10 @@ EXPECTED_HOOKS_FINGERPRINT: dict[str, str] = {
     "0.2.9": "49dcb67abee3d229834c3f07e6d22e8db3b786afc19ec0bbec43364fcb15e78b",
     "0.2.10": "1b8ca1d0177c69a4f1db00e38fc3a71b0aa8229743c59ad8bb27fa7b816d1b84",
     "0.2.11": "25a9355427e7c846b7c5ef77bac5fa395cc3707ce89d2d897920aa2b1bba9b7c",
+    "0.2.12": "8f30c07de17b1cd5dba319c2c1dd562348c6208537d67f964e9072b61a766b8f",
 }
 
-PLUGIN_VERSION = "0.2.11"
+PLUGIN_VERSION = "0.2.12"
 
 
 def plugin_manifest() -> dict:
@@ -924,8 +822,7 @@ def _explicit_wid(hint: str | None,
                   panes: dict[str, sessions.Pane] | None = None) -> str | None:
     """A window id the AGENT ITSELF supplied, via ``$CHELA_WID`` on the one hook whose
     ``command`` string carries it — ``SessionStart``, which inherits its process's env
-    (:func:`recap_command`; :func:`message_display_command` is also a ``command`` hook,
-    for an unrelated reason, and carries no header) — ground truth, not inference: no pane
+    (:func:`recap_command`) — ground truth, not inference: no pane
     walk, no ``/proc``, nothing that a missing kernel interface can take out from under it
     on macOS.
 
