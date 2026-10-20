@@ -80,8 +80,8 @@ def test_red_only_on_registered_is_rerun_then_judged_not_sent_back(tmp_path, mon
     assert (summary["ci_known_flake"], summary["ci_failed"], summary["ci_rerun"]) == (1, 0, 0)
     assert len(fake.reruns) == 3 and seen[-1] == ["CMX-9"]
     run = _run()
-    assert (run["status"], run["rework_count"], run["ci_failed_sha"]) == (
-        "awaiting_review", 0, "deadbee1")
+    assert (run["status"], run["rework_count"], run["ci_failed_sha"], run["ci_rerun_state"]) == (
+        "awaiting_review", 0, "deadbee1", "known_flake")
     assert json.loads(run["ci_known_flake"]) == {
         "sha": "deadbee1", "tests": [{"test": "tests/a.py::t[x]", "issue": "CMX-9"}]}
     assert notices == [("tests/a.py::t[x] (CMX-9)", True)]
@@ -90,6 +90,30 @@ def test_red_only_on_registered_is_rerun_then_judged_not_sent_back(tmp_path, mon
     fake.sha = "newpush1"                                         # a new head is not judged
     _tick(wf, fake)
     assert _candidates(wf) == []
+
+
+def test_a_new_head_gets_its_own_known_flake_reruns(tmp_path, monkeypatch, notices):
+    """The FLAKE_RERUNS budget is per sha: a head pushed after the last one spent its budget
+    must get a fresh one, not inherit the exhausted counter (65c: drive the second cycle)."""
+    wf, fake, _ = _setup(tmp_path, monkeypatch, _FLAKE, states={"CMX-9": None})
+    _tick(wf, fake)
+    _red_again(wf, fake)
+    _red_again(wf, fake)
+    assert _red_again(wf, fake)["ci_known_flake"] == 1
+    assert _run()["ci_flake_reruns"] == 2
+
+    fake.sha = "newpush1"
+    assert _tick(wf, fake)["ci_rerun"] == 1                       # CMX-255's re-run of it
+    assert _run()["ci_flake_reruns"] == 0
+    assert (_red_again(wf, fake)["ci_rerun"], _run()["ci_flake_reruns"]) == (1, 1)
+    assert (_red_again(wf, fake)["ci_rerun"], _run()["ci_flake_reruns"]) == (1, 2)
+    summary = _red_again(wf, fake)
+    assert (summary["ci_known_flake"], summary["ci_rerun"], summary["ci_failed"]) == (1, 0, 0)
+    assert len(fake.reruns) == 6
+    run = _run()
+    assert (run["rework_count"], run["ci_failed_sha"], json.loads(run["ci_known_flake"])["sha"]
+            ) == (0, "newpush1", "newpush1")
+    assert len(notices) == 2 and _candidates(wf) == ["abc123"]
 
 
 @pytest.mark.parametrize("log, expires, states", [

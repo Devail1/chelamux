@@ -326,8 +326,9 @@ def test_repeat_flake_names_a_quarantine_candidate_after_two_prs_ci_flakes(env):
     def at(ago):
         return datetime.fromtimestamp(NOW - ago, timezone.utc).isoformat()
     t, u = "tests/a.py::t", "tests/b.py::u"
-    flakes = {"CMX-1": [{"test": t, "at": at(3600)}, {"test": u, "at": at(60)}],
-              "CMX-2": [{"test": t, "at": at(47 * 3600)}, {"test": "?", "at": at(60)}],
+    flakes = {"CMX-1": [{"test": t, "at": at(3600)}, {"test": u, "at": at(60)},
+                        {"test": "?", "at": at(60)}],
+              "CMX-2": [{"test": t, "at": at(48 * 3600)}, {"test": "?", "at": at(60)}],
               "CMX-3": [{"test": u, "at": at(49 * 3600)}, {"test": u, "at": "garbage"}],
               "CMX-4": "not json"}
     conn = sqlite3.connect(env.dir / "scheduler.db")
