@@ -577,6 +577,7 @@ def test_judge_prompt_points_at_the_defeat_shapes_catalog(tmp_path):
             "held_out_pct": 30, "held_out_min": 3,     # ⚖️🙈 CMX-395
             "risk": "normal", "max_experiments": 8, "risk_guidance": "focused",
             "sweep_equivalents": "",                   # ⚖️🧹 CMX-88
+            "generated_paths": "`uv.lock`",            # 🏭 CMX-284
         }
         with patch.object(dispatcher, "detached_worktree", return_value=(None, True)), \
              patch.object(dispatcher, "_refresh_judge_worktree", return_value=None), \

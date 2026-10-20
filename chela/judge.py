@@ -86,7 +86,7 @@ from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
 from typing import NamedTuple
 
-from chela import envutil, judge_select, procguard, toolconfig
+from chela import envutil, generated, judge_select, procguard, toolconfig
 
 log = logging.getLogger(__name__)
 
@@ -1621,6 +1621,14 @@ def run_experiments(
     return report
 
 
+def _drop_generated(items: list) -> tuple[list, int]:
+    """🏭 CMX-284: ``(kept, skipped)`` — experiments on a generated file (see
+    :mod:`chela.generated`) are dropped before anything runs, and counted."""
+    kept = [i for i in items if not (isinstance(i, dict) and isinstance(i.get("file"), str)
+                                     and generated.is_generated(i["file"]))]
+    return kept, len(items) - len(kept)
+
+
 def _run_experiments(
     worktree: Path, test_cmd: str, raw: dict, *, timeout: float, base_branch: str,
     select_tests: bool, consistency_sample: int, max_experiments: int, risk: str,
@@ -1640,6 +1648,20 @@ def _run_experiments(
             "unknown edits is not a controlled experiment"
         )
         return report
+
+    if isinstance(items, list):
+        items, skipped = _drop_generated(items)
+        if skipped:
+            report.notes.append({"title": "Generated files not mutated",
+                                 "body": generated.note(skipped)})
+        if skipped and not items:
+            report.cannot_verify = (
+                f"every one of the judge's {skipped} experiment(s) targeted a GENERATED file, "
+                "so none ran — nothing was proven. ⛔ Unknown is never a pass: the guards "
+                "live in the source those files are built from."
+            )
+            report.cannot_verify_final = True
+            return report
 
     if not isinstance(items, list) or not items:
         if _docs_only_diff(worktree, base_branch):
