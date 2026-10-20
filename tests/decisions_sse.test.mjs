@@ -83,7 +83,6 @@ let util;
 beforeAll(async () => {
     const dom = new JSDOM(`<!doctype html><html><body>${PANEL}</body></html>`,
         { url: 'http://localhost:5005/', pretendToBeVisual: true });
-    dom.window.TERMINALS_ENABLED = true;
     for (const k of ['window', 'document', 'localStorage', 'navigator', 'HTMLElement',
         'Element', 'Node', 'Event', 'MouseEvent', 'KeyboardEvent', 'CustomEvent',
         'getComputedStyle', 'requestAnimationFrame', 'cancelAnimationFrame']) {
@@ -106,7 +105,7 @@ beforeAll(async () => {
 
     // Browser load order: index.html -> main.js -> everything else. main.js's top-level
     // initSSE() wires the REAL `log` listener onto our FakeEventSource.
-    await import('../chela/dashboard/static/js/main.js');
+    await import('../chela/dashboard/frontend/src/boot.ts');
     util = await import('../chela/dashboard/static/js/util.js');
     util.setAgentsCache(AGENTS);
     // Flush main.js's own load-time fetches (agents/status/decisions seed) so they

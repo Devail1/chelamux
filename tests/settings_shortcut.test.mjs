@@ -73,8 +73,7 @@ beforeAll(async () => {
     globalThis.fetch = () => Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve({}) });
     globalThis.window.chela = globalThis.window.chela || {};
     globalThis.setInterval = () => 0;
-    globalThis.TERMINALS_ENABLED = dom.window.TERMINALS_ENABLED = true;
-    await import('../chela/dashboard/static/js/main.js');
+    await import('../chela/dashboard/frontend/src/boot.ts');
 });
 
 const settingsOpen = () => document.getElementById('settings-drawer').classList.contains('open');

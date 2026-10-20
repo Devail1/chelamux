@@ -1,14 +1,14 @@
 // --- Stage 0: ES-module imports ---
-import { $, BASE_PATH, attrEsc, escHtml } from './util.js';
-import { _runDisplayId, _runPrCell, _taskProgressChip } from './dispatcher.js';
-import { pollWork, postWorkDelete } from './work.js';
-import { openTaskModal } from './taskmodal.js';
-import { displayTitle, riskChip } from './taskmodalmodel.js';
-import { knInline } from './knowledge.js';
-import { KANBAN_LANES, KANBAN_LANE_LABELS, laneOf } from './kanbanlanemodel.js';
-import { columnKey, runStateBadges, sampledLabel, trackerBoard, trackerColumns } from './kanbanlinearmodel.js';
-import { hiddenSummary, loadColPrefs, saveColPrefs, splitColumns } from './kanbanhiddenmodel.js';
-import { runCardNote, runCloseAction, runHandoffNote, runStallNote } from './runstate.js';
+import { $, BASE_PATH, attrEsc, escHtml } from './util';
+import { _runDisplayId, _runPrCell, _taskProgressChip } from './dispatcher';
+import { pollWork, postWorkDelete } from './work';
+import { openTaskModal } from './taskmodal';
+import { displayTitle, riskChip } from './taskmodalmodel';
+import { knInline } from './knowledge';
+import { KANBAN_LANES, KANBAN_LANE_LABELS, laneOf } from './kanbanlanemodel';
+import { columnKey, runStateBadges, sampledLabel, trackerBoard, trackerColumns } from './kanbanlinearmodel';
+import { hiddenSummary, loadColPrefs, saveColPrefs, splitColumns } from './kanbanhiddenmodel';
+import { runCardNote, runCloseAction, runHandoffNote, runStallNote } from './runstate';
 
 // ---------------------------------------------------------------------------
 // Render: the Board segment of WORK (the global cross-workflow kanban)

@@ -16,10 +16,9 @@
 // None of these had ANY test reading back the actual rendered/runtime value —
 // the judge reverted each to its old 'agents'-shaped literal, one at a time, in
 // a throwaway checkout, and all 3059 tests stayed green. This boots the REAL
-// main.js module graph (main.js <-> nav.js is a cycle — see tests/sidebar.test.mjs's
-// own note) with window.TERMINALS_ENABLED explicitly false — a genuine
-// terminals-off deployment, not just "unset" (util.js: `!== false`, so leaving
-// it unset would NOT reproduce terminals-off) — and reads every claim back off
+// module graph with the boot block's terminalsEnabled false — a genuine
+// terminals-off deployment (CMX-217: index.html renders the flag both ways; an
+// absent block defaults to terminals ON) — and reads every claim back off
 // the actually running program: the live `currentTab` binding, the real DOM
 // node's classList (mounted from index.html's OWN markup, not a hand copy),
 // and the real renderKanban() paint that only happens once the currentTab gate
@@ -60,12 +59,10 @@ const BODY = `
 let util, nav;
 
 beforeAll(async () => {
-    // The genuine terminals-off boot: EXPLICITLY false, not merely unset — see
-    // util.js's own `window.TERMINALS_ENABLED !== false`, which defaults TRUE
-    // when the bootstrap script is absent (index.html only ever emits `= true`,
-    // never `= false`; that asymmetry is pre-existing and untouched by CMX-279,
-    // out of scope here). This is the one value that actually drives TERMINALS_ON
-    // to false in JS, which is the terminals-off behaviour this file guards.
+    // The genuine terminals-off boot: the boot block's terminalsEnabled false, what
+    // index.html renders for CHELA_TERMINALS_ENABLED=false (CMX-217; before it, the
+    // template emitted only `= true` and an off deployment read as on). This is the
+    // value that drives TERMINALS_ON to false in JS, the behaviour this file guards.
     ({ modules: { util, nav } } = await bootDashboardDom({
         body: BODY,
         terminalsEnabled: false,

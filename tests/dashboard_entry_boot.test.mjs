@@ -1,6 +1,6 @@
 // CMX-215 — the jsdom bootstrap boots what Flask serves: the Vite build's entry
 // (frontend/src/main.tsx, the manifest's entry), which installs the islands' bridge and then
-// runs the legacy main.js graph. A suite's extraModules are the SAME module instances that
+// boots the legacy graph (frontend/src/boot.ts). A suite's extraModules are the SAME module instances that
 // entry loaded, so a test drives the page it booted, not a second copy.
 //
 // Run: pnpm exec vitest run tests/dashboard_entry_boot.test.mjs (pytest runs it via tests/test_js_suites.py)
@@ -26,7 +26,7 @@ beforeAll(async () => {
 
 test('the boot entry is the manifest\'s, frontend/src/main.tsx', () => {
     assert.match(ENTRY_URL, /\/chela\/dashboard\/frontend\/src\/main\.tsx$/);
-    assert.match(readFileSync(new URL(ENTRY_URL), 'utf8'), /import '\.\.\/\.\.\/static\/js\/main\.js';/);
+    assert.match(readFileSync(new URL(ENTRY_URL), 'utf8'), /import '\.\/boot\.ts';/);
 });
 
 test('the entry installed the real bridge, and legacy boot published the agents it fetched to it', () => {

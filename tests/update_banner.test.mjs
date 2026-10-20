@@ -6,6 +6,7 @@
 import { beforeAll, test } from 'vitest';
 import assert from 'node:assert/strict';
 import { JSDOM, VirtualConsole } from 'jsdom';
+import { bootBlock } from './js_helpers/dashboard_dom.mjs';
 
 let reloadOffered, applyVersion, checkForUpdate, staticUrl;
 // jsdom cannot navigate: location.reload() reports "Not implemented: navigation" on the
@@ -17,9 +18,8 @@ let versionFetches = 0;
 beforeAll(async () => {
     const virtualConsole = new VirtualConsole();
     virtualConsole.on('jsdomError', e => { if (/navigation/i.test(e.message)) navigations.push(e.message); });
-    const dom = new JSDOM('<!doctype html><html><body></body></html>',
+    const dom = new JSDOM(`<!doctype html><html><body>${bootBlock({ assetVersion: 'aaaaaaaaaaaa' })}</body></html>`,
         { url: 'http://localhost:5005/', virtualConsole });
-    dom.window.CHELA_ASSET_VERSION = 'aaaaaaaaaaaa';
     for (const k of ['window', 'document']) {
         Object.defineProperty(globalThis, k, { value: dom.window[k], writable: true, configurable: true });
     }
@@ -49,7 +49,7 @@ test('same version on every poll: no banner (the stable-deploy case)', () => {
 });
 
 test('the page reads its own version from the rendered page', () => {
-    // applyVersion's default pageVersion is window.CHELA_ASSET_VERSION via util.js.
+    // applyVersion's default pageVersion is the boot block's assetVersion, via util.js.
     assert.equal(applyVersion('bbbbbbbbbbbb'), true);
     assert.equal(banner().hidden, false);
     assert.match(banner().textContent, /chela was updated/);
@@ -74,15 +74,15 @@ test('staticUrl() returns the versioned URL of the page\'s own deploy', () => {
 });
 
 test('staticUrl() with no rendered version (an old template) stays a working unversioned URL', async () => {
-    const saved = window.CHELA_ASSET_VERSION;
-    delete window.CHELA_ASSET_VERSION;
+    const block = document.getElementById('chela-boot');
+    block.remove();
     try {
-        // A fresh module instance (query string) so util.js re-reads the page's version.
-        const fresh = await import('../chela/dashboard/static/js/util.js?no-version');
+        // A fresh module instance (query string) so the api module re-reads the page's boot block.
+        const fresh = await import('../chela/dashboard/frontend/src/shared/api/index.ts?no-version');
         assert.equal(fresh.ASSET_VERSION, '');
         assert.equal(fresh.staticUrl('x.js'), '/static/x.js');
     } finally {
-        window.CHELA_ASSET_VERSION = saved;
+        document.body.prepend(block);
     }
 });
 

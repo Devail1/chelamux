@@ -16,7 +16,9 @@
 //
 // The browser notification on a NEW request is opt-in (Settings → Notifications, off by
 // default) and silently does nothing where the Notification API is missing or refused.
-import { api, attrEsc, escHtml } from './util.js';
+import { api, attrEsc, escHtml } from './util';
+import { onEvent } from '../../frontend/src/shared/events';
+import { registerLane } from '../../frontend/src/shared/scheduler';
 
 export const NOTIFY_KEY = 'chela_approval_notify';
 const ARM_MS = 6000;
@@ -240,6 +242,11 @@ export async function setApprovalNotify(v) {
         return true;
     } catch (_) { off(); return false; }
 }
+
+// CMX-103: a pill on every view, and the SSE `overrides` frame (the pending requests
+// changed) refetches the list and its badge.
+registerLane('approvals', () => tickApprovals());
+onEvent('overrides', () => { tickApprovals(); });
 
 // --- Stage 0: window.chela — surface reachable from inline HTML handlers ---
 window.chela = window.chela || {};

@@ -18,14 +18,11 @@
 // Run: pnpm exec vitest run tests/sidebar_archive_guards.test.mjs  (pytest runs it via tests/test_js_suites.py)
 import { afterAll, test } from 'vitest';
 import assert from 'node:assert/strict';
-import { cpSync, mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { dirname, join } from 'node:path';
-import { fileURLToPath, pathToFileURL } from 'node:url';
-import { activateDom, bootDashboardDom, flush } from './js_helpers/dashboard_dom.mjs';
+import { join } from 'node:path';
+import { activateDom, bootDashboardDom, copyDashboard, flush } from './js_helpers/dashboard_dom.mjs';
 import { fakeArchiveServer } from './js_helpers/fake_archive.mjs';
-
-const STATIC = join(dirname(fileURLToPath(import.meta.url)), '..', 'chela', 'dashboard', 'static');
 
 const BODY = `
 <aside class="sidebar">
@@ -71,11 +68,10 @@ async function boot({ hidden = [], sessions = [], hold = [], seedLocalStorage, o
         // a held request reaches the server only when released — it has not happened yet
         return gate ? gate.promise.then(answer) : Promise.resolve(answer());
     }
-    const root = join(tmp, `page-${_n++}`);
-    for (const d of ['js', 'collab']) cpSync(join(STATIC, d), join(root, d), { recursive: true });
+    const jsRoot = copyDashboard(join(tmp, `page-${_n++}`));
     const { dom, modules } = await bootDashboardDom({
         body: BODY, canvasStub: true, terminalsEnabled: false, fetchImpl, seedLocalStorage,
-        jsRoot: pathToFileURL(join(root, 'js') + '/').href,
+        jsRoot,
         extraModules: ['util.js', 'nav.js'],
     });
     const page = {
