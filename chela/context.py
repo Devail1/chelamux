@@ -23,7 +23,7 @@ from chela.config import CHELA_DIR, CONTEXT_CACHE_DIR
 # Context-window size (tokens) assumed when deriving usage from the transcript
 # (the fallback): the transcript records token counts but not the window size.
 # The statusLine payload, when installed, carries the exact size and overrides
-# this. Default 200k; bumped to 1M automatically when observed usage exceeds it.
+# this — even once stale, for the same session (CMX-292, see window_for). Default 200k; bumped to 1M automatically when observed usage exceeds it.
 # A Timing-tab knob (CMX-217) — see config.default_context_window(); read per
 # call below, not latched here.
 
@@ -406,34 +406,82 @@ def _cache_snapshot(agent_name: str, session_id: str | None = None) -> dict | No
     return None
 
 
+def _reported_window(session_id: str | None, agent_name: str | None = None) -> tuple[int, str | None] | None:
+    """``(context_window_size, model)`` that ``session_id``'s statusLine last reported.
+
+    CMX-292: read at ANY age — a session's window size does not change while it runs,
+    so a cache too stale to serve usage from still knows the window. Only a payload
+    whose own ``session_id`` is this session counts: its ``by-session`` file, else the
+    window file (when ``agent_name`` is given). None when no cache for this session
+    has ever existed, or none carries a window size.
+    """
+    if not session_id:
+        return None
+    paths = [_session_cache_path(session_id)]
+    if agent_name:
+        paths.append(cache_path(agent_name))
+    for path in paths:
+        if path is None:
+            continue
+        try:
+            data = json.loads(path.read_text())
+        except (ValueError, OSError):  # ValueError: bad JSON or bytes that aren't UTF-8
+            continue
+        if not isinstance(data, dict) or data.get("session_id") != session_id:
+            continue
+        ctx = data.get("context_window")
+        size = ctx.get("context_window_size") if isinstance(ctx, dict) else None
+        if not isinstance(size, int) or isinstance(size, bool) or size <= 0:
+            continue
+        model = data.get("model")
+        return size, (model.get("display_name") if isinstance(model, dict) else None)
+    return None
+
+
+def window_for(used_tokens: int, session_id: str | None,
+               agent_name: str | None = None) -> dict:
+    """Size ``used_tokens`` of transcript usage against the session's context window.
+
+    The window is the one ``session_id``'s own statusLine reported (CMX-292), else
+    ``config.default_context_window()`` — bumped to 1M when observed usage exceeds
+    it, so 1M sessions don't read as >100% — and then ``estimated`` is True.
+    """
+    reported = _reported_window(session_id, agent_name)
+    window = reported[0] if reported else config.default_context_window()
+    if used_tokens > window and used_tokens <= 1_000_000:
+        window = 1_000_000
+    total_k = round(window / 1000, 1)
+    used_k = round(used_tokens / 1000, 1)
+    used_pct = min(100, round(used_tokens / window * 100))
+    return {
+        "used_k": used_k, "total_k": total_k, "used_pct": used_pct,
+        "free_k": round(total_k - used_k, 1), "free_pct": max(0, 100 - used_pct),
+        "model": reported[1] if reported else None,
+        "estimated": reported is None or window != reported[0],
+    }
+
+
 def _transcript_snapshot(agent_name: str, window_id: str | None = None) -> dict | None:
     """Context-only snapshot derived from the agent's active transcript.
 
-    Zero-setup fallback when no statusLine cache exists: no rate-limit/cost data,
-    and the window size is estimated (the transcript doesn't record it). The
-    window is bumped to 1M when observed usage exceeds the 200k default, so 1M
-    sessions don't read as >100%.
+    Fallback when no fresh statusLine cache exists: no rate-limit/cost data. The
+    window size comes from the transcript's own session's statusLine cache when one
+    was ever written (stale is fine — see :func:`window_for`), else it is estimated.
     """
     u = transcripts.agent_context_from_transcript(agent_name, window_id)
     if not u or not u.get("used_tokens"):
         return None
-    used = u["used_tokens"]
-    window = config.default_context_window()
-    if used > window and used <= 1_000_000:
-        window = 1_000_000
-    total_k = round(window / 1000, 1)
-    used_k = round(used / 1000, 1)
-    used_pct = min(100, round(used / window * 100))
+    w = window_for(u["used_tokens"], u.get("session_id"), agent_name)
     return {
         "name": agent_name,
-        "used_k": used_k, "total_k": total_k, "used_pct": used_pct,
+        "used_k": w["used_k"], "total_k": w["total_k"], "used_pct": w["used_pct"],
         "messages_k": None, "messages_pct": None,
-        "free_k": round(total_k - used_k, 1), "free_pct": max(0, 100 - used_pct),
-        "model": u.get("model"), "cost_usd": None,
+        "free_k": w["free_k"], "free_pct": w["free_pct"],
+        "model": w["model"] or u.get("model"), "cost_usd": None,
         "rate_limit_pct": None, "rate_limit_resets_at": None,
         "weekly_rl_pct": None, "weekly_rl_resets_at": None,
         "session_name": None, "branch": None, "ts": None,
-        "source": "transcript", "estimated": True,
+        "source": "transcript", "estimated": w["estimated"],
     }
 
 

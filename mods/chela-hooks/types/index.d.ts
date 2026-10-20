@@ -1,5 +1,4 @@
-// The values chela-hooks-mod keeps in `$.state` (Mod 2/4, CMX-182; Mod 3/4, CMX-183).
-export type Stamp = string | null
+// The values chela-hooks-mod keeps in `$.state` (Mod 3/4, CMX-183).
 
 // One thing waiting on the human, as GET /api/needs-you lists it (`since` in epoch seconds).
 export type NeedsYouItem = {
@@ -13,6 +12,6 @@ export type NeedsYou = { at: number, items: NeedsYouItem[] } | null
 
 declare module 'claude-code' {
   interface PluginState {
-    'chela-hooks-mod': { lastStamp: Stamp, needsYou: NeedsYou }
+    'chela-hooks-mod': { needsYou: NeedsYou }
   }
 }

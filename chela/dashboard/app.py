@@ -3992,10 +3992,9 @@ def api_hooks(event):
     The plugin (``plugin/hooks/hooks.json``, rendered by :func:`chela.hooks.hooks_spec`)
     POSTs each event here — as an ``http`` hook for most events (no shell script, no
     process spawn per tool call), or via a ``curl`` relaying into this SAME route for
-    ``SessionStart`` and ``MessageDisplay`` (each forced onto a ``command`` hook for its
-    own reason — see :func:`chela.hooks.recap_command` and
-    :func:`chela.hooks.message_display_command`). Correlation to a window is off the
-    session's origin, not the pane.
+    ``SessionStart`` and the tool events (forced onto ``command`` hooks — see
+    :func:`chela.hooks.recap_command` and :func:`chela.hooks.tool_event_command`).
+    Correlation to a window is off the session's origin, not the pane.
 
     **Only one event ever decides anything.** An agent is *blocked* on this request and
     Claude Code reads what comes back, so a ``permissionDecision`` or a
@@ -4005,13 +4004,9 @@ def api_hooks(event):
     Telegram topic within the wait budget (:func:`chela.gateanswer.answer_permission_request`).
     It is the ONLY safe way to answer a multi-question / ``multiSelect`` picker: the
     keystroke path has no cursor to read for those shapes, and the one time it guessed it
-    silently answered the wrong option (CMX-32). Nothing else here decides anything —
-    ``MessageDisplay`` also returns a non-empty body (CMX-285,
-    :func:`chela.hooks.message_display_response`, gated by ``config.TERMINAL_TIMESTAMPS``),
-    but that body only replaces how an assistant reply's own first line is DISPLAYED (a
-    local-time marker prepended inline); it never touches the stored transcript, answers
-    no prompt, and decides nothing a human would call a decision. Every other event still
-    returns ``{}``.
+    silently answered the wrong option (CMX-32). Nothing else here decides anything:
+    every other event returns ``{}`` (bar ``SessionStart``'s recap, which is context, not
+    a decision).
 
     **A blocked request is bounded and fails OPEN.** The wait is at most
     ``CHELA_GATE_WAIT_S`` and the number of simultaneously-held gates is capped; past
@@ -4030,21 +4025,9 @@ def api_hooks(event):
         log.warning("hooks: %s body over %d bytes — not read", event, hooks.MAX_BODY)
         return jsonify({})
     body = request.get_json(force=True, silent=True)
-    if event in hooks.TIMESTAMP_EVENTS:
-        # CMX-285: `MessageDisplay` fires once per streamed BATCH of every assistant
-        # message — far higher volume than PreToolUse/PostToolUse (already ~78% of the
-        # log on their own, per hooks.hooks_spec's own comment). Answered here, ahead of
-        # hooks.ingest, so this display-only decoration never touches the event log (a
-        # firehose of near-duplicate "message display" records nobody would read) and
-        # stays off the hot path — no wid resolution, no disk write — even when
-        # config.TERMINAL_TIMESTAMPS is False. See docs/archive/SPIKE_LIVE_TERMINAL_TIMESTAMPS.md
-        # and hooks.message_display_response.
-        if config.TERMINAL_TIMESTAMPS and isinstance(body, dict):
-            return jsonify(hooks.message_display_response(body))
-        return jsonify({})
     # Only the SessionStart `command` hook can send this (CMX-160) — its curl is the one
-    # that carries an X-Chela-Wid header; MessageDisplay's own curl (CMX-303) and every
-    # `http` hook carry Claude Code's payload and none of the agent's own env.
+    # that carries an X-Chela-Wid header; every other hook carries Claude Code's payload
+    # and none of the agent's own env.
     explicit_wid = request.headers.get("X-Chela-Wid") or None
     hooks.ingest(event, body, explicit_wid=explicit_wid)
     if event == "SessionStart" and isinstance(body, dict):

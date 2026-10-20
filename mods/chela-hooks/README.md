@@ -40,33 +40,6 @@ Running both is harmless: they write the same figures to the same file.
 Turn it off without unloading the Mod with the `statusLine` option (`/config`, or
 `pluginConfigs` in settings). Off, it draws nothing and writes no cache.
 
-## Turn timestamps (CMX-182)
-
-With `CHELA_TERMINAL_TIMESTAMPS` on, the Mod draws the time of the last assistant reply in
-a band above the prompt, in the same local `[HH:MM]` the `plugin/` path writes:
-
-```
-[14:05] last reply
-```
-
-Without the Mod, `plugin/` still writes `**[HH:MM]**` into the first line of each reply
-through `MessageDisplay`'s `displayContent` (CMX-277/283/285), unchanged. While the band
-is on, the Mod adds `"chela_timestamp_owner": "mod"` to every `MessageDisplay` payload it
-passes on, and the daemon answers that payload with `{}`, so a reply never shows its time
-in both places. The fixture both sides test against is `hooks/timestamps-cases.ts`
-(`tests/test_mods_timestamps.py` runs it through the real endpoint).
-
-| Case | Band | `plugin/` marker |
-|---|---|---|
-| Mod loaded, its flag on | the last reply's time | none (the payload carries the handshake) |
-| Mod loaded, its flag unset or off (`false`, `0`, `no`, `off`) | none | as without the Mod |
-| Mod not loaded, or Claude Code below 2.1.301 | none | as without the Mod |
-| an org-managed install | none | as without the Mod (`classic.MessageDisplay` does not reach a person's plugins there) |
-
-"As without the Mod" means the daemon's own `CHELA_TERMINAL_TIMESTAMPS` decides. The Mod
-reads the flag from the Claude Code process's environment and the daemon from its own,
-so set it in both.
-
 ## Needs you (CMX-183)
 
 In the orchestrator session only (the window `chela watching` names), the Mod draws one
@@ -76,7 +49,7 @@ link to where the dashboard shows it (an approval's `/override/<id>` page, else 
 dashboard):
 
 ```
-needs you: 1 approval · 1 access request · 1 run in needs_human · oldest: access request mount /data (ro) (20m)
+needs you: 1 approval · 1 access request · 1 run in needs_human · oldest: access request mount /data (read-only) (20m)
 ```
 
 It reads the daemon's `GET /api/needs-you` on `127.0.0.1:$CHELA_DASHBOARD_PORT` (default

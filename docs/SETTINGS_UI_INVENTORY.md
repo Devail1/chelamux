@@ -20,7 +20,7 @@ grep -rhoE 'os\.environ(\.get)?\(["'"'"']CHELA_[A-Z0-9_]+["'"'"']|os\.environ\[[
   | grep -oE 'CHELA_[A-Z0-9_]+' | sort -u | wc -l
 ```
 
-**67** (was 58, then 49 after CMX-217 wired the 9-strong "Daemon loop intervals" group
+**66** (was 58, then 49 after CMX-217 wired the 9-strong "Daemon loop intervals" group
 below through `chela.config.dashboard_setting()`, its precedence layer — CMX-220 then
 wired the 9-strong "Dispatch / judge / critic policy" group the same way (CMX-264 then
 added a tenth member, `memory_slice_budget_bytes`, straight onto that same registry, so it
@@ -38,7 +38,7 @@ group 9 — then 59, until CMX-435 added `CHELA_SHARE_SANDBOX_SUBSCRIPTION`, gro
 until CMX-26 added `CHELA_INBOX_HELD_ALERT_S` and `CHELA_CLEAN_UNMERGED_ALERT_S`, group 5 — then 65,
 until CMX-86 added the four orchestrator-inbox notice knobs, group 5 — then 66, until CMX-110
 added `CHELA_SELFCHECK_ALERT_S`, group 5 — then 67, until CMX-103 added `CHELA_DASHBOARD_URL`,
-group 7) — every literal `CHELA_*` name a Python module in
+group 7 — then 66, until CMX-266 retired `CHELA_TERMINAL_TIMESTAMPS`, group 8) — every literal `CHELA_*` name a Python module in
 `chela/` reads straight off `os.environ`.
 `tests/test_settings_inventory.py::test_inventory_matches_env_reads` re-runs this scan and
 diffs it against the table below on every `pytest` run, so the count can't go stale the way
@@ -271,7 +271,7 @@ Status section already does for other facts), not a write control.
 host." A dashboard writing its own bind host is a process editing the boundary that makes
 "loopback + no-auth" a safe default in the first place.
 
-### 8. Terminal wall (7 of the 58; +6 shell-only, see above) — mixed
+### 8. Terminal wall (6 of the 58; +6 shell-only, see above) — mixed
 
 | Variable | Default | Class | Notes |
 |---|---|---|---|
@@ -279,7 +279,6 @@ host." A dashboard writing its own bind host is a process editing the boundary t
 | `CHELA_TERMINALS_EXPOSE` | `false` | `trust-boundary` | Serve the writable wall on a non-loopback bind — RCE risk, opt-in |
 | `CHELA_TERM_COLS` | `120` | `hot` | Shared collab grid geometry (columns) |
 | `CHELA_TERM_ROWS` | `30` | `hot` | Shared collab grid geometry (rows) |
-| `CHELA_TERMINAL_TIMESTAMPS` | `false` | `hot` | Prepend a local-time marker inline into each assistant reply via the `MessageDisplay` hook's `displayContent` (CMX-285, superseding CMX-277's separate-line `systemMessage`) — OFF by default (adopter-facing, needs Claude Code 2.1.152+); opt in per-install |
 | `CHELA_WALL_TILE_DISPATCHED` | `false` | `hot` | Give dispatcher-spawned agents a full tile eagerly vs minimized |
 | `CHELA_TERM_THEME` | unset | `restart` | Operator override for the terminals' xterm palette (a JSON ITheme). Read by BOTH `scripts/agent-terminals.sh` (ttyd's launch theme) and the dashboard (`chela/dashboard/term_themes.py`), where it wins over every Settings > Appearance theme's per-theme terminal palette (CMX-381) |
 

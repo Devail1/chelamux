@@ -11,7 +11,6 @@
 //   shell hook it fails OPEN when the gate cannot decide.
 import type { Register } from 'claude-code'
 import { refresh } from './status'
-import { band, onDisplay } from './timestamps'
 import { band as needsBand, start as needsStart } from './needsyou'
 
 const RESERVED = new Set(['tool', 'tool_use_id', 'consent', 'agentId', 'requestMeta'])
@@ -69,9 +68,6 @@ export const register: Register = (on, options) => {
     void refresh($, options)
     return done
   })
-  // the turn-timestamp band (timestamps.tsx), and its handshake with the plugin/ hook
-  on('classic.MessageDisplay', ($, e, next) => onDisplay($, e, next))
-  on('ui.render', { component: 'AbovePrompt' }, ($, e, next) => band($, e, next))
   // the "needs you" band (needsyou.tsx), orchestrator session only, polled from the daemon
   on('ui.render', { component: 'AbovePrompt' }, ($, e, next) => needsBand($, e, next))
   on('classic.SessionStart', ($, e, next) => { void relay($, e); return next(e) })
