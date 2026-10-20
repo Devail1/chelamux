@@ -535,7 +535,7 @@ test('the expanded status dot is the SAME size as the collapsed rail', () => {
 // multi-selector `display: none` rules, so dropping or misspelling ONE member of a
 // list leaves the rest of the rule (and any one-member test) green.
 const _RAIL_HIDDEN = [
-    '#resources-strip', '#version-island', '.sidebar-quick',
+    '#resources-strip', '.sidebar-quick',
     '.side-head', '.side-empty', '.side-badges', '.side-item-label', '.group-head',
     '.triage-head', '.agent-row .ar-main', '.agent-row.rich .agent-row-name',
     '.agent-row.rich .ar-meta', '.agent-row .row-unarchive', '.agent-row .recent-resume',

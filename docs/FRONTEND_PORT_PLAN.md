@@ -940,6 +940,7 @@ verifies all of them before the release.
 | 10-19 | Sidebar | The Dispatched group is always last, after every human folder group | CMX-172 |
 | 10-19 | Sidebar | Recent sessions never lists a live session (match by session id, not window address); judge and dispatched sessions sit under the dispatcher toggle with no Resume | CMX-172 |
 | 10-16 | Icons | Lucide via `icons.ts`, never emoji; no em dash in UI strings | all (§5) |
+| 10-20 | Sidebar footer | The build/version string lives in the Settings modal, not the sidebar footer | P15 · CMX-221 |
 
 ---
 

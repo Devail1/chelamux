@@ -61,7 +61,7 @@ after(async () => {
     if (browser) await browser.close();
 });
 
-test('the version island renders the real version beside the legacy sidebar and wall', { skip: why }, async () => {
+test('the version island renders the real version in the Settings modal beside the legacy sidebar and wall', { skip: why }, async () => {
     if (failed) throw failed;
     const page = await browser.newPage({ viewport: { width: 1440, height: 900 } });
     const errors = [];
@@ -70,7 +70,12 @@ test('the version island renders the real version beside the legacy sidebar and 
     const badge = page.locator('#version-island .version-badge');
     await badge.waitFor({ timeout: 15_000 });
     assert.equal(await badge.textContent(), `build ${version}`);
-    assert.ok(await badge.isVisible(), 'the badge is on screen');
+    // CMX-291: the island lives in the Settings modal's foot, on screen once the modal is open.
+    await page.evaluate(() => window.chela.toggleSettings());
+    await page.waitForFunction(() => getComputedStyle(document.getElementById('settings-drawer')).opacity === '1',
+        null, { timeout: 5_000 });
+    assert.ok(await badge.isVisible(), 'the badge is not on screen in the open Settings modal');
+    await page.evaluate(() => window.chela.toggleSettings());
     // Legacy ran: nav.js loaded the sidebar layout and published it through the bridge, and
     // terminals.js drew the wall's preset picker.
     await page.waitForFunction(() => window.chelaBridge?.sidebarLayout.get().loaded === true, null, { timeout: 15_000 });
