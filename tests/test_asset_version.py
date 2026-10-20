@@ -110,6 +110,10 @@ def _js_files():
     return [p for d in JS_DIRS for p in sorted([*d.glob("*.js"), *d.glob("*.ts")])]
 
 
+def test_the_import_scan_reaches_modules_converted_to_typescript():
+    assert STATIC / "js" / "wire.ts" in _js_files()
+
+
 def test_every_module_import_inherits_the_version():
     """A relative specifier resolves against the importing module's versioned URL; an
     absolute ``/static/…`` one would escape it. Dynamic imports of our own modules must go
