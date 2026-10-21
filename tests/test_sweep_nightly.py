@@ -218,6 +218,106 @@ def test_negative_control_a_core_pr_read_as_standard_would_be_swept(tmp_path, no
     assert filer.calls[0][0].endswith("at chela/dispatcher.py:2")
 
 
+# One PR of each tier that is NOT standard, each carrying a weak guard of its own, so any
+# filter looser than `== STANDARD` sweeps (and files, or at least reports) it.
+NOT_STANDARD_PRS = {
+    "core": ({"chela/dispatcher.py": CORE_WEAK}, "core PR (#3)", None),
+    "human": ({"plugin/hook.py": CORE_WEAK}, "always-human PR (#4)", None),
+    "prose": ({"docs/notes.md": "    if y > 7:\n"}, "prose PR (#5)", None),
+}
+
+
+@pytest.mark.parametrize("tier", sorted(NOT_STANDARD_PRS))
+def test_a_merged_pr_of_any_tier_but_standard_is_not_swept(tmp_path, notices, tier):
+    """CORE and HUMAN PRs were judged per PR, a PROSE one has nothing to mutate: none of them
+    is swept — the run is SKIPPED (no battery at all), not swept and found clean."""
+    repo, chela = _repo(tmp_path, prs=[NOT_STANDARD_PRS[tier]]), tmp_path / "chela"
+    filer = Filer()
+    res = _run(repo, chela, filer)
+    assert (res["status"], filer.calls, res["prs"], res["not_swept"]) == (
+        "skipped", [], [], {t: int(t == tier) for t in ("core", "human", "prose")})
+    assert "mutations" not in res
+
+
+def test_with_every_tier_merged_only_the_standard_pr_is_swept(tmp_path, notices):
+    prs = [NOT_STANDARD_PRS[t] for t in sorted(NOT_STANDARD_PRS)] + [
+        ({"size.py": WEAK}, "PR 1: is_big (#1)", None)]
+    repo, chela = _repo(tmp_path, prs=prs), tmp_path / "chela"
+    filer = Filer()
+    res = _run(repo, chela, filer)
+    assert [t for t, _ in filer.calls] == ["Nightly sweep: if-false, compare-flip survived at "
+                                           "size.py:2"]
+    assert [p.split(" ", 1)[1] for p in res["prs"]] == ["PR 1: is_big (#1)"]
+    assert res["not_swept"] == {"core": 1, "human": 1, "prose": 1}
+
+
+def test_merged_commits_parses_every_field_of_each_commit(tmp_path):
+    """The `git log` parser: sha, subject, tier, files and introduced, exactly — on commits
+    whose fields all differ, so a swapped or mis-indexed field cannot pass."""
+    prs = [NOT_STANDARD_PRS["human"], ({"size.py": WEAK, "b.py": "B = 1\n"},
+                                       "PR 1: is_big | two files (#1)", None)]
+    repo = _repo(tmp_path, prs=prs)
+    shas = _git(repo, "log", "--format=%H", "-3").split()
+    wf = load_workflow(repo / "WORKFLOW.md")
+    since = datetime.fromisoformat(OLD).timestamp() + 1
+    got = sweep_nightly.merged_commits(repo, shas[0], since, wf)
+    assert got == [
+        {"sha": shas[0], "subject": "PR 1: is_big | two files (#1)", "tier": "standard",
+         "files": ["b.py", "size.py"], "introduced": [shas[0]]},
+        {"sha": shas[1], "subject": "always-human PR (#4)", "tier": "human",
+         "files": ["plugin/hook.py"], "introduced": [shas[1]]}]
+
+
+def test_blamed_lines_are_the_final_line_numbers_and_their_origin(tmp_path):
+    """A later (core) PR pushed PR 1's lines DOWN by two, so blame's original line (1-4)
+    and final line (3-6) differ: the sweep must mutate the final ones, at HEAD."""
+    prs = [({"size.py": WEAK}, "PR 1 (#1)", None),
+           ({"size.py": "import os\n\n" + WEAK, "chela/dispatcher.py": "X = 1\n"},
+            "core (#9)", None)]
+    repo = _repo(tmp_path, prs=prs)
+    head = _git(repo, "rev-parse", "HEAD")
+    wf = load_workflow(repo / "WORKFLOW.md")
+    commits = sweep_nightly.merged_commits(repo, head, 1, wf)
+    pr1 = [c for c in commits if c["tier"] == risktier.STANDARD and c["sha"] != head]
+    assert [c["subject"] for c in pr1] == ["PR 1 (#1)"]
+    lines, origin = sweep_nightly.blamed_lines(repo, pr1)
+    assert lines == {"size.py": {3, 4, 5, 6}}
+    assert origin == {("size.py", n): pr1[0]["sha"] for n in (3, 4, 5, 6)}
+
+
+def test_a_file_a_standard_pr_deleted_is_not_blamed(tmp_path, notices):
+    """A deleted file is in the PR's diff but not at HEAD: it is left out, never a failed
+    blame that turns the whole night into CANNOT VERIFY."""
+    prs = [({"gone.py": "G = 1\n"}, "add gone (#1)", OLD.replace("2020", "2021")),
+           ({"size.py": WEAK}, "PR 1: is_big (#2)", None)]
+    repo = _repo(tmp_path, prs=prs)
+    (repo / "gone.py").unlink()
+    _commit(repo, {}, "drop gone (#3)")
+    res = _run(repo, tmp_path / "chela", Filer())
+    assert (res["status"], res["filed"]) == ("filed", ["CMX-901"])
+
+
+def test_an_unsupported_file_a_standard_pr_merged_is_reported_unknown(tmp_path, notices):
+    """Not mutatable is not clean: the run says the file is UNKNOWN."""
+    prs = [({"other.py": COVERED, "tests/test_other.py": COVERED_TEST, "tool.go":
+             "package tool\n\nfunc F(x int) bool { return x > 1 }\n"}, "PR 2 (#2)", None)]
+    repo, chela = _repo(tmp_path, prs=prs), tmp_path / "chela"
+    res = _run(repo, chela, Filer())
+    assert (res["status"], res["unsupported"]) == ("clean", ["tool.go"])
+    assert notices[-1][1] == (
+        f"🧹🌙 nightly sweep (repo): clean — no survivors, nothing filed — 1 standard-tier "
+        f"PR(s), {res['mutations']} mutation(s), 1 file(s) UNKNOWN (not mutatable)")
+
+
+def test_unsupported_is_only_what_the_standard_prs_merged(tmp_path, notices):
+    """The other side: a CORE PR's unsupported file is not this run's to report."""
+    prs = [({"other.py": COVERED, "tests/test_other.py": COVERED_TEST}, "PR 2 (#2)", None),
+           ({"chela/dispatcher.py": "X = 1\n", "tool.go": "package tool\n"}, "core (#3)",
+            None)]
+    res = _run(_repo(tmp_path, prs=prs), tmp_path / "chela", Filer())
+    assert (res["status"], res["unsupported"]) == ("clean", [])
+
+
 def test_only_the_last_24h_is_swept(tmp_path, notices):
     old = [({"size.py": WEAK}, "old PR", "2020-06-01T00:00:00+00:00")]
     repo, chela = _repo(tmp_path, prs=old), tmp_path / "chela"
@@ -259,6 +359,32 @@ def test_a_refused_filing_is_not_recorded_and_is_filed_next_run(tmp_path, notice
     assert res["failed"] == ["size.py:2: Linear said no"]
     assert "1 NOT filed (size.py:2: Linear said no)" in notices[-1][1]
     assert _run(repo, chela, Filer())["filed"] == ["CMX-901"]
+
+
+def test_a_crash_between_two_filings_keeps_the_first_key(tmp_path, notices):
+    """The store is written per issue: a crash (not an Exception — nothing catches it) on the
+    2nd filing leaves the 1st recorded, so the next run files all but the 1st."""
+    second = "def is_tiny(x):\n    if x < 3:\n        return 1\n    return 2\n"
+    prs = [({"size.py": WEAK, "tiny.py": second}, "PR 1 (#1)", None)]
+    repo, chela = _repo(tmp_path, prs=prs), tmp_path / "chela"
+
+    class Crash(Filer):
+        def __call__(self, title, body):
+            if self.calls:
+                raise KeyboardInterrupt
+            return super().__call__(title, body)
+    crash = Crash()
+    with pytest.raises(KeyboardInterrupt):
+        _run(repo, chela, crash)
+    store = json.loads((sweep_nightly.state_dir(chela) / "filed.json").read_text())
+    assert {v["issue"] for v in store["keys"].values()} == {"CMX-901"}
+    first_site = {v["site"] for v in store["keys"].values()}
+    assert len(first_site) == 1 and first_site <= {"size.py:2", "tiny.py:2"}
+    again = Filer()
+    res = _run(repo, chela, again)
+    site = first_site.pop()
+    assert res["already_filed"] == 1 and again.calls
+    assert [t for t, _ in again.calls if t.endswith(f"at {site}")] == []
 
 
 def test_a_tracker_that_cannot_file_is_reported_not_filed(tmp_path, notices, monkeypatch):
@@ -709,6 +835,23 @@ def test_a_raising_label_create_is_a_warning(tmp_path):
         return t(query, variables)
     out = _source(tmp_path, call).create_issue("T", "B", labels=("sweep",))
     assert out["warnings"][0].startswith("label 'sweep' could not be created: ")
+
+
+def test_labels_add_to_the_parents_inherited_labels_and_keep_them(tmp_path):
+    """A sub-issue inherits its parent's labels (its risk): the named labels are ADDED, the
+    inherited ones kept, and one that is both is sent once."""
+    t = LabelTeam([{"id": "L-sweep", "name": "sweep", "team": None},
+                   {"id": "L-risk", "name": "risk:normal", "team": None}])
+
+    def call(query, variables):
+        if query == linear.ISSUES_BY_NUMBER_QUERY:
+            return {"issues": {"nodes": [{"id": "p1", "identifier": "CMX-7", "labels": {
+                "nodes": [{"id": "L-risk"}, {"id": "L-parent"}]}}]}}
+        return t(query, variables)
+    _source(tmp_path, call).create_issue("T", "B", parent="CMX-7",
+                                         labels=("sweep", "risk:normal"))
+    sent = next(v for n, v in t.calls if n == "create")["input"]
+    assert (sent["parentId"], sent["labelIds"]) == ("p1", ["L-risk", "L-parent", "L-sweep"])
 
 
 def test_create_issue_without_labels_sends_no_label_ids(tmp_path):
