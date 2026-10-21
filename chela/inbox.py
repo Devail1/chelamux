@@ -126,7 +126,7 @@ from contextlib import contextmanager
 from pathlib import Path
 
 from chela import agent_manager, discovery, epoch, event_log, hooks, judge, messenger, notify, sessions, transcripts
-from chela import config, stall_alerts
+from chela import config, stall_alerts, suite_guard
 from chela.config import INBOX_ENABLED
 from chela.hold import human_duration
 from chela.tui_text import sanitize_prompt
@@ -2242,7 +2242,8 @@ def stuck_probes(runs: list[dict]) -> dict[str, dict]:
         if procs is None:
             procs = _selfcheck_scan()
         out[task] = {"activity": max(stamps) if stamps else None, "markers": markers,
-                     "selfcheck": _selfcheck_for(worktree, procs)}
+                     "selfcheck": _selfcheck_for(worktree, procs),
+                     "slot_wait": suite_guard.waits_in(worktree)}
     return out
 
 
@@ -2367,6 +2368,14 @@ def stuck_events(runs: list[dict], store: dict, probes: dict[str, dict], now: fl
                 wid=wid))
         entry["markers"] = said
         selfcheck = probe.get("selfcheck")
+        # 🧠 CMX-119: a run queued for a suite slot is waiting, not stuck and not slow — no
+        # notice while it waits, and the time it spent queued is not its running time.
+        slot_wait = probe.get("slot_wait") or {}
+        queued_since = slot_wait.get("waiting_since")
+        if queued_since is not None and not selfcheck:
+            entry["active_at"] = now
+            nxt[task] = entry
+            continue
         entry.pop("selfcheck_at", None)     # the pre-CMX-120 latch, keyed on a jittery float
         if not selfcheck:
             entry.pop("selfcheck", None)    # the self-check ended: the next one is news
@@ -2374,11 +2383,14 @@ def stuck_events(runs: list[dict], store: dict, probes: dict[str, dict], now: fl
             entry["active_at"] = now
             since, ceiling = selfcheck.get("since"), config.selfcheck_alert_s()
             running = now - since if since is not None else None
+            if running is not None:
+                running -= float(slot_wait.get("waited") or 0.0) + (
+                    now - queued_since if queued_since is not None else 0.0)
             latch = entry.get("selfcheck")
             if not _same_selfcheck(latch, selfcheck):
                 latch = None
                 entry.pop("selfcheck", None)
-            due = _selfcheck_round(running, ceiling)
+            due = None if queued_since is not None else _selfcheck_round(running, ceiling)
             if due is not None and (latch is None or due > latch.get("round", 0)):
                 entry["selfcheck"] = {"what": selfcheck.get("what"),
                                       "pid": selfcheck.get("pid"), "since": since,

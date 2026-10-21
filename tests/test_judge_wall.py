@@ -382,3 +382,26 @@ def test_judge_run_counts_each_confirmation_into_its_status(tmp_path, monkeypatc
     assert after["confirm"]["confirmations"] == 2, after["confirm"]
     assert after["consistency"]["phase"] == "consistency"
     assert after["experiment"]["confirmations"] == 2          # a start never counts as one
+
+
+# --- 🧠 CMX-119: a run queued for a suite slot is waiting, not stuck ------------------------
+
+def test_the_watchdog_holds_a_run_waiting_for_a_suite_slot(tmp_path, monkeypatch):
+    """Stalled 15 min, 100 min in — reaped as stuck, except while it waits for a slot."""
+    wf = _judging_run(tmp_path, monkeypatch, run_started_ago=100 * MIN,
+                      status=_st(done=7, since_progress=15 * MIN,
+                                 slot_waiting_since=time.time() - 15 * MIN))
+    assert _watch(wf)[:2] == (0, judge.J_RUNNING)
+
+
+@pytest.mark.parametrize("queued,want", [
+    (30 * MIN, (0, judge.J_RUNNING)), (5 * MIN, (1, judge.J_CANNOT_VERIFY)),
+    (None, (1, judge.J_CANNOT_VERIFY))])
+def test_the_watchdog_wall_skips_the_time_spent_queued(tmp_path, monkeypatch, queued, want):
+    """A 3-experiment run is reaped at its flat 60 min wall — unless 30 of its 70 min were
+    spent queued for a slot; 5 min queued is not enough."""
+    st = _st(total=3, done=1, since_progress=None)
+    if queued is not None:
+        st["slot_wait_seconds"] = queued
+    wf = _judging_run(tmp_path, monkeypatch, run_started_ago=70 * MIN, status=st)
+    assert _watch(wf)[:2] == want

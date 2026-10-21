@@ -25,5 +25,7 @@ export default defineConfig(({ mode }) => ({
   },
   // CMX-218: Vitest stubs CSS imports to '' unless included; the UI kit's layout tests read
   // style.css (`?raw`) to check the rules the page actually ships.
-  test: { environment: 'jsdom', css: { include: [/static\/style\.css/] } },
+  // CMX-119: 4 jsdom workers, not Vitest's default of one per core minus one. On a 20-core
+  // box that default was 19 forks and 4.3 GB, most of a full pytest run's peak; 4 is 1.3 GB.
+  test: { environment: 'jsdom', css: { include: [/static\/style\.css/] }, maxWorkers: 4 },
 }));

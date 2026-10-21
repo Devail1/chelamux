@@ -251,7 +251,7 @@ SIGTERM. Three of them held 12 GB.
 wraps each run in its own `systemd-run --user --scope`:
 
 - `MemoryMax` = `CHELA_SUITE_MEMORY_MAX` (or `suite_memory_max` in `config.json`). The
-  default is 3x the measured peak below (5.1G). `0` turns it off.
+  default is 3x the measured peak below (8.3G). `0` turns it off.
 - `MemorySwapMax=0` makes a runaway get killed instead of thrashing swap, and
   `OOMPolicy=continue` makes the kernel kill the biggest process while the scope's own shell
   survives to record `memory.events`.
@@ -259,7 +259,7 @@ wraps each run in its own `systemd-run --user --scope`:
   toward the fleet's sum.
 
 A run whose scope logged an `oom_kill` comes back **CANNOT VERIFY**, with the message
-`suite exceeded 5.1G (its memory ceiling, CMX-119)`. It is never read as a pass or a fail.
+`suite exceeded 8.3G (its memory ceiling, CMX-119)`. It is never read as a pass or a fail.
 
 ⛔ **Verify the guard, not the wrapper's exit.** The scope's first act is to write its own
 `/proc/self/cgroup`. If that does not name `chela-suite-<id>.scope`, the run is refused with
@@ -270,14 +270,48 @@ container), the suite runs unbounded, a warning is logged, and nothing claims a 
 SIGKILLs whatever is left in the scope (`systemctl --user kill --signal=SIGKILL`). That is
 exactly the shape of the 10-13 leak: the daemons ignored SIGTERM.
 
-**Measured 2026-10-17** (with the CMX-115 leak already fixed): one full
-`CHELA_REQUIRE_JS_TESTS=1 uv run pytest -q` run (8,669 tests, `-n 4 --dist loadfile`) peaked
-at **1,812,647,936 bytes** of cgroup `memory.peak` in 12m13s. `/usr/bin/time -v` reported a
-max RSS of 457,792 KiB, but that is the coordinating process only. The suite is 2.4x the
-0.77 GB measured above, so the old 0.77 GB figure is out of date.
+**Measured 2026-10-21** on a 20-core, 16 GB box, sampling the run's own cgroup
+`memory.stat` every half second. One full `CHELA_REQUIRE_JS_TESTS=1 uv run pytest -q` run
+(10,075 tests, `-n 4 --dist loadfile`):
 
-Admission control is CMX-119 slice 2: at most K suite runs at once, judges and agents
-together, as flock slots in `$CHELA_DIR`.
+| | anon peak | cgroup `memory.peak` | wall |
+|---|---|---|---|
+| Vitest at its default workers | 5.36 GiB | 6.62 GB | 10m11s |
+| Vitest capped at 4 workers | **2.75 GiB** (2,954,940,416 B) | 4.69 GB | 9m36s |
+
+`memory.peak` counts page cache, which the kernel reclaims before it OOM-kills anything, so
+anon is the number that sizes the ceiling and the slots. `/usr/bin/time -v` reports a max RSS
+of about 0.9 GB, but that is the coordinating process only. The 10-17 figure (1.81 GB) is out
+of date: the React frontend's Vitest suite arrived since, and Vitest starts one jsdom worker
+per core minus one. On 20 cores that was 19 workers and 4.3 GB on its own, so
+`chela/dashboard/frontend/vite.config.ts` now caps it at 4 (1.2 GB, 33s instead of 17s).
+
+## At most K suites at once (CMX-119)
+
+A ceiling per run still lets N runs authorise N ceilings. On 10-20/21 Claude Code's memory
+reaper killed six hand-in checks while three agents and the judges ran full suites at once.
+So every `run_suite` first takes one of **K slots**, box-wide, judges and agents alike:
+`flock` locks on `$CHELA_DIR/suite-slots/slot-<i>`. A lock dies with its holder, so a crashed
+run never strands a slot.
+
+- **K** = `CHELA_SUITE_SLOTS` > `suite_slots` in `config.json` > half the box's RAM over the
+  measured anon peak, between 1 and 4. That is 2 on a 16 GB box. RAM that cannot be read is
+  1. `0` turns admission control off.
+- **First come, first served.** A run that frees its slot and takes the next one a moment
+  later (a judge battery does this dozens of times) waits behind a run already queued. A
+  stopped waiter (a fleet pause) does not hold the line.
+- **Visible.** The waiting run prints `⏳ waiting for a suite slot — all 2 busy: <worktree>
+  (pid …, 4m), …`. A judge's `chela peek` badge says `⏳ waiting for a suite slot`.
+- **Never stuck.** A queued run is waiting, not stuck. The judge watchdog holds a run while
+  it waits and leaves the queued time out of its wall. The inbox sends no stuck or
+  long-self-check notice while a run waits, and leaves queued time out of a self-check's
+  running time (CMX-110). The self-check and sweep budgets (CMX-141) are not charged for it
+  either.
+- **Bounded.** A run waits at most 4 of its own suite timeouts. After that it is CANNOT
+  VERIFY ("no suite slot came free in …"), never a pass.
+
+Every `run_suite` call takes a slot, including a judge's targeted subset runs, which are
+smaller than a full suite. That is the safe side of the trade.
 
 ## Why chela cares (and does not fix all of it)
 
