@@ -8,7 +8,7 @@ import * as RP from '@radix-ui/react-popover';
 import * as RToast from '@radix-ui/react-toast';
 import * as RT from '@radix-ui/react-tooltip';
 import { Check, ChevronRight, X, type LucideIcon } from 'lucide-react';
-import { useLayoutEffect, useMemo, useRef, type ReactElement, type ReactNode, type RefObject, type SyntheticEvent } from 'react';
+import { useLayoutEffect, useMemo, useRef, type ReactElement, type MouseEvent as ReactMouseEvent, type ReactNode, type RefObject, type SyntheticEvent } from 'react';
 
 const cx = (...names: (string | false | undefined)[]) => names.filter(Boolean).join(' ');
 
@@ -254,6 +254,15 @@ export type MenuItem =
       submenu?: boolean;
       /** A page's back row: a chevron pointing back. */
       back?: boolean;
+      /** Extra classes on the row (the pane menu's rows keep their legacy names). */
+      className?: string;
+      title?: string;
+      /** `data-*` attributes on the row, for code that finds it by them. */
+      data?: Record<`data-${string}`, string>;
+      /** A press that starts a gesture (the Wire row's drag), before any pick. */
+      onMouseDown?: (e: ReactMouseEvent<HTMLElement>) => void;
+      /** Read-only content after the label (a mode glyph, a count). */
+      trailing?: ReactNode;
     }
   | 'separator';
 
@@ -278,7 +287,8 @@ function MenuEntry({ it }: { it: Entry }) {
   };
   const role = it.check === 'radio' ? 'menuitemradio' : it.check === 'checkbox' ? 'menuitemcheckbox' : undefined;
   return (
-    <RM.Item className={cx('popover-item ov-item', it.checked && 'on', it.back && 'ov-back')} disabled={it.disabled} onSelect={onSelect}
+    <RM.Item className={cx('popover-item ov-item', it.checked && 'on', it.back && 'ov-back', it.className)} disabled={it.disabled} onSelect={onSelect}
+      title={it.title} onMouseDown={it.onMouseDown} {...it.data}
       {...(role ? { role, 'aria-checked': !!it.checked } : {})} {...(it.submenu ? { 'aria-haspopup': 'menu' as const } : {})}>
       {it.back && <span className="ov-chev back"><ChevronRight size={12} aria-hidden /></span>}
       {it.icon && (
@@ -288,6 +298,7 @@ function MenuEntry({ it }: { it: Entry }) {
       )}
       <span className="ov-label">{it.label}</span>
       {it.value !== undefined && <span className="ov-val">{it.value}</span>}
+      {it.trailing}
       {it.checked && <span className="ov-check"><Check size={12} aria-hidden /></span>}
       {it.submenu && <span className="ov-chev"><ChevronRight size={12} aria-hidden /></span>}
     </RM.Item>

@@ -103,6 +103,9 @@ beforeAll(async () => {
     }
     globalThis.GridStack = fakeGridStack();
     globalThis.fetch = fakeFetch;
+    // The pane header's ⋯ menu is Radix's: its popper measures with ResizeObserver.
+    globalThis.ResizeObserver = class { observe() {} unobserve() {} disconnect() {} };
+    globalThis.MutationObserver = dom.window.MutationObserver;
     dom.window.document.elementFromPoint = elementFromPoint;
     // jsdom has no matchMedia (the phone/desktop split reads it).
     dom.window.matchMedia = q => ({
@@ -160,11 +163,12 @@ const roomed = (room, wids) => ({
 
 // --- 0. the harness itself is not a mock ---------------------------------------
 
-test('the REAL buildWall put REAL iframes on the stage', () => {
+test('the REAL buildWall put REAL iframes on the stage', async () => {
     assert.equal(iframes().length, 2, 'two live agents -> two live terminals');
     assert.equal(frameFor('@1').tagName, 'IFRAME');
     assert.match(frameFor('@1').getAttribute('src'), /\/term\/%401\//);
-    assert.ok(port('@1'), 'and each tile has the wire port the gesture starts from');
+    assert.ok(await port('@1'), 'and each tile has the wire port the gesture starts from');
+    await closeMenu();
 });
 
 // --- 1. 🔴 a room change reloads no terminal ------------------------------------
@@ -265,7 +269,7 @@ test('a tile in two rooms names the first and counts the rest; leaving clears th
 });
 
 test('a tile with no badge, or a badge with no name slot, is accented without a crash', () => {
-    // Single-pane mode draws a header with no badge (terminals.js paneHead), so the patch
+    // Single-pane mode draws a header with no badge (features/panehead PaneHead), so the patch
     // must accent what it finds and skip the rest, never throw half-way through the stage.
     const stage = document.createElement('div');
     stage.innerHTML = '<div class="grid-stack-item" gs-id="@1"><div class="grid-stack-item-content"></div></div>'
@@ -392,25 +396,39 @@ test('relabelling a session updates the pane title in place — it does NOT rebu
 // (style.css). If it survives the gesture, EVERY terminal on the wall is dead to
 // clicks and nothing rebuilds the wall to heal it.
 
-const port = wid => document.querySelector(`.grid-stack-item[gs-id="${wid}"] .gs-port`);
-const startWire = wid => {
-    // The production binding: the tile's port has onmousedown="chela.wireDragStart(...)".
-    window.chela.wireDragStart(new window.MouseEvent('mousedown', {
-        bubbles: true, clientX: 10, clientY: 10, buttons: 1,
-    }), port(wid), wid);
+const tick = () => new Promise(resolve => setTimeout(resolve, 0));
+// The "Wire to…" row lives in the pane header's ⋯ menu (features/panehead), portaled to
+// <body> while the menu is open: open the tile's own menu (Enter on its trigger, as the
+// keyboard does) and return the row.
+const port = async wid => {
+    const trigger = document.querySelector(`.grid-stack-item[gs-id="${wid}"] .gs-menu-btn`);
+    trigger.dispatchEvent(new window.KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+    await tick();
+    return document.querySelector('.pane-overflow-menu .gs-port');
 };
+const closeMenu = async () => {
+    const menu = document.querySelector('.pane-overflow-menu');
+    if (menu) menu.dispatchEvent(new window.KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+    await tick();
+};
+const press = row => row.dispatchEvent(new window.MouseEvent('mousedown', {
+    bubbles: true, clientX: 10, clientY: 10, buttons: 1,
+}));
+// The production binding: pressing the row starts the drag (PaneHead's onMouseDown -> the
+// host's wireDragStart).
+const startWire = async wid => press(await port(wid));
 const dragging = () => grid().classList.contains('gs-dragging');
 
-test('a wire drag drops pointer-events on the iframes — that is what makes it work', () => {
-    startWire('@1');
+test('a wire drag drops pointer-events on the iframes — that is what makes it work', async () => {
+    await startWire('@1');
     assert.ok(dragging(), 'the iframes must stop eating the mouse mid-wire');
     assert.ok(document.querySelector('#term-stage').classList.contains('wire-live'));
     document.dispatchEvent(new window.MouseEvent('mouseup', { clientX: 10, clientY: 10 }));
     assert.equal(dragging(), false, 'and a normal release gives the wall back');
 });
 
-test('a release OUTSIDE the window does not leave the whole wall dead to clicks', () => {
-    startWire('@1');
+test('a release OUTSIDE the window does not leave the whole wall dead to clicks', async () => {
+    await startWire('@1');
     assert.ok(dragging());
     window.dispatchEvent(new window.Event('blur'));   // drag off the window, release there
     assert.equal(dragging(), false,
@@ -418,14 +436,14 @@ test('a release OUTSIDE the window does not leave the whole wall dead to clicks'
     assert.equal(document.querySelector('#term-stage').classList.contains('wire-live'), false);
 });
 
-test('a cancelled pointer (touch stolen, devtools opened) also gives the wall back', () => {
-    startWire('@1');
+test('a cancelled pointer (touch stolen, devtools opened) also gives the wall back', async () => {
+    await startWire('@1');
     document.dispatchEvent(new window.Event('pointercancel'));
     assert.equal(dragging(), false);
 });
 
-test('a mousemove with no button held cancels the wire — the release happened off-window', () => {
-    startWire('@1');
+test('a mousemove with no button held cancels the wire — the release happened off-window', async () => {
+    await startWire('@1');
     // The mouse comes back over the page with nothing pressed: the gesture is over,
     // and it ended somewhere we never saw. Cancel — never a room the user didn't drop.
     document.dispatchEvent(new window.MouseEvent('mousemove', {
@@ -435,8 +453,8 @@ test('a mousemove with no button held cancels the wire — the release happened 
     assert.equal(document.querySelector('.wire-overlay'), null, 'and its overlay is gone');
 });
 
-test('Escape cancels a wire in flight', () => {
-    startWire('@1');
+test('Escape cancels a wire in flight', async () => {
+    await startWire('@1');
     document.dispatchEvent(new window.KeyboardEvent('keydown', { key: 'Escape' }));
     assert.equal(dragging(), false);
 });
@@ -444,16 +462,16 @@ test('Escape cancels a wire in flight', () => {
 // --- 3. 🔴 the wire must emanate from the PANE, not the fixed-position menu row ----
 //
 // `port('@1')` — the "Wire to…" row the gesture starts from — lives inside the
-// `⋮` overflow popover, which `togglePaneOverflow` anchors with inline
-// `position: fixed` top/left (CMX-117/119). Anchoring the wire's origin to THAT
+// `⋮` overflow menu, which floats wherever its popper places it (CMX-117/119; the
+// kit's Menu since CMX-241). Anchoring the wire's origin to THAT
 // row's rect makes the cable start wherever the popover happens to be floating,
 // not at the pane it is wiring from. Give the button and the pane deliberately
 // disjoint rects and prove the drawn path starts at the pane's top-center.
 
-test('the wire origin is the source PANE\'s top-center, not the "Wire to…" row', () => {
+test('the wire origin is the source PANE\'s top-center, not the "Wire to…" row', async () => {
     const pane = document.querySelector('.grid-stack-item[gs-id="@1"]');
     const stageEl = document.querySelector('#term-stage');
-    const btn = port('@1');
+    const btn = await port('@1');
     const restore = [];
     const stub = (el, rect) => {
         const orig = el.getBoundingClientRect;
@@ -465,7 +483,7 @@ test('the wire origin is the source PANE\'s top-center, not the "Wire to…" row
     // Deliberately far away — a popover row floating elsewhere on the screen.
     stub(btn, { left: 900, top: 700, right: 940, bottom: 720, width: 40, height: 20 });
     try {
-        startWire('@1');
+        press(btn);
         const d = document.querySelector('.wire-overlay path').getAttribute('d');
         assert.match(d, /^M 250 50 C /,
             `wire must start at the pane's top-center (250, 50), not the button's — got: ${d}`);

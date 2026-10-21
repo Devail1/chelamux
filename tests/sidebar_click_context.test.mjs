@@ -129,7 +129,7 @@ test('1. wall visible + pane open on it -> click MINIMIZES it', () => {
 const settleFocus = () => new Promise(r => setTimeout(r, 120));
 
 test('2. wall visible + pane minimized -> click restores + focuses (unchanged)', async () => {
-    window.chela.termMinFor(document.querySelector(`#term-stage .grid-stack-item[gs-id="${WORKER}"] .gs-min-btn`));
+    document.querySelector(`#term-stage .grid-stack-item[gs-id="${WORKER}"] .gs-min-btn`).click();
     assert.ok(terminals._minimized.has(WORKER), 'setup: worker must be docked before the click');
     window.chela.selectAgent('cmx-139');
     await settleFocus();
