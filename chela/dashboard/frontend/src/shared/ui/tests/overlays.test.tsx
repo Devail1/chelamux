@@ -306,3 +306,15 @@ test('Dialog: one dialog handing over to another leaves focus in the new one', a
   await act(() => new Promise((r) => setTimeout(r, 0)));
   expect(document.activeElement).toBe(opener); // B returns to what A was opened from
 });
+
+test('an AnchoredPopover hands focus back to the control it hung off when it closes', async () => {
+  const anchor = document.createElement('button');
+  document.body.appendChild(anchor);
+  const { rerender } = render(<AnchoredPopover anchor={anchor} onClose={() => {}} label="New"><ItemButton>Row</ItemButton></AnchoredPopover>);
+  await act(() => new Promise((r) => setTimeout(r, 0)));
+  screen.getByRole('button', { name: 'Row' }).focus();
+  rerender(<AnchoredPopover anchor={null} onClose={() => {}} label="New"><ItemButton>Row</ItemButton></AnchoredPopover>);
+  await act(() => new Promise((r) => setTimeout(r, 0)));
+  expect(document.activeElement).toBe(anchor);
+  anchor.remove();
+});

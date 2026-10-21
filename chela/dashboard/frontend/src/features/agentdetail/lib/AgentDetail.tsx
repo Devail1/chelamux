@@ -46,9 +46,14 @@ function ActionButton({ name, a }: { name: string; a: Action }) {
   const run = async () => {
     if (a.confirm && !window.confirm(`${a.label} ${name}?`)) return;
     setBusy(true);
-    await post(a.path, { agent: name });
-    // the agent row changes on the next tick; a Trigger leaves the button as it was
-    if (!a.busy) setBusy(false);
+    try {
+      await post(a.path, { agent: name });
+    } catch {
+      /* the next tick shows what happened to the agent */
+    } finally {
+      // the button may stay mounted (a Restart leaves it running): never stuck busy
+      setBusy(false);
+    }
     void refresh();
   };
   return <Button variant={a.variant} disabled={busy} onClick={() => void run()}>{busy && a.busy ? a.busy : a.label}</Button>;

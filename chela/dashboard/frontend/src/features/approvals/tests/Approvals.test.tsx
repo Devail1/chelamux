@@ -454,3 +454,15 @@ test('a refresh that lands while the SSE `overrides` frame fires refetches at on
   });
   expect(pill().hidden).toBe(false);
 });
+
+test('overlapping reads: an older answer landing last never overwrites the newer list', async () => {
+  const pending: ((body: unknown) => void)[] = [];
+  vi.stubGlobal('fetch', () => new Promise((r) => pending.push((body) => r({ json: () => Promise.resolve(body) }))));
+  const older = tickApprovals();
+  const newer = tickApprovals();
+  pending[1]?.({ requests: [] });
+  await act(() => newer);
+  pending[0]?.({ requests: [req()] });
+  await act(() => older);
+  expect(pill().hidden).toBe(true);
+});

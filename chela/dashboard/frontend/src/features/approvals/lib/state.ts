@@ -40,13 +40,18 @@ function notifyNew(rows: Request[]) {
   }
 }
 
+// Reads overlap (the lane, the SSE frame, a decision's follow-up): only the newest may land.
+let latest = 0;
+
 export async function tickApprovals(): Promise<void> {
+  const mine = ++latest;
   let data: { requests?: unknown; error?: unknown } | null;
   try {
     data = (await api('/api/overrides')) as typeof data;
   } catch {
     data = null;
   }
+  if (mine !== latest) return;
   const prev = approvals.get();
   if (!data || data.error || !Array.isArray(data.requests)) {
     // A failed or error reply keeps the last KNOWN rows and says so: never "nothing waiting".

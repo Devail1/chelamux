@@ -239,3 +239,10 @@ test('the dismiss x is 24px high with a 24x24 minimum target and a 14px glyph; a
   other.remove();
   style.remove();
 });
+
+test('a restart that restarts THIS dashboard ends as success, not an error', async () => {
+  stale(STALE);
+  applyPayload = { ok: true, started: true, run: 5, boot: 'b1', detail: 'restarting chela-dashboard' };
+  const res = await act(() => restartStale(instant([{ ...STALE, boot: 'b2' }])));
+  expect([res?.text, res?.cls]).toEqual(['The dashboard restarted, reloading…', 'ok']);
+});

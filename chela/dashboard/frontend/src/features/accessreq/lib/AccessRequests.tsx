@@ -26,7 +26,9 @@ export async function tickAccessRequests(): Promise<void> {
   } catch {
     return;
   }
-  accessRequests.set({ rows: data?.requests || [], shareTyping: !!data?.share_typing, defaultMinutes: data?.default_minutes || 60 });
+  // an error reply is not "no requests": keep the last list
+  if (!Array.isArray(data?.requests)) return;
+  accessRequests.set({ rows: data.requests, shareTyping: !!data?.share_typing, defaultMinutes: data?.default_minutes || 60 });
 }
 
 export async function openAccessRequests(): Promise<void> {

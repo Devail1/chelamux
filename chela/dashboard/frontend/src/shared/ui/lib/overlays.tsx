@@ -171,6 +171,11 @@ export type AnchoredPopoverProps = Omit<PopoverProps, 'trigger' | 'open' | 'onOp
 export function AnchoredPopover({ anchor, onClose, children, align = 'end', className, label }: AnchoredPopoverProps) {
   // Radix measures a virtual anchor through a ref-shaped object
   const ref = useMemo(() => ({ current: anchor }), [anchor]);
+  // no Trigger for Radix to return focus to: the last anchor gets it back
+  const last = useRef<HTMLElement | null>(null);
+  useLayoutEffect(() => {
+    if (anchor) last.current = anchor;
+  }, [anchor]);
   return (
     <RP.Root open={!!anchor} onOpenChange={(o) => {
         if (!o) onClose();
@@ -179,6 +184,12 @@ export function AnchoredPopover({ anchor, onClose, children, align = 'end', clas
       <RP.Portal>
         <RP.Content className={cx('popover ui-floating', className)} aria-label={label} side="bottom" align={align} sideOffset={GAP} collisionPadding={MARGIN}
           onFocusOutside={(e) => e.preventDefault()}
+          onCloseAutoFocus={(e) => {
+            if (last.current?.isConnected) {
+              e.preventDefault();
+              last.current.focus();
+            }
+          }}
           onInteractOutside={(e) => {
             // a click on the control that opened it reopens it there, not close-then-open
             if (anchor && e.target instanceof Node && anchor.contains(e.target)) e.preventDefault();

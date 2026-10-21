@@ -188,3 +188,11 @@ test('the pure half: labels, choices, who, time left, pending', () => {
   expect(pendingCount([pending(), pending({ status: 'approved' })])).toBe(1);
   expect(pendingCount(null)).toBe(0);
 });
+
+test.each([[{ error: 'restarting' }], [null], [{ requests: 'x' }]])('an error reply %j keeps the last list, never "no requests"', async (bad) => {
+  listing = { requests: [pending()], share_typing: true };
+  await tick();
+  listing = bad;
+  await tick();
+  expect(pill().hidden).toBe(false);
+});

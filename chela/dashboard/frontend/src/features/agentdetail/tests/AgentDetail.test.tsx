@@ -162,3 +162,14 @@ test('send a message: the dialog names the agent, a blank message sends nothing,
   fireEvent.click(screen.getByRole('button', { name: 'Cancel' }));
   expect(screen.queryByRole('dialog')).toBeNull();
 });
+
+test('a button that stays (Restart on a running agent) comes back clickable, also when the request fails', async () => {
+  await drill('a', [{ name: 'a', claude_running: true }]);
+  fireEvent.click(screen.getByRole('button', { name: 'Restart' }));
+  await settle();
+  expect(screen.getByRole('button', { name: 'Restart' }).hasAttribute('disabled')).toBe(false);
+  vi.stubGlobal('fetch', () => Promise.reject(new Error('down')));
+  fireEvent.click(screen.getByRole('button', { name: 'Restart' }));
+  await settle();
+  expect(screen.getByRole('button', { name: 'Restart' }).hasAttribute('disabled')).toBe(false);
+});

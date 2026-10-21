@@ -86,7 +86,8 @@ export async function restartStale(deps: FollowDeps = {}): Promise<Progress | nu
   if (!resp || resp.ok === false || resp.error) return end({ text: resp?.error || 'Restart refused.', cls: 'err', done: true });
   if (!resp.started) return end({ text: resp.detail || 'Nothing to restart.', cls: 'ok', done: true });
   const step = await followUpdate(resp, (s) => patch({ progress: { text: s.text, cls: '' } }), deps);
-  const done = step.state === 'done';
+  // 'reload': this dashboard restarted, which is the restart succeeding
+  const done = step.state === 'done' || step.state === 'reload';
   // a done restart clears the stale offer: the next status read re-decides
   if (done) patch({ stale: null });
   return end({ text: step.text, cls: done ? 'ok' : 'err', done: true });
