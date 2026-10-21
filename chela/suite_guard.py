@@ -74,8 +74,15 @@ def verdict(unit: str, cap: int, files: Path, returncode: int) -> str | None:
     return None
 
 
+_scope_ok = False      # a probe that once worked is not re-run by every suite in a battery
+
+
 def _scope_works() -> bool:
-    """A harmless scope, launched for real — ``systemd-run`` on PATH is not a user session."""
+    """A harmless scope, launched for real — ``systemd-run`` on PATH is not a user session.
+    Only a success is remembered: a failed probe is retried by the next run."""
+    global _scope_ok
+    if _scope_ok:
+        return True
     if not memcap.available():
         return False
     try:
@@ -83,6 +90,7 @@ def _scope_works() -> bool:
                        check=True, capture_output=True, timeout=10)
     except (OSError, subprocess.SubprocessError):
         return False
+    _scope_ok = True
     return True
 
 
@@ -140,7 +148,7 @@ DEFAULT_SLOTS_MAX = 4
 
 _waited = 0.0                     # seconds THIS process has spent waiting for a slot
 _waited_lock = threading.Lock()
-_thread_waited: dict[int, float] = {}   # the same, per thread — what each ledger publishes
+_thread_waited: dict[tuple[int, str], float] = {}  # per (thread, cwd): what a ledger publishes
 
 
 def _cast_slots(raw) -> int:
@@ -205,7 +213,7 @@ class _Ledger:
 
     def __init__(self, cwd: str):
         self.path = _waits_dir() / f"{os.getpid()}-{threading.get_ident()}.json"
-        self.cwd, self.waited = cwd, _thread_waited.get(threading.get_ident(), 0.0)
+        self.cwd, self.waited = cwd, _thread_waited.get((threading.get_ident(), cwd), 0.0)
         stat = _proc_stat(os.getpid())
         self.start = stat[1] if stat else None
 
@@ -352,7 +360,7 @@ def slot(cwd: str | Path, on_wait=None, max_wait: float | None = None,
             with _waited_lock:
                 _waited += spent
             ledger.waited += spent
-            _thread_waited[threading.get_ident()] = ledger.waited
+            _thread_waited[(threading.get_ident(), ledger.cwd)] = ledger.waited
             ledger.write(None)      # kept: what the stuck probes credit, while we live
             if on_wait is not None:
                 on_wait(None)

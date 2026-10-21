@@ -94,18 +94,29 @@ def test_bounded_pins_the_full_scope_argv(guard_on, monkeypatch, budget, slice_a
 
 def test_scope_probe_pins_its_argv_and_fails_closed(monkeypatch):
     calls = []
+    monkeypatch.setattr(suite_guard, "_scope_ok", False)
     monkeypatch.setattr(suite_guard.memcap, "available", lambda: True)
     monkeypatch.setattr(suite_guard.subprocess, "run", lambda *a, **k: calls.append((a, k)))
     assert suite_guard._scope_works() is True
     assert calls == [((["systemd-run", "--user", "--scope", "--collect", "-q", "--", "true"],),
                       {"check": True, "capture_output": True, "timeout": 10})]
+    assert suite_guard._scope_works() is True and len(calls) == 1     # remembered
     for exc in (subprocess.CalledProcessError(1, "x"), subprocess.TimeoutExpired("x", 10),
                 FileNotFoundError("systemd-run")):
+        monkeypatch.setattr(suite_guard, "_scope_ok", False)
         monkeypatch.setattr(suite_guard.subprocess, "run",
                             lambda *a, _e=exc, **k: (_ for _ in ()).throw(_e))
         assert suite_guard._scope_works() is False
     monkeypatch.setattr(suite_guard.memcap, "available", lambda: False)
     assert suite_guard._scope_works() is False
+    assert suite_guard._scope_works() is False       # a failure is not remembered as success
+
+
+def test_a_threads_wait_is_credited_to_its_own_worktree_only(slots_on, monkeypatch):
+    monkeypatch.setitem(suite_guard._thread_waited,
+                        (__import__("threading").get_ident(), "/wt-a"), 1200.0)
+    assert suite_guard._Ledger("/wt-a").waited == 1200.0
+    assert suite_guard._Ledger("/wt-b").waited == 0.0
 
 
 def test_a_suite_over_its_ceiling_is_cannot_verify_never_a_pass(guard_on, monkeypatch):
