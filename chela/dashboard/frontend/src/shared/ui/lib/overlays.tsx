@@ -12,10 +12,9 @@ import { useLayoutEffect, useRef, type ReactElement, type ReactNode, type Synthe
 
 const cx = (...names: (string | false | undefined)[]) => names.filter(Boolean).join(' ');
 
-// The last element focused outside every dialog. By the time a dialog's onOpenAutoFocus runs, a
-// field with autoFocus inside it has already taken focus, and a dialog opened from another
-// dialog (a Decisions row opening its task) has focus inside the one closing: neither is the
-// control to return to.
+// The last element focused outside every dialog. As a dialog opens, a field with autoFocus
+// inside it may already hold focus, and a dialog opened from another (a Decisions row opening
+// its task) finds focus inside the one closing: neither is the control to return to.
 let lastOutside: Element | null = null;
 const inDialog = (el: Element | null) => !!el?.closest('[role="dialog"]');
 if (typeof document !== 'undefined') {
@@ -70,12 +69,12 @@ export function Dialog({ open, onOpenChange, title, description, className, hide
             className={cx('modal', className)}
             {...(description ? {} : { 'aria-describedby': undefined })}
             onCloseAutoFocus={(e) => {
-              // A dialog that hands over to another (a Decisions row opening its task) leaves
-              // focus to the one now open, never pulls it back behind it.
-              const self = e.currentTarget;
-              const handedOver = [...document.querySelectorAll('[role="dialog"]')].some((d) => d !== self);
-              if (handedOver || opener.current instanceof HTMLElement) e.preventDefault();
-              if (!handedOver && opener.current instanceof HTMLElement) opener.current.focus();
+              // A dialog handing over to another (a Decisions row opening its task) needs nothing
+              // here: the new dialog's focus trap keeps focus inside it.
+              if (opener.current instanceof HTMLElement) {
+                e.preventDefault();
+                opener.current.focus();
+              }
             }}
           >
             <RD.Title asChild>
