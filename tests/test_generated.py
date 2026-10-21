@@ -135,3 +135,24 @@ def test_the_size_gate_never_counts_generated_files(tmp_path):
     root = _plain_repo(tmp_path / "r", {}, {"chela/x.py": "a\nb\n", BUNDLE_PATH: "x\n" * 40,
                                            "uv.lock": "y\n" * 30})
     assert sizegate.measure(root, "dev", ()) == 2
+
+
+@pytest.mark.parametrize("rel, rebuilt", [
+    ("chela/dashboard/static/app/manifest.json", True),
+    ("chela/dashboard/static/app/assets/main-B_ZW3c7a.js", True),
+    ("./chela/dashboard/static/app/assets/x.css", True),
+    ("chela/dashboard/static/app/x.js\n", True),
+    ("chela/dashboard/static/apps/x.js", False),
+    ("chela/dashboard/static/app", False),
+    ("x/chela/dashboard/static/app/x.js", False),
+    ("chela/dashboard/static/js/util.js", False),
+    ("chela/dashboard/frontend/src/main.tsx", False),
+    ("uv.lock", False),                                   # generated, but never REBUILT
+    ("chela/dashboard/frontend/pnpm-lock.yaml", False),
+    ("chela/dashboard/static/vendor/xterm.min.js", False),
+    ("tests/test_frontend_build.py", False),
+])
+def test_only_the_bundle_is_rebuilt_by_a_base_merge(rel, rebuilt):
+    """🔀 CMX-300: the paths a conflicted base merge may rebuild instead of sending back."""
+    assert generated.is_rebuilt(rel) is rebuilt
+    assert generated.REBUILT == ("chela/dashboard/static/app/**",)

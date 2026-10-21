@@ -1,19 +1,19 @@
 // --- Stage 0: ES-module imports ---
-import { $$, TERMINALS_ON, _agentsCache, ageStr, agentDotColor, api, attrEsc, escHtml, lucideIcon, setAgentsCache, setCurrentTab, shortTime, updateTabSignal, wantsHuman } from './util';
+import { $$, TERMINALS_ON, _agentsCache, agentDotColor, api, attrEsc, escHtml, lucideIcon, setCurrentTab, updateTabSignal, wantsHuman } from './util';
 import { onOrchestratorChange, orchestratorState } from '../../frontend/src/shared/orchestrator';
-import { refreshSummary } from './header';
-import { checkContext } from './agents';
+import { refreshSummary } from '../../frontend/src/features/primarymenu';
+import { detailAgent, redrawAgentDetail, setAgentDetailHost } from '../../frontend/src/features/agentdetail';
 import { showAddSchedule } from '../../frontend/src/features/schedules';
 import { openNewTask } from '../../frontend/src/features/newtask';
 import { _displayLabel, adoptSidebarDefault, _minimized, _orderedWids, _renderedWids, focusPaneByWid, isWallVisible, minimizePane, setTermMode, shareBtnClick } from './terminals';
-import { _launcherData, launchProject, refreshLauncher } from './launcher';
+import { launchProject, launcher, newShellWindow, refreshLauncher, setLauncherHost } from '../../frontend/src/features/launcher';
+import { setApprovalNotify } from '../../frontend/src/features/approvals/model';
 import { VIEWS } from './views';
 import { findView, navViews, otherViews, paletteViews, panelId } from './viewreg';
 import { refresh } from '../../frontend/src/shared/scheduler';
-import { placePopover } from '../../frontend/src/shared/popover';
 import { refreshCostTab } from './usage';
 import { resolveWindowId } from './windowid';
-import { followUpdate } from './updateflow';
+import { followUpdate } from '../../frontend/src/features/update/flow';
 import { memNote, stepPayload, workflowNote } from './concurrencymodel';
 import { isShared, stopShare } from '../../frontend/src/features/share';
 import { closeSidebar, configureSidebar, refreshSidebar, renderSidebarAgents, setActiveRow, setNav } from '../../frontend/src/features/sidebar/controller';
@@ -35,8 +35,6 @@ import { closeSidebar, configureSidebar, refreshSidebar, renderSidebarAgents, se
 // third hardcoded copy of the view list).
 // ---------------------------------------------------------------------------
 
-let _detailAgent = null;    // window name focused in the agent-detail view
-
 // --- The sidebar (CMX-278) --------------------------------------------------
 // The sidebar is the React island's (frontend/src/features/sidebar): its state and commands
 // are controller.ts's. What it needs from the rest of the page, it reaches through this.
@@ -48,14 +46,14 @@ configureSidebar({
     tabSignal: agents => updateTabSignal(agents),
     adoptDefault: () => adoptSidebarDefault(),
     openPane: _openPane,
-    launchProject: (cwd, opts) => (typeof launchProject === 'function' ? launchProject(cwd, opts) : undefined),
+    launchProject: (cwd, opts) => launchProject(cwd, opts),
 });
 
 // The orchestrator slot changes independently of the agent list poll (a pane's toggle, the
 // decisions dropdown): redraw off the cached list, no refetch to move one badge.
 onOrchestratorChange(() => {
     renderSidebarAgents(_agentsCache || []);
-    if (_detailAgent) renderAgentDetail();
+    redrawAgentDetail();   // its Role row reads the slot too
 });
 
 // --- The nav, rendered from the registry ------------------------------------
@@ -73,7 +71,7 @@ function renderNav() {
 function selectView(view) {
     const v = findView(VIEWS, view);
     setCurrentTab(view);
-    _detailAgent = null;
+    detailAgent.set(null);
 
     $$('.panel').forEach(p => p.classList.remove('active'));
     const panel = document.getElementById(panelId(view));
@@ -134,7 +132,7 @@ function _openPane(w) {
 // Focus a single agent in the canvas (metadata detail / transcript).
 function showAgentDetail(name) {
     setCurrentTab('agent-detail');
-    _detailAgent = name;
+    detailAgent.set(name);   // the agent-detail island (features/agentdetail) draws it
     $$('.panel').forEach(p => p.classList.remove('active'));
     const panel = document.getElementById(panelId('agent-detail'));
     if (panel) panel.classList.add('active');
@@ -142,9 +140,7 @@ function showAgentDetail(name) {
     // Drilling in is leaving every other view — same registry-driven teardown as
     // selectView (agent-detail is a registered, virtual view).
     otherViews(VIEWS, 'agent-detail').forEach(o => { if (o.exit) o.exit(); });
-    renderAgentDetail();
     refreshSummary();
-    checkContext();   // fills the detail context bar via ctx-<name>
     closeSidebar();   // navigating dismisses the mobile drawer (no-op on desktop)
 }
 
@@ -212,86 +208,11 @@ const _AGENT_STATUS_WORD = { green: 'working', yellow: 'waiting', grey: 'idle' }
 const _SIDEBAR_DOT_CLASS = { green: 'working', yellow: 'waiting', grey: 'idle' };
 
 // --- Agent detail view -----------------------------------------------------
-
-// Where "← Back" returns to: agent-detail has no nav item of its own (it is
-// reached from the always-visible sidebar Sessions list, not a nav tab), so
-// there is no single "parent" view — fall back to the same default main.js
-// picks on load (the Wall when terminals are on, else Work).
-function _agentDetailBackView() {
-    return (typeof TERMINALS_ON !== 'undefined' && TERMINALS_ON) ? 'terminals' : 'work';
-}
-
-function renderAgentDetail() {
-    const host = document.getElementById('agent-detail');
-    if (!host) return;
-    const a = (_agentsCache || []).find(x => x.name === _detailAgent);
-    if (!a) {
-        host.innerHTML = `<div class="detail-head">
-            <span class="detail-back" onclick="chela.selectView('${_agentDetailBackView()}')">← Back</span>
-            <span class="detail-title">${escHtml(_detailAgent || '')}</span>
-        </div>
-        <div class="side-empty">This agent's window is no longer present.</div>`;
-        return;
-    }
-    const dot = agentDotColor(a);
-    const type = _agentType(a);
-
-    // "Message" only when there's no wall to type into directly (terminals off).
-    const actions = [];
-    if (!(typeof TERMINALS_ON !== 'undefined' && TERMINALS_ON)) {
-        actions.push(`<button onclick="chela.openSendMsg('${attrEsc(a.name)}')">Message</button>`);
-    }
-    if (a.has_schedules) actions.push(`<button onclick="chela.triggerSchedule('${attrEsc(a.name)}')">Trigger</button>`);
-    if (a.claude_running) {
-        actions.push(`<button onclick="chela.restartAgent('${attrEsc(a.name)}')">Restart</button>`);
-        actions.push(`<button class="btn-danger" onclick="chela.stopAgent('${attrEsc(a.name)}')">Stop</button>`);
-    } else {
-        actions.push(`<button class="btn-accent" onclick="chela.startAgent('${attrEsc(a.name)}')">Start</button>`);
-    }
-
-    const rows = [
-        ['Window', escHtml(a.window_id || '—')],
-        ['Type', escHtml(type)],
-        ['Role', escHtml(_ROLE_LABEL[_agentRole(a)])],
-        ['Claude', a.claude_running ? 'running' : 'stopped'],
-        ['Status', escHtml(a.session_status || (a.claude_running ? 'running' : 'offline'))],
-        ['Liveness', escHtml(a.liveness || '—')],
-        ['CWD', escHtml(a.cwd || '—')],
-    ];
-    if (a.schedule_next_run) rows.push(['Next run', shortTime(a.schedule_next_run)]);
-    if (a.schedule_last_run) rows.push(['Last run', shortTime(a.schedule_last_run)]);
-    if (a.ai_title) rows.push(['Title', escHtml(a.ai_title)]);
-
-    let pr = '';
-    if (a.pr && a.pr.url) {
-        // CMX-41: say when the PR is history — a transcript's pr-link outlives the merge.
-        const st = (a.pr.state === 'merged' || a.pr.state === 'closed') ? ` · ${a.pr.state}` : '';
-        const label = (a.pr.number ? `PR #${a.pr.number}` : 'PR') + st;
-        pr = ` <a class="pr-badge" href="${attrEsc(a.pr.url)}" target="_blank" rel="noopener noreferrer">${escHtml(label)}</a>`;
-    }
-
-    let recap = '';
-    if (a.recap) {
-        const age = a.recap_ts ? ` · ${ageStr((Date.now() - new Date(a.recap_ts)) / 1000)}` : '';
-        recap = `<h4 style="margin-top:16px;">Recap${age}</h4><div class="detail-recap">${escHtml(a.recap)}</div>`;
-    }
-
-    host.innerHTML = `
-        <div class="detail-head">
-            <span class="detail-back" onclick="chela.selectView('${_agentDetailBackView()}')">← Back</span>
-            <span class="health-dot ${dot}"></span>
-            <span class="detail-title">${escHtml(a.name)}</span>${pr}
-        </div>
-        <div class="canvas-toolbar">${actions.join('')}</div>
-        <div class="detail-grid">
-            ${rows.map(([k, v]) => `<div class="k">${k}</div><div class="v">${v}</div>`).join('')}
-        </div>
-        <div class="context-bar-wrap" id="ctx-${attrEsc(a.name)}">
-            <div class="context-bar"><div class="context-bar-fill" style="width:0%"></div></div>
-            <span class="context-label">Context: --</span>
-        </div>
-        ${recap}`;
-}
+// The agent-detail island (frontend/src/features/agentdetail, CMX-219) draws it; what only
+// this module knows (the view switch, the role, the attention dot) it reads through its host.
+setAgentDetailHost({ selectView, roleLabel: a => _ROLE_LABEL[_agentRole(a)], dotColor: agentDotColor });
+// A launch lands on the Wall and the sidebar the sidebar controller owns (features/launcher, CMX-219).
+setLauncherHost({ focusPaneByWid, selectView, refreshSidebar });
 
 // --- Settings modal (CMX-287: tabbed, replaces the old off-canvas drawer) --
 //
@@ -1686,164 +1607,6 @@ function applyTermPrefsToIframes() {
     });
 }
 
-// --- "+ new" popover -------------------------------------------------------
-
-// The "+" menu is also the LAUNCH menu: Favorites + Recent live in it (launcher.js
-// fills #new-menu-launch). Re-render on open so a pin/launch from anywhere else is
-// already reflected when it appears.
-function openNewMenu(ev) {
-    if (ev) ev.stopPropagation();
-    const m = document.getElementById('new-menu');
-    if (!m) return;
-    if (typeof refreshLauncher === 'function') refreshLauncher();
-    const anchor = (ev && ev.currentTarget) || document.getElementById('btn-new');
-    // Show it BEFORE measuring: a display:none element has no offsetWidth.
-    m.style.display = 'block';
-    // Right-aligned to the button off the MEASURED width (placePopover). A
-    // hardcoded width here (it used to be 160, from the old popover) silently
-    // sent the menu off the RIGHT edge the moment the CSS got wider than the
-    // guess — which .launch-menu's 232px min-width did, on a button that sits
-    // ~55px from the viewport edge.
-    placePopover(m, anchor, { gap: 4 });
-    setTimeout(() => document.addEventListener('click', hideNewMenu, { once: true }), 0);
-}
-
-function hideNewMenu() {
-    const m = document.getElementById('new-menu');
-    if (m) m.style.display = 'none';
-}
-
-// Primary menu (a settings gear at the right of the sidebar foot's one row since
-// CMX-393 — a ⋮ in the foot since CMX-377, originally a topbar button): folds the three former topbar primaries — Jump
-// to… (#btn-palette), New… (#btn-new), overflow (#btn-overflow) — behind ONE
-// button (CMX-109 / CMX-108 Part A re-filed; cmx-108/#122's WALL toolbar fold —
-// grid presets + lock behind openLayoutMenu — was reverted in CMX-111: Liav
-// never asked for that one folded, only this one). Jump to…
-// and the old overflow's secondary actions (Share current, Notifications,
-// Settings) plus the usage/updated readouts are flat items here; New… reopens
-// the existing #new-menu (openNewMenuFromPrimary below) rather than duplicating
-// it, since #new-menu already serves the sidebar's own "+" trigger from a
-// different anchor. The safety kill-switch (#btn-shares) is deliberately NOT in
-// here — it stays visible whenever a share is live. Anchored + light-dismiss,
-// same pattern as the old openNewMenu/openOverflowMenu.
-function openPrimaryMenu(ev) {
-    if (ev) ev.stopPropagation();
-    const m = document.getElementById('primary-menu');
-    if (!m) return;
-    const anchor = (ev && ev.currentTarget) || document.getElementById('btn-primary-menu');
-    m.style.display = 'block';
-    // CMX-398: the button sits in the sidebar FOOT now, so "below it" is off
-    // the bottom of the screen — placePopover flips the menu above it.
-    placePopover(m, anchor, { gap: 6 });
-    setTimeout(() => document.addEventListener('click', hidePrimaryMenu, { once: true }), 0);
-}
-
-function hidePrimaryMenu() {
-    const m = document.getElementById('primary-menu');
-    if (m) m.style.display = 'none';
-}
-
-// The primary menu's "New…" row: close the primary menu and reopen #new-menu
-// (Favorites/Recent + Init a repo/Scheduled task/Shell window) anchored at
-// #btn-primary-menu — the exact same popover the sidebar's "+" trigger opens
-// from its own anchor, just from a second entry point.
-function openNewMenuFromPrimary() {
-    hidePrimaryMenu();
-    openNewMenu({ stopPropagation() {}, currentTarget: document.getElementById('btn-primary-menu') });
-}
-
-// Spawn a plain shell window. The backend spawn endpoint is currently behind
-// the terminals feature flag (it was the wall's spawner); until a non-gated
-// endpoint lands this surfaces the API's response rather than failing silently.
-async function newShellWindow() {
-    try {
-        const res = await api('/api/agents/spawn', { method: 'POST' });
-        if (res && res.ok) { setAgentsCache([]); refreshSidebar(); }
-        else alert((res && res.error) || 'Could not spawn a window (enable terminals, or use tmux directly).');
-    } catch (e) {
-        alert('Could not spawn a window (enable terminals, or use tmux directly).');
-    }
-}
-
-// New session → Sandboxed (CMX-403): a window running the container launcher
-// (chela.share_sandbox) — the only kind of window a share guest may type into. Asks
-// for the project directory, pre-filled with the most recent launch target; the server
-// refuses $HOME, secret dirs, or a host without docker/image/token, and says why.
-// `web` (CMX-418, the "· allow web access…" entry) opts THIS session into web access:
-// public hosts only, through the filtering egress proxy — confirmed before launch.
-async function newSandboxedSession(web) {
-    web = web === true;
-    const recent = (_launcherData.favorites || []).concat(_launcherData.recent || []);
-    const guess = recent.length ? recent[0].path : '';
-    const label = web ? 'Sandboxed session with WEB ACCESS' : 'Sandboxed session';
-    const cwd = (window.prompt(label + ': project directory (the guest sees ONLY this):', guess) || '').trim();
-    if (!cwd) return;
-    if (web && !window.confirm('Allow web access for this session?\n\n'
-            + 'It can fetch any PUBLIC web page (never your host or LAN), rate-limited, and every '
-            + 'request is logged. A web page can also make it SEND workspace contents to a public '
-            + 'site, so keep only the guest\'s own material in ' + cwd + '.')) return;
-    try {
-        const res = await api('/api/agents/spawn-sandboxed', {
-            method: 'POST', headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(web ? { cwd, web: true } : { cwd }),
-        });
-        if (!res || !res.ok) { alert('Sandboxed session refused: ' + ((res && res.error) || 'unknown error')); return; }
-        setAgentsCache([]);
-        selectView('terminals');
-        refreshSidebar();
-        refreshLauncher();
-    } catch (e) {
-        alert('Sandboxed session failed: ' + e);
-    }
-}
-
-// Touch-friendly tooltips. Native `title` only surfaces on hover, so on a
-// phone the rate-limit pills (and any other titled pill) have no tooltip at
-// all. Tapping a titled element pops a floating bubble; tapping elsewhere or
-// after a few seconds dismisses it. Desktop hover still uses the native title.
-(function () {
-    let tipEl = null, hideTimer = null;
-
-    function hideTip() {
-        if (hideTimer) { clearTimeout(hideTimer); hideTimer = null; }
-        if (tipEl) { tipEl.remove(); tipEl = null; }
-    }
-
-    function showTip(target, text) {
-        hideTip();
-        tipEl = document.createElement('div');
-        tipEl.className = 'tap-tip';
-        tipEl.textContent = text;
-        document.body.appendChild(tipEl);
-        // Centred under the target — or above it when the target sits at the
-        // bottom of the screen (the sidebar foot's CPU/RAM/Disk readouts) —
-        // clamped to the viewport.
-        placePopover(tipEl, target, { gap: 6, align: 'center' });
-        hideTimer = setTimeout(hideTip, 4000);
-    }
-
-    // Only react to touch — desktop keeps the native hover tooltip. CRITICAL:
-    // never touch interactive controls. preventDefault() on touchend suppresses
-    // the follow-up click, so hijacking a tap on a button/link/onclick row (the
-    // hamburger, bell, gear, sidebar rows…) would silently kill its action. Bail
-    // on anything actionable and let the tap through; only non-interactive titled
-    // elements (e.g. the rate-limit pills) get the tap-tooltip.
-    document.addEventListener('touchend', function (e) {
-        if (e.target.closest('button, a, input, select, textarea, label, [onclick], [role="button"]')) {
-            hideTip();
-            return;
-        }
-        const el = e.target.closest('[title], [data-tip]');
-        if (!el) { hideTip(); return; }
-        const text = el.getAttribute('data-tip') || el.getAttribute('title');
-        if (!text) { hideTip(); return; }
-        e.preventDefault();
-        showTip(el, text);
-    }, { passive: false });
-
-    window.addEventListener('scroll', hideTip, true);
-})();
-
 // --- Command palette (⌘K / Ctrl-K) ----------------------------------------
 // One fuzzy jump-to for everything: agents (→ detail), views, project launches,
 // and a couple of global actions. The fastest way to navigate once you're past a
@@ -1888,7 +1651,8 @@ function _paletteItems(skipWids) {
         });
     }
 
-    if (TERMINALS_ON && typeof _launcherData !== 'undefined' && _launcherData) {
+    const _launcherData = launcher.get();
+    if (TERMINALS_ON && _launcherData) {
         const seen = new Set();
         [...(_launcherData.favorites || []), ...(_launcherData.recent || [])].forEach(e => {
             if (!e || seen.has(e.path)) return;
@@ -2139,8 +1903,8 @@ function closeShortcuts() {
 document.body.dataset.theme = localStorage.getItem('chela_theme') || 'dark';
 
 // --- Stage 0: ES-module exports ---
-export { closeShortcuts, openPalette, openShortcuts, renderAgentDetail, renderNav, selectView };
+export { closeShortcuts, openPalette, openShortcuts, renderNav, selectView };
 
 // --- Stage 0: window.chela — surface reachable from inline HTML handlers ---
 window.chela = window.chela || {};
-Object.assign(window.chela, { _updateFlowDeps, applyUpdate, clearSettingsSearch, closePalette, closeShortcuts, hideNewMenu, hidePrimaryMenu, newSandboxedSession, newShellWindow, openNewMenu, openNewMenuFromPrimary, openPalette, openPrimaryMenu, openShortcuts, _palRun, _renderPalette, saveDispatch, saveProjectsDir, saveTiming, selectAgent, setConcurrency, setTelegramDelete, deleteArchivedTopics, selectSettingsTab, selectView, setAgentModel, setAgentPermissionMode, setCollabName, setFileDrop, setRemoteControl, setRunToastsMuted, setShareTyping, setTermFont, setTermLatin, setTermSize, setTheme, settingsSearch, sidebarJumpInput, toggleSettings });
+Object.assign(window.chela, { _updateFlowDeps, applyUpdate, clearSettingsSearch, closePalette, closeShortcuts, openPalette, openShortcuts, _palRun, _renderPalette, saveDispatch, saveProjectsDir, saveTiming, selectAgent, setConcurrency, setTelegramDelete, deleteArchivedTopics, selectSettingsTab, selectView, setAgentModel, setAgentPermissionMode, setCollabName, setFileDrop, setRemoteControl, setRunToastsMuted, setApprovalNotify, setShareTyping, setTermFont, setTermLatin, setTermSize, setTheme, settingsSearch, sidebarJumpInput, toggleSettings });

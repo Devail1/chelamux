@@ -5,7 +5,7 @@ import { ICONS } from './icons';
 // their importers need no edit.
 import { ASSET_VERSION, BASE_PATH, BOOT, api, staticUrl } from '../../frontend/src/shared/api';
 import { onEvent } from '../../frontend/src/shared/events';
-import { relativeTime, shortTime } from '../../frontend/src/shared/format';
+import { ageStr, relativeTime, shortTime } from '../../frontend/src/shared/format';
 import { agents as agentsStore } from '../../frontend/src/shared/store/agents';
 import { view as viewStore } from '../../frontend/src/shared/store/view';
 
@@ -113,7 +113,6 @@ const REFRESH_MS = 30000;
 // is 'work' until one is selected (boot.ts selects the Wall when TERMINALS_ON).
 let currentTab = viewStore.get();
 viewStore.subscribe(() => { currentTab = viewStore.get(); });
-let msgTargetAgent = '';
 let _agentsCache = agentsStore.get();
 agentsStore.subscribe(() => { _agentsCache = agentsStore.get(); });
 // The window set changed (an agent window appeared or vanished): any render refetches it.
@@ -145,14 +144,6 @@ function wantsHuman(a) {
 
 function $(sel) { return document.querySelector(sel); }
 function $$(sel) { return document.querySelectorAll(sel); }
-
-function ageStr(seconds) {
-    if (seconds == null) return 'never';
-    if (seconds < 60) return Math.round(seconds) + 's ago';
-    if (seconds < 3600) return Math.round(seconds / 60) + 'm ago';
-    if (seconds < 86400) return Math.round(seconds / 3600) + 'h ago';
-    return Math.round(seconds / 86400) + 'd ago';
-}
 
 function escHtml(s) {
     if (s == null) return '';
@@ -270,7 +261,6 @@ document.addEventListener('click', e => {
 
 // --- Stage 0: setters for cross-module mutable state (imported bindings are read-only) ---
 function setCurrentTab(v) { viewStore.set(v); }
-function setMsgTarget(v) { msgTargetAgent = v; }
 // The agents store is typed Agent[]: a failed fetch's non-array body caches [].
 function setAgentsCache(v) { agentsStore.set(Array.isArray(v) ? v : []); }
 
@@ -282,7 +272,7 @@ function publish(name, value) {
 }
 
 // --- Stage 0: ES-module exports ---
-export { $, $$, ASSET_VERSION, BASE_PATH, REFRESH_MS, TERMINALS_ON, WALL_TILE_DISPATCHED, _agentProject, _agentsCache, ageStr, agentDotColor, api, attrEsc, closeModal, currentTab, escHtml, icon, lucideIcon, msgTargetAgent, publish, relativeTime, setAgentsCache, setCurrentTab, setMsgTarget, shortTime, showModal, staticUrl, updateTabSignal, wantsHuman };
+export { $, $$, ASSET_VERSION, BASE_PATH, REFRESH_MS, TERMINALS_ON, WALL_TILE_DISPATCHED, _agentProject, _agentsCache, ageStr, agentDotColor, api, attrEsc, closeModal, currentTab, escHtml, icon, lucideIcon, publish, relativeTime, setAgentsCache, setCurrentTab, shortTime, showModal, staticUrl, updateTabSignal, wantsHuman };
 
 // --- Stage 0: window.chela — surface reachable from inline HTML handlers ---
 window.chela = window.chela || {};

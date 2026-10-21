@@ -1,6 +1,13 @@
 import { act } from 'react';
-import { expect, test, vi } from 'vitest';
+import { afterEach, expect, test, vi } from 'vitest';
 import { boot } from './islands.tsx';
+
+// Each test resets document.body. A dialog left open keeps its portal there; the reset
+// orphans it and a later commit that removes it throws (NotFoundError). So none stays open.
+const escape = () => act(async () => document.activeElement?.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true })));
+afterEach(() => {
+  expect(document.querySelector('[role="dialog"]')).toBeNull();
+});
 
 test('boot installs the bridge and mounts the version island into #version-island', async () => {
   vi.stubGlobal('fetch', () => Promise.resolve({ ok: true, json: () => Promise.resolve({ version: 'v9' }) }));
@@ -44,7 +51,32 @@ test('boot mounts the Work view (Board, Runs, Schedules), its toasts and the New
   const { openNewTask } = await import('./features/newtask/index.ts');
   await act(async () => openNewTask());
   expect(document.querySelector('[role="dialog"] h3')?.textContent).toBe('New task');
+  await escape();
   await act(async () => work.set(null));
+  vi.unstubAllGlobals();
+});
+
+test('boot mounts the chrome into its slots (CMX-219): pills, gear, New session, the "+", detail, overlays', async () => {
+  vi.stubGlobal('fetch', () => Promise.resolve({ ok: true, json: () => Promise.resolve({}) }));
+  document.body.innerHTML = ['sidebar-new-island', 'sessions-count-island', 'resources-island', 'primary-menu-island', 'new-fab-island',
+    'status-health-island', 'access-req-island', 'approvals-island', 'term-approvals-island'].map((id) => `<span id="${id}"></span>`).join('')
+    + '<div id="agent-detail"></div><div id="overlays-island"></div>';
+  Reflect.deleteProperty(window, 'chelaBridge');
+  await act(async () => boot(window));
+  const inSlot = (slot: string, sel: string) => document.querySelector(`#${slot} ${sel}`) !== null;
+  expect([
+    inSlot('sidebar-new-island', '.sidebar-new-btn'), inSlot('sessions-count-island', '#hdr-agents'), inSlot('resources-island', '#resources-strip'),
+    inSlot('primary-menu-island', '#btn-primary-menu'), inSlot('new-fab-island', '#btn-new-mobile'), inSlot('status-health-island', '#status-health-warn'),
+    inSlot('access-req-island', '#btn-access-req'), inSlot('approvals-island', '#btn-approvals'), inSlot('term-approvals-island', '#term-approvals'),
+  ]).toEqual(Array(9).fill(true));
+  const { detailAgent } = await import('./features/agentdetail/index.ts');
+  await act(async () => detailAgent.set('nobody'));
+  expect(document.querySelector('#agent-detail .detail-title')?.textContent).toBe('nobody');
+  await act(async () => detailAgent.set(null));
+  const { openSendMsg } = await import('./features/agentdetail/index.ts');
+  await act(async () => openSendMsg('w1'));
+  expect(document.querySelector('[role="dialog"] h3')?.textContent).toBe('Send Message to w1');
+  await escape();
   vi.unstubAllGlobals();
 });
 

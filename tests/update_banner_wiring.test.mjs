@@ -7,7 +7,7 @@
 import { beforeAll, test } from 'vitest';
 import assert from 'node:assert/strict';
 import { JSDOM } from 'jsdom';   // needs `pnpm install` — tests/test_js_suites.py enforces it
-import { bootBlock } from './js_helpers/dashboard_dom.mjs';
+import { bootBlock, exposeDomConstructors, mountIslands } from './js_helpers/dashboard_dom.mjs';
 
 const PAGE_VERSION = 'aaaaaaaaaaaa';     // what index.html was rendered with
 const SERVER_VERSION = 'bbbbbbbbbbbb';   // what the restarted dashboard now reports
@@ -27,7 +27,8 @@ const PANEL = `
 <section class="side-section" id="side-decisions">
   <div id="decisions-chip"></div>
   <div class="decisions-list" id="decisions-list"></div>
-</section>`;
+</section>
+<div id="overlays-island"></div>`;
 
 const AGENTS = [
     { name: 'shell', window_id: '@1', online: true },
@@ -93,6 +94,9 @@ beforeAll(async () => {
     globalThis.window.chela = globalThis.window.chela || {};
     globalThis.setInterval = () => 0;
 
+    // CMX-219: the banner is the update island's (features/update), mounted as the page does
+    exposeDomConstructors(dom.window);
+    await mountIslands(dom.window);
     await import('../chela/dashboard/frontend/src/boot.ts');
     // refresh() awaits a chain of polls before the version check; let them all settle.
     for (let i = 0; i < 20 && !document.getElementById('update-banner'); i++) {

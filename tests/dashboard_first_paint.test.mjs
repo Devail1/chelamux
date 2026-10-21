@@ -4,7 +4,7 @@
 //
 //   1. the Wall toolbar row (CMX-135): no "+ New shell" in it any more — the
 //      New menu is the one place a shell starts — and its in-row pill copies
-//      ship empty: #term-approvals [hidden], #term-shares as an empty island slot
+//      ship empty: #term-approvals and #term-shares as empty island slots
 //      (CMX-240), so neither paints before the modules have counted anything.
 //   2. the collapsed desktop sidebar — nav.js restores it, but as a module it
 //      runs late; index.html's inline <body> script must restore it first.
@@ -49,9 +49,10 @@ test('the Wall toolbar renders no "+ New shell" button (CMX-135)', () => {
 for (const [name, vp] of [['@390', PHONE], ['@1440', DESKTOP]]) {
     test(`${name} before any JS: neither in-row pill paints`, () => {
         const dom = toolbarDom(vp);
-        const approvals = dom.window.document.getElementById('term-approvals');
-        assert.ok(approvals, '#term-approvals is missing from index.html');
-        assert.equal(dom.window.getComputedStyle(approvals).display, 'none', `#term-approvals paints before JS at ${name}`);
+        // CMX-219: #term-approvals is the approvals island's: before JS its slot draws nothing
+        const approvals = dom.window.document.getElementById('term-approvals-island');
+        assert.ok(approvals, '#term-approvals-island is missing from index.html');
+        assert.equal(approvals.childNodes.length, 0, `#term-approvals-island has content before JS at ${name}`);
         // CMX-240: #term-shares is the share feature's pill island; before JS its slot is
         // empty and draws no box of its own.
         const slot = dom.window.document.getElementById('shares-pill-row');

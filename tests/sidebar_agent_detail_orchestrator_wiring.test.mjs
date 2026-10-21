@@ -1,23 +1,15 @@
-// CMX-300 rework round 1 (PR #374, judge finding 1, WIRING): onOrchestratorChange
-// (nav.js:447-450) has TWO effects — `renderSidebarAgents(_agentsCache || [])`
-// AND, when a detail panel is open, `renderAgentDetail()`. tests/sidebar.test.mjs
-// closes the FIRST half (the sidebar badge) but can't reach the second one there:
-// with TERMINALS_ON true (that file's boot config), `selectAgent` on ANY
-// window-id'd agent always routes to the wall (terminals.js's focusPaneByWid ->
-// selectView('terminals')) and never falls through to showAgentDetail —
-// nav.js:140-151's own comment says so, and 'orchestrator' role requires
-// `a.window_id` (nav.js:229), so a window-id-LESS agent (the only kind whose
-// detail panel IS reachable there) can never actually become Orchestrator either.
+// CMX-300 rework round 1 (PR #374, judge finding 1, WIRING): onOrchestratorChange (nav.js)
+// has TWO effects: `renderSidebarAgents(_agentsCache || [])` AND a redraw of the open agent
+// detail (its Role row; the agent-detail island since CMX-219, redrawn by
+// `redrawAgentDetail()`). tests/sidebar.test.mjs closes the FIRST half (the sidebar badge) but
+// can't reach the second there: with terminals on, `selectAgent` on a window-id'd agent always
+// routes to the Wall, and 'orchestrator' role requires `a.window_id`.
 //
-// A terminals-OFF deployment is the one real configuration where BOTH are true at
-// once: `selectAgent` always falls through to showAgentDetail (TERMINALS_ON is
-// false, so the wall-focus branch never applies — see nav.js:152), and a
-// window-id'd agent can still hold the orchestrator slot. This file boots exactly
-// that (same recipe as tests/dashboard_default_view.test.mjs), opens the detail
-// panel for a window-id'd agent, and proves its Role row updates off the REAL
-// onOrchestratorChange listener with no renderAgentDetail() call from the test
-// itself — dead-coding that half of the listener body goes red here even when
-// the sidebar-only guard in sidebar.test.mjs would not catch it.
+// A terminals-OFF deployment is the one real configuration where BOTH are true at once:
+// `selectAgent` always falls through to showAgentDetail, and a window-id'd agent can still hold
+// the orchestrator slot. This file boots exactly that, opens the detail for a window-id'd
+// agent, and proves its Role row updates off the REAL onOrchestratorChange listener with no
+// redraw from the test itself.
 //
 // Run: pnpm exec vitest run tests/sidebar_agent_detail_orchestrator_wiring.test.mjs
 // (pytest via tests/test_js_suites.py; needs `pnpm install` for jsdom).
@@ -35,7 +27,6 @@ const BODY = `
       <div class="side-list" id="side-nav"></div>
     </section>
     <section class="side-section">
-      <span class="side-count" id="hdr-agents">-/-</span>
       <div class="side-list" id="sidebar-agents"><div class="side-empty">No agents</div></div>
     </section>
   </aside>
@@ -79,8 +70,6 @@ beforeAll(async () => {
     }));
     await flush();
     await flush();
-    if (!document.getElementById('hdr-next')) document.body.appendChild(document.createElement('span')).id = 'hdr-next';
-    if (!document.getElementById('hdr-updated')) document.body.appendChild(document.createElement('span')).id = 'hdr-updated';
 });
 
 function _detailRowValue(key) {
@@ -94,6 +83,7 @@ test('an OPEN agent-detail panel updates its Role row off the real onOrchestrato
     globalThis.fetch = () => Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve([]) });
     try {
         window.chela.selectAgent('cmx300-detail-wired');   // terminals off -> always showAgentDetail
+        await flush();
     } finally {
         globalThis.fetch = prevFetch;
     }
@@ -101,14 +91,16 @@ test('an OPEN agent-detail panel updates its Role row off the real onOrchestrato
         'agent-detail did not start as Plain session before the window ever held the inbox slot');
 
     // The ONLY thing that happens next is the real subscribe round trip — no
-    // renderAgentDetail()/renderSidebarAgents() call from the test itself.
+    // redraw call from the test itself.
     await orchestrator.orchestratorSubscribe('@2');
+    await flush();
     assert.equal(_detailRowValue('Role'), 'Orchestrator',
         'the OPEN agent-detail panel did not update off the real subscribe round trip — ' +
-        'onOrchestratorChange did not call renderAgentDetail()');
+        'onOrchestratorChange did not redraw the agent detail');
 
     await orchestrator.orchestratorRelease('@2');
+    await flush();
     assert.equal(_detailRowValue('Role'), 'Plain session',
         'the OPEN agent-detail panel did not revert off the real release round trip — ' +
-        'onOrchestratorChange did not call renderAgentDetail() on release either');
+        'onOrchestratorChange did not redraw the agent detail on release either');
 });

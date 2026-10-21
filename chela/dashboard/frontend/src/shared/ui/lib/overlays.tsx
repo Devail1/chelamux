@@ -8,7 +8,7 @@ import * as RP from '@radix-ui/react-popover';
 import * as RToast from '@radix-ui/react-toast';
 import * as RT from '@radix-ui/react-tooltip';
 import { Check, ChevronRight, X, type LucideIcon } from 'lucide-react';
-import { useLayoutEffect, useRef, type ReactElement, type ReactNode, type SyntheticEvent } from 'react';
+import { useLayoutEffect, useMemo, useRef, type ReactElement, type ReactNode, type RefObject, type SyntheticEvent } from 'react';
 
 const cx = (...names: (string | false | undefined)[]) => names.filter(Boolean).join(' ');
 
@@ -129,6 +129,45 @@ export function Dialog({
 /** Wrap a button in it to close the enclosing Dialog. */
 export const DialogClose = RD.Close;
 
+/**
+ * A Dialog in the safety sheets' look (.shares-backdrop / .shares-sheet, the approvals and
+ * access-request sheets): its title in the .ss-hd row beside a close button, then `children`.
+ * Same behaviour as Dialog (focus trap and return, Escape, outside click).
+ */
+export function Sheet({ open, onOpenChange, title, className, children }: Omit<DialogProps, 'description' | 'hideTitle'>) {
+  const opener = useRef<Element | null>(null);
+  // remembered as it opens, as Dialog does
+  useLayoutEffect(() => {
+    if (open) opener.current = openerNow();
+  }, [open]);
+  if (!title.trim()) throw new Error('<Sheet> needs a title: it is the dialog\'s accessible name');
+  return (
+    <RD.Root open={open} onOpenChange={onOpenChange}>
+      <RD.Portal>
+        <RD.Overlay className="shares-backdrop">
+          <RD.Content className={cx('shares-sheet', className)} aria-describedby={undefined}
+            onCloseAutoFocus={(e) => {
+              if (opener.current instanceof HTMLElement && opener.current.isConnected) {
+                e.preventDefault();
+                opener.current.focus();
+              }
+            }}>
+            <div className="ss-hd">
+              <RD.Title asChild>
+                <span>{title}</span>
+              </RD.Title>
+              <RD.Close className="ss-close" aria-label="Close">
+                <X size={14} aria-hidden />
+              </RD.Close>
+            </div>
+            {children}
+          </RD.Content>
+        </RD.Overlay>
+      </RD.Portal>
+    </RD.Root>
+  );
+}
+
 export type PopoverProps = {
   /** The control it anchors to: one element that takes a ref (a Button, an IconButton). */
   trigger: ReactElement;
@@ -147,6 +186,51 @@ export function Popover({ trigger, children, open, onOpenChange, align = 'end', 
       <RP.Trigger asChild>{trigger}</RP.Trigger>
       <RP.Portal>
         <RP.Content className={cx('popover ui-floating', className)} aria-label={label} side="bottom" align={align} sideOffset={GAP} collisionPadding={MARGIN}>
+          {children}
+        </RP.Content>
+      </RP.Portal>
+    </RP.Root>
+  );
+}
+
+export type AnchoredPopoverProps = Omit<PopoverProps, 'trigger' | 'open' | 'onOpenChange'> & {
+  /** The element it hangs off; null = closed. One popover can open from several controls. */
+  anchor: HTMLElement | null;
+  onClose: () => void;
+};
+
+/**
+ * A Popover with no trigger of its own: it opens at whichever element `anchor` names (the
+ * launch menu opens from the sidebar button, the phone "+" and the gear menu's New...).
+ * An outside click or Escape closes it; focus leaving it does not (the control that opened
+ * it may take focus back after the popover appears).
+ */
+export function AnchoredPopover({ anchor, onClose, children, align = 'end', className, label }: AnchoredPopoverProps) {
+  // Radix measures a virtual anchor through a ref-shaped object
+  const ref = useMemo(() => ({ current: anchor }), [anchor]);
+  // no Trigger for Radix to return focus to: the last anchor gets it back
+  const last = useRef<HTMLElement | null>(null);
+  useLayoutEffect(() => {
+    if (anchor) last.current = anchor;
+  }, [anchor]);
+  return (
+    <RP.Root open={!!anchor} onOpenChange={(o) => {
+        if (!o) onClose();
+      }}>
+      <RP.Anchor virtualRef={ref as RefObject<HTMLElement>} />
+      <RP.Portal>
+        <RP.Content className={cx('popover ui-floating', className)} aria-label={label} side="bottom" align={align} sideOffset={GAP} collisionPadding={MARGIN}
+          onFocusOutside={(e) => e.preventDefault()}
+          onCloseAutoFocus={(e) => {
+            if (last.current?.isConnected) {
+              e.preventDefault();
+              last.current.focus();
+            }
+          }}
+          onInteractOutside={(e) => {
+            // a click on the control that opened it reopens it there, not close-then-open
+            if (anchor && e.target instanceof Node && anchor.contains(e.target)) e.preventDefault();
+          }}>
           {children}
         </RP.Content>
       </RP.Portal>
@@ -217,6 +301,8 @@ export type MenuProps = {
   /** Controlled open state, for a menu that also opens another way (a right-click). */
   open?: boolean;
   onOpenChange?: (open: boolean) => void;
+  /** Read-only content under the items (the gear menu's usage readouts). */
+  footer?: ReactNode;
 };
 
 // A portal still bubbles React events up the React tree: a pick inside the menu must not
@@ -229,17 +315,20 @@ const containContext = (e: SyntheticEvent) => {
 };
 
 /** A dropdown menu, named by its trigger: arrow keys move, Enter picks, typing jumps, Escape closes. */
-export function Menu({ trigger, items, className, open, onOpenChange }: MenuProps) {
+export function Menu({ trigger, items, className, open, onOpenChange, footer }: MenuProps) {
+  // A trigger with an id of its own keeps it (Radix's would be overwritten), so name the menu by it.
+  const triggerId = (trigger.props as { id?: string }).id;
   return (
     <RM.Root open={open} onOpenChange={onOpenChange}>
       <RM.Trigger asChild>{trigger}</RM.Trigger>
       <RM.Portal>
         <RM.Content className={cx('popover overflow-menu ui-floating', className)} align="end" sideOffset={GAP} collisionPadding={MARGIN}
-          onClick={contain} onContextMenu={containContext}>
+          onClick={contain} onContextMenu={containContext} {...(triggerId ? { 'aria-labelledby': triggerId } : {})}>
           {items.map((it, i) =>
             // keyed by label too: a new page's items are new nodes, so refocus() sees focus leave
             it === 'separator' ? <RM.Separator key={i} className="popover-sep" /> : <MenuEntry key={`${i}:${it.label}`} it={it} />,
           )}
+          {footer}
         </RM.Content>
       </RM.Portal>
     </RM.Root>

@@ -3,17 +3,9 @@
 // the others' `let`s in their temporal dead zone. Each feature registers its own refresh lane
 // and SSE handlers at import (shared/scheduler, shared/events), so this file only starts them.
 import { REFRESH_MS } from '../../static/js/util';
-import '../../static/js/header';
-import '../../static/js/agents';
 import { renderNav, selectView } from '../../static/js/nav';
-import '../../static/js/launcher';
 import { VIEWS } from '../../static/js/views';
 import { findView } from '../../static/js/viewreg';
-import '../../static/js/resources';
-import '../../static/js/statushealth';
-import '../../static/js/version';
-import '../../static/js/accessreq';
-import '../../static/js/approvals';
 import { startShares } from './features/share/index.ts';
 import { BOOT } from './shared/api/index.ts';
 import { openEvents } from './shared/events/index.ts';

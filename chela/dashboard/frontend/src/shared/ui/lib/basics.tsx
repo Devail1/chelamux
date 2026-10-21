@@ -27,6 +27,14 @@ export function IconButton({ label, type = 'button', ...rest }: ButtonHTMLAttrib
 }
 
 /**
+ * A row of a popover list (.popover-item): a real button, so the keyboard reaches it, drawn as
+ * the legacy menus' rows. Its text is its name; `className` adds to the row's classes.
+ */
+export function ItemButton({ className, type = 'button', ...rest }: ButtonHTMLAttributes<HTMLButtonElement>) {
+  return <button type={type} className={['popover-item', className].filter(Boolean).join(' ')} {...rest} />;
+}
+
+/**
  * A text control drawn by its own `className` (a filter pill, a segment, a card's action), not
  * the .btn look. `aria-pressed` makes it a toggle.
  */

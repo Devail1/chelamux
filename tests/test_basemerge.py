@@ -11,7 +11,7 @@ from pathlib import Path
 
 import pytest
 
-from chela import basemerge, dispatcher, judge
+from chela import basemerge, dispatcher, generated, judge
 from tests.test_dispatcher_ci import _FakeGh, _row, _tick, _wf
 
 PYTEST = f"{sys.executable} -m pytest -q -p no:cacheprovider"
@@ -381,3 +381,230 @@ def test_a_clean_merge_with_no_targeted_tests_says_so(tmp_path, tried):
     _tick(wf, fake)
     assert any("(no targeted tests ran; CI gates it)" in c for c in fake.comments)
     assert not any("0 targeted" in c for c in fake.comments)
+
+
+# --- 🏭 CMX-300: a conflict only in the generated bundle is rebuilt, not sent back -------
+
+APP = "chela/dashboard/static/app"
+
+
+def _bundle(name: str) -> dict[str, str]:
+    return {f"{APP}/manifest.json": f'{{"src/main.tsx": {{"file": "assets/{name}"}}}}\n',
+            f"{APP}/assets/{name}": f"// {name}\n"}
+
+
+def _rebundle(repo, name: str, files: dict[str, str], msg: str) -> str:
+    """Commit ``files`` with the bundle renamed to ``name``, the way a port PR's rebuild does."""
+    old = _g(repo, "ls-files", f"{APP}/assets").splitlines()
+    _g(repo, "rm", "-q", *old)
+    return _commit(repo, {**files, **_bundle(name)}, msg)
+
+
+@pytest.fixture
+def bx(tmp_path):
+    """origin `dev` with a bundle; PR `feat` changed `src/a.ts` and rebuilt; then `dev` changed
+    `src/b.ts` and rebuilt too ⇒ they conflict on the bundle ONLY."""
+    origin, repo = tmp_path / "origin.git", tmp_path / "repo"
+    _g(tmp_path, "init", "-q", "--bare", "-b", "dev", str(origin))
+    _g(tmp_path, "clone", "-q", "-c", "user.name=t", "-c", "user.email=t@example.com",
+       str(origin), str(repo))
+    _commit(repo, {"src/a.ts": "a\n", "src/b.ts": "b\n", "mod.py": MOD, **_bundle("main-0.js")},
+            "base")
+    _g(repo, "push", "-q", "origin", "dev")
+    _g(repo, "checkout", "-qb", "feat")
+    head = _rebundle(repo, "main-PR.js", {"src/a.ts": "a2\n"}, "pr")
+    _g(repo, "push", "-q", "origin", "feat")
+    _g(repo, "checkout", "-q", "dev")
+    base = _rebundle(repo, "main-DEV.js", {"src/b.ts": "b2\n"}, "dev moved")
+    _g(repo, "push", "-q", "origin", "dev")
+    return repo, head, base
+
+
+@pytest.fixture
+def steps(monkeypatch):
+    """The rebuild steps, faked: each call recorded; the build step writes ``main-NEW.js``."""
+    calls, answer = [], {"fail": None, "write": _bundle("main-NEW.js")}
+
+    def step(wt, argv, timeout):
+        calls.append((Path(wt).name, argv, timeout))
+        if answer["fail"] == argv:
+            return 1, "vite: boom"
+        if argv[-1] == "build":
+            for rel, text in answer["write"].items():
+                (Path(wt) / rel).parent.mkdir(parents=True, exist_ok=True)
+                (Path(wt) / rel).write_text(text)
+        return 0, ""
+    monkeypatch.setattr(basemerge, "_step", step)
+    return calls, answer
+
+
+def test_a_conflict_only_in_the_bundle_is_rebuilt_checked_and_pushed(bx, steps):
+    repo, head, base = bx
+    calls, _ = steps
+
+    res = basemerge.attempt(repo, "feat", "dev", "")
+
+    assert res["outcome"] == "rebuilt" and res["files"] == []
+    assert [c[1] for c in calls] == [("pnpm", "install", "--frozen-lockfile"),
+                                     ("pnpm", "-C", "chela/dashboard/frontend", "build"),
+                                     (sys.executable, "chela/dashboard/frontend_build.py")]
+    assert {c[0] for c in calls} == {"wt"}
+    merge = res["merge_sha"]
+    assert _origin_feat(repo) == merge
+    assert _g(repo, "rev-parse", f"{merge}^@").split() == [head, base]
+    assert _g(repo, "log", "-1", "--format=%s", merge) == "Merge origin/dev; rebuild generated bundle"
+    assert _g(repo, "ls-tree", "-r", "--name-only", merge, APP).splitlines() == [
+        f"{APP}/assets/main-NEW.js", f"{APP}/manifest.json"]
+    assert _g(repo, "show", f"{merge}:src/a.ts") == "a2"            # the PR's source, kept
+    assert _g(repo, "show", f"{merge}:src/b.ts") == "b2"            # and the base's
+    assert len(_g(repo, "worktree", "list").splitlines()) == 1
+
+
+def test_a_rebuilt_merge_runs_the_targeted_tests_and_a_red_one_is_not_pushed(bx, steps,
+                                                                            monkeypatch):
+    repo, head, _ = bx
+    ran = []
+    monkeypatch.setattr(basemerge, "targeted_tests", lambda wt, touched: ["tests/test_mod.py"])
+    monkeypatch.setattr(judge, "run_suite", lambda c, cwd, timeout: ran.append(c) or _BOOM)
+    res = basemerge.attempt(repo, "feat", "dev", PYTEST)
+    assert (res["outcome"], ran, _origin_feat(repo)) == (
+        "red", [f"{PYTEST} tests/test_mod.py"], head)
+
+
+def test_a_source_conflict_beside_the_bundle_one_is_sent_back_and_never_rebuilt(bx, steps):
+    repo, head, _ = bx
+    calls, _ = steps
+    _g(repo, "checkout", "-q", "feat")
+    head = _commit(repo, {"mod.py": MOD.replace("return 2", "return 3")}, "pr 2")
+    _g(repo, "push", "-q", "origin", "feat")
+    _dev(repo, {"mod.py": MOD.replace("return 2", "return 4")})
+
+    res = basemerge.attempt(repo, "feat", "dev", "")
+
+    assert res["outcome"] == "conflict" and "mod.py" in res["files"]
+    assert any(f.startswith(APP) for f in res["files"])
+    assert (calls, _origin_feat(repo)) == ([], head)
+
+
+@pytest.mark.parametrize("failing", [s[0] for s in basemerge.REBUILD_STEPS],
+                         ids=["install", "build", "stale-check"])
+def test_a_failed_rebuild_step_is_sent_back_with_its_error_and_nothing_pushed(bx, steps, failing):
+    repo, head, _ = bx
+    calls, answer = steps
+    answer["fail"] = failing
+
+    res = basemerge.attempt(repo, "feat", "dev", "")
+
+    assert res["outcome"] == "build_failed" and res["merge_sha"] is None
+    assert res["detail"] == f"`{' '.join(failing)}` exited 1:\nvite: boom"
+    assert f"{APP}/manifest.json" in res["files"]
+    assert calls[-1][1] == failing
+    assert _origin_feat(repo) == head
+    assert len(_g(repo, "worktree", "list").splitlines()) == 1
+
+
+@pytest.mark.parametrize("write, why", [
+    ({**_bundle("main-NEW.js"), "src/a.ts": "rewritten\n"}, "changed outside the bundle:\nsrc/a.ts"),
+    ({**_bundle("main-NEW.js"), "stray.txt": "x\n"}, "changed outside the bundle:\nstray.txt"),
+    ({}, f"wrote no {APP}/manifest.json"),
+    ({f"{APP}/assets/main-NEW.js": "x\n"}, f"wrote no {APP}/manifest.json"),
+])
+def test_a_rebuild_that_strays_or_writes_nothing_is_a_build_failure(bx, steps, write, why):
+    repo, head, _ = bx
+    _, answer = steps
+    answer["write"] = write
+    res = basemerge.attempt(repo, "feat", "dev", "")
+    assert res["outcome"] == "build_failed" and res["detail"].endswith(why)
+    assert _origin_feat(repo) == head
+
+
+def test_the_rebuild_steps_are_install_build_and_the_stale_asset_check():
+    assert basemerge.BUNDLE_DIR == "chela/dashboard/static/app"
+    assert generated.is_rebuilt(f"{basemerge.BUNDLE_DIR}/manifest.json")   # one scope, both
+    assert basemerge.REBUILD_STEPS == (
+        (("pnpm", "install", "--frozen-lockfile"), 600),
+        (("pnpm", "-C", "chela/dashboard/frontend", "build"), 300),
+        ((sys.executable, "chela/dashboard/frontend_build.py"), 600))
+
+
+def test_a_step_runs_its_argv_in_the_worktree_without_a_leaked_node_ipc_fd(monkeypatch,
+                                                                          tmp_path):
+    seen = []
+    monkeypatch.setenv("NODE_CHANNEL_FD", "3")
+    monkeypatch.setenv("KEEP_ME", "1")
+    monkeypatch.setattr(basemerge.subprocess, "run", lambda argv, **k: seen.append((argv, k))
+                        or subprocess.CompletedProcess(argv, 2, "out\n", "err\n"))
+    assert basemerge._step(tmp_path, ("pnpm", "build"), 42) == (2, "out\nerr\n")
+    (argv, kw), = seen
+    assert argv == ["pnpm", "build"]
+    assert (kw["cwd"], kw["timeout"], kw["capture_output"], kw["text"]) == (
+        str(tmp_path), 42, True, True)
+    assert "NODE_CHANNEL_FD" not in kw["env"] and kw["env"]["KEEP_ME"] == "1"
+
+
+def test_a_step_that_times_out_is_a_failed_step(monkeypatch, tmp_path):
+    exc = subprocess.TimeoutExpired("pnpm", 1)
+
+    def boom(*a, **k):
+        raise exc
+    monkeypatch.setattr(basemerge.subprocess, "run", boom)
+    assert basemerge._step(tmp_path, ("pnpm",), 1) == (-1, str(exc))
+
+
+def test_a_step_that_cannot_start_is_unmeasured_not_the_agents_build(monkeypatch, tmp_path):
+    def boom(*a, **k):
+        raise FileNotFoundError("no pnpm")
+    monkeypatch.setattr(basemerge.subprocess, "run", boom)
+    with pytest.raises(RuntimeError, match="`pnpm install` could not start: no pnpm"):
+        basemerge._step(tmp_path, ("pnpm", "install"), 1)
+
+
+def test_a_rebuild_step_that_cannot_start_raises_and_pushes_nothing(bx, monkeypatch):
+    repo, head, _ = bx
+    real = subprocess.run
+    monkeypatch.setattr(basemerge.subprocess, "run", lambda argv, **k: (
+        (_ for _ in ()).throw(FileNotFoundError("no pnpm")) if argv[0] == "pnpm"
+        else real(argv, **k)))
+    with pytest.raises(RuntimeError, match="could not start"):
+        basemerge.attempt(repo, "feat", "dev", "")
+    assert _origin_feat(repo) == head
+    assert len(_g(repo, "worktree", "list").splitlines()) == 1
+
+
+def test_the_build_failed_body_names_the_files_and_fences_the_build_error():
+    res = {"base_sha": "abcdef1234567890", "files": [f"{APP}/manifest.json"],
+           "detail": "x ``` y", "outcome": "build_failed"}
+    body = basemerge.rework_body(res, "dev")
+    assert ("Conflict with base after `abcdef123456` merged, only in the generated bundle, but "
+            "rebuilding it on the merge failed: merge origin/dev, rebuild and fix the build"
+            ) in body
+    assert f"- `{APP}/manifest.json`\n" in body and "\n````\nx ``` y\n````\n" in body
+    assert "not charged" in body and "targeted tests" not in body
+
+
+def test_a_rebuilt_merge_is_recorded_on_the_pr_as_rebuilt_and_not_sent_back(tmp_path, tried):
+    _, answer = tried
+    answer["res"] = {**_result("merged", files=[]), "outcome": "rebuilt"}
+    wf, fake = _setup(tmp_path, pr_mergeable="CONFLICTING")
+
+    summary = _tick(wf, fake)
+
+    assert (summary["base_merged"], summary["base_conflict"]) == (1, 0)
+    run = dispatcher.resolve_run("abc123")
+    assert (run["status"], run["rework_count"], run["conflict_sha"]) == (
+        "awaiting_review", 0, "deadbee1")
+    assert any("Base merged automatically (it conflicted only in the generated bundle, so the "
+               "bundle was rebuilt from the merged source and passed the stale-asset check): "
+               "origin/dev `bbbbbbbbbbbb` → merge commit `mmmmmmmmmmmm`" in c
+               for c in fake.comments)
+
+
+def test_a_failed_rebuild_reworks_free_with_the_build_error(tmp_path, tried):
+    _, answer = tried
+    answer["res"] = {**_result("build_failed"), "detail": "vite: boom"}
+    wf, fake = _setup(tmp_path, pr_mergeable="CONFLICTING")
+    assert _tick(wf, fake)["base_conflict"] == 1
+    run = dispatcher.resolve_run("abc123")
+    verdict = dispatcher.latest_verdict(run)
+    assert run["conflict_reworks"] == 1 and "rebuilding it on the merge failed" in verdict
+    assert "vite: boom" in verdict and not any("Base merged" in c for c in fake.comments)

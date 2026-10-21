@@ -30,8 +30,11 @@ any change under `src/` **or `static/js/`** (and the `static/collab/` modules it
 pnpm -C chela/dashboard/frontend build    # then commit static/app/ with your change
 ```
 
-The bundle's name is a content hash, so a rebuild renames it: update `BUNDLE` in
-`tests/test_frontend_build.py` to the new name.
+The bundle's name is a content hash, so a rebuild renames it; nothing pins the name (the
+manifest names it). When two PRs both rebuilt it, the second one conflicts with the base only
+on `static/app/`: the dispatcher's base merge (CMX-300, `chela/basemerge.py`) then rebuilds
+the bundle on the merge, runs the stale-asset check and pushes it, instead of sending the PR
+back. A conflict on any other file, or a rebuild that fails, is still sent back.
 
 What each test suite runs: the `tests/browser/` Playwright suites load the **committed
 bundle** (what Flask serves), so they see a legacy edit only after the rebuild; the jsdom
@@ -71,6 +74,19 @@ mountIsland('version-island', VersionBadge, {});
 `mountIsland(id, Component, props)` (`src/shared/islands`) renders `<Component {...props} />`
 into `#id` and returns the React root, or `null` when the page has no such element.
 
+The page's chrome (CMX-219) mounts from `src/chrome.tsx`, which has no side effect at import so
+the jsdom suites can mount it on a page of their own: the safety float's pills, the sidebar's
+New session, agent count, resources strip and gear menu, the phone "+", the agent detail, and
+`Overlays` (one root for the launch menu, the send-message dialog, the approvals and
+access-request sheets and the update banner). An island that draws one control
+inside a legacy row renders into a `<span class="island-slot">` (`display: contents`), so the
+control lays out as the row's own child.
+
+When a ported surface needs something only legacy knows (the Wall, the view switch, the
+orchestrator slot), legacy hands it in at import, the way `work.js` hands `setWorkPoll` its poll:
+`nav.js` calls `setLauncherHost` and `setAgentDetailHost`. A legacy surface the island only
+opens (the palette, Settings, sharing) is looked up on `window.chela` at call time.
+
 Islands are a migration path, not the end state: each island is its own root, so context and
 portals do not cross between them. `FRONTEND_PORT_PLAN.md` §2.1 ends in one app shell.
 
@@ -97,7 +113,9 @@ Since CMX-217 the page's state is `src/shared/store/`, one file per slice (`view
 active view; `agents.ts`, the bridge's `agents` store; `work.ts`, the last `/api/dispatcher`
 payload, which `src/features/work`'s one poll (a scheduler lane, CMX-233) publishes and the Work
 view and New-task dialog read; they ask for a fresh poll with `refreshWork()`, CMX-231; `orchestrator.ts`, who holds the decisions
-inbox, read and written through `src/shared/orchestrator`, CMX-228). Legacy imports those objects through
+inbox, read and written through `src/shared/orchestrator`, CMX-228; `context.ts`, the last
+`/api/agents/context` rows, which the gear menu's usage readouts and the agent detail read,
+CMX-219). Legacy imports those objects through
 `util.js`, whose `currentTab` and `_agentsCache` are a facade over them: the store is the
 truth, the live bindings mirror it. `sidebarLayout` still goes through `window.chelaBridge`:
 
