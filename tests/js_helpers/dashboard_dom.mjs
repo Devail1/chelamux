@@ -23,7 +23,7 @@
 //     the REAL templates/index.html (byte-identical to what Flask serves),
 //     for callers that want their fixture to be the shipped markup instead of
 //     a hand-typed copy that can silently drift from it — the other half of
-//     the same "boundary a user reaches" gap (see tests/kanban_task_modal_wiring.test.mjs).
+//     the same "boundary a user reaches" gap (see tests/new_task.test.mjs).
 import { cpSync, readFileSync, symlinkSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
@@ -121,7 +121,7 @@ export function exposeDomConstructors(win) {
 
 /** CMX-276: what the page's React islands do before the legacy graph boots (index.html loads
  * them first): a bridge on `win`, the sidebar island drawing its #sidebar-agents, the diff
- * modal and keybar islands (CMX-237), the Work view's islands (CMX-231), and the Decisions and
+ * modal and keybar islands (CMX-237), the Work view and its toasts (CMX-233), and the Decisions and
  * task modal islands (CMX-228). From
  * src/, so a mutation of the TypeScript reaches every suite that boots the page. Each page
  * (window) gets its own bridge and root. A suite that hand-rolls its jsdom boot calls this
@@ -134,8 +134,8 @@ export async function mountIslands(win, src = SRC_URL) {
         const { mountIsland } = await import('../../chela/dashboard/frontend/src/shared/islands/index.tsx');
         mountIsland('diff-modal-island', DiffModal, {}, doc);
     }
-    // CMX-231: the Work view's Runs and Schedules segments and the New-task dialog.
-    for (const [id, feature, name] of [['work-runs', 'runs', 'Runs'], ['work-schedules', 'schedules', 'Schedules'],
+    // CMX-233: the Work view (Board, Runs, Schedules) and its toasts; CMX-231: the New-task dialog.
+    for (const [id, feature, name] of [['panel-work', 'work', 'WorkView'], ['work-toasts', 'work', 'WorkToasts'],
         ['newtask-island', 'newtask', 'NewTask']]) {
         if (!doc.getElementById(id)) continue;
         const mod = await import(`../../chela/dashboard/frontend/src/features/${feature}/index.ts`);
@@ -200,7 +200,7 @@ export function flush() {
  *   (nav.js's collapsed-sidebar read, for one) that only run once at import
  *   time, not on demand.
  * @param {(string|[string, string])[]} [extraModules] - dashboard module paths (relative to
- *   `chela/dashboard/static/js/`, e.g. `'kanban.js'`) to import AFTER
+ *   `chela/dashboard/static/js/`, e.g. `'launcher.js'`) to import AFTER
  *   the boot and return, keyed by their filename minus `.js`; or a `[name, path]` pair for a
  *   module that moved into frontend/src (ORCHESTRATOR below).
  * @param {string} [jsRoot] - a URL (ending in `/`) of the `static/js/` directory to

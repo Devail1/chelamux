@@ -1,6 +1,6 @@
 // ---------------------------------------------------------------------------
 // Markdown rendering: the dependency-free markdown-to-HTML renderer the task-detail modal
-// (features/taskmodal) and kanban.js's inline card text use. It was static/js/knowledge.js,
+// (features/taskmodal) and the Work board's card titles use. It was static/js/knowledge.js,
 // the survivor of the OKF viewer's Knowledge tab (CMX-279 deleted the view); CMX-228
 // (CMX-212 P09) moved it here. React renders its output only through <Markdown>.
 // ---------------------------------------------------------------------------

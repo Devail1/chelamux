@@ -2,5 +2,5 @@
 // §4 rule 7): Radix Primitives for behaviour, style.css's classes and tokens for the look.
 export { Dialog, DialogClose, Menu, Popover, Toast, ToastProvider, Tooltip, type DialogProps, type MenuItem, type MenuProps, type PopoverProps } from './lib/overlays.tsx';
 export { CopyField, FieldRow, MultiSelect, NumberInput, RadioGroup, Select, TextArea, TextInput, Toggle, type RadioOption } from './lib/form.tsx';
-export { BADGE_TONE, BUTTON_VARIANT, Badge, Button, IconButton, SectionHeader, Tabs, type BadgeTone, type ButtonSize, type ButtonVariant, type Tab, type TabsClasses } from './lib/basics.tsx';
+export { BADGE_TONE, BUTTON_VARIANT, Badge, Button, IconButton, SectionHeader, Tabs, TextButton, type BadgeTone, type ButtonSize, type ButtonVariant, type Tab, type TabsClasses } from './lib/basics.tsx';
 export { useMediaQuery } from './lib/useMediaQuery.ts';

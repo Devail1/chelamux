@@ -183,81 +183,13 @@
       <div id="agent-detail"></div>
     </div>
 
-    <!-- WORK (default view) — Dispatch + Kanban + Schedules, one view over one poll.
-         Dispatch and Kanban were never two datasets: both rendered /api/dispatcher.
-         They are two SEGMENTS of the same view now, drawn from one fetch (work.js),
-         and Schedules — the other half of "work in flight" — rides along. Every id
-         inside is unchanged, so the renderers are untouched.
+    <!-- WORK: Board · Runs · Schedules, one view over one /api/dispatcher poll. A React
+         island (frontend/src/features/work, CMX-233) renders everything inside.
          CMX-89: it is the server-rendered FIRST panel only when terminals are
          off; with terminals on, #panel-terminals below carries `active` instead,
-         so first paint is the Wall rather than Work-then-Wall once main.js's
-         module graph has loaded (worst on a phone). -->
-    <div class="panel{% if not terminals_enabled %} active{% endif %}" id="panel-work">
-      <div class="work-toolbar">
-        <div class="work-seg" id="work-seg" role="group" aria-label="Work view">
-          <button type="button" class="work-seg-btn" data-seg="board" aria-pressed="true"
-                  onclick="chela.setWorkSegment('board')">Board</button>
-          <button type="button" class="work-seg-btn" data-seg="runs" aria-pressed="false"
-                  onclick="chela.setWorkSegment('runs')">Runs</button>
-          <button type="button" class="work-seg-btn" data-seg="schedules" aria-pressed="false"
-                  onclick="chela.setWorkSegment('schedules')">Schedules</button>
-        </div>
-        <!-- CMX-6: create a Linear issue in a linear workflow's team. Hidden until a poll
-             shows a workflow whose tracker is linear (work.js _renderNewTaskButton). -->
-        <button class="btn-accent" id="new-task-btn" style="display:none;"
-                onclick="chela.openNewTask()">+ New task</button>
-        <button class="btn-accent" onclick="chela.openInitRepo()"
-                title="Seed a starter WORKFLOW.md + TODO.md into a repo">+ Init a repo</button>
-        <!-- CMX-206: `chela dispatch --pause` from the dashboard — no task is claimed
-             until Resume. Hidden until the first /api/dispatcher poll lands (see
-             _renderDispatchHold in work.js), so it never flashes the wrong state. -->
-        <button class="btn-accent" id="dispatch-hold-btn" style="display:none;"
-                onclick="chela.toggleDispatchHold()"></button>
-        <span class="work-toolbar-hint" id="dispatch-hold-hint"></span>
-      </div>
-
-    <!-- Board (kanban) -->
-    <div class="work-pane active" id="work-board" data-seg="board">
-      <div class="kanban-filters" id="kanban-filters"></div>
-      <!-- Mobile-only layout controls (≤768px). Swipe = scroll-snap carousel
-           (default), Rows = collapsible accordion. Hidden on desktop, which
-           keeps its 7-column grid. -->
-      <div class="kanban-mobile-controls" id="kanban-mobile-controls">
-        <div class="kanban-layout-toggle" role="group" aria-label="Mobile board layout">
-          <button type="button" class="kanban-layout-btn" data-layout="swipe"
-                  aria-pressed="true" onclick="chela.setKanbanLayout('swipe')">Swipe</button>
-          <button type="button" class="kanban-layout-btn" data-layout="rows"
-                  aria-pressed="false" onclick="chela.setKanbanLayout('rows')">Rows</button>
-        </div>
-        <!-- Swipe-layout quick-nav: one chip per column (label + live count),
-             tap to snap-scroll. Populated + shown only in the swipe layout. -->
-        <div class="kanban-nav-strip" id="kanban-nav-strip" aria-label="Jump to column"></div>
-      </div>
-      <div class="kanban-board-wrap">
-        <div class="kanban-board" id="kanban-board"></div>
-        <!-- CMX-136: kanban.js fills #kanban-hidden (the Hidden columns panel) -->
-      </div>
-      <div id="kanban-empty" class="work-empty" style="display:none;">
-        <div class="work-empty-icon">▤</div>
-        <div class="work-empty-title">A board for work in flight</div>
-        <div class="work-empty-body">
-          The Kanban board tracks dispatched work across all your <code>WORKFLOW.md</code> files:
-          open tasks, agents running now, PRs awaiting review, and done, all in one place. It fills in
-          once the dispatcher has workflows to watch.
-        </div>
-        <div class="work-empty-hint">
-          Enable it: set <code>CHELA_DISPATCH_WORKFLOWS</code> to a colon-separated list of
-          <code>WORKFLOW.md</code> paths, then restart the daemon.
-        </div>
-      </div>
-    </div><!-- /work-board -->
-
-    <!-- Runs (per-workflow dispatch tables) and Schedules: React islands
-         (frontend/src/features/runs, features/schedules, CMX-231). -->
-    <div class="work-pane" id="work-runs" data-seg="runs"></div>
-    <div class="work-pane" id="work-schedules" data-seg="schedules"></div>
-
-    </div><!-- /panel-work -->
+         so first paint is the Wall rather than Work-then-Wall once the bundle has
+         loaded (worst on a phone). -->
+    <div class="panel{% if not terminals_enabled %} active{% endif %}" id="panel-work"></div>
 
     {% if terminals_enabled %}
     <!-- Terminals wall (flagship view mode; streams live ttyd panes). Active in
@@ -594,6 +526,8 @@
 <!-- Per-session changed-files / diff modal (CMX-299): a wall tile's "Files" chip opens it.
      The diff modal island (frontend/src/features/diffmodal) portals its dialog to <body>. -->
 <div id="diff-modal-island"></div>
+<!-- The Work toasts (a run changed state; a board note): outside every panel, so they show on any view. -->
+<div id="work-toasts"></div>
 
 <!-- CMX-217: the boot config the bundle reads (frontend/src/shared/api readBoot). -->
 <script type="application/json" id="chela-boot">{{ boot|tojson }}</script>

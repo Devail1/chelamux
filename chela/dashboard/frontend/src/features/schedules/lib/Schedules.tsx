@@ -1,6 +1,6 @@
 // The Schedules segment of WORK: chela's schedules (enable, disable, delete, add) and the
 // read-only system cron. Ported from static/js/schedules.js by CMX-231 (FRONTEND_PORT_PLAN.md
-// P11). /api/schedules is its own dataset, fetched only when work.js asks (refreshSchedules():
+// P11). /api/schedules is its own dataset, fetched only when the Work view asks (refreshSchedules():
 // the segment is showing, or a poll landed while it is).
 import { useEffect, useState } from 'react';
 import { api } from '../../../shared/api/index.ts';

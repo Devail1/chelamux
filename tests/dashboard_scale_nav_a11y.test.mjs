@@ -261,7 +261,6 @@ const src = p => readFileSync(join(ROOT, p), 'utf8');
 const CSS = src('static/style.css');
 const TERMINALS = src('static/js/terminals.js');
 const NAV = src('static/js/nav.js');
-const KANBAN = src('static/js/kanban.js');
 const VIEWS_SRC = src('static/js/views.js');
 
 // --- jsdom fixtures: mount the REAL style.css and a concrete, hand-written
@@ -615,43 +614,20 @@ test('non-hue cue — sidebar row: the rendered dot NAMES the state word, not ju
     }
 });
 
-// 3c. The Work board's closest real analogue of "error": a failed task. The
-// WORD is what the ticket demands survive greyscale — kanban.js's STATUS_CHIPS
-// already carries one per state; this pins 'failed' specifically, and that the
-// card-level last_error message renders as real text, not colour-only.
-test('non-hue cue — kanban "error" analogue (failed): the status chip carries a real word, not colour alone', () => {
-    const m = KANBAN.match(/failed:\s*\{\s*label:\s*'([^']*)'/);
-    assert.ok(m, 'STATUS_CHIPS.failed not found in kanban.js');
-    assert.ok(m[1].trim().length > 0, 'STATUS_CHIPS.failed.label is empty — the failed chip would be colour-only');
-    assert.match(m[1], /failed/i, 'STATUS_CHIPS.failed.label must literally say "failed"');
-});
-
-// CMX-257 round 9 (CLAIM 4's exception — stays fully guarded, gets the most
-// direct proof available per the human directive): the test above only pins
-// STATUS_CHIPS.failed's label CONSTANT — round 7's source-regex pair pinned
-// the render call site's TEXT but not the VALUE travelling between them, and
-// the judge blanked chipMeta.label right where it's looked up (leaving both
-// regexes byte-identical). This drives the REAL renderKanban() into a REAL
-// DOM (same jsdom-import technique as tests/wallnav.test.mjs/
-// tests/sidebar.test.mjs: real main.js entry order, then the target module)
-// and reads the rendered .kanban-state-chip/.kanban-card-error text nodes
-// back — mirrors the wall .gs-state pill's WIRING test above and
-// sidebar.test.mjs:447's real `.ar-state` read, the two members of this guard
-// family that have never fallen to a judge mutation because they assert the
-// rendered node, not source text.
-test('WIRING: a REAL rendered kanban card shows its status chip word AND its error text — not colour-only', async () => {
-    const BODY = '<div id="work-board"><div id="kanban-board"></div><div id="kanban-empty"></div><div id="kanban-filters"></div></div>';
-    // Browser-faithful import order: main.js is the entry (nav <-> main is a
-    // cycle — import anything else first and its `let`s are in their TDZ).
-    const { modules: { kanban } } = await bootDashboardDom({ body: BODY, extraModules: ['kanban.js'] });
-
-    kanban.renderKanban({
-        configured: true,
-        workflows: [{
-            path: 'wf.yaml',
-            recent_runs: [{ task_id: 'T1', status: 'failed', last_error: 'boom', ended_at: '2026-01-01' }],
-        }],
+// 3c. The Work board's closest real analogue of "error": a failed task. The WORD is what the
+// ticket demands survive greyscale. CMX-233: the board is React (features/work); its
+// STATUS_CHIPS constant and rendered card are pinned in features/work/tests (models.test.ts,
+// Board.test.tsx). This keeps the page-level read: the REAL page's Work island, fed a
+// failed run by the one poll, shows the chip's word and the error text, not colour only.
+test('WIRING: a REAL rendered Work board card shows its status chip word AND its error text — not colour-only', async () => {
+    const payload = { configured: true, workflows: [{ path: 'wf.yaml', recent_runs: [{ task_id: 'T1', status: 'failed', last_error: 'boom', ended_at: '2026-01-01' }] }] };
+    await bootDashboardDom({
+        body: '<div class="panel active" id="panel-work"></div>', terminalsEnabled: false,
+        fetchImpl: url => Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve(String(url).endsWith('/api/dispatcher') ? payload : {}) }),
     });
+    const { pollWork } = await import('../chela/dashboard/frontend/src/features/work/index.ts');
+    await pollWork();
+    await new Promise(r => setTimeout(r, 0));
 
     const chip = document.querySelector('#kanban-board .kanban-state-chip');
     assert.ok(chip, 'no .kanban-state-chip rendered for a failed card');

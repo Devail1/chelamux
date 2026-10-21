@@ -12,7 +12,7 @@
 // (defaultTab()). Ported from static/js/taskmodal.js by CMX-228 (CMX-212 P09).
 //
 // openTaskModal(item) never fetches: it renders the SAME object its caller already holds
-// (kanban.js's card from the one /api/dispatcher poll, or a decision's resolved run). Every
+// (a Work board card from the one /api/dispatcher poll, or a decision's resolved run). Every
 // field is optional (TaskItem), because an open task and a backlog item carry far fewer.
 // ---------------------------------------------------------------------------
 import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react';

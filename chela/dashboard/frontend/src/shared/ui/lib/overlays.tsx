@@ -235,10 +235,11 @@ export function ToastProvider({ children }: { children: ReactNode }) {
   );
 }
 
-/** One toast; it closes itself after `duration` ms (Radix pauses that while hovered). */
-export function Toast({ open, onOpenChange, title, duration = 6000, children }: { open: boolean; onOpenChange: (open: boolean) => void; title: string; duration?: number; children?: ReactNode }) {
+/** One toast; it closes itself after `duration` ms (Radix pauses that while hovered), and on a
+ * click when `dismissOnClick`. */
+export function Toast({ open, onOpenChange, title, duration = 6000, dismissOnClick, children }: { open: boolean; onOpenChange: (open: boolean) => void; title: string; duration?: number; dismissOnClick?: boolean; children?: ReactNode }) {
   return (
-    <RToast.Root className="run-toast" open={open} onOpenChange={onOpenChange} duration={duration}>
+    <RToast.Root className="run-toast" open={open} onOpenChange={onOpenChange} duration={duration} onClick={dismissOnClick ? () => onOpenChange(false) : undefined}>
       <RToast.Title>{title}</RToast.Title>
       {children && <RToast.Description>{children}</RToast.Description>}
     </RToast.Root>

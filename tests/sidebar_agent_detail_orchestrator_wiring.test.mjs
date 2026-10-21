@@ -26,7 +26,7 @@ import assert from 'node:assert/strict';
 import { bootDashboardDom, flush, ORCHESTRATOR, sliceTemplate } from './js_helpers/dashboard_dom.mjs';
 
 const CANVAS_HTML = sliceTemplate(
-    '<div class="panel" id="panel-agent-detail">', '<!-- /panel-work -->');
+    '<div class="panel" id="panel-agent-detail">', 'id="panel-work"></div>');
 
 const BODY = `
 <div class="app">
