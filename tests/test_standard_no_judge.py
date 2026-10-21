@@ -84,10 +84,13 @@ def test_a_non_standard_pr_is_never_stamped(tmp_path, files):
 
 
 @pytest.mark.parametrize("path, stamped", [("server/auth/login.py", False),
+                                           ("server/billing/pay.py", False),
                                            ("server/ui/page.py", True)])
 def test_a_workflow_core_path_takes_the_judge(tmp_path, path, stamped):
-    """The stamp classifies against the workflow's OWN `merge.core` additions."""
-    got, run = _stamp(tmp_path, [path], merge={"core": ["server/auth/**"]})
+    """The stamp classifies against the workflow's OWN `merge.core` AND `merge.always_human`
+    additions — both lists ride into the same `classify` call, so each needs its own row."""
+    got, run = _stamp(tmp_path, [path], merge={"core": ["server/auth/**"],
+                                               "always_human": ["server/billing/**"]})
     assert got is stamped
     assert run["judge_state"] == ("standard_no_judge" if stamped else None)
 
@@ -135,14 +138,21 @@ def _pr(repo: Path, rel: str) -> str:
     return sha
 
 
-@pytest.mark.parametrize("rel, judged", [("chela/app.py", False), ("chela/dispatcher.py", True)])
-def test_spawn_judge_stamps_standard_and_judges_core(tmp_path, repo, monkeypatch, rel, judged):
+@pytest.mark.parametrize("rel, merge, judged, tier", [
+    ("chela/app.py", None, False, "standard"),
+    ("chela/dispatcher.py", None, True, "core"),
+    ("chela/app.py", {"always_human": ["chela/app.py"]}, True, "human"),
+], ids=["standard", "core", "workflow-always-human"])
+def test_spawn_judge_stamps_standard_and_judges_core(tmp_path, repo, monkeypatch, rel, merge,
+                                                     judged, tier):
     """`_spawn_judge` itself (a real worktree, a real diff) — the path a relaunched or
-    re-judged row takes past the pre-gate stamp."""
+    re-judged row takes past the pre-gate stamp. It classifies against the workflow's OWN
+    `merge.always_human` additions: such a path is judged, never stamped standard."""
     sha = _pr(repo, rel)
     launched: list = []
     monkeypatch.setattr(dispatcher, "_launch_agent", lambda *a, **k: launched.append(1))
-    wf = WorkflowDef(path=repo / "WORKFLOW.md", config=_wf(tmp_path).config, prompt_template="")
+    config = _wf(tmp_path, **({"merge": merge} if merge else {})).config
+    wf = WorkflowDef(path=repo / "WORKFLOW.md", config=config, prompt_template="")
     with dispatcher._db() as conn:
         _run_row(conn, repo, workflow_path=str(wf.path), pr_head_sha=sha, worktree_path=str(repo))
         row = conn.execute("SELECT * FROM runs WHERE task_id='abc123'").fetchone()
@@ -151,7 +161,7 @@ def test_spawn_judge_stamps_standard_and_judges_core(tmp_path, repo, monkeypatch
     assert (spawned, bool(launched)) == (judged, judged)
     assert run["judge_sha"] == sha
     assert run["judge_state"] == (judge.J_RUNNING if judged else "standard_no_judge")
-    assert run["risk_tier"] == ("core" if judged else "standard")
+    assert run["risk_tier"] == tier
 
 
 # --- chela merge -----------------------------------------------------------------------------
@@ -309,7 +319,8 @@ def _insert(task_id: str, worktree, workflow) -> None:
     ("chela/app.py", "", "standard"),
     ("chela/dispatcher.py", "", "core"),
     ("chela/app.py", "merge:\n  core:\n    - \"chela/app.py\"\n", "core"),
-])
+    ("chela/app.py", "merge:\n  always_human:\n    - \"chela/app.py\"\n", "human"),
+], ids=["standard", "default-core", "workflow-core", "workflow-always-human"])
 def test_hand_in_tier_reads_the_runs_own_worktree(tmp_path, repo, rel, extra, tier):
     _git("checkout", "-b", "work", cwd=repo)
     (repo / rel).write_text("VALUE = 3\n")
@@ -453,6 +464,17 @@ def test_an_unset_lint_is_skipped_and_said(tmp_path):
         result = dispatcher.verify_standard_hand_in("t1")
     assert calls == [("pytest -q", wt, 77.0)]
     assert result["ok"] is True
+    assert result["steps"][0] == {"name": "lint", "cmd": "", "passed": None,
+                                  "detail": "the workflow sets no `hand_in.lint_cmd` — skipped"}
+
+
+def test_a_blank_lint_is_skipped_never_run_as_an_empty_command(tmp_path):
+    """Whitespace is unset too: `lint_cmd: '   '` must never reach the shell as a command."""
+    wt = _std_run(tmp_path, "   ", "pytest -q")
+    calls, fake = _recording([0])
+    with patch.object(judge, "run_suite", side_effect=fake):
+        result = dispatcher.verify_standard_hand_in("t1")
+    assert calls == [("pytest -q", wt, 77.0)]
     assert result["steps"][0] == {"name": "lint", "cmd": "", "passed": None,
                                   "detail": "the workflow sets no `hand_in.lint_cmd` — skipped"}
 
