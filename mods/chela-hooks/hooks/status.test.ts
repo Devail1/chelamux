@@ -62,7 +62,8 @@ test('the orchestrator recorded in inbox.json is marked at start; $CHELA_INBOX_F
   const w = await turn($, on, () => world(on, { ...ENV, CHELA_INBOX_FILE: '/i.json' },
     { inbox: '{"orchestrator": "@7"}' }), () => $.session.start({ source: 'startup' } as any))
   expect(w.status).toEqual([`${LINE} · orchestrator`])
-  expect(w.reads).toEqual(['/i.json'])
+  // read twice at start: the status line, and the needs-you band's first poll (CMX-183)
+  expect(w.reads).toEqual(['/i.json', '/i.json'])
 })
 
 test('an unreadable inbox.json is no orchestrator; HOME/.chela by default', async ($, on) => {

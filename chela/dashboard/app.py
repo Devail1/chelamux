@@ -3838,6 +3838,47 @@ def api_overrides():
     return jsonify({"requests": rows})
 
 
+def _needs_you_items() -> list[dict]:
+    """Everything waiting on the human, oldest first (CMX-183): pending override approvals,
+    pending access requests and runs in ``needs_human``. Each item is ``kind``, ``label``,
+    ``since`` (epoch seconds) and ``url`` (where the dashboard shows it). Raises when a
+    source cannot be read: a partial list would undercount."""
+    from chela import overrides
+    rows, error = overrides.listing_state()
+    if error:
+        raise RuntimeError(error)
+    items = [{"kind": "approval", "label": r.get("label") or r["id"],
+              "since": float(r.get("created") or 0),
+              "url": config.dashboard_url(f"/override/{r['id']}")} for r in rows]
+    share_requests.ingest_all()
+    share_requests.sweep()
+    items += [{"kind": "access", "label": r.get("description") or r.get("id") or "",
+               "since": float(r.get("filed_at") or 0), "url": config.dashboard_url("/")}
+              for r in share_requests.pending()]
+    for run in dispatcher.list_runs():
+        if run.get("status") != "needs_human":
+            continue
+        at = dispatcher._parse_ts(run.get("ended_at") or run.get("started_at"))
+        # an undated row counts as waiting from now: never the epoch, which would rank it
+        # oldest and print an age of decades
+        items.append({"kind": "run", "label": run.get("task_id") or "",
+                      "since": at.timestamp() if at else time.time(),
+                      "url": config.dashboard_url("/")})
+    return sorted(items, key=lambda i: i["since"])
+
+
+# 🙋 CMX-183: the orchestrator session's "needs you" band (mods/chela-hooks) polls this.
+# Read-only; approving stays in Telegram, the dashboard or a plain terminal. A source that
+# cannot be read is a 503, never an empty list the band would show as "nothing waiting".
+@app.route("/api/needs-you")
+@require_auth
+def api_needs_you():
+    try:
+        return jsonify({"items": _needs_you_items()})
+    except Exception as exc:  # noqa: BLE001 - report it, do not 500 into silence
+        return jsonify({"items": [], "error": f"{exc.__class__.__name__}: {exc}"}), 503
+
+
 @app.route("/api/override/<request_id>/<action>", methods=["POST"])
 @require_auth
 def api_override_decide(request_id, action):

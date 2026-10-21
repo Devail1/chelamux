@@ -47,7 +47,7 @@ export function cachePayload(session_id: string, cwd: string, model: string, u: 
 
 // The env pin, else the window `chela watch` recorded in inbox.json, as
 // chela.inbox.orchestrator_wid reads it. Unreadable reads as no orchestrator.
-async function orchestratorWid($: any): Promise<string | undefined> {
+export async function orchestratorWid($: any): Promise<string | undefined> {
   const pin = ((await $.env.get('CHELA_ORCHESTRATOR_WID')) || '').trim()
   if (pin) return pin
   const dir = (await $.env.get('CHELA_DIR')) || `${await $.env.get('HOME')}/.chela`

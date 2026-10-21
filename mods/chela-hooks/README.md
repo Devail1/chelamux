@@ -40,6 +40,35 @@ Running both is harmless: they write the same figures to the same file.
 Turn it off without unloading the Mod with the `statusLine` option (`/config`, or
 `pluginConfigs` in settings). Off, it draws nothing and writes no cache.
 
+## Needs you (CMX-183)
+
+In the orchestrator session only (the window `chela watching` names), the Mod draws one
+line above the prompt with what is waiting on you: pending override approvals, pending
+access requests and runs in `needs_human`. It shows the counts and the oldest item, each a
+link to where the dashboard shows it (an approval's `/override/<id>` page, else the
+dashboard):
+
+```
+needs you: 1 approval · 1 access request · 1 run in needs_human · oldest: access request mount /data (read-only) (20m)
+```
+
+It reads the daemon's `GET /api/needs-you` on `127.0.0.1:$CHELA_DASHBOARD_PORT` (default
+5001) every 10 s, from a timer: no tool call waits on it. It is read-only. Approving stays
+in Telegram, the dashboard or a plain terminal.
+
+| Case | Band |
+|---|---|
+| the orchestrator session, something waiting | counts plus the oldest |
+| nothing waiting | none |
+| any other session (another window is the orchestrator, none recorded, not a chela window) | none, and the daemon is never asked |
+| the daemon is down, answers 503 (a store it cannot read) or anything but the documented shape | none |
+| the last good reading is more than 30 s old (the daemon hangs) | none: a count is never shown stale |
+| Claude Code below 2.1.301 | none |
+
+The orchestrator is found as the status line finds it: `$CHELA_ORCHESTRATOR_WID`, else
+`inbox.json`'s `orchestrator`. The fixture both sides test against is
+`hooks/needsyou-cases.ts` (`tests/test_mods_needsyou.py` runs it through the real route).
+
 ## Hook spike (CMX-157)
 
 The merge gate and event posting, measured side by side with `plugin/` in
@@ -54,6 +83,7 @@ event, and a default URL would file each one twice.
 | `CHELA_MOD_HOOKS_URL` | unset ⇒ nothing is posted | where `POST /hooks/<Event>` goes, e.g. `http://127.0.0.1:5001` |
 | `CHELA_MOD_MERGEGATE` | `<mod>/../../plugin/hooks/mergegate.py` | the gate script it runs |
 | `CHELA_MOD_STATUSLINE` | `<mod>/../../scripts/cache-statusline.sh` | the cache writer the status line pipes to |
+| `CHELA_DASHBOARD_PORT` | `5001` | the port the needs-you band asks the daemon on |
 
 Tests: `claude plugin validate mods/chela-hooks && claude plugin test mods/chela-hooks`
 (also run by `tests/test_mods_spike.py` when a Mods-capable `claude` is on `PATH`).

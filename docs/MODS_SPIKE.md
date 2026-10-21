@@ -213,6 +213,11 @@ CMX-182 shipped item 2, the terminal-wall timestamps as a band above the prompt.
 retired it, with the `displayContent` marker and `CHELA_TERMINAL_TIMESTAMPS`: Claude Code's
 own turn footer now prints the completion time ("done HH:MM") on every reply.
 
+CMX-183 shipped item 3: a "needs you" band above the prompt in the orchestrator session
+(pending approvals, access requests and `needs_human` runs), polled from the daemon's
+`GET /api/needs-you`
+([`mods/chela-hooks/README.md`](../mods/chela-hooks/README.md#needs-you-cmx-183)).
+
 ### 8.1 Soak: NOT RUN yet
 
 ⛔ **The ≥ 2 h side-by-side soak has not been run.** CMX-181 was a dispatched run, and the
