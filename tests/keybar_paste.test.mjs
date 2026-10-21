@@ -1,6 +1,6 @@
 // MOBILE KEYBAR "Paste" — real-DOM guard for CMX-423.
 //
-// The keybar's Paste button (index.html → chela.termPaste) reads the DEVICE clipboard in
+// The keybar's Paste button (the keybar island, CMX-237 → chela.termPaste) reads the DEVICE clipboard in
 // the parent page and POSTs it to /api/term/paste for the active pane (#term-agent). After
 // CMX-412 it "stopped working": every early exit was silent, and a phone clipboard holding
 // a screenshot came back empty from readText(), so the tap did nothing visible.
@@ -23,6 +23,7 @@
 import { beforeAll, beforeEach, test } from 'vitest';
 import assert from 'node:assert/strict';
 import { JSDOM } from 'jsdom';
+import { flush, mountIslands } from './js_helpers/dashboard_dom.mjs';
 
 const PANEL = `
 <div class="panel" id="panel-terminals">
@@ -33,8 +34,7 @@ const PANEL = `
   <button id="term-new-shell"></button>
   <div id="term-stage"></div>
   <div id="term-min-dock"></div>
-  <div id="term-bar" class="kb-collapsed"><button class="kb-toggle" id="kb-toggle"></button><div class="kb-body" id="kb-body"></div></div>
-  <div id="term-keybar"><button class="kb2-key" id="paste-btn">Paste</button></div>
+  <div id="keybar-island"></div>
 </div>`;
 
 const AGENTS = [{ name: 'shell', window_id: '@1', online: true }];
@@ -85,6 +85,7 @@ beforeAll(async () => {
     });
     globalThis.window.chela = globalThis.window.chela || {};
     globalThis.setInterval = () => 0;
+    await mountIslands(dom.window);
     await import('../chela/dashboard/frontend/src/boot.ts');
     const util = await import('../chela/dashboard/static/js/util.js');
     const terminals = await import('../chela/dashboard/static/js/terminals.js');
@@ -100,8 +101,16 @@ beforeEach(() => {
     sel.value = '@1';
 });
 
-const btn = () => document.getElementById('paste-btn');
+// The island's real Paste button.
+const btn = () => [...document.querySelectorAll('#term-keybar button')].find(b => b.title === 'Paste from clipboard');
 const pastes = () => calls.filter(c => c.path === '/api/term/paste').map(c => JSON.parse(c.opts.body));
+
+test('⭐ a real tap on the keybar island\'s Paste button reaches termPaste and pastes', async () => {
+    setClipboard({ readText: async () => 'tapped' });
+    btn().dispatchEvent(new window.MouseEvent('click', { bubbles: true, cancelable: true }));
+    await flush();
+    assert.deepEqual(pastes(), [{ agent: '@1', text: 'tapped' }]);
+});
 
 test('⭐ tapping Paste with text (readText-only clipboard) delivers it to /api/term/paste for the active pane', async () => {
     setClipboard({ readText: async () => 'hello from the phone' });

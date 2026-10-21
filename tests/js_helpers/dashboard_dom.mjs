@@ -88,7 +88,11 @@ const GLOBAL_WINDOW_PROPS = ['window', 'document', 'localStorage', 'navigator', 
  * what bootDashboardDom does before it loads the modules, and what a two-page suite calls
  * to switch which page the globals (and so the next call into its modules) act on. */
 export function activateDom(dom) {
-    for (const k of GLOBAL_WINDOW_PROPS) {
+    // CMX-237: plus the DOM classes React and Radix reach for as globals (the diff modal
+    // island's Dialog: `instanceof HTMLInputElement`, MutationObserver, a NodeFilter walk).
+    const domClasses = Object.getOwnPropertyNames(dom.window)
+        .filter(k => /^(HTML\w*Element|SVGElement|NodeFilter|MutationObserver|FocusEvent|PointerEvent)$/.test(k));
+    for (const k of [...GLOBAL_WINDOW_PROPS, ...domClasses]) {
         // defineProperty, NOT assignment: from node 21 `globalThis.navigator` has
         // only a getter, and plain assignment throws.
         Object.defineProperty(globalThis, k, {
@@ -109,13 +113,26 @@ export function exposeDomConstructors(win) {
 }
 
 /** CMX-276: what the page's React islands do before the legacy graph boots (index.html loads
- * them first): a bridge on `win`, and the sidebar island drawing its #sidebar-agents. From
+ * them first): a bridge on `win`, the sidebar island drawing its #sidebar-agents, and the diff
+ * modal and keybar islands (CMX-237). From
  * src/, so a mutation of the TypeScript reaches every suite that boots the page. Each page
  * (window) gets its own bridge and root. A suite that hand-rolls its jsdom boot calls this
  * before it imports boot.ts / nav.js. */
 export async function mountIslands(win) {
-    // A page with no sidebar has no island to mount.
-    if (!win.document.getElementById('sidebar-agents')) return;
+    const doc = win.document;
+    // CMX-237: the diff modal and keybar islands, where the page has their slots.
+    if (doc.getElementById('diff-modal-island')) {
+        const { DiffModal } = await import('../../chela/dashboard/frontend/src/features/diffmodal/index.ts');
+        const { mountIsland } = await import('../../chela/dashboard/frontend/src/shared/islands/index.tsx');
+        mountIsland('diff-modal-island', DiffModal, {}, doc);
+    }
+    if (doc.getElementById('keybar-island')) {
+        const { mountKeybar } = await import('../../chela/dashboard/frontend/src/features/keybar/index.ts');
+        mountKeybar(win);
+        await flush();   // React commits the bars (and the keybar binds its pin) on its next turn
+    }
+    // A page with no sidebar has no sidebar island to mount.
+    if (!doc.getElementById('sidebar-agents')) return;
     const { createBridge } = await import('../../chela/dashboard/frontend/src/shared/bridge/index.ts');
     const { mountSidebar } = await import('../../chela/dashboard/frontend/src/features/sidebar/index.ts');
     win.chelaBridge = createBridge();

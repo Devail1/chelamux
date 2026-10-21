@@ -1376,6 +1376,8 @@ body.term-dragging { overflow: hidden; }
 .gs-room svg { vertical-align: -2px; margin-right: 3px; }
 .gs-room:hover { background: color-mix(in srgb, var(--room-accent, var(--accent)) 40%, transparent); }
 /* On-screen key bar: sticky bottom dock, collapsible, grouped + inverted-T D-pad */
+/* The keybar island's slot adds no box: #term-bar stays the panel's own sticky child. */
+.keybar-island { display: contents; }
 #term-stage { padding-bottom: 4px; }
 #term-bar {
     flex-direction: column;
@@ -2332,13 +2334,6 @@ input[type="text"]:focus, textarea:focus, select:focus {
     flex-direction: column;
     overflow: hidden;
 }
-#diff-modal-content {
-    display: flex;
-    flex-direction: column;
-    flex: 1 1 auto;
-    min-height: 0;
-    overflow: hidden;
-}
 .diff-modal-head {
     flex: 0 0 auto;
     padding-right: 28px;
@@ -2346,7 +2341,7 @@ input[type="text"]:focus, textarea:focus, select:focus {
     margin-bottom: 10px;
     padding-bottom: 10px;
 }
-.diff-modal-head h3 { margin: 0 0 4px; }
+.modal-diff > h3 { margin: 0 0 4px; padding-right: 28px; }
 .diff-modal-summary { font-size: 12px; color: var(--text-dim); font-variant-numeric: tabular-nums; }
 .diff-modal-body {
     flex: 1 1 auto;
