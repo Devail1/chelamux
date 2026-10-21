@@ -30,11 +30,15 @@ export function actions() {
   return {
     selectAgent: vi.fn<SidebarActions['selectAgent']>(),
     toggleGroup: vi.fn<SidebarActions['toggleGroup']>(),
-    openGroupMenu: vi.fn<SidebarActions['openGroupMenu']>(),
-    openRowMenu: vi.fn<SidebarActions['openRowMenu']>(),
     groupNewSession: vi.fn<SidebarActions['groupNewSession']>(),
     toggleArchivedSection: vi.fn<SidebarActions['toggleArchivedSection']>(),
-    toggleShowArchived: vi.fn<SidebarActions['toggleShowArchived']>(),
     unarchiveRow: vi.fn<SidebarActions['unarchiveRow']>(() => Promise.resolve()),
+    groupMenuAction: vi.fn<SidebarActions['groupMenuAction']>(),
+    rowMenuAction: vi.fn<SidebarActions['rowMenuAction']>(),
+    moveToGroup: vi.fn<SidebarActions['moveToGroup']>(),
+    viewMenuAction: vi.fn<SidebarActions['viewMenuAction']>(),
+    newCustomGroup: vi.fn<SidebarActions['newCustomGroup']>(() => null),
+    renameCustomGroup: vi.fn<SidebarActions['renameCustomGroup']>(),
+    deleteCustomGroup: vi.fn<SidebarActions['deleteCustomGroup']>(),
   };
 }
