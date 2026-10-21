@@ -1,7 +1,7 @@
 // CMX-276: the dashboard's icons, by MEANING (FRONTEND_PORT_PLAN.md §2.5): a component asks
 // for `icons.orchestrator`, never for a Lucide name, so a meaning is chosen once. Lucide is
 // bundled by the build (no CDN). An icon is aria-hidden unless it is the only label.
-import { ChevronDown, ChevronRight, Crown, Ellipsis, FlaskConical, GitPullRequest, Plus, SlidersHorizontal } from 'lucide-react';
+import { ArrowUpToLine, ChevronDown, ChevronRight, ChevronUp, Crown, Ellipsis, FlaskConical, GitPullRequest, Keyboard, Plus, SlidersHorizontal, X } from 'lucide-react';
 
 export const icons = {
   orchestrator: Crown,
@@ -11,5 +11,9 @@ export const icons = {
   chevronDown: ChevronDown,
   more: Ellipsis,
   add: Plus,
+  close: X,
+  chevronUp: ChevronUp,
+  keyboard: Keyboard,
+  scrollback: ArrowUpToLine,
   view: SlidersHorizontal,
 } as const;
