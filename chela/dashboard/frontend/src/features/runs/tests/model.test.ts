@@ -6,8 +6,7 @@
 // gets. The one run state that means "a human must look at this" was styled as the least
 // interesting thing on the board.
 import { expect, test } from 'vitest';
-import { linearGroups, prLabel, riskChip, runBuckets, runCardNote, runCloseAction, runDisplayId, runStallNote, runStatusBadgeClass, RUN_STATUSES, taskProgress, trackerHref, UNKNOWN_BADGE } from '../model.ts';
-import { runPrCellHtml, taskProgressChipHtml } from '../legacy.ts';
+import { linearGroups, prLabel, riskChip, runBuckets, runCardNote, runCloseAction, runDisplayId, runHandoffNote, runStallNote, runStatusBadgeClass, RUN_STATUSES, taskProgress, trackerHref, UNKNOWN_BADGE } from '../model.ts';
 
 test('needs_human is the LOUDEST badge — never the unknown-status grey', () => {
   const cls = runStatusBadgeClass('needs_human');
@@ -135,6 +134,7 @@ test('trackerHref links https only; riskChip knows three levels and never guesse
   expect(riskChip({ risk: 'low' })).toEqual({ label: 'risk: low', cls: 'risk-low', reason: '' });
   expect(riskChip({ risk: 'extreme' })).toBe(null);
   expect(riskChip({ risk: 3 })).toBe(null);
+  expect(riskChip({ risk: 'constructor' })).toBe(null); // a prototype key is not a level (CMX-228)
 });
 
 test('runBuckets: needs_human leaves every bucket for its own; linearGroups splits by group', () => {
@@ -148,10 +148,9 @@ test('runBuckets: needs_human leaves every bucket for its own; linearGroups spli
   expect([g.ready, g.started, g.backlog].map((x) => x.map((t) => t.id))).toEqual([['b'], ['c'], ['a', 'd']]);
 });
 
-test('legacy string forms escape what they splice and render nothing without data', () => {
-  expect(runPrCellHtml(null)).toBe('');
-  expect(runPrCellHtml('https://github.com/o/r/pull/9')).toBe('<a class="pr-badge" href="https://github.com/o/r/pull/9" target="_blank" rel="noopener noreferrer" title="https://github.com/o/r/pull/9">#9</a>');
-  expect(runPrCellHtml('https://x/"><img>')).toMatch(/href="https:\/\/x\/&quot;&gt;&lt;img&gt;"/);
-  expect(taskProgressChipHtml(null)).toBe('');
-  expect(taskProgressChipHtml({ total: 2, done: 1, in_progress: { subject: '<b>' } }, '<svg/>')).toBe('<span class="task-progress-chip" title="1 of 2 tasks done\nIn progress: &lt;b&gt;"><svg/> 1/2</span>');
+// CMX-52 (from tests/task_handoff.test.mjs, CMX-233): the agent's handoff as one display line.
+test('runHandoffNote: one line; nothing for null, empty, blank or absent; control characters dropped', () => {
+  expect(runHandoffNote({ handoff: 'changed X\n\n  look at Y\tfirst' })).toBe('changed X look at Y first');
+  for (const r of [{ handoff: null }, { handoff: '' }, { handoff: ' \n\t ' }, {}, null]) expect(runHandoffNote(r)).toBe(null);
+  expect(runHandoffNote({ handoff: 'ok\u001b[31mred\u0007' })).toBe('ok [31mred');
 });

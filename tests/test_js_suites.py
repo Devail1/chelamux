@@ -286,7 +286,9 @@ def test_only_the_suites_directly_in_tests_run_under_vitest(rel, expected):
 def test_the_vitest_and_node_test_split_is_the_one_the_plan_names():
     """CMX-216: 124+ dashboard suites moved to Vitest; collab and tests/browser/ did not."""
     vitest = [p for p in _SUITES if runs_under_vitest(p)]
-    assert len(vitest) >= 124
+    # CMX-228: the decisions and task-modal suites moved on into the frontend's own Vitest
+    # (frontend/src/**/tests), as each CMX-212 port slice moves its own.
+    assert len(vitest) >= 100
     assert {str(p.relative_to(ROOT).parent) for p in _SUITES if not runs_under_vitest(p)} == {
         "tests/browser", "chela/dashboard/static/collab"}
 

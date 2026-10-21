@@ -109,7 +109,7 @@ beforeAll(async () => {
     await import('../chela/dashboard/frontend/src/boot.ts');
     const util = await import('../chela/dashboard/static/js/util.js');
     terminals = await import('../chela/dashboard/static/js/terminals.js');
-    orchestrator = await import('../chela/dashboard/static/js/orchestrator.js');
+    orchestrator = await import('../chela/dashboard/frontend/src/shared/orchestrator/index.ts');
     util.setCurrentTab('terminals');
     util.setAgentsCache(AGENTS);
     await terminals.renderTerminals();   // ONE wall, built once — as in a live session

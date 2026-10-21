@@ -3,6 +3,9 @@ import { $, TERMINALS_ON, _agentsCache, api, attrEsc, escHtml, setAgentsCache } 
 import { _jsStr, focusPaneByWid } from './terminals';
 import { refreshSidebar, renderSidebarAgents, selectView } from './nav';
 import { registerLane } from '../../frontend/src/shared/scheduler';
+import { launcher as launcherStore } from '../../frontend/src/shared/store/launcher';
+import { openInitRepo } from '../../frontend/src/features/runs';
+import { showAddSchedule } from '../../frontend/src/features/schedules';
 
 // ---------------------------------------------------------------------------
 // Launcher: Recent + Favorites click-to-launch (the "+" launch menu)
@@ -25,11 +28,17 @@ import { registerLane } from '../../frontend/src/shared/scheduler';
 
 let _launcherData = { recent: [], favorites: [] };
 
+// The Work view's "+ Init a repo" reads the same dirs from the launcher store (CMX-233).
+function _setLauncherData(d) {
+    _launcherData = { recent: d.recent || [], favorites: d.favorites || [] };
+    launcherStore.set(_launcherData);
+}
+
 async function refreshLauncher() {
     if (typeof TERMINALS_ON === 'undefined' || !TERMINALS_ON) return;
     try {
         const d = await api('/api/launcher');
-        if (d) _launcherData = { recent: d.recent || [], favorites: d.favorites || [] };
+        if (d) _setLauncherData(d);
     } catch (e) { return; }   // transient — keep the last render
     renderLauncher();
 }
@@ -139,7 +148,7 @@ function _isFav(path) {
 // updates both immediately rather than waiting for the next 30s tick.
 function _applyLauncherResp(d) {
     if (!d || !d.ok) return;
-    _launcherData = { recent: d.recent || [], favorites: d.favorites || [] };
+    _setLauncherData(d);
     renderLauncher();
     if (typeof renderSidebarAgents === 'function') renderSidebarAgents(_agentsCache || []);
 }
@@ -203,4 +212,9 @@ export { _isFav, _launcherData, launchProject, refreshLauncher };
 
 // --- Stage 0: window.chela — surface reachable from inline HTML handlers ---
 window.chela = window.chela || {};
-Object.assign(window.chela, { forgetRecent, hideFavAdd, launchProject, openFavAdd, pinFav, toggleFavCwd, unpinFav });
+// The New menu's "Init a repo" and "Scheduled task" (index.html) open React dialogs (CMX-231);
+// Init a repo suggests these dirs.
+Object.assign(window.chela, {
+    forgetRecent, hideFavAdd, launchProject, openFavAdd, openInitRepo: () => openInitRepo(_launcherData), pinFav, showAddSchedule,
+    toggleFavCwd, unpinFav,
+});

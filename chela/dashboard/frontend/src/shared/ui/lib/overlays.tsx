@@ -8,9 +8,28 @@ import * as RP from '@radix-ui/react-popover';
 import * as RToast from '@radix-ui/react-toast';
 import * as RT from '@radix-ui/react-tooltip';
 import { Check, ChevronRight, X, type LucideIcon } from 'lucide-react';
-import { useRef, type ReactElement, type ReactNode, type SyntheticEvent } from 'react';
+import { useLayoutEffect, useRef, type ReactElement, type ReactNode, type SyntheticEvent } from 'react';
 
 const cx = (...names: (string | false | undefined)[]) => names.filter(Boolean).join(' ');
+
+// The last element focused outside every dialog. As a dialog opens, a field with autoFocus
+// inside it may already hold focus, and a dialog opened from another (a Decisions row opening
+// its task) finds focus inside the one closing: neither is the control to return to.
+let lastOutside: Element | null = null;
+const inDialog = (el: Element | null) => !!el?.closest('[role="dialog"]');
+if (typeof document !== 'undefined') {
+  document.addEventListener(
+    'focus', // captured at the document: `focus` does not bubble, but every one passes through here
+    (e) => {
+      if (e.target instanceof Element && !inDialog(e.target)) lastOutside = e.target;
+    },
+    true,
+  );
+}
+function openerNow(): Element | null {
+  const active = document.activeElement;
+  return active && active !== document.body && !inDialog(active) ? active : lastOutside;
+}
 
 /** Gap and viewport margin, the legacy popover's (shared/popover). */
 const GAP = 6;
@@ -28,6 +47,8 @@ export type DialogProps = {
    * the title in a header row beside its icon and a close button (CMX-240). */
   variant?: 'modal' | 'sheet';
   icon?: LucideIcon;
+  /** The title names the dialog for assistive tech only: the content draws its own heading. */
+  hideTitle?: boolean;
   children?: ReactNode;
 };
 
@@ -41,13 +62,28 @@ const SURFACE = {
  * opened (Radix returns it only to its own Trigger, and a legacy opener is not one); Escape
  * and an outside click close it.
  */
-export function Dialog({ open, onOpenChange, title, description, className, variant = 'modal', icon: Icon, children }: DialogProps) {
+export function Dialog({
+  open,
+  onOpenChange,
+  title,
+  description,
+  className,
+  hideTitle,
+  variant = 'modal',
+  icon: Icon,
+  children,
+}: DialogProps) {
   const opener = useRef<Element | null>(null);
+  // Remembered as it opens. Radix skips onOpenAutoFocus when an autoFocus field already holds
+  // focus, so the opener is read here, from the focus history, not there.
+  useLayoutEffect(() => {
+    if (open) opener.current = openerNow();
+  }, [open]);
   if (!title.trim()) throw new Error('<Dialog> needs a title: it is the dialog\'s accessible name');
   const surface = SURFACE[variant];
   const heading = (
     <RD.Title asChild>
-      <h3>{title}</h3>
+      <h3 className={hideTitle ? 'sr-only' : undefined}>{title}</h3>
     </RD.Title>
   );
   return (
@@ -57,10 +93,9 @@ export function Dialog({ open, onOpenChange, title, description, className, vari
           <RD.Content
             className={cx(surface.box, className)}
             {...(description ? {} : { 'aria-describedby': undefined })}
-            onOpenAutoFocus={() => {
-              opener.current = document.activeElement;
-            }}
             onCloseAutoFocus={(e) => {
+              // A dialog handing over to another (a Decisions row opening its task) needs nothing
+              // here: the new dialog's focus trap keeps focus inside it.
               if (opener.current instanceof HTMLElement) {
                 e.preventDefault();
                 opener.current.focus();
@@ -237,10 +272,11 @@ export function ToastProvider({ children }: { children: ReactNode }) {
   );
 }
 
-/** One toast; it closes itself after `duration` ms (Radix pauses that while hovered). */
-export function Toast({ open, onOpenChange, title, duration = 6000, children }: { open: boolean; onOpenChange: (open: boolean) => void; title: string; duration?: number; children?: ReactNode }) {
+/** One toast; it closes itself after `duration` ms (Radix pauses that while hovered), and on a
+ * click when `dismissOnClick`. */
+export function Toast({ open, onOpenChange, title, duration = 6000, dismissOnClick, children }: { open: boolean; onOpenChange: (open: boolean) => void; title: string; duration?: number; dismissOnClick?: boolean; children?: ReactNode }) {
   return (
-    <RToast.Root className="run-toast" open={open} onOpenChange={onOpenChange} duration={duration}>
+    <RToast.Root className="run-toast" open={open} onOpenChange={onOpenChange} duration={duration} onClick={dismissOnClick ? () => onOpenChange(false) : undefined}>
       <RToast.Title>{title}</RToast.Title>
       {children && <RToast.Description>{children}</RToast.Description>}
     </RToast.Root>
