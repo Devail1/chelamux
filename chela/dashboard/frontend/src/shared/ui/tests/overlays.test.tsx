@@ -151,6 +151,30 @@ test('Tooltip shows on focus as a .tap-tip', async () => {
   expect(document.querySelector('.tap-tip.ui-floating')).not.toBeNull();
 });
 
+// CMX-301: iOS treats a tap that makes hover content appear as a hover and drops its click, so
+// the kit's Tooltip must never open on a touch pointer; a mouse hover still opens it.
+test.each([
+  ['touch', false],
+  ['mouse', true],
+] as const)('Tooltip on a %s pointer: opens = %s', (pointerType, opens) => {
+  render(
+    <Tooltip content="Set by CHELA_X">
+      <Button>knob</Button>
+    </Tooltip>,
+  );
+  const knob = screen.getByText('knob');
+  vi.useFakeTimers();
+  try {
+    fireEvent.pointerMove(knob, { pointerType });
+    act(() => {
+      vi.advanceTimersByTime(450);   // past the 400ms delayDuration
+    });
+    expect(screen.queryByRole('tooltip') !== null).toBe(opens);
+  } finally {
+    vi.useRealTimers();
+  }
+});
+
 test('Toast lands in the .run-toast-stack as a .run-toast, and leaves on close', () => {
   const { rerender } = render(
     <ToastProvider>

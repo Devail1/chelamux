@@ -104,6 +104,10 @@ export function installTapTips(win: Window = window) {
   doc.addEventListener('touchend', (e) => {
     const target = e.target as Element | null;
     if (typeof target?.closest !== 'function' || target.closest('button, a, input, select, textarea, label, [onclick], [role="button"]')) return hide();
+    // CMX-301: a React row's onClick is invisible to the selector above, so a tap on its
+    // titled name popped "window: …" and the session never opened. What is clickable is
+    // drawn with the pointer cursor (inherited by everything inside it): that is the test.
+    if (win.getComputedStyle(target).cursor === 'pointer') return hide();
     const el = target.closest<HTMLElement>('[title], [data-tip]');
     const text = el?.getAttribute('data-tip') || el?.getAttribute('title');
     if (!el || !text) return hide();
