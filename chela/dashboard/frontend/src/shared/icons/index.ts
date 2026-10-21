@@ -2,11 +2,11 @@
 // for `icons.orchestrator`, never for a Lucide name, so a meaning is chosen once. Lucide is
 // bundled by the build (no CDN). An icon is aria-hidden unless it is the only label.
 import {
-  ArrowUpToLine, Ban, CalendarClock, Check, ChevronDown, ChevronRight, ChevronUp, Circle,
+  ArrowUpToLine, Ban, Bell, CalendarClock, Check, ChevronDown, ChevronRight, ChevronUp, Circle,
   CircleDashed, CircleDot, CircleHelp, CircleMinus, Columns3, Crown, Ellipsis, ExternalLink, Eye,
-  FlaskConical, GitMerge, GitPullRequest, Inbox, Keyboard, LayoutGrid, Lock, Minus, NotebookPen,
-  OctagonX, Play, Plus, RefreshCw, RotateCw, Share2, SlidersHorizontal, Snowflake, SquareCheck,
-  TriangleAlert, Workflow, X,
+  FlaskConical, GitMerge, GitPullRequest, Hand, Inbox, Keyboard, LayoutGrid, Lock, Menu, Minus,
+  NotebookPen, OctagonX, Play, Plus, RefreshCw, RotateCw, Scale, Search, Settings, Share2,
+  SlidersHorizontal, Snowflake, SquareCheck, SquareTerminal, Star, TriangleAlert, Workflow, X,
 } from 'lucide-react';
 
 export const icons = {
@@ -55,6 +55,19 @@ export const icons = {
   handoff: NotebookPen,
   merged: GitMerge,
   board: LayoutGrid,
+  // CMX-219: the safety float, the launcher and the gear menu
+  approvals: Scale,
+  accessRequest: Hand,
+  blocked: Ban,
+  review: Search,
+  rework: RefreshCw,
+  search: Search,
+  notifications: Bell,
+  settings: Settings,
+  menu: Menu,
+  launch: Play,
+  shell: SquareTerminal,
+  favorite: Star,
 } as const;
 
 /** A meaning in the map, for a pure model that names the icon its renderer draws. */

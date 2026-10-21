@@ -112,7 +112,7 @@ function controls() {
     const all = [...doc.querySelectorAll(CONTROLS)];
     // Vacuity guard: the shell + drawer + JS-built set must actually be here.
     for (const sel of ['#settings-search', '#palette-input', '#sidebar-jump-input', '[list="init-suggestions"]',
-        '.s-textarea', '#modal-msg-text', '.s-multi', '.s-input', '.s-select',
+        '.s-textarea', '.s-multi', '.s-input', '.s-select',
         '.s-timing-input', '.s-dispatch-input', '.pane-title-edit']) {
         assert.ok(doc.querySelector(sel), `fixture lost ${sel} — the guard would pass vacuously`);
     }

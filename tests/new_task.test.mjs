@@ -17,7 +17,6 @@ import { bootDashboardDom, clickIsland, clickOnclick, flush, sliceTemplate } fro
 
 const PANEL = sliceTemplate('<div class="panel active" id="panel-work">', '</div>', { terminals_enabled: false });
 const PALETTE = sliceTemplate('<div class="palette-overlay" id="palette"', '</div>\n</div>');
-const MENU = sliceTemplate('<div class="popover-item" onclick="chela.hideNewMenu(); chela.openInitRepo()">', 'Scheduled task</div>');
 const ISLANDS = sliceTemplate('<div id="newtask-island">', '</div>');
 
 const WF = '/repo/WORKFLOW.md';
@@ -55,6 +54,14 @@ const $ = sel => document.querySelector(sel);
 const button = text => [...document.querySelectorAll('#panel-work button')].find(b => b.textContent === text) || null;
 const dialog = name => [...document.querySelectorAll('[role="dialog"]')].find(d => d.querySelector('h3')?.textContent === name) || null;
 const settle = async () => { for (let i = 0; i < 4; i++) await flush(); };
+// Open the launch menu and pick one of its rows, as a click does.
+async function menuItem(label) {
+    launcher.openLaunchMenu($('#new-anchor'));
+    await settle();
+    const item = [...document.querySelectorAll('.launch-menu button')].find(b => b.textContent === label);
+    assert.ok(item, `no "${label}" in the launch menu`);
+    clickIsland(item);
+}
 const escape = async () => {
     const d = document.querySelector('[role="dialog"]');
     if (d) d.dispatchEvent(new window.KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
@@ -62,10 +69,12 @@ const escape = async () => {
 };
 
 beforeAll(async () => {
-    ({ modules: { launcher } } = await bootDashboardDom({
-        body: `${PANEL}\n<div class="popover" id="new-menu">${MENU}</div>\n${ISLANDS}\n${PALETTE}`,
-        fetchImpl, canvasStub: true, extraModules: ['launcher.js'],
-    }));
+    await bootDashboardDom({
+        // CMX-219: the New menu is the launcher island's, in the overlays island
+        body: `${PANEL}\n<button id="new-anchor"></button><div id="overlays-island"></div>\n${ISLANDS}\n${PALETTE}`,
+        fetchImpl, canvasStub: true,
+    });
+    launcher = await import('../chela/dashboard/frontend/src/features/launcher/index.ts');
     ({ refreshWork, work: workStore } = await import('../chela/dashboard/frontend/src/shared/store/work.ts'));
     ({ pollWork } = await import('../chela/dashboard/frontend/src/features/work/index.ts'));
     await flush();
@@ -116,8 +125,8 @@ test('the ⌘K palette has a "New task" row that opens the dialog', async () => 
 
 test('the toolbar\'s "+ Init a repo" and the New menu\'s "Init a repo" open the Init dialog, suggesting the launcher\'s dirs', async () => {
     await launcher.refreshLauncher();
-    for (const open of [() => clickIsland(button('+ Init a repo')), () => clickOnclick($('#new-menu [onclick*="openInitRepo"]'))]) {
-        open();
+    for (const open of [async () => clickIsland(button('+ Init a repo')), async () => menuItem('Init a repo')]) {
+        await open();
         await settle();
         assert.ok(dialog('Init a repo for the dispatcher'), 'the Init dialog did not open');
         assert.deepEqual([...document.querySelectorAll('#init-suggestions option')].map(o => o.getAttribute('value')),
@@ -127,7 +136,7 @@ test('the toolbar\'s "+ Init a repo" and the New menu\'s "Init a repo" open the 
 });
 
 test('the New menu\'s "Scheduled task" opens the add-schedule dialog', async () => {
-    clickOnclick($('#new-menu [onclick*="showAddSchedule"]'));
+    await menuItem('Scheduled task');
     await settle();
     assert.ok(dialog('Add Scheduled Task'), 'the add-schedule dialog did not open');
 });

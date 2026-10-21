@@ -750,7 +750,7 @@ function paneHead(wid, draggable) {
 
 // Toggle this pane's "⋯" overflow menu (Wire/Share/Orchestrator/Pin). Only one
 // open at a time — opening a second closes the first — and light-dismisses on
-// the next outside click, same pattern as nav.js's openPrimaryMenu/openNewMenu.
+// the next outside click.
 function togglePaneOverflow(ev, btn) {
     if (ev) ev.stopPropagation();
     const menu = btn.nextElementSibling;

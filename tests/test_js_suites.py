@@ -240,13 +240,13 @@ def test_an_xdist_worker_watches_its_master_and_a_plain_run_watches_nothing(
     assert _xdist_master() == (4242 if expected else None)
 
 
-_VITEST_SUITE = ROOT / "tests" / "approvals.test.mjs"
+_VITEST_SUITE = ROOT / "tests" / "approvals_wiring.test.mjs"
 _NODE_SUITE = ROOT / "chela" / "dashboard" / "static" / "collab" / "fit.test.mjs"
 
 
 @pytest.mark.parametrize("suite,argv", [
     (_VITEST_SUITE, lambda vt: ["/opt/node", str(vt), "run", "--config",
-                                str(ROOT / "vitest.config.mjs"), "tests/approvals.test.mjs"]),
+                                str(ROOT / "vitest.config.mjs"), "tests/approvals_wiring.test.mjs"]),
     (_NODE_SUITE, lambda vt: ["/opt/node", "--test", str(_NODE_SUITE)]),
 ], ids=["vitest", "node-test"])
 def test_a_js_suite_runs_contained_with_its_full_call_pinned(monkeypatch, suite, argv):
@@ -274,7 +274,7 @@ def test_a_js_suite_runs_contained_with_its_full_call_pinned(monkeypatch, suite,
 
 
 @pytest.mark.parametrize("rel,expected", [
-    ("tests/approvals.test.mjs", True),
+    ("tests/approvals_wiring.test.mjs", True),
     ("tests/browser/dashboard.test.mjs", False),
     ("chela/dashboard/static/collab/fit.test.mjs", False),
     ("tests/js_helpers/x.test.mjs", False),
@@ -288,7 +288,8 @@ def test_the_vitest_and_node_test_split_is_the_one_the_plan_names():
     vitest = [p for p in _SUITES if runs_under_vitest(p)]
     # CMX-228: the decisions and task-modal suites moved on into the frontend's own Vitest
     # (frontend/src/**/tests), as each CMX-212 port slice moves its own.
-    assert len(vitest) >= 100
+    # CMX-219: the safety float, readouts, launcher and agent detail suites followed them.
+    assert len(vitest) >= 90
     assert {str(p.relative_to(ROOT).parent) for p in _SUITES if not runs_under_vitest(p)} == {
         "tests/browser", "chela/dashboard/static/collab"}
 
@@ -313,7 +314,7 @@ def test_a_missing_vitest_fails_under_require_and_skips_loudly_otherwise(monkeyp
     monkeypatch.setattr(sys.modules[__name__], "run_contained",
                         lambda *_a, **_k: pytest.fail("ran a suite that cannot run"))
     with pytest.raises((pytest.fail.Exception, pytest.skip.Exception),
-                       match="vitest is not installed.*approvals.test.mjs DID NOT RUN") as out:
+                       match="vitest is not installed.*approvals_wiring.test.mjs DID NOT RUN") as out:
         test_js_suite(_VITEST_SUITE)
     assert out.type is (pytest.fail.Exception if required else pytest.skip.Exception)
 
@@ -337,7 +338,7 @@ def test_a_failing_suite_fails_its_item_and_never_reads_as_a_load_error(monkeypa
     judge does not count it as a test that failed to load (see ``test_frontend._shown``)."""
     # `{n}`, not a digit: pytest prints this source on failure, which must not read as one.
     n = 1
-    out = f" FAIL  tests/approvals.test.mjs\n Tests  {n} failed\n Errors  {n} error\n".encode()
+    out = f" FAIL  tests/approvals_wiring.test.mjs\n Tests  {n} failed\n Errors  {n} error\n".encode()
     err = f"{n + 1} errors".encode()
     monkeypatch.setattr(
         sys.modules[__name__], "run_contained",
@@ -348,7 +349,7 @@ def test_a_failing_suite_fails_its_item_and_never_reads_as_a_load_error(monkeypa
     msg = str(failed.value)
     # Booleans, not `in msg`: pytest would print the message, and its error count would be read
     # by the judge as the very load error this test rules out.
-    names_the_file = msg.startswith("tests/approvals.test.mjs failed:\n FAIL  tests/approvals")
+    names_the_file = msg.startswith("tests/approvals_wiring.test.mjs failed:\n FAIL  tests/approvals")
     rewritten = "1 \N{MULTIPLICATION SIGN} error" in msg and "2 \N{MULTIPLICATION SIGN} errors" in msg
     assert names_the_file
     assert rewritten
