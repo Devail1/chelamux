@@ -239,3 +239,60 @@ test('mountSidebar draws the VIEW menu into #sidebar-view-menu and repaints it o
   act(() => root?.unmount());
   document.body.innerHTML = '';
 });
+
+test('a choice page marks ONLY the current value: Status, Last activity, Sort by', () => {
+  const s = state([win('a')]);
+  const { btn } = drawView({ ...s, view: { ...s.view, status: 'archived', activity: '30d', sort: 'created' } });
+  open(btn);
+  const on = () => entries().filter(i => i.getAttribute('aria-checked') === 'true').map(i => i.textContent);
+  for (const [page, want] of [['Status', 'Archived'], ['Last activity', '30d'], ['Sort by', 'Created']]) {
+    pick(rowOf(page as string)?.textContent ?? '');
+    expect(on()).toEqual([want]);
+    // the check mark is drawn on the current choice alone
+    expect(entries().filter(i => i.querySelector('.ov-check')).map(i => i.textContent)).toEqual([want]);
+    pick(page as string);   // ‹ back
+  }
+});
+
+test('the kit draws a back chevron only on a back row, a submenu marker only on a submenu row', () => {
+  const { btn } = drawView(state([win('a')]));
+  open(btn);
+  expect(entries().filter(i => i.getAttribute('aria-haspopup') === 'menu').map(i => i.querySelector('.ov-label')?.textContent))
+    .toEqual(['Status', 'Environment', 'Last activity', 'Group by', 'Sort by', 'Custom groups']);
+  expect(document.querySelectorAll('[role="menu"] .ov-chev.back')).toHaveLength(0);
+  pick(rowOf('Sort by')?.textContent ?? '');
+  expect(entries().filter(i => i.querySelector('.ov-chev.back')).map(i => i.textContent)).toEqual(['Sort by']);
+  expect(item('Sort by').className).toBe('popover-item ov-item ov-back');
+  expect(item('Name').className).toBe('popover-item ov-item on');   // the fixture sorts by Name
+  expect(item('Created').className).toBe('popover-item ov-item');
+});
+
+test('a page change moves focus to the new page\'s first item; a closed menu reopens on its top page', async () => {
+  const { btn } = drawView(state([win('a')]));
+  open(btn);
+  pick(rowOf('Group by')?.textContent ?? '');
+  await act(() => new Promise(r => setTimeout(r, 0)));
+  expect(document.activeElement?.textContent).toBe('Group by');
+  pick('Group by');   // ‹ back
+  await act(() => new Promise(r => setTimeout(r, 0)));
+  expect(document.activeElement?.querySelector('.ov-label')?.textContent).toBe('Status');
+  pick(rowOf('Sort by')?.textContent ?? '');
+  fireEvent.keyDown(screen.getByRole('menu'), { key: 'Escape' });
+  expect(menuOpen()).toBe(false);
+  open(btn);
+  expect(rowOf('Status')).toBeTruthy();
+});
+
+test('Move to group: a row assigned to a DELETED group reads Ungrouped, unassigned reads Ungrouped', () => {
+  for (const assigned of ['gone', undefined]) {
+    const a = win('a');
+    const custom = { groups: [{ id: 'g1', name: 'Infra' }], assign: assigned ? { [`w:${a.window_id}`]: assigned } : {} };
+    const s = state([a], { custom });
+    const { el } = draw({ ...s, view: { ...s.view, groupBy: 'custom' } });
+    fireEvent.contextMenu(el.querySelector('.agent-row[data-agent="a"]') as Element);
+    pick('Move to group…');
+    expect(screen.getAllByRole('menuitemradio').filter(i => i.getAttribute('aria-checked') === 'true').map(i => i.textContent))
+      .toEqual(['Ungrouped']);
+    cleanup();
+  }
+});
