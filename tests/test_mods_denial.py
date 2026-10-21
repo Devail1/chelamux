@@ -239,3 +239,11 @@ def test_the_fixture_is_the_documented_literal():
                              "tool_input": {"command": "rm -rf build"},
                              "tool_use_id": "toolu_01denied",
                              "reason": "Deletes files outside the task"}
+
+
+def test_the_reason_is_one_line_clipped_to_200_characters(client):
+    assert inbox.DENIED_REASON_CHARS == 200
+    _post(client, {**CASES["body"], "reason": " a\n\tb  " + "x" * 300})
+    reason = _queued()[0]["payload"]["reason"]
+    assert reason == "a b " + "x" * 195 + "…" and len(reason) == 200
+    assert inbox._one_line("y" * 200, 200) == "y" * 200
