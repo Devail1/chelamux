@@ -105,7 +105,7 @@ export async function routeFixture(context, api = {}) {
     function sidebarLayout(req) {
         if (req.method() !== 'POST') return { layout };
         const body = req.postDataJSON() || {};
-        const fields = Object.fromEntries(['order', 'custom', 'view'].filter(f => f in body).map(f => [f, body[f]]));
+        const fields = Object.fromEntries(['order', 'custom', 'view', 'width'].filter(f => f in body).map(f => [f, body[f]]));
         const empty = { order: [], custom: { groups: [], assign: {} }, view: {} };
         if (body.import === true) {
             const imported = layout === null && Object.keys(fields).length > 0;
@@ -168,12 +168,13 @@ export const DID_NOT_RUN = 'browser suite DID NOT RUN';
 /** Launch Chromium. Returns `{ browser }`, or `{ why }` when it cannot. A
  * missing browser is treated exactly the way tests/test_js_suites.py treats a
  * missing node or jsdom: under CHELA_REQUIRE_JS_TESTS it THROWS (the suite
- * file fails), never a silent green; otherwise every test skips with `why`. */
-export async function launchChromium() {
+ * file fails), never a silent green; otherwise every test skips with `why`.
+ * `options` go to playwright's `chromium.launch` (e.g. extra `args`). */
+export async function launchChromium(options = {}) {
     let why;
     try {
         const { chromium } = await import('playwright');
-        return { browser: await chromium.launch() };
+        return { browser: await chromium.launch(options) };
     } catch (e) {
         why = e.code === 'ERR_MODULE_NOT_FOUND'
             ? 'the playwright package is not installed — run `pnpm install`'

@@ -68,21 +68,16 @@
     <div class="sidebar-scroll">
 
       <!-- CMX-377: New session + jump-to search, ahead of nav (mockup order —
-           head -> New session -> jump-to search -> nav). "New session" reopens
-           the SAME #new-menu the old sidebar "+" used (chela.openNewMenu) —
-           there is only one launch surface, this is just its new prominent
-           entry point, so the old per-section "+" in Sessions below is gone
-           (redundant with this). The search input reuses the EXISTING fuzzy
+           head -> New session -> jump-to search -> nav). "New session" opens the
+           launch menu (the launcher island, frontend/src/features/launcher, CMX-219):
+           there is only one launch surface, this is just its prominent entry point. The search input reuses the EXISTING fuzzy
            jump (nav.js's #palette machinery, ~1507) rather than a second
            implementation: typing here opens/drives the real #palette overlay
            in place — global ArrowUp/ArrowDown/Enter/Escape handling already
            works off `#palette.open`, not focus, so it needs no keydown wiring
            of its own (see nav.js's sidebarJumpInput). -->
       <div class="sidebar-quick">
-        <button class="sidebar-new-btn" onclick="chela.openNewMenu(event)">
-          <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12h14"/><path d="M12 5v14"/></svg>
-          <span>New session</span>
-        </button>
+        <span class="island-slot" id="sidebar-new-island"></span>
         <label class="sidebar-jump">
           <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg>
           <input type="search" id="sidebar-jump-input" placeholder="Jump to session" aria-label="Jump to session"
@@ -91,7 +86,7 @@
         </label>
       </div>
 
-      <!-- Primary navigation. NOT written here: nav.js renders these rows from the
+      <!-- Primary navigation. NOT written here: the sidebar island (CMX-278) draws these rows from the
            view REGISTRY (static/js/views.js) — one declaration per view, so adding
            or deleting a view is one entry there and nothing here.
 
@@ -112,7 +107,8 @@
       <section class="side-section">
         <div class="side-head">
           <span class="side-title">Sessions</span>
-          <span class="side-count" id="hdr-agents">-/-</span>
+          <!-- CMX-219: the agent count, from /api/summary (frontend/src/features/primarymenu). -->
+          <span class="island-slot" id="sessions-count-island"></span>
           <!-- CMX-66: the VIEW menu (Status / Environment / Last activity / Group by / Sort by /
                Custom groups / Show empty groups / Show PR status), drawn here by the sidebar
                island (CMX-277, frontend/src/features/sidebar/lib/menus.tsx). -->
@@ -122,23 +118,10 @@
         <div class="side-list" id="sidebar-agents"></div>
       </section>
 
-      <!-- Recent (dead) sessions — CMX-208. A UI over `chela restore`'s already-tested
-           classification (chela/restore.py): a Claude session a hard tmux death (or
-           `wsl --shutdown`) orphaned, with enough on record (cwd + session id) to
-           relaunch. Hidden entirely when there is nothing to resume — this is a
-           rare-but-important recovery affordance, not a permanent fixture like
-           Navigate/Sessions above, so nav.js's renderRecentSessions toggles `hidden`
-           rather than always reserving the space. -->
-      <section class="side-section" id="side-recent-section" hidden>
-        <div class="side-head">
-          <span class="side-title">Recent sessions</span>
-          <span class="side-count" id="hdr-recent">0</span>
-          <button class="recent-clear-all" id="recent-clear-all" hidden
-                  title="Dismiss every recent session (transcripts are kept)"
-                  onclick="chela.clearRecentSessions()">Clear all</button>
-        </div>
-        <div class="side-list" id="side-recent"></div>
-      </section>
+      <!-- Recent (dead) sessions (CMX-208): resuming a prior Claude conversation by its session
+           id, drawn by the sidebar island (CMX-278, features/sidebar/lib/Recent.tsx) and absent
+           when there is nothing to resume. -->
+      <div class="side-recent-slot" id="side-recent-island"></div>
 
     </div><!-- /sidebar-scroll -->
 
@@ -147,32 +130,18 @@
          below `</main>`) — reachable whenever the sidebar itself is, which is
          always on desktop and one drawer-open away on a phone. -->
     <div class="sidebar-foot">
-      <!-- Host resources strip — live CPU/RAM/Disk, sampled on-request by the
-           dashboard process itself (chela/dashboard/resources.py via
-           GET /api/resources — never the daemon, never a shared state file,
-           CMX-172). Three compact readouts; resources.js (pure math lives in
-           resourcesmodel.js) tints each past its 75%/90% threshold via
-           --ok-green/--ok-orange/--ok-vermillion, but the % NUMBER is always
-           the signal — colour is decoration on top, never the sole cue (Liav
-           is red-weak). A metric whose value comes back null (unreadable
-           host) hides itself rather than show a stale/fake number. -->
-      <div class="res-strip" id="resources-strip" hidden>
-        <span class="res-item" id="res-cpu" hidden><span class="res-label">CPU</span><span class="res-value">--%</span></span>
-        <span class="res-item" id="res-mem" hidden><span class="res-label">RAM</span><span class="res-value">--%</span></span>
-        <span class="res-item" id="res-disk" hidden><span class="res-label">Disk</span><span class="res-value">--%</span></span>
-      </div>
-      <!-- The three former primaries (Jump to… #btn-palette, New… #btn-new, overflow
-           #btn-overflow) fold into this ONE button (CMX-109 / CMX-108 Part A
-           re-filed) — #primary-menu below. ⌘K still opens the palette directly
-           (nav.js's global keydown listener, unrelated to this menu). -->
-      <!-- CMX-393: a settings gear, not a ⋮ alone on its own row — the mockup's
-           single footer control. It still opens #primary-menu (Settings is one of
-           its rows), so every action it held stays one click away. -->
-      <button class="icon-btn" id="btn-primary-menu" title="Settings &amp; menu" aria-label="Open menu" aria-haspopup="true" onclick="chela.openPrimaryMenu(event)">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z"/><circle cx="12" cy="12" r="3"/></svg>
-      </button>
+      <!-- Host resources strip: live CPU/RAM/Disk (CMX-172), drawn by the resources island
+           (frontend/src/features/resources, CMX-219). The % NUMBER is the signal, colour
+           only decoration (Liav is red-weak); an unreadable metric hides itself. -->
+      <span class="island-slot" id="resources-island"></span>
+      <!-- CMX-393: the settings gear and its menu (Jump to, New, Share, Notifications,
+           Settings, then the usage readouts), the primary menu island
+           (frontend/src/features/primarymenu, CMX-219). ⌘K still opens the palette directly. -->
+      <span class="island-slot" id="primary-menu-island"></span>
     </div>
 
+    <!-- CMX-278: the desktop width handle (features/sidebar/lib/Resize.tsx). -->
+    <div class="sidebar-resize-slot" id="sidebar-resize"></div>
   </aside>
 
   <!-- Main canvas: context-driven by sidebar selection -->
@@ -232,21 +201,13 @@
                         style="margin-left:6px;"></button>
                 </span>
             </span>
-            <!-- CMX-422: the active-shares pill's in-row copy (terminals.js
-                 _renderSharesIndicator drives both). Desktop only: it takes the
-                 row's flow slot at its right end, and while it shows, the floating
+            <!-- CMX-422: the active-shares pill's in-row copy, #term-shares (the share
+                 feature's pill island, CMX-240, draws both copies). Desktop only: it takes
+                 the row's flow slot at its right end, and while it shows, the floating
                  #btn-shares is hidden so it can't be drawn over the row. CMX-135: the
-                 same for pending approvals (#term-approvals, approvals.js). -->
-            <button class="shares-indicator" id="term-shares" hidden onclick="chela.openSharesSheet()"
-                    title="Active shares, tap to manage or stop" aria-label="Active shares">
-                <span class="si-dot" aria-hidden="true"></span>
-                <span class="si-text">0 sharing</span>
-            </button>
-            <button class="shares-indicator approvals-indicator" id="term-approvals" hidden
-                    onclick="chela.openApprovals()"
-                    title="Requests waiting for your approval, tap to review" aria-label="Pending approvals">
-                <span class="pa-pill-text">⚖️ 0 pending approvals</span>
-            </button>
+                 same for pending approvals (#term-approvals, the approvals island). -->
+            <span class="shares-pill-slot" id="shares-pill-row"></span>
+            <span class="island-slot" id="term-approvals-island"></span>
         </div>
         <div id="term-stage"></div>
         <div id="term-min-dock" style="display:none;"></div>
@@ -269,16 +230,10 @@
   <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="3" y1="6" x2="21" y2="6"/><line x1="3" y1="12" x2="21" y2="12"/><line x1="3" y1="18" x2="21" y2="18"/></svg>
 </button>
 
-<!-- Phone-only "+" beside the menu fab (CMX-386): New session was two taps deep
-     on a phone once #529 removed the topbar (open the drawer, then its "New
-     session" button). This opens the SAME #new-menu directly, with the drawer
-     left CLOSED. It must live out here, not in the sidebar: the off-canvas
-     sidebar's `transform` would trap it off-screen (see .safety-float below).
-     Desktop hides it — .sidebar-new-btn is always on screen there. -->
-<button class="mobile-new-fab" id="btn-new-mobile" title="New session" aria-label="New session"
-        onclick="chela.openNewMenu(event)">
-  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12h14"/><path d="M12 5v14"/></svg>
-</button>
+<!-- Phone-only "+" beside the menu fab (CMX-386): New session in one tap, with the drawer
+     left CLOSED (the launcher island, frontend/src/features/launcher). Out here, not in the
+     sidebar, whose `transform` would trap it off-screen. Desktop hides it. -->
+<span class="island-slot" id="new-fab-island"></span>
 
 <!-- Always-on-top safety cluster (CMX-377): the native-status-feed outage
      warning and the active-shares kill-switch, floating above the canvas on
@@ -289,39 +244,19 @@
      two stay OUTSIDE the sidebar entirely, not just outside the drawer's scroll
      area, or a live share could go unseen behind a closed drawer. -->
 <div class="safety-float">
-  <!-- Native status feed health marker (CMX-179's load-bearing half): the native
-       `claude agents --json` busy/idle feed died for 12 days and every pane kept
-       rendering "idle" — indistinguishable from a genuinely calm fleet — because
-       nothing said the feed itself was down. statushealth.js shows this whenever
-       /api/agents/status_health reports not-ok; glyph + word, never colour-only
-       (Liav is red-weak). Hidden by default: shown only on a real outage. -->
-  <span class="status-health-warn" id="status-health-warn" hidden
-        title="claude agents --json is not answering. Every pane's busy/idle status is stale fleet-wide, not a calm fleet">
-    <span aria-hidden="true">&#9888;</span><span class="shw-text">agent status unavailable</span><span class="shw-text-narrow">status down</span>
-  </span>
+  <!-- Native status feed health marker (CMX-179): shown whenever
+       /api/agents/status_health reports not-ok (frontend/src/features/statushealth). -->
+  <span class="island-slot" id="status-health-island"></span>
   <!-- Global active-shares indicator (safety kill-switch): shown on EVERY tab +
        mobile whenever any session is shared, so a forgotten live share (= an
        exposed terminal via a public link) is always one tap from Stop. NOT in
-       the menu above — it must stay visible whenever a share is live. -->
-  <button class="shares-indicator" id="btn-shares" hidden onclick="chela.openSharesSheet()"
-          title="Active shares, tap to manage or stop" aria-label="Active shares">
-    <span class="si-dot" aria-hidden="true"></span>
-    <span class="si-text">0 sharing</span>
-  </button>
-  <!-- 🙋 Sandboxed guests' access requests (CMX-7): shown only while one waits for a
-       decision. Text + count, never hue alone. -->
-  <button class="shares-indicator access-req-indicator" id="btn-access-req" hidden
-          onclick="chela.openAccessRequests()"
-          title="Access requests from sandboxed guests, tap to approve or deny" aria-label="Access requests">
-    <span class="ar-pill-text">🙋 0 access requests</span>
-  </button>
-  <!-- ⚖️ Pending approvals (CMX-103): override / release requests waiting on the operator —
-       so a dashboard-only operator (no Telegram) learns one is waiting. Text + count. -->
-  <button class="shares-indicator approvals-indicator" id="btn-approvals" hidden
-          onclick="chela.openApprovals()"
-          title="Requests waiting for your approval, tap to review" aria-label="Pending approvals">
-    <span class="pa-pill-text">⚖️ 0 pending approvals</span>
-  </button>
+       the menu above — it must stay visible whenever a share is live. The share
+       feature's pill island (CMX-240) draws it here as #btn-shares. -->
+  <span class="shares-pill-slot" id="shares-pill-float"></span>
+  <!-- Sandboxed guests' access requests (CMX-7) and pending approvals (CMX-103), each shown
+       only while one waits: the safety islands (frontend/src/features/accessreq, approvals). -->
+  <span class="island-slot" id="access-req-island"></span>
+  <span class="island-slot" id="approvals-island"></span>
 </div>
 
 <!-- Command palette (⌘K / Ctrl-K): fuzzy jump to any agent, view, or project -->
@@ -421,103 +356,14 @@
   </div>
 </div>
 
-<!-- "+ new" popover — the LAUNCH surface. Favorites + Recent used to be a third
-     sidebar section; they are launch affordances, so they live here, above the
-     other "new…" actions. launcher.js renders #new-menu-launch (click-to-launch,
-     ★ pin/unpin, × forget, + add-a-favourite); it stays empty when terminals are
-     off, and the whole block is gated on that flag. -->
-<div class="popover launch-menu" id="new-menu" style="display:none;">
-  {% if terminals_enabled %}
-  <div id="new-menu-launch"></div>
-  <div class="popover-sep"></div>
-  {% endif %}
-  <div class="popover-item" onclick="chela.hideNewMenu(); chela.openInitRepo()">Init a repo</div>
-  <div class="popover-item" onclick="chela.hideNewMenu(); chela.showAddSchedule()">Scheduled task</div>
-  <!-- CMX-403: the ONLY kind of window a share guest may type into (a container that
-       sees just the project — docs/SHARE_SANDBOX.md). Both the sidebar "New session"
-       and the phone "+" open this same #new-menu, so it is in both. -->
-  <div class="popover-item" id="new-sandbox-item" title="A container that sees only the project, the only kind of window a share guest may type into"
-       onclick="chela.hideNewMenu(); chela.newSandboxedSession()">Sandboxed session…</div>
-  <!-- CMX-418: the same container, opted in to web access (public hosts only, through a
-       filtering + rate-limited + logged egress proxy, with a headless browser). -->
-  <div class="popover-item" id="new-sandbox-web-item" title="A sandboxed session that may also read PUBLIC web pages, never your host or LAN. Every request is logged"
-       onclick="chela.hideNewMenu(); chela.newSandboxedSession(true)">Sandboxed session · allow web access…</div>
-  <div class="popover-item" id="new-shell-item" onclick="chela.hideNewMenu(); chela.newShellWindow()">Shell window</div>
-</div>
-
-<!-- Topbar primary menu: Jump to… + New… + the old overflow's secondary actions +
-     usage readouts, folded off three separate topbar buttons into one (CMX-109 /
-     CMX-108 Part A re-filed — cmx-108/#122 folded the WALL toolbar's primaries
-     instead; #new-menu above is the Wall's un-touched sibling). "New…" reopens
-     the existing #new-menu (Favorites/Recent + Init a repo/Scheduled task/Shell
-     window) anchored at #btn-primary-menu — reused unchanged rather than
-     duplicated, since #new-menu already serves the sidebar's own "+" trigger from
-     a different anchor. The rate-limit / Next / Updated elements keep their
-     #hdr-* ids so the existing updaters (agents.js _updateRlPill, header.js)
-     drive them here, visibility-agnostic. -->
-<div class="popover overflow-menu" id="primary-menu" style="display:none;">
-  <div class="popover-item ov-item" onclick="chela.hidePrimaryMenu(); chela.openPalette()">
-    <span class="ov-ic"><svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="m21 21-4.3-4.3"/></svg></span>
-    <span>Jump to…</span>
-    <span class="pt-kbd" style="margin-left:auto;">⌘K</span>
-  </div>
-  <div class="popover-item ov-item" onclick="chela.openNewMenuFromPrimary()">
-    <span class="ov-ic"><svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12h14"/><path d="M12 5v14"/></svg></span>
-    <span>New…</span>
-  </div>
-  <div class="popover-sep"></div>
-  {% if terminals_enabled %}
-  <div class="popover-item ov-item" onclick="chela.hidePrimaryMenu(); chela.shareCurrentAgent()">
-    <span class="ov-ic"><svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="18" cy="5" r="3"/><circle cx="6" cy="12" r="3"/><circle cx="18" cy="19" r="3"/><line x1="8.59" x2="15.42" y1="13.51" y2="17.49"/><line x1="15.41" x2="8.59" y1="6.51" y2="10.49"/></svg></span>
-    <span>Share current session</span>
-  </div>
-  {% endif %}
-  <div class="popover-item ov-item" onclick="chela.hidePrimaryMenu(); chela.toggleSettings('notify')">
-    <span class="ov-ic"><svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M10.268 21a2 2 0 0 0 3.464 0"/><path d="M3.262 15.326A1 1 0 0 0 4 17h16a1 1 0 0 0 .74-1.673C19.41 13.956 18 12.499 18 8A6 6 0 0 0 6 8c0 4.499-1.411 5.956-2.738 7.326"/></svg></span>
-    <span>Notifications</span>
-  </div>
-  <div class="popover-item ov-item" onclick="chela.hidePrimaryMenu(); chela.toggleSettings()">
-    <span class="ov-ic"><svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z"/><circle cx="12" cy="12" r="3"/></svg></span>
-    <span>Settings</span>
-  </div>
-  <div class="popover-sep"></div>
-  <div class="ov-stat" id="hdr-ratelimit-pill" style="display:none" title="5-hour usage">
-    <span class="ov-lbl">5h usage</span><span class="value" id="hdr-ratelimit">-</span>
-  </div>
-  <div class="ov-stat" id="hdr-weekly-rl-pill" style="display:none" title="7-day usage">
-    <span class="ov-lbl">7d usage</span><span class="value" id="hdr-weekly-rl">-</span>
-  </div>
-  <!-- Schedules moved into WORK (its own nav item is gone), so its active/total
-       readout lives here with the other ambient stats. header.js fills it. -->
-  <div class="ov-stat" title="Enabled / total scheduled tasks">
-    <span class="ov-lbl">Schedules</span><span class="value" id="hdr-schedules">-</span>
-  </div>
-  <div class="ov-stat" id="hdr-next-pill" title="Soonest scheduled run">
-    <span class="ov-lbl">Next run</span><span class="value ts" id="hdr-next">-</span>
-  </div>
-  <div class="ov-stat">
-    <span class="ov-lbl">Updated</span><span class="value ts" id="hdr-updated">-</span>
-  </div>
-</div>
-
-<!-- Launcher: "add a project to Favorites" picker (filled from /api/launcher/suggest) -->
-<div class="popover" id="fav-add-menu" style="display:none;"></div>
+<!-- Overlays island (CMX-219, frontend/src/chrome.tsx Overlays): the launch menu, the
+     send-message dialog, the approvals and access-request sheets and the update banner. Each
+     portals or fixes itself on the page. -->
+<div id="overlays-island"></div>
 
 <!-- New task (CMX-6): creates a Linear issue via the dashboard, the key never comes here.
      The New-task island (frontend/src/features/newtask) portals its dialog to <body>. -->
 <div id="newtask-island"></div>
-
-<!-- Send Message Modal -->
-<div class="modal-overlay" id="modal-msg">
-  <div class="modal">
-    <h3>Send Message to <span id="modal-msg-agent"></span></h3>
-    <textarea id="modal-msg-text" rows="4" placeholder="Message…"></textarea>
-    <div class="modal-actions">
-      <button onclick="chela.closeModal('modal-msg')">Cancel</button>
-      <button class="btn-accent" onclick="chela.doSendMsg()">Send</button>
-    </div>
-  </div>
-</div>
 
 <!-- Task-detail modal (CMX-228): a kanban card or a Decisions row opens it. The task modal
      island (frontend/src/features/taskmodal) portals its dialog to <body>. -->
@@ -528,6 +374,8 @@
 <div id="diff-modal-island"></div>
 <!-- The Work toasts (a run changed state; a board note): outside every panel, so they show on any view. -->
 <div id="work-toasts"></div>
+<!-- The Active shares sheet (CMX-240): the kill switch's list, opened by either pill. -->
+<div id="shares-sheet-island"></div>
 
 <!-- CMX-217: the boot config the bundle reads (frontend/src/shared/api readBoot). -->
 <script type="application/json" id="chela-boot">{{ boot|tojson }}</script>

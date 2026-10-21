@@ -1,12 +1,13 @@
 // CMX-301 — on an iPhone, tapping a session row in the sidebar drawer showed the
 // row's "window: cv" tooltip and never opened the session.
 //
-// Cause: nav.js's touch tap-tip. On touchend it walks up to the nearest [title]
-// and preventDefault()s, which cancels the click — unless the target sits in
-// something it recognises as interactive (button, a, [onclick], [role=button]).
-// The legacy row carried an onclick attribute; the React row (CMX-276) keeps its
-// onClick in React, so the tap-tip took every tap on the row's titled name.
-// Fixed by marking every React root and kit overlay [data-island] and bailing there.
+// Cause: the touch tap-tip (shared/popover installTapTips, nav.js's before CMX-219).
+// On touchend it walks up to the nearest [title] and preventDefault()s, which
+// cancels the click — unless the target sits in something it recognises as
+// interactive (button, a, [onclick], [role=button]). The legacy row carried an
+// onclick attribute; the React row (CMX-276) keeps its onClick in React, so the
+// tap-tip took every tap on the row's titled name. Fixed by also leaving alone
+// anything drawn with the pointer cursor (what is clickable is).
 //
 // Driven with tap() on a touch context, against the committed bundle: drawer open
 // → tap a row ⇒ that session is the one full-width pane and the drawer is shut;
@@ -51,9 +52,14 @@ function screenState(page) {
     });
 }
 
+// The tap-tip shown right after a tap (it hides itself after 4 s), or null.
+const tipNow = page => page.evaluate(() => document.querySelector('.tap-tip:not(.ui-floating)')?.textContent ?? null);
+
 async function tapRow(page, name) {
     // The row's name span carries title="window: …": the exact element the tap-tip took.
     await page.locator(`#sidebar-agents .agent-row[data-agent="${name}"] .agent-row-name`).tap();
+    const tip = await tipNow(page);
+    assert.equal(tip, null, `the tap popped the tap-tip "${tip}" instead of opening the session`);
 }
 
 async function waitShown(page, wid) {
@@ -73,9 +79,11 @@ describe(`CMX-301 phone ${W}×${H}, touch: tapping a session row opens it`, { sk
     });
     after(() => context && context.close());
 
-    test('the rows are inside a [data-island] (else the fix below proves nothing)', async () => {
+    test('the row name carries a title (else the tap below proves nothing)', async () => {
         ready();
-        assert.ok(await page.evaluate(() => !!document.querySelector('#sidebar-agents[data-island] .agent-row')));
+        assert.equal(await page.evaluate(() =>
+            document.querySelector('#sidebar-agents .agent-row[data-agent="c-idle"] .agent-row-name')?.getAttribute('title')),
+        'window: c-idle');
     });
 
     test('tap a row ⇒ that session is the one full-width pane, the drawer shut, no tooltip', async () => {
@@ -111,14 +119,12 @@ describe(`CMX-301 phone ${W}×${H}, touch: tapping a session row opens it`, { sk
         assert.deepEqual(s.panes.map(p => p.src), ['/term/@1/'], `panes on screen: ${JSON.stringify(s.panes)}`);
     });
 
-    test('a titled legacy pill outside any island still gets its tap-tip', async () => {
+    test('a titled readout that is not clickable still gets its tap-tip', async () => {
         ready();
         await openDrawer(page);
-        // The sidebar foot's CPU readout: legacy, titled, not interactive.
-        const stat = page.locator('.sidebar-foot [title]:not(button)').first();
-        await stat.tap();
-        const tip = await page.evaluate(() => document.querySelector('.tap-tip:not(.ui-floating)')?.textContent ?? null);
-        assert.ok(tip, 'no tap-tip on a legacy titled pill: the bail is too wide');
+        // The sidebar foot's CPU readout: titled, not interactive.
+        await page.locator('#res-cpu').tap();
+        assert.equal(await tipNow(page), 'CPU: 8%', 'no tap-tip on the CPU readout: the bail is too wide');
     });
 });
 

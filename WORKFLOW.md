@@ -32,7 +32,9 @@ workspace:
   base_branch: dev          # active branch — worktrees fork from dev, PRs target dev
 
 concurrency:
-  max: 3                    # 3 in flight (raised 2026-10-16 once CMX-151 stopped orphaned
+  max: 2                    # TEMP 2026-10-21 (Liav): 3 → 2 until CMX-119 (suite admission control) lands;
+                            # 3 agents + judges running full suites at once got hand-ins reaped for memory.
+                            # Was: 3 in flight (raised 2026-10-16 once CMX-151 stopped orphaned
                             # node test trees leaking ~4 GB). Light dashboard/JS agents. NOTE: the
                             # dispatcher's active-count is GLOBAL across workflows, so this
                             # also caps total box-wide agents; lean-alpha stays at max:1 so

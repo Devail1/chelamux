@@ -1,7 +1,7 @@
 // CMX-160 rewrote the copy on dashboard lines that sit behind a condition no test had
 // covered. These pin each condition, so the rewrite can't hide a dropped branch:
-//   1. agents.js: a context reading that is a transcript ESTIMATE gets the
-//      `chela install-statusline` hint in its tooltip, and an exact reading does not.
+//   1. (the agent detail's context bar moved to the agent-detail island's own suite, CMX-219:
+//      frontend/src/features/agentdetail/tests/AgentDetail.test.tsx)
 //   2. terminals.js: the same split on a wall tile's context bar tooltip.
 //   3. (seeding a repo moved to the Init-a-repo dialog's own suite, CMX-231:
 //      frontend/src/features/runs/tests/Runs.test.tsx)
@@ -43,8 +43,7 @@ const PAGE = `
   <button id="term-new-shell"></button><div id="term-stage"></div>
   <div id="term-min-dock"></div>
   <div id="term-bar" class="kb-collapsed"><button class="kb-toggle" id="kb-toggle"></button><div class="kb-body" id="kb-body"></div></div>
-</div>
-<div id="ctx-a1"><div class="context-bar-fill"></div><span class="context-label"></span></div>`;
+</div>`;
 
 function fakeGridStack() {
     const grid = {
@@ -56,7 +55,7 @@ function fakeGridStack() {
     return { init: () => grid };
 }
 
-let agents, nav, terminals, util;
+let nav, terminals, util, sidebar;
 
 beforeAll(async () => {
     const dom = new JSDOM(`<!doctype html><html><body>${PAGE}</body></html>`,
@@ -78,32 +77,18 @@ beforeAll(async () => {
     await import('../chela/dashboard/frontend/src/boot.ts');
     util = await import('../chela/dashboard/static/js/util.js');
     nav = await import('../chela/dashboard/static/js/nav.js');
+    sidebar = await import('../chela/dashboard/frontend/src/features/sidebar/controller.ts');
     terminals = await import('../chela/dashboard/static/js/terminals.js');
-    agents = await import('../chela/dashboard/static/js/agents.js');
     util.setCurrentTab('terminals');
     util.setAgentsCache(AGENTS);
 });
 
 const settle = async () => { for (let i = 0; i < 8; i++) await new Promise(r => setTimeout(r, 0)); };
 
-// --- 1 + 2. the context tooltip's estimate hint ------------------------------------
+// --- 2. the wall tile's context tooltip, estimate hint -----------------------------
 
 const reading = over => ({ name: 'a1', window_id: '@3', used: '50k', total: '200k', used_pct: 25,
     session_name: 'cmx-1', ...over });
-const label = () => document.querySelector('#ctx-a1 .context-label');
-
-test('an estimated context reading carries the install-statusline hint in its tooltip', async () => {
-    CONTEXT = [reading({ estimated: true })];
-    await agents.checkContext();
-    assert.equal(label().title,
-        'cmx-1 · estimate from transcript; run `chela install-statusline` for exact context %');
-});
-
-test('an exact context reading has no estimate hint', async () => {
-    CONTEXT = [reading({ estimated: false })];
-    await agents.checkContext();
-    assert.equal(label().title, 'cmx-1');
-});
 
 const tileBar = () => document.querySelector('#term-stage .term-ctx-bar[data-ctx-for="@3"]');
 
@@ -133,12 +118,12 @@ for (const [fn, text] of [['archiveKeys', 'Archive failed. The dashboard did not
     ['unarchiveKeys', 'Unarchive failed. The dashboard did not answer.']]) {
     test(`${fn}: no answer from the dashboard alerts "${text}"`, async () => {
         ARCHIVE_DOWN = true;
-        assert.equal(await nav[fn](['s:abc']), null);
+        assert.equal(await sidebar[fn](['s:abc']), null);
         assert.deepEqual(ALERTS, [text]);
     });
 
     test(`${fn}: an answered request does not alert`, async () => {
-        const res = await nav[fn](['s:abc']);
+        const res = await sidebar[fn](['s:abc']);
         assert.ok(res, 'the fake dashboard answered, so the result is not null');
         assert.deepEqual(ALERTS, []);
     });
@@ -146,6 +131,6 @@ for (const [fn, text] of [['archiveKeys', 'Archive failed. The dashboard did not
     test(`${fn}: a page without alert() fails quietly instead of throwing`, async () => {
         ARCHIVE_DOWN = true;
         delete globalThis.alert;
-        assert.equal(await nav[fn](['s:abc']), null);
+        assert.equal(await sidebar[fn](['s:abc']), null);
     });
 }

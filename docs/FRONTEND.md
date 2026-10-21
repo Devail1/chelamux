@@ -71,6 +71,19 @@ mountIsland('version-island', VersionBadge, {});
 `mountIsland(id, Component, props)` (`src/shared/islands`) renders `<Component {...props} />`
 into `#id` and returns the React root, or `null` when the page has no such element.
 
+The page's chrome (CMX-219) mounts from `src/chrome.tsx`, which has no side effect at import so
+the jsdom suites can mount it on a page of their own: the safety float's pills, the sidebar's
+New session, agent count, resources strip and gear menu, the phone "+", the agent detail, and
+`Overlays` (one root for the launch menu, the send-message dialog, the approvals and
+access-request sheets and the update banner). An island that draws one control
+inside a legacy row renders into a `<span class="island-slot">` (`display: contents`), so the
+control lays out as the row's own child.
+
+When a ported surface needs something only legacy knows (the Wall, the view switch, the
+orchestrator slot), legacy hands it in at import, the way `work.js` hands `setWorkPoll` its poll:
+`nav.js` calls `setLauncherHost` and `setAgentDetailHost`. A legacy surface the island only
+opens (the palette, Settings, sharing) is looked up on `window.chela` at call time.
+
 Islands are a migration path, not the end state: each island is its own root, so context and
 portals do not cross between them. `FRONTEND_PORT_PLAN.md` §2.1 ends in one app shell.
 
@@ -82,8 +95,10 @@ Legacy code owns the fetches until the component reading their result is ported.
 | Store | Published by legacy from | Value |
 |---|---|---|
 | `agents` | `util.js` `setAgentsCache()` | the `/api/agents` rows |
-| `sidebarLayout` | `nav.js` `_setLayout()` / `_writeLayout()` | `{order, custom, view, loaded}` (CMX-82) |
-| `sidebar` | `nav.js` `renderSidebarAgents()` (and Alt held, the active row) | `SidebarState`: what the sidebar island draws (CMX-276) |
+| `sidebarLayout` | the sidebar controller's layout (`features/sidebar/lib/layout.ts`) | `{order, custom, view, width, loaded}` (CMX-82, CMX-278) |
+| `sidebar` | the sidebar controller's `renderSidebarAgents()` (and Alt held, the active row) | `SidebarState`: what the sidebar island draws (CMX-276) |
+| `nav` | `nav.js` `renderNav()` / `selectView()`, `work.js` (the badges) | the nav rows, the active view, the Work badge counts (CMX-278) |
+| `recent` | the sidebar controller (`/api/restore`, dismiss, Undo) | Recent sessions (CMX-278) |
 
 A store is a value plus listeners (`createStore`: `get`, `set`, `subscribe`; `set` with the
 same value notifies nobody, so always publish a NEW array or object, never one mutated in place). React reads it with `useStore(store)`, a one-line
@@ -95,7 +110,9 @@ Since CMX-217 the page's state is `src/shared/store/`, one file per slice (`view
 active view; `agents.ts`, the bridge's `agents` store; `work.ts`, the last `/api/dispatcher`
 payload, which `src/features/work`'s one poll (a scheduler lane, CMX-233) publishes and the Work
 view and New-task dialog read; they ask for a fresh poll with `refreshWork()`, CMX-231; `orchestrator.ts`, who holds the decisions
-inbox, read and written through `src/shared/orchestrator`, CMX-228). Legacy imports those objects through
+inbox, read and written through `src/shared/orchestrator`, CMX-228; `context.ts`, the last
+`/api/agents/context` rows, which the gear menu's usage readouts and the agent detail read,
+CMX-219). Legacy imports those objects through
 `util.js`, whose `currentTab` and `_agentsCache` are a facade over them: the store is the
 truth, the live bindings mirror it. `sidebarLayout` still goes through `window.chelaBridge`:
 
@@ -115,18 +132,30 @@ call `publish('<name>', value)` wherever legacy changes it.
 
 ### The sidebar island
 
-`#sidebar-agents` is the sidebar island's (`src/features/sidebar`, CMX-276), and so is the VIEW
-menu's slot on the Sessions header, `#sidebar-view-menu` (a second root over the same store,
-CMX-277). Its group, row and VIEW menus are the kit's `Menu`; what a choice does is still
-legacy's (`groupMenuAction`, `rowMenuAction`, `viewMenuAction`, … on `window.chela`), and so are
-the layout, the archive and the collapsed groups, until slice C. It repaints
-synchronously (`flushSync`) on every publish of the `sidebar` store, because legacy code reads
-the rows straight back (Alt+N, jump to the orchestrator). Its clicks call the legacy handlers on
-`window.chela`, looked up at call time. Legacy `nav.js` / `terminals.js` import its pure
-model, `src/features/sidebar/model.ts`, as source. `tests/js_helpers/dashboard_dom.mjs` mounts it (from
-`src/`) for every suite that boots the page; a suite with its own jsdom boot calls
-`mountIslands(window)` before it imports `src/boot.ts`. Icons come from `src/shared/icons`, a map
-from a meaning to a Lucide icon.
+The sidebar is `src/features/sidebar` (CMX-172: slices CMX-276, CMX-277, CMX-278). Its roots
+draw into slots `index.html` keeps: the session list `#sidebar-agents`, the VIEW menu
+`#sidebar-view-menu`, the nav rows `#side-nav`, Recent sessions `#side-recent-island` and the
+width handle `#sidebar-resize`. Its group, row and VIEW menus are the kit's `Menu`.
+
+Its state and commands are `controller.ts`, the module's second entry point (the pure
+`model.ts` is the third): the `/api/agents` read the sidebar draws (its scheduler lane), the
+per-device collapsed groups, the server layout and archive, Recent sessions, the collapsed rail
+and phone drawer, the Alt fast switch, and the width. What it needs from the rest of the page
+(a window's label, the wall, opening a pane, the launcher, the orchestrator slot) it reaches
+through the host `nav.js` gives `configureSidebar()`, so it imports no legacy module; legacy
+(`nav.js`, `terminals.js`, `launcher.js`, `work.js`) imports it. The islands' clicks reach it
+through `window.chela` (`legacyActions`, looked up at call time).
+
+Every root repaints synchronously (`flushSync`) on a publish of its stores, because legacy
+code reads the rows straight back (Alt+N, jump to the orchestrator).
+`tests/js_helpers/dashboard_dom.mjs` mounts the islands (from `src/`) for every suite that boots
+the page, and returns the controller as `modules.sidebar` (`extraModules: [SIDEBAR]`); a suite
+with its own jsdom boot calls `mountIslands(window)` before it imports `src/boot.ts`. Icons come
+from `src/shared/icons`, a map from a meaning to a Lucide icon.
+
+The desktop width (CMX-278) is `--sidebar-w` on the root element, set from the layout's `width`
+(clamped to 264-480 px, default 288; `chela/sidebar_layout.py` clamps the same). The handle sets
+it live while dragging and saves it on release. The phone drawer keeps its own 264 px.
 
 ### Markdown
 

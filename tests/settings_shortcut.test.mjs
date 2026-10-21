@@ -32,7 +32,7 @@ const HTML = readFileSync(join(ROOT, 'templates', 'index.html'), 'utf8');
 const APP_PY = readFileSync(join(ROOT, 'app.py'), 'utf8');
 
 const SETTINGS_START = HTML.indexOf('<div class="drawer-scrim" id="drawer-scrim"');
-const SETTINGS_END = HTML.indexOf('<!-- "+ new" popover');
+const SETTINGS_END = HTML.indexOf('<!-- Overlays island');
 if (SETTINGS_START < 0 || SETTINGS_END < 0) throw new Error('index.html markers for the settings modal moved — update this test');
 const BODY = `
 <div class="palette-overlay" id="palette">

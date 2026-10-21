@@ -124,3 +124,20 @@ def test_the_store_is_written_atomically(store, phone):
     _post(phone, {"order": ["/srv/a"]})
     assert store.exists()
     assert not store.with_suffix(".json.tmp").exists()
+
+
+# CMX-278: the desktop sidebar's width, dragged on one device, follows to the others.
+@pytest.mark.parametrize("sent,stored", [
+    (300, 300), (300.6, 301), (264, 264), (480, 480),
+    (263, 264), (100, 264), (481, 480), (9999, 480),   # clamped
+    (True, None), ("300", None), (None, None), (float("nan"), None), (float("inf"), None),
+])
+def test_the_width_travels_clamped(phone, laptop, sent, stored):
+    _post(phone, {"width": sent})
+    assert _get(laptop)["width"] == stored
+
+
+def test_a_width_write_keeps_the_other_fields(phone):
+    _post(phone, {"order": ["/srv/a"]})
+    _post(phone, {"width": 320})
+    assert (_get(phone)["order"], _get(phone)["width"]) == (["/srv/a"], 320)

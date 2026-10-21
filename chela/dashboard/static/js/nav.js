@@ -1,25 +1,22 @@
 // --- Stage 0: ES-module imports ---
-import { $, $$, TERMINALS_ON, _agentProject, _agentsCache, ageStr, agentDotColor, api, attrEsc, currentTab, escHtml, lucideIcon, publish, setAgentsCache, setCurrentTab, shortTime, updateTabSignal, wantsHuman } from './util';
+import { $$, TERMINALS_ON, _agentsCache, agentDotColor, api, attrEsc, escHtml, lucideIcon, setCurrentTab, updateTabSignal, wantsHuman } from './util';
 import { onOrchestratorChange, orchestratorState } from '../../frontend/src/shared/orchestrator';
-import { refreshSummary } from './header';
-import { checkContext } from './agents';
+import { refreshSummary } from '../../frontend/src/features/primarymenu';
+import { detailAgent, redrawAgentDetail, setAgentDetailHost } from '../../frontend/src/features/agentdetail';
 import { showAddSchedule } from '../../frontend/src/features/schedules';
 import { openNewTask } from '../../frontend/src/features/newtask';
-import { _displayLabel, adoptSidebarDefault, _minimized, _orderedWids, _renderedWids, _sharedWids, _stopShare, focusPaneByWid, isWallVisible, minimizePane, setTermMode, shareBtnClick } from './terminals';
-import { _launcherData, launchProject, refreshLauncher } from './launcher';
+import { _displayLabel, adoptSidebarDefault, _minimized, _orderedWids, _renderedWids, focusPaneByWid, isWallVisible, minimizePane, setTermMode, shareBtnClick } from './terminals';
+import { launchProject, launcher, newShellWindow, refreshLauncher, setLauncherHost } from '../../frontend/src/features/launcher';
+import { setApprovalNotify } from '../../frontend/src/features/approvals/model';
 import { VIEWS } from './views';
 import { findView, navViews, otherViews, paletteViews, panelId } from './viewreg';
-import { refresh, registerLane } from '../../frontend/src/shared/scheduler';
-import { placePopover } from '../../frontend/src/shared/popover';
+import { refresh } from '../../frontend/src/shared/scheduler';
 import { refreshCostTab } from './usage';
 import { resolveWindowId } from './windowid';
-import { followUpdate } from './updateflow';
+import { followUpdate } from '../../frontend/src/features/update/flow';
 import { memNote, stepPayload, workflowNote } from './concurrencymodel';
-import { ARCHIVED_SECTION_KEY, isArchivable, moveGroup, normalizeView, sidebarModel, sidebarOrder as modelSidebarOrder } from '../../frontend/src/features/sidebar/model';
-
-// The sidebar (agent list + WORK badges) is always visible, so it refreshes on every tick
-// whatever the view; its /api/agents read is what lets the view's tick start (CMX-166).
-registerLane('sidebar', t => refreshSidebar(t.paneListKnown, t.context).finally(t.paneListKnown));
+import { isShared, stopShare } from '../../frontend/src/features/share';
+import { closeSidebar, configureSidebar, refreshSidebar, renderSidebarAgents, setActiveRow, setNav } from '../../frontend/src/features/sidebar/controller';
 
 // ---------------------------------------------------------------------------
 // Sidebar + canvas navigation (replaces the old tab bar)
@@ -38,102 +35,35 @@ registerLane('sidebar', t => refreshSidebar(t.paneListKnown, t.context).finally(
 // third hardcoded copy of the view list).
 // ---------------------------------------------------------------------------
 
-let _detailAgent = null;    // window name focused in the agent-detail view
-let _activeRow = null;      // the sidebar row lit as the current view (_syncSidebarActive)
+// --- The sidebar (CMX-278) --------------------------------------------------
+// The sidebar is the React island's (frontend/src/features/sidebar): its state and commands
+// are controller.ts's. What it needs from the rest of the page, it reaches through this.
+configureSidebar({
+    label: _agentLabel,
+    onWall: () => _renderedWids.filter(w => !_minimized.has(w)),
+    orchWid: () => orchestratorState().wid,
+    wants: wantsHuman,
+    tabSignal: agents => updateTabSignal(agents),
+    adoptDefault: () => adoptSidebarDefault(),
+    openPane: _openPane,
+    launchProject: (cwd, opts) => launchProject(cwd, opts),
+});
 
-// --- Sidebar: one control, two behaviours ----------------------------------
-// PHONE (≤768px): the 264px sidebar is off-canvas (see the @media block in
-// style.css); .mobile-menu-fab's hamburger slides it in over a scrim (CMX-377 —
-// there is no topbar; the sidebar's OWN #btn-menu toggle is unreachable while
-// the drawer is closed, which is exactly why the floating fab exists).
-// DESKTOP: the sidebar is a static grid column, so there is nothing to slide —
-// the SAME control collapses it to an icon rail instead, handing the width to the
-// canvas. The state is persisted (a collapse that forgets itself on reload is an
-// annoyance, not a feature); the rail is pure CSS off a body class, so no row is
-// re-rendered and nothing the wall caches on can see it.
-const SIDEBAR_COLLAPSED_KEY = 'chela_sidebar_collapsed';
-
-function _isPhoneWidth() { return window.matchMedia('(max-width: 768px)').matches; }
-
-function _setSidebarCollapsed(collapsed) {
-    document.body.classList.toggle('sidebar-collapsed', collapsed);
-    localStorage.setItem(SIDEBAR_COLLAPSED_KEY, collapsed ? '1' : '0');
-    const btn = document.getElementById('btn-menu');
-    if (btn) btn.setAttribute('aria-expanded', collapsed ? 'false' : 'true');
-    // The canvas just changed width without a window RESIZE, so the listeners that
-    // re-fit the terminal wall never fired — poke them. The rail snaps (there is no
-    // width transition to wait out); the delay is only to let the grid settle after
-    // the reflow, and the wall debounces the event anyway. This is a RE-FIT, not a
-    // rebuild: buildWall's cache key (_termSig) is the live wid set — sidebar state
-    // never enters it — so the iframes stay put and no terminal reloads. That
-    // property is held by a real-DOM test (tests/wall.test.mjs), not by this comment.
-    setTimeout(() => window.dispatchEvent(new Event('resize')), 220);
-}
-
-// force: true = "show the sidebar" (drawer open / rail expanded), false = hide it.
-function toggleSidebar(force) {
-    if (!_isPhoneWidth()) {
-        const collapsed = (force === undefined)
-            ? !document.body.classList.contains('sidebar-collapsed')
-            : !force;
-        _setSidebarCollapsed(collapsed);
-        return;
-    }
-    const sb = document.querySelector('.sidebar');
-    const scrim = document.getElementById('sidebar-scrim');
-    if (!sb) return;
-    const open = (force === undefined) ? !sb.classList.contains('open') : !!force;
-    sb.classList.toggle('open', open);
-    if (scrim) scrim.classList.toggle('open', open);
-    // CMX-377: .mobile-menu-fab (the off-canvas drawer's phone-only opener,
-    // since the sidebar's own toggle is unreachable while it's closed) hides
-    // itself off this body class while the drawer is open, so the two
-    // triggers never render on top of each other.
-    document.body.classList.toggle('sidebar-open', open);
-    const fab = document.getElementById('btn-menu-mobile');
-    if (fab) fab.setAttribute('aria-expanded', open ? 'true' : 'false');
-}
-
-// Navigating dismisses the mobile drawer. It must NOT collapse the desktop rail —
-// selectView() calls this on every click, and a sidebar that folds itself away
-// whenever you use it is not a sidebar.
-function closeSidebar() { if (_isPhoneWidth()) toggleSidebar(false); }
-
-// Restore the persisted desktop state (mobile CSS ignores the class, so a phone
-// that inherits it from a desktop session is unaffected). The class itself is
-// already set before first paint by index.html's inline <body> script (CMX-89 —
-// a module runs too late for that); this keeps the toggle's aria in step.
-if (localStorage.getItem(SIDEBAR_COLLAPSED_KEY) === '1') {
-    document.body.classList.add('sidebar-collapsed');
-    const _menuBtn = document.getElementById('btn-menu');
-    if (_menuBtn) _menuBtn.setAttribute('aria-expanded', 'false');
-}
+// The orchestrator slot changes independently of the agent list poll (a pane's toggle, the
+// decisions dropdown): redraw off the cached list, no refetch to move one badge.
+onOrchestratorChange(() => {
+    renderSidebarAgents(_agentsCache || []);
+    redrawAgentDetail();   // its Role row reads the slot too
+});
 
 // --- The nav, rendered from the registry ------------------------------------
-// One .side-item per registered, enabled, non-virtual view — including its badge
-// slots. Adding a view to views.js puts it here; deleting it from views.js takes
-// it out of here. There is no second list.
+// One nav row per registered, enabled, non-virtual view, including its badge slots
+// (the island draws them). Adding a view to views.js puts it there; there is no second list.
 
 function _viewCtx() { return { terminalsOn: TERMINALS_ON }; }
 
-function _navItemHtml(v) {
-    const badges = (v.badges || []).map(b =>
-        `<span class="badge ${b.cls || ''}" id="${attrEsc(b.id)}" title="${attrEsc(b.title || '')}">${escHtml(b.text || '')}</span>`
-    ).join('');
-    // The title is the label — it is the only thing left to read once the sidebar
-    // is collapsed to its icon rail.
-    return `<div class="side-item" data-view="${attrEsc(v.id)}" title="${attrEsc(v.label || v.id)}"
-        onclick="chela.selectView(this.dataset.view)">
-        <span class="side-item-icon">${v.lucide ? lucideIcon(v.lucide) : escHtml(v.icon || '')}</span>
-        <span class="side-item-label">${escHtml(v.label || v.id)}</span>
-        ${badges ? `<span class="side-badges">${badges}</span>` : ''}
-    </div>`;
-}
-
 function renderNav() {
-    const host = document.getElementById('side-nav');
-    if (!host) return;
-    host.innerHTML = navViews(VIEWS, _viewCtx()).map(_navItemHtml).join('');
+    setNav({ items: navViews(VIEWS, _viewCtx()).map(({ id, label, lucide, badges }) => ({ id, label, lucide, badges })) });
 }
 
 // --- View switching --------------------------------------------------------
@@ -141,7 +71,7 @@ function renderNav() {
 function selectView(view) {
     const v = findView(VIEWS, view);
     setCurrentTab(view);
-    _detailAgent = null;
+    detailAgent.set(null);
 
     $$('.panel').forEach(p => p.classList.remove('active'));
     const panel = document.getElementById(panelId(view));
@@ -187,95 +117,22 @@ function selectAgent(name) {
     }
     showAgentDetail(name);
 }
-
-// --- Alt fast switch (CMX-85) ------------------------------------------------
-// Like the Claude desktop app's Ctrl-held numbers, with Alt (Ctrl+1..9 is the
-// browser's own tab switch, which a page cannot take): HOLDING Alt shows 1..9 on
-// the first nine visible session rows, top to bottom as drawn, and Alt+N opens
-// the Nth. The sidebar is the ONE numbering — the wall panes carry none — so
-// "what a row shows" and "what Alt+N opens" are both read off _altRows().
-//
-// Visible = a row in #sidebar-agents (Needs you + the folder groups), minus a
-// collapsed group's rows and the Archived section. Recent sessions live in
-// another list and are not sessions you can switch to.
-function _altRows() {
-    const host = document.getElementById('sidebar-agents');
-    if (!host) return [];
-    return [...host.querySelectorAll('.agent-row[data-agent]')]
-        .filter(r => !r.closest('.side-group.collapsed, .side-archived'))
-        .slice(0, 9);
-}
-
-// The island draws the numbers while Alt is held (CMX-276), on the same rows.
-let _altHeld = false;
-function setAltHeld(on) {
-    on = !!on;
-    if (on === _altHeld) return;
-    _altHeld = on;
-    _publishSidebar({ altHeld: on });
-}
-
-// Alt+1..9's row number (1..9), or 0. Keyed on e.code (the physical key,
-// "Digit1"), not e.key: macOS Option is a compose modifier, so Option+1 reports
-// e.key "¡". Ctrl/⌘ held too is someone else's shortcut.
-function altRowNumber(e) {
-    if (!e.altKey || e.ctrlKey || e.metaKey) return 0;
-    const m = /^Digit([1-9])$/.exec(e.code || '');
-    return m ? Number(m[1]) : 0;
-}
-
-// A bare Alt press — the "hold to see the numbers" gesture. Any other modifier
-// held with it is a different chord.
-function isAltOnly(e) {
-    return e.key === 'Alt' && !e.ctrlKey && !e.metaKey && !e.shiftKey;
-}
-
-// Open the session on the Nth visible row — what a click on it does, except a
-// pane already open on the wall is focused, never minimized: Alt+N OPENS.
-// Returns whether a row was there to open.
-function openSidebarRow(n) {
-    const row = _altRows()[n - 1];
-    if (!row) return false;
-    const name = row.dataset.agent;
-    if (TERMINALS_ON && typeof focusPaneByWid === 'function') {
-        const a = (_agentsCache || []).find(x => x.name === name);
-        if (a && a.window_id) {
-            if (!isWallVisible()) setTermMode('wall');
-            focusPaneByWid(a.window_id);
-            return true;
-        }
+// Open (never toggle) a window's pane: unlike a row click (selectAgent), which
+// minimizes a pane that is already open, a menu's "Open … pane" and Alt+N always land on it.
+function _openPane(w) {
+    if (!w) return;
+    if (TERMINALS_ON && w.window_id && typeof focusPaneByWid === 'function') {
+        if (!isWallVisible()) setTermMode('wall');
+        focusPaneByWid(w.window_id);
+        return;
     }
-    showAgentDetail(name);
-    return true;
+    showAgentDetail(w.name);
 }
-
-// The ONE keydown handler for both documents: the dashboard's own (below) and
-// each terminal pane's (terminals.js `_wireIframeShortcuts`, whose keydowns
-// never reach this document). Returns true when it consumed the key.
-function altSwitchKeydown(e) {
-    if (isAltOnly(e)) { setAltHeld(true); return false; }   // Alt itself must still reach a pane
-    const n = altRowNumber(e);
-    if (!n) return false;
-    return openSidebarRow(n);
-}
-
-// Capture phase, so a handler further down cannot swallow Alt+N first. Typing
-// in a field (the palette's input included) keeps every keystroke.
-document.addEventListener('keydown', e => {
-    const t = e.target;
-    if (t && /^(INPUT|TEXTAREA|SELECT)$/.test(t.tagName)) return;
-    const pal = document.getElementById('palette');
-    if (pal && pal.classList.contains('open')) return;
-    if (altSwitchKeydown(e)) e.preventDefault();
-}, true);
-document.addEventListener('keyup', e => { if (e.key === 'Alt') setAltHeld(false); }, true);
-window.addEventListener('blur', () => setAltHeld(false));
-document.addEventListener('visibilitychange', () => setAltHeld(false));
 
 // Focus a single agent in the canvas (metadata detail / transcript).
 function showAgentDetail(name) {
     setCurrentTab('agent-detail');
-    _detailAgent = name;
+    detailAgent.set(name);   // the agent-detail island (features/agentdetail) draws it
     $$('.panel').forEach(p => p.classList.remove('active'));
     const panel = document.getElementById(panelId('agent-detail'));
     if (panel) panel.classList.add('active');
@@ -283,21 +140,15 @@ function showAgentDetail(name) {
     // Drilling in is leaving every other view — same registry-driven teardown as
     // selectView (agent-detail is a registered, virtual view).
     otherViews(VIEWS, 'agent-detail').forEach(o => { if (o.exit) o.exit(); });
-    renderAgentDetail();
     refreshSummary();
-    checkContext();   // fills the detail context bar via ctx-<name>
     closeSidebar();   // navigating dismisses the mobile drawer (no-op on desktop)
 }
 
 function _syncSidebarActive(view, agentName) {
     // The agent-detail view has no nav item of its own (it is reached from the
-    // always-visible sidebar Sessions list, not a nav tab), so nothing in
-    // #side-nav lights up while drilled into one — `navView` never matches a
-    // real data-view when `view` is 'agent-detail'.
-    const navView = view === 'agent-detail' ? null : view;
-    $$('.side-item').forEach(el => el.classList.toggle('active', el.dataset.view === navView));
-    _activeRow = agentName || null;
-    _publishSidebar({ active: _activeRow });
+    // always-visible sidebar Sessions list), so no nav row lights up while drilled in.
+    setNav({ active: view === 'agent-detail' ? null : view });
+    setActiveRow(agentName || null);
 }
 
 // --- Window type (per-row cue) ---------------------------------------------
@@ -340,17 +191,6 @@ function _agentRole(a) {
 
 const _ROLE_LABEL = { orchestrator: 'Orchestrator', dispatched: 'Dispatched', plain: 'Plain session' };
 
-// --- Sidebar agent list ----------------------------------------------------
-
-// Per-window context cache (used_pct etc.), fed by both the sidebar refresh and
-// the wall tick so rows can show ctx% even when the wall isn't open.
-let _ctxByWid = {};
-function updateCtxCache(ctx) {
-    if (!Array.isArray(ctx)) return;
-    const m = {};
-    ctx.forEach(c => { if (c && c.window_id) m[c.window_id] = c; });
-    _ctxByWid = m;
-}
 
 // Friendly label, shared with the wall panes (_displayLabel): a manual rename
 // wins, else Claude's session title, else the window name (CMX-62) — so a
@@ -361,924 +201,18 @@ function _agentLabel(a) {
     return a ? a.name : '';
 }
 
-// --- Per-DEVICE sidebar state (CMX-35) ---------------------------------------
-// Collapsed groups (the Archived section's open/closed among them) and the collapsed
-// sidebar are about the screen you are holding, so they live in this browser's
-// localStorage — and every read and write is wrapped: a private window, blocked site
-// data or a throwing accessor must leave a sidebar that still renders (just one that
-// forgets). The group order, custom groups and View settings are SHARED (CMX-82): chela
-// state behind /api/sidebar/layout (_layout, below).
-const SB_COLLAPSED_KEY = 'chela_grp_collapsed';
-// Pre-CMX-82 these three were per browser. A browser that still holds them imports them
-// ONCE, and only while the server has no layout yet (_migrateLayout).
-const SB_ORDER_KEY = 'chela_sb_group_order';
-// Pre-CMX-75 the archive lived here, per browser. It is chela state now (_arch, below);
-// whatever a browser still holds is imported ONCE (_migrateArchive) and then removed.
-const SB_ARCHIVED_KEY = 'chela_sb_archived';
-// CMX-66: the VIEW menu's choices ({status, env, activity, groupBy, sort, showEmpty,
-// showPR} — sidebarmodel.normalizeView) and the custom groups ({groups: [{id, name}],
-// assign: {itemKey: id}}). Part 1's "show archived" toggle is now Status ▸ All.
-const SB_VIEW_KEY = 'chela_sb_view';
-const SB_CUSTOM_KEY = 'chela_sb_custom_groups';
-
-// `mem` is the session-only stand-in, used ONLY while storage throws: the list
-// rebuilds on every tick, so without it a click on a blocked-storage page would undo
-// itself on the next render. When storage works, storage is the whole truth.
-function _lsRead(key, mem) {
-    try { return localStorage.getItem(key); }
-    catch { return mem; }
-}
-function _lsList(key, mem) {
-    const raw = _lsRead(key, mem == null ? null : JSON.stringify(mem));
-    try {
-        const v = JSON.parse(raw || '[]');
-        return Array.isArray(v) ? v : [];
-    } catch { return []; }
-}
-function _lsSet(key, value) {
-    try { localStorage.setItem(key, typeof value === 'string' ? value : JSON.stringify(value)); }
-    catch { /* storage unavailable — the in-memory copy carries it for this session */ }
-}
-
-let _memCollapsed = null;
-function _collapsedGroups() { return new Set(_lsList(SB_COLLAPSED_KEY, _memCollapsed)); }
-function _saveCollapsed(s) {
-    _memCollapsed = [...s];
-    _lsSet(SB_COLLAPSED_KEY, _memCollapsed);
-}
-function toggleGroup(key) {
-    const s = _collapsedGroups();
-    if (s.has(key)) s.delete(key); else s.add(key);
-    _saveCollapsed(s);
-    renderSidebarAgents(_agentsCache || []);
-}
-
-// --- The layout (CMX-82) — SERVER state, shared by every device ---------------
-// chela/sidebar_layout.py, behind /api/sidebar/layout: the group order (Move up / Move
-// down), the custom groups and their membership, and the View menu's choices. Read on
-// start and on every sidebar refresh (so another device's change shows up); a change
-// here is written there. `loaded` stays false until the first answer, and NOTHING is
-// written back before it — a render off the defaults must never overwrite the layout a
-// device saved (the same rule as the archive's prune guard); a choice made in that
-// moment lasts until the first answer replaces it. `gen` counts local writes: once
-// loaded, a read that started before one is stale and is not applied over it.
-let _layout = { order: [], custom: null, view: null, loaded: false, gen: 0 };
-function _setLayout(l) {
-    const o = l && typeof l === 'object' ? l : {};
-    _layout = {
-        ..._layout,
-        order: Array.isArray(o.order) ? o.order.filter(k => typeof k === 'string') : [],
-        custom: o.custom && typeof o.custom === 'object' && !Array.isArray(o.custom) ? o.custom : null,
-        view: o.view && typeof o.view === 'object' && !Array.isArray(o.view) ? o.view : null,
-        loaded: true,
-    };
-    _publishLayout();
-}
-// CMX-178: the React islands read the layout through the bridge (all of it but `gen`).
-function _publishLayout() {
-    const { order, custom, view, loaded } = _layout;
-    publish('sidebarLayout', { order, custom, view, loaded });
-}
-// Write the named fields: kept here at once (the next render shows them), sent to the
-// server only once the layout has loaded.
-function _writeLayout(fields) {
-    _layout = { ..._layout, ...fields, gen: _layout.gen + 1 };
-    _publishLayout();
-    if (!_layout.loaded) return;
-    const gen = _layout.gen;
-    _postJson('/api/sidebar/layout', fields)
-        .then(res => { if (res && res.layout && gen === _layout.gen) _setLayout(res.layout); })
-        .catch(() => { /* transient — the next refresh re-reads the server's copy */ });
-}
-// The browser's old localStorage layout, if it holds any (null when it holds none).
-function _legacyLayout() {
-    const out = {};
-    if (_lsRead(SB_ORDER_KEY, null) != null) out.order = _lsList(SB_ORDER_KEY, null);
-    const c = _lsObj(SB_CUSTOM_KEY, null);
-    if (c) out.custom = c;
-    const v = _lsObj(SB_VIEW_KEY, null);
-    if (v) out.view = v;
-    return Object.keys(out).length ? out : null;
-}
-function _dropLegacyLayout() {
-    for (const k of [SB_ORDER_KEY, SB_CUSTOM_KEY, SB_VIEW_KEY]) {
-        try { localStorage.removeItem(k); } catch { /* storage blocked */ }
-    }
-}
-// One-time import: only when the server has NO layout yet. The server writes it only
-// then too (import_once), so of two devices racing, the first wins and the second gets
-// the winner's layout back. Either way this browser's old keys are spent.
-async function _migrateLayout(fresh) {
-    const old = _legacyLayout();
-    if (!old) return false;
-    const res = await _postJson('/api/sidebar/layout', { import: true, ...old });
-    if (!res || !('layout' in res) || !res.layout) return false;
-    if (fresh()) _setLayout(res.layout);
-    _dropLegacyLayout();
-    return true;
-}
-// One read at a time (CMX-89): page load runs refresh() twice back to back (selectView's
-// and main.js's own), and two overlapping reads that both saw "nothing saved" raced the
-// import — the first spent this browser's old keys, the second then found none and drew
-// the defaults over what the first had just imported. A caller during a read shares it.
-let _layoutRead = null;
-function refreshLayout() {
-    if (!_layoutRead) _layoutRead = _readLayout().finally(() => { _layoutRead = null; });
-    return _layoutRead;
-}
-async function _readLayout() {
-    const wasLoaded = _layout.loaded, gen = _layout.gen;
-    const fresh = () => !wasLoaded || gen === _layout.gen;
-    let st;
-    try { st = await api('/api/sidebar/layout'); } catch { return; /* keep the last answer */ }
-    if (!st || typeof st !== 'object' || !('layout' in st)) return;
-    if (st.layout) {
-        if (fresh()) _setLayout(st.layout);
-        _dropLegacyLayout();   // a layout exists: this browser's old one is never imported
-        return;
-    }
-    try { if (await _migrateLayout(fresh)) return; } catch { /* the next refresh retries */ }
-    // nothing saved anywhere yet: the defaults
-    if (fresh()) _setLayout(null);
-}
-function _groupOrder() { return _layout.order; }
-// --- The archive (CMX-75) — SERVER state, not this browser's -----------------
-// chela/sidebar_archive.py, behind /api/sidebar/archive: `hidden` (row keys hidden only —
-// a settled dispatched run) and `sessions` (CLOSED human sessions, each with what it
-// takes to resume it). Every device reads the same set. Until the first answer the archive
-// is UNKNOWN — `hidden`/`sessions` are null, not empty — so nothing can act on an archive
-// this page has not seen: rendering reads it as "nothing archived yet", and _pruneHidden
-// refuses outright (an empty list would let it prune nothing by luck, not by its guard).
-let _arch = { hidden: null, sessions: null, loaded: false };
-function _archivedSet() { return new Set(_arch.hidden || []); }
-function _setArchive(st) {
-    if (!st || typeof st !== 'object') return;
-    _arch = {
-        hidden: Array.isArray(st.hidden) ? st.hidden.filter(k => typeof k === 'string') : [],
-        sessions: Array.isArray(st.sessions) ? st.sessions.filter(r => r && typeof r.key === 'string') : [],
-        loaded: true,
-    };
-}
-function _postJson(path, body) {
-    return api(path, {
-        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
-    });
-}
-// What the server refused, said once — a refusal is a decision the user should see.
-function _sayRefused(res) {
-    const r = res && Array.isArray(res.refused) ? res.refused : [];
-    if (r.length && typeof alert === 'function') alert(r.map(x => x.error || x.key).join('\n'));
-}
-// One-time import of this browser's old localStorage archive. Those keys only ever meant
-// HIDE, and the server imports them as hidden — a page load never closes a window.
-let _migrating = false;
-async function _migrateArchive() {
-    if (_migrating) return;
-    const old = _lsList(SB_ARCHIVED_KEY, null);
-    if (!old.length) return;
-    _migrating = true;
-    try {
-        const res = await _postJson('/api/sidebar/archive/migrate', { keys: old });
-        if (res && res.ok) {
-            _setArchive(res.state);
-            try { localStorage.removeItem(SB_ARCHIVED_KEY); } catch { /* storage blocked */ }
-        }
-    } catch { /* the next refresh retries */ }
-    _migrating = false;
-}
-async function refreshArchive() {
-    try {
-        const st = await api('/api/sidebar/archive');
-        if (st && Array.isArray(st.hidden)) _setArchive(st);
-    } catch { /* transient — keep the last answer */ }
-    await _migrateArchive();
-}
-// Archive rows by item key: a plain session is CLOSED server-side (resumable from the
-// Archived section), a settled run is hidden. Refusals are reported, never swallowed.
-async function archiveKeys(keys) {
-    if (!keys || !keys.length) return null;
-    let res = null;
-    try { res = await _postJson('/api/sidebar/archive', { keys }); } catch { /* below */ }
-    if (res && res.state) _setArchive(res.state);
-    // The windows the server CLOSED are gone now — drop them before the next poll says so,
-    // or their rows would sit in their groups beside their own Archived entries.
-    const closed = new Set(res && Array.isArray(res.closed) ? res.closed : []);
-    if (closed.size) setAgentsCache((_agentsCache || []).filter(a => !(a && closed.has(a.window_id))));
-    renderSidebarAgents(_agentsCache || []);
-    if (!res) { if (typeof alert === 'function') alert('Archive failed. The dashboard did not answer.'); }
-    else _sayRefused(res);
-    return res;
-}
-// Unarchive rows: a closed session is RESUMED (a new window, same cwd + name, `claude
-// --resume`, its Telegram topic reopened); a hidden row is shown again.
-async function unarchiveKeys(keys) {
-    if (!keys || !keys.length) return null;
-    let res = null;
-    try { res = await _postJson('/api/sidebar/unarchive', { keys }); } catch { /* below */ }
-    if (res && res.state) _setArchive(res.state);
-    renderSidebarAgents(_agentsCache || []);
-    if (!res) { if (typeof alert === 'function') alert('Unarchive failed. The dashboard did not answer.'); }
-    else _sayRefused(res);
-    return res;
-}
-// Hidden rows that woke up (busy, waiting) or whose window is gone leave the archive, so
-// a woken row is not re-hidden the moment it settles and a recycled @N never inherits an
-// old row's flag. Never before the server's first answer (an unknown archive is not an
-// empty one), and one request in flight at a time: a refresh that lands while it is in
-// flight re-reads the not-yet-pruned keys, and must not send them a second time.
-let _pruning = false;
-function _pruneHidden(stillHidden) {
-    if (!_arch.loaded || _pruning) return;
-    const keep = new Set(stillHidden);
-    const prune = _arch.hidden.filter(k => !keep.has(k));
-    if (!prune.length) return;
-    _pruning = true;
-    _arch = { ..._arch, hidden: _arch.hidden.filter(k => keep.has(k)) };
-    _postJson('/api/sidebar/unarchive', { keys: prune })
-        .then(res => { if (res && res.state) _setArchive(res.state); })
-        .catch(() => {})
-        .finally(() => { _pruning = false; });
-}
-function _lsObj(key, mem) {
-    const raw = _lsRead(key, mem == null ? null : JSON.stringify(mem));
-    try {
-        const v = JSON.parse(raw || 'null');
-        return v && typeof v === 'object' && !Array.isArray(v) ? v : null;
-    } catch { return null; }
-}
-
-function _view() { return normalizeView(_layout.view); }
-function _saveView(v) { _writeLayout({ view: normalizeView(v) }); }
-
-function _custom() {
-    const c = _layout.custom || {};
-    const groups = Array.isArray(c.groups)
-        ? c.groups.filter(g => g && typeof g.id === 'string' && typeof g.name === 'string') : [];
-    const assign = c.assign && typeof c.assign === 'object' && !Array.isArray(c.assign) ? c.assign : {};
-    return { groups, assign };
-}
-function _saveCustom(c) { _writeLayout({ custom: { groups: c.groups, assign: c.assign } }); }
-
-// The last render's model — what the group/row menus act on (they open off a click on
-// what is on screen, so they read the same grouping the screen was drawn from).
-let _sb = { groups: [], needsYou: [], items: new Map() };
-
-// CMX-276: the sidebar's rows are the React island's (frontend/src/features/sidebar). This
-// is what it draws, published to the bridge on every render: the rows, the layout, and the
-// page state still owned here (labels, the wall, the active row, Alt held). null until the
-// first render.
-let _sbState = null;
-function _publishSidebar(patch) {
-    if (!_sbState) return;
-    _sbState = { ..._sbState, ...patch };
-    publish('sidebar', _sbState);
-}
-
-// CMX-165: the window ids in the order the sidebar last drew them (sidebarmodel.sidebarOrder
-// over the same state). The View filters are lifted for it.
-function sidebarOrder() { return modelSidebarOrder(_sbState); }
-
-// The section is COLLAPSED by default, so what is persisted is that it was OPENED.
-function toggleArchivedSection() {
-    const s = _collapsedGroups();
-    const k = `${ARCHIVED_SECTION_KEY}:open`;
-    if (s.has(k)) s.delete(k); else s.add(k);
-    _saveCollapsed(s);
-    renderSidebarAgents(_agentsCache || []);
-}
-
-// A row's Unarchive. Disabled at once: a slow resume must not be double-clicked into two
-// windows for one session.
-async function unarchiveRow(btn, key) {
-    if (btn) { if (btn.disabled) return; btn.disabled = true; btn.textContent = 'Resuming…'; }
-    const res = await unarchiveKeys([key]);
-    if (res && Array.isArray(res.resumed) && res.resumed.length) await refreshSidebar();
-    return res;
-}
-
-function renderSidebarAgents(agents) {
-    // Keep the tab title/favicon in lockstep with the agent list.
-    updateTabSignal(agents);
-    if (!document.getElementById('sidebar-agents')) return;
-    const rows = agents || [];
-
-    const custom = _custom();
-    const labels = {};
-    for (const a of rows) if (a && a.window_id) labels[a.window_id] = _agentLabel(a);
-    const ctx = {};
-    for (const [wid, c] of Object.entries(_ctxByWid)) if (c && c.used_pct != null) ctx[wid] = c.used_pct;
-    _sbState = {
-        agents: rows, wants: wantsHuman, orchWid: orchestratorState().wid, view: _view(),
-        order: _groupOrder(), custom, archived: [..._archivedSet()], sessions: _arch.sessions || [],
-        labels, now: Date.now(), collapsed: [..._collapsedGroups()], ctx,
-        onWall: TERMINALS_ON ? _renderedWids.filter(w => !_minimized.has(w)) : [],
-        active: _activeRow, altHeld: _altHeld,
-    };
-    if (!rows.length) {
-        // The island says "No agents". Nothing else runs off an empty list: one empty read
-        // must not unarchive every hidden row, nor drop every custom-group assignment.
-        publish('sidebar', _sbState);
-        return;
-    }
-    // A custom-group assignment for a WINDOW that is gone is dropped (a recycled @N must
-    // not inherit it); a run's (`run:CMX-N`) is kept — a run outlives its windows. Before
-    // the layout's first answer this stays in the page (_writeLayout sends nothing yet).
-    const liveKeys = new Set(rows.filter(Boolean).map(a => `w:${a.window_id || a.name}`));
-    const goneW = Object.keys(custom.assign).filter(k => k.startsWith('w:') && !liveKeys.has(k));
-    if (goneW.length) { goneW.forEach(k => delete custom.assign[k]); _saveCustom(custom); }
-    const model = sidebarModel(_sbState);
-    // A hidden row that came back to life (busy, waiting) or whose window is gone leaves
-    // the archive (server-side — every device sees it come back).
-    _pruneHidden(model.hidden);
-    const items = new Map();
-    for (const it of [...model.needsYou, ...model.groups.flatMap(g => g.items), ...model.archived]) {
-        items.set(it.key, it);
-    }
-    _sb = { ...model, items };
-    publish('sidebar', _sbState);
-    adoptSidebarDefault();    // CMX-169: a boot's default pane moves to the top sidebar row
-}
-
-// --- The group and row menus' commands (CMX-35, CMX-81) ----------------------
-// The menus are the React island's (frontend/src/features/sidebar/lib/menus.tsx, CMX-277);
-// what a choice DOES is here. "Archive all" archives the group's FINISHED rows (a `done`
-// session, a window with no Claude left in it, a settled run — see sidebarmodel.isArchivable),
-// like the desktop app (CMX-75): a plain session's window is CLOSED, server-side, after its
-// resume record is written (and refused when its session id is unknown); a settled run is only
-// hidden. Each comes back from the Archived group at the bottom (Unarchive = resume). A row
-// that is working, blocked on you, the orchestrator or a judge mid-battery is never archived,
-// and a hidden row that wakes up comes back on its own.
-
-function _archivableIn(g) {
-    const orchWid = orchestratorState().wid;
-    return g.items.filter(it => isArchivable(it, { wants: wantsHuman, orchWid }));
-}
-
-// The menu's actions, callable directly (tests and keyboard paths use the same entry).
-function groupMenuAction(key, act) {
-    const groups = _sb.groups;
-    const g = groups.find(x => x.key === key);
-    if (!g) return;
-    if (act === 'new') return groupNewSession(key);
-    if (act === 'up' || act === 'down') {
-        const keys = groups.map(x => x.key);
-        const next = moveGroup(keys, _groupOrder(), key, act === 'up' ? -1 : 1);
-        if (next) _writeLayout({ order: next });
-    } else if (act === 'collapse-all') {
-        _saveCollapsed(new Set([..._collapsedGroups(), ...groups.map(x => x.key)]));
-    } else if (act === 'expand-all') {
-        const keys = new Set(groups.map(x => x.key));
-        _saveCollapsed(new Set([..._collapsedGroups()].filter(k => !keys.has(k))));
-    } else if (act === 'archive') {
-        // async: the server closes / hides, then answers with the new archive
-        return archiveKeys(_archivableIn(g).map(it => it.key));
-    }
-    renderSidebarAgents(_agentsCache || []);
-}
-
-// `+` on a group header: a NEW session in that group's folder, through the launcher's
-// own spawn path (/api/agents/spawn — `chela spawn` semantics, remote control per
-// Settings). `fresh` skips the launcher's focus-the-existing-agent dedup: the header's
-// `+` exists precisely to open another session where one already runs.
-function groupNewSession(key) {
-    const g = _sb.groups.find(x => x.key === key);
-    if (!g || !g.cwd || typeof launchProject !== 'function') return;
-    return launchProject(g.cwd, { fresh: true });
-}
-
-// A row already in the Archived section is not archived twice (its way back is Unarchive).
-function _rowArchivable(it) {
-    if (_archivedSet().has(it.key)) return false;
-    return isArchivable(it, { wants: wantsHuman, orchWid: orchestratorState().wid });
-}
-
-// The row menu's actions, callable directly (tests and keyboard paths use the same entry).
-function rowMenuAction(key, act) {
-    const it = _sb.items.get(key);
-    if (!it) return;
-    if (act === 'archive') {
-        // re-checked at click time: the row may have woken up since the menu opened
-        if (!_rowArchivable(it)) return null;
-        return archiveKeys([it.key]);
-    }
-    _openPane(act === 'judge' ? it.judge : it.agent);
-}
-
-// Assign a row (by its STABLE item key) to custom group `id`, or to Ungrouped (null).
-function moveToGroup(itemKey, id) {
-    const c = _custom();
-    if (id && c.groups.some(g => g.id === id)) c.assign[itemKey] = id;
-    else delete c.assign[itemKey];
-    _saveCustom(c);
-    renderSidebarAgents(_agentsCache || []);
-}
-
-function _askName(msg, dflt = '') {
-    try { return (window.prompt(msg, dflt) || '').trim(); }
-    catch { return ''; }
-}
-
-function newCustomGroup(name) {
-    const n = name != null ? String(name).trim() : _askName('New group name:');
-    if (!n) return null;
-    const c = _custom();
-    const g = { id: `g${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`, name: n };
-    c.groups.push(g);
-    _saveCustom(c);
-    renderSidebarAgents(_agentsCache || []);
-    return g;
-}
-
-function renameCustomGroup(id, name) {
-    const c = _custom();
-    const g = c.groups.find(x => x.id === id);
-    if (!g) return;
-    const n = name != null ? String(name).trim() : _askName('Rename group:', g.name);
-    if (!n) return;
-    g.name = n;
-    _saveCustom(c);
-    renderSidebarAgents(_agentsCache || []);
-}
-
-// Deleting a group moves its rows to Ungrouped — it never hides or closes them.
-function deleteCustomGroup(id) {
-    const c = _custom();
-    c.groups = c.groups.filter(g => g.id !== id);
-    for (const [k, v] of Object.entries(c.assign)) if (v === id) delete c.assign[k];
-    _saveCustom(c);
-    renderSidebarAgents(_agentsCache || []);
-}
-
-// --- The VIEW menu (CMX-66) ----------------------------------------------------------
-// The menu is the React island's (menus.tsx ViewMenu, on the Sessions header); its choices land here.
-
-// Apply one view-menu choice (`status:all`, `env:judge` (toggles), `activity:30d`,
-// `group:state`, `sort:name`, `toggle:showEmpty`) and re-render. Callable directly.
-function viewMenuAction(act) {
-    const v = _view();
-    const [k, val] = String(act).split(':');
-    if (k === 'status') v.status = val;
-    else if (k === 'activity') v.activity = val;
-    else if (k === 'group') v.groupBy = val;
-    else if (k === 'sort') v.sort = val;
-    else if (k === 'env') v.env = v.env.includes(val) ? v.env.filter(x => x !== val) : [...v.env, val];
-    else if (k === 'toggle' && (val === 'showEmpty' || val === 'showPR')) v[val] = !v[val];
-    else return;
-    _saveView(v);
-    renderSidebarAgents(_agentsCache || []);
-}
-
-// Open (never toggle) a window's pane: unlike a row click (selectAgent), which
-// minimizes a pane that is already open, a menu's "Open … pane" always lands on it.
-function _openPane(w) {
-    if (!w) return;
-    if (TERMINALS_ON && w.window_id && typeof focusPaneByWid === 'function') {
-        if (!isWallVisible()) setTermMode('wall');
-        focusPaneByWid(w.window_id);
-        return;
-    }
-    showAgentDetail(w.name);
-}
-
 // Status colour → human word, for the dot's tooltip.
 const _AGENT_STATUS_WORD = { green: 'working', yellow: 'waiting', grey: 'idle' };
 // Status colour → the pane dot's CSS state class, so the sidebar dot pulses
 // identically to the wall's .term-status-dot (working/waiting/idle).
 const _SIDEBAR_DOT_CLASS = { green: 'working', yellow: 'waiting', grey: 'idle' };
 
-// Single source of the always-visible sidebar agent list. Owns the /api/agents
-// fetch that also primes _agentsCache (schedule dropdown, detail view, etc.).
-// CMX-166: `onAgents` fires as soon as the agent list is cached, before the archive,
-// layout and Recent sessions reads (the wall needs only the pane list). `ctxRead` is
-// refresh()'s one /api/agents/context read, shared with the wall and checkContext.
-async function refreshSidebar(onAgents, ctxRead) {
-    try {
-        // Fetch context alongside agents so rows can show ctx% even when the wall
-        // (which owns the 4s context poll) isn't the active view. Best-effort:
-        // a context failure must not blank the agent list.
-        const [agents, ctx] = await Promise.all([
-            api('/api/agents'),
-            TERMINALS_ON ? (ctxRead || api('/api/agents/context')).catch(() => null) : Promise.resolve(null),
-        ]);
-        // A non-list reply (an error body) is a failed read: keep the last render.
-        if (!Array.isArray(agents)) throw new Error('/api/agents: not a list');
-        setAgentsCache(agents);
-        if (ctx) updateCtxCache(ctx);
-        if (onAgents) onAgents();
-        // Awaited BEFORE the render: what another device archived or resumed since the
-        // last tick is drawn on this one, not a tick later.
-        await Promise.all([refreshArchive(), refreshLayout()]);
-        renderSidebarAgents(_agentsCache);
-    } catch (e) {
-        // transient — keep the last render; the next tick retries.
-    }
-    // Awaited (its own try/catch is inside refreshRecentSessions): a caller that
-    // awaits refreshSidebar() — resumeSession() does, to know when it's safe to
-    // re-read the section — must see BOTH halves settled, not just the agent list.
-    await refreshRecentSessions();
-}
-
-// The orchestrator slot (who owns the decisions inbox) changes independently of
-// the agent list poll — a click on ANY pane's toggle (terminals.js) or the
-// Decisions inbox's re-register (frontend/src/features/decisions) fires this for every listener. Redraw
-// off the already-cached agent list; no need to refetch /api/agents just to move
-// one badge.
-onOrchestratorChange(() => {
-    renderSidebarAgents(_agentsCache || []);
-    if (_detailAgent) renderAgentDetail();
-});
-
-// CMX-76: the sidebar header's inbox icon (the Decisions island, frontend/src/features/
-// decisions) calls this on a click before it opens the log: the orchestrator HOLDS the inbox,
-// so with one registered the click jumps to it, its pane focused (or its detail view, with no
-// wall), its row scrolled into view (its folder group expanded if collapsed).
-// NOT selectAgent: that one TOGGLES — on a pane
-// already open on the wall it minimizes it, the opposite of "jump to". Returns false
-// when there is no orchestrator window to jump to.
-function jumpToOrchestrator() {
-    const wid = orchestratorState().wid;
-    const a = wid ? (_agentsCache || []).find(x => x && x.window_id === wid) : null;
-    if (!a) return false;
-    if (TERMINALS_ON && typeof focusPaneByWid === 'function') {
-        if (!isWallVisible()) setTermMode('wall');
-        focusPaneByWid(wid);
-    } else {
-        showAgentDetail(a.name);
-    }
-    const rowOf = () => [...$$('#sidebar-agents .agent-row')].find(r => r.dataset.agent === a.name) || null;
-    let row = rowOf();
-    const g = row && row.closest('.side-group.collapsed');
-    if (g && g.dataset.g && g.dataset.g !== ARCHIVED_SECTION_KEY) { toggleGroup(g.dataset.g); row = rowOf(); }
-    if (row && typeof row.scrollIntoView === 'function') row.scrollIntoView({ block: 'nearest' });
-    return true;
-}
-
-
-// The WORK badges used to be a THIRD independent poller of /api/dispatcher, right
-// here — fetching the same payload the Dispatch and Kanban views were each already
-// fetching on their own timers. They are now filled by work.js's single poll (the
-// slots themselves are declared on the Work view in views.js).
-
-// --- Recent (dead) sessions — one-click resume (CMX-208) --------------------
-// A UI over `chela restore`'s already-tested classification (chela/restore.py): a
-// Claude session a hard tmux death (or `wsl --shutdown`) orphaned, with enough on
-// record (cwd + session id) to relaunch via /api/restore/resume. Terminals-gated
-// (resuming spawns a window, same as the "+" launcher) and hidden entirely when
-// there is nothing to resume — a rare recovery affordance, not a permanent fixture.
-
-// The identity a row is hidden by (CMX-11): /api/restore's `dismiss_key` — the
-// session id for a resumable row, a `row:` address key for a dispatcher row, which
-// carries no session id. Every row the list shows has one, so every row has a ×.
-function _dismissKey(r) {
-    return (r && (r.dismiss_key || r.session_id)) || '';
-}
-
-function _dismissButtonHtml(r, label) {
-    return `<button class="recent-dismiss" title="Dismiss: hide this session from Recent (the transcript is kept)"
-                aria-label="Dismiss ${attrEsc(label)}" data-session="${attrEsc(r.session_id || '')}"
-                data-dismiss="${attrEsc(_dismissKey(r))}"
-                onclick="event.stopPropagation(); chela.dismissRecentSession(this)">${lucideIcon('x')}</button>`;
-}
-
-function _recentRowHtml(r) {
-    const label = r.label || r.cwd || r.wid;
-    const key = `${r.store} ${r.wid}`;
-    return `<div class="agent-row recent-row" data-key="${attrEsc(key)}">
-        <span class="ar-type recent" title="dead session, needs a human to resume">&#8635;</span>
-        <div class="ar-main">
-            <div class="ar-top"><span class="agent-row-name" title="${attrEsc(label)}">${escHtml(label)}</span></div>
-            <div class="ar-sub"><span class="ar-recap" title="${attrEsc(r.cwd || '')}">${escHtml(r.cwd || '')}</span></div>
-        </div>
-        <button class="btn-accent recent-resume" title="Resume this session"
-                data-store="${attrEsc(r.store)}" data-wid="${attrEsc(r.wid)}"
-                data-session="${attrEsc(r.session_id || '')}" data-epoch="${attrEsc(r.stamped_epoch || '')}"
-                onclick="event.stopPropagation(); chela.resumeSession(this)">Resume</button>
-        ${_dismissButtonHtml(r, label)}
-    </div>`;
-}
-
-// A dispatcher-owned row (its worktree/window is still the dispatcher's — see
-// app.py's _dispatcher_owned_wid_epochs) never gets a Resume button, hidden or
-// revealed: resuming it would race the dispatcher's own worktree reap/completion,
-// the same single-writer hazard roster.json/telegram-bindings.json have already hit
-// (three times). It is shown ONLY as a fact, behind the toggle below — but, like
-// every row the list shows, it can be dismissed (CMX-11).
-// CMX-156: a row whose run the dispatcher will relaunch itself (`relaunch` = its task id)
-// is shown OUTSIDE the toggle, read-only, saying so: why it has no Resume.
-function _dispatcherRowHtml(r) {
-    const label = r.label || r.cwd || r.wid;
-    const sub = r.relaunch ? `↻ dispatcher will relaunch ${r.relaunch}` : (r.cwd || '');
-    return `<div class="agent-row recent-row recent-row-dispatcher"
-                title="dispatcher-owned: resuming it would race the dispatcher's own worktree lifecycle">
-        <span class="ar-type recent" title="dispatcher-owned session">&#8635;</span>
-        <div class="ar-main">
-            <div class="ar-top"><span class="agent-row-name" title="${attrEsc(label)}">${escHtml(label)}</span></div>
-            <div class="ar-sub"><span class="ar-recap" title="${attrEsc(r.cwd || '')}">${escHtml(sub)}</span></div>
-        </div>
-        ${_dismissButtonHtml(r, label)}
-    </div>`;
-}
-
-let _recentPayload = { rows: [], dispatcher_rows: [], hidden: 0 };
-let _recentDispatcherRevealed = false;
-
-// Accepts either the /api/restore object shape ({rows, dispatcher_rows, hidden}) or
-// a bare array (tests, and any future caller that only has resumable rows in hand) —
-// a bare array is treated as "no dispatcher rows to show".
-function renderRecentSessions(data) {
-    _recentPayload = Array.isArray(data)
-        ? { rows: data, dispatcher_rows: [], hidden: 0 }
-        : (data || { rows: [], dispatcher_rows: [], hidden: 0 });
-    _paintRecentSessions();
-}
-
-function _paintRecentSessions() {
-    const section = document.getElementById('side-recent-section');
-    const host = document.getElementById('side-recent');
-    const count = document.getElementById('hdr-recent');
-    if (!section || !host) return;
-
-    const rows = _recentPayload.rows || [];
-    const dispatcherRows = _recentPayload.dispatcher_rows || [];
-    if (count) count.textContent = String(rows.length);
-    const clearAll = document.getElementById('recent-clear-all');
-    if (clearAll) clearAll.hidden = rows.length < 2;
-
-    if (!rows.length && !dispatcherRows.length) {
-        section.hidden = true;
-        host.innerHTML = '';
-        return;
-    }
-    section.hidden = false;
-
-    const hiddenRows = dispatcherRows.filter(r => !r.relaunch);
-    let html = rows.map(_recentRowHtml).join('')
-        + dispatcherRows.filter(r => r.relaunch).map(_dispatcherRowHtml).join('');
-    if (hiddenRows.length) {
-        html += `<button class="recent-toggle-dispatcher" aria-expanded="${_recentDispatcherRevealed}"`
-            + ` onclick="chela.toggleDispatcherSessions()">`
-            + `${escHtml(dispatcherToggleLabel(hiddenRows.length, _recentDispatcherRevealed))}</button>`;
-        if (_recentDispatcherRevealed) {
-            html += hiddenRows.map(_dispatcherRowHtml).join('');
-        }
-    }
-    host.innerHTML = html;
-    host.querySelectorAll('.recent-row:not(.recent-row-dispatcher)').forEach(_wireRecentSwipe);
-}
-
-// The toggle's copy (CMX-437). It once concatenated two labels into "Hide 1
-// dispatcher session hidden"; collapsed it now says what a click reveals, expanded
-// what a click does.
-function dispatcherToggleLabel(n, revealed) {
-    if (revealed) return 'Hide dispatcher sessions';
-    return `Show ${n} hidden dispatcher session${n === 1 ? '' : 's'}`;
-}
-
-// Swipe-left on touch dismisses, same as the ×. A mostly-horizontal leftward drag
-// past the threshold counts; anything shorter or more vertical is a scroll.
-const _SWIPE_DISMISS_PX = 70;
-function _wireRecentSwipe(row) {
-    let x0 = null, y0 = 0;
-    row.addEventListener('touchstart', e => {
-        const t = e.touches && e.touches[0];
-        if (t) { x0 = t.clientX; y0 = t.clientY; }
-    }, { passive: true });
-    row.addEventListener('touchmove', e => {
-        const t = e.touches && e.touches[0];
-        if (x0 === null || !t) return;
-        const dx = Math.min(0, t.clientX - x0);
-        if (Math.abs(dx) > Math.abs(t.clientY - y0)) row.style.transform = `translateX(${dx}px)`;
-    }, { passive: true });
-    row.addEventListener('touchend', e => {
-        const t = e.changedTouches && e.changedTouches[0];
-        const start = x0;
-        x0 = null;
-        row.style.transform = '';
-        if (start === null || !t) return;
-        const dx = t.clientX - start, dy = t.clientY - y0;
-        if (dx < -_SWIPE_DISMISS_PX && Math.abs(dx) > 2 * Math.abs(dy)) {
-            dismissRecentSession(row.querySelector('.recent-dismiss'));
-        }
-    });
-}
-
-// --- Dismiss (CMX-437) -------------------------------------------------------
-// The × on a Recent row (or a swipe-left) hides it: the row leaves the list at once,
-// the server records the session id (chela/dismissed_sessions.py, so every device
-// agrees), and an Undo toast offers it back for a few seconds. Nothing is deleted —
-// not the transcript, not the restore bookkeeping.
-
-const _UNDO_MS = 6000;
-let _undoToast = null;
-
-function _closeRecentUndoToast() {
-    if (!_undoToast) return;
-    clearTimeout(_undoToast.timer);
-    _undoToast.el.remove();
-    _undoToast = null;
-}
-
-function _showRecentUndoToast(sids, text) {
-    _closeRecentUndoToast();
-    let stack = document.getElementById('run-toast-stack');
-    if (!stack) {
-        stack = document.createElement('div');
-        stack.id = 'run-toast-stack';
-        stack.className = 'run-toast-stack';
-        document.body.appendChild(stack);
-    }
-    const el = document.createElement('div');
-    el.className = 'run-toast recent-undo-toast';
-    el.setAttribute('role', 'status');
-    el.innerHTML = `<span class="recent-undo-text">${escHtml(text)}</span> <button class="recent-undo">Undo</button>`;
-    el.querySelector('.recent-undo').onclick = e => { e.stopPropagation(); undoDismissRecent(sids); };
-    el.onclick = () => _closeRecentUndoToast();
-    stack.appendChild(el);
-    _undoToast = { el, sids, timer: setTimeout(_closeRecentUndoToast, _UNDO_MS) };
-}
-
-async function _postDismiss(path, sids) {
-    try {
-        const res = await api(path, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ session_ids: sids }),
-        });
-        return !!(res && res.ok);
-    } catch (e) {
-        return false;
-    }
-}
-
-async function _dismiss(sids, text) {
-    sids = sids.filter(Boolean);
-    if (!sids.length) return;
-    const gone = new Set(sids);
-    const before = _recentPayload;
-    const keep = r => !gone.has(_dismissKey(r));
-    _recentPayload = {
-        ...before,
-        rows: (before.rows || []).filter(keep),
-        dispatcher_rows: (before.dispatcher_rows || []).filter(keep),
-    };
-    _paintRecentSessions();
-    if (!(await _postDismiss('/api/restore/dismiss', sids))) {
-        _recentPayload = before;
-        _paintRecentSessions();
-        alert('Could not dismiss. Nothing was changed.');
-        return;
-    }
-    _showRecentUndoToast(sids, text);
-}
-
-async function dismissRecentSession(btn) {
-    if (!btn) return;
-    const key = btn.dataset.dismiss || btn.dataset.session;
-    const row = [...(_recentPayload.rows || []), ...(_recentPayload.dispatcher_rows || [])]
-        .find(r => _dismissKey(r) === key);
-    const label = row ? (row.label || row.cwd || row.wid) : 'session';
-    await _dismiss([key], `Dismissed ${label}`);
-}
-
-async function clearRecentSessions() {
-    const sids = (_recentPayload.rows || []).map(_dismissKey).filter(Boolean);
-    if (!sids.length) return;
-    const n = sids.length;
-    if (!confirm(`Dismiss all ${n} recent session${n === 1 ? '' : 's'}? Transcripts are kept; Undo is offered briefly.`)) return;
-    await _dismiss(sids, `Dismissed ${n} session${n === 1 ? '' : 's'}`);
-}
-
-async function undoDismissRecent(sids) {
-    _closeRecentUndoToast();
-    if (!(await _postDismiss('/api/restore/undismiss', sids))) {
-        alert('Could not undo the dismiss.');
-    }
-    await refreshRecentSessions();
-}
-
-function toggleDispatcherSessions() {
-    _recentDispatcherRevealed = !_recentDispatcherRevealed;
-    _paintRecentSessions();
-}
-
-async function refreshRecentSessions() {
-    if (!TERMINALS_ON) return;
-    try {
-        renderRecentSessions(await api('/api/restore'));
-    } catch (e) {
-        // transient — keep the last render; the next tick retries.
-    }
-}
-
-// Resume button click: spawn `claude --resume <session>` in the row's recorded cwd
-// (server-side, /api/restore/resume — the exact same window-open path the "+" launch
-// menu and Telegram's /new use). The row disables itself immediately so a slow spawn
-// can't be double-clicked into two windows for the same dead session.
-async function resumeSession(btn) {
-    if (!btn || btn.disabled) return;
-    const { store, wid, session, epoch: stampedEpoch } = btn.dataset;
-    btn.disabled = true;
-    const prevText = btn.textContent;
-    btn.textContent = 'Resuming…';
-    let res = null;
-    try {
-        res = await api('/api/restore/resume', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ store, wid, session_id: session, stamped_epoch: stampedEpoch || null }),
-        });
-    } catch (e) { /* res stays null — handled below */ }
-    if (!res || res.error || res.ok === false) {
-        btn.disabled = false;
-        btn.textContent = prevText;
-        alert((res && res.error) || 'Could not resume this session. It may have changed since the list was loaded.');
-        refreshRecentSessions();
-        return;
-    }
-    await refreshSidebar();   // re-fetches both the live agent list and Recent sessions
-}
-
 // --- Agent detail view -----------------------------------------------------
-
-// Where "← Back" returns to: agent-detail has no nav item of its own (it is
-// reached from the always-visible sidebar Sessions list, not a nav tab), so
-// there is no single "parent" view — fall back to the same default main.js
-// picks on load (the Wall when terminals are on, else Work).
-function _agentDetailBackView() {
-    return (typeof TERMINALS_ON !== 'undefined' && TERMINALS_ON) ? 'terminals' : 'work';
-}
-
-function renderAgentDetail() {
-    const host = document.getElementById('agent-detail');
-    if (!host) return;
-    const a = (_agentsCache || []).find(x => x.name === _detailAgent);
-    if (!a) {
-        host.innerHTML = `<div class="detail-head">
-            <span class="detail-back" onclick="chela.selectView('${_agentDetailBackView()}')">← Back</span>
-            <span class="detail-title">${escHtml(_detailAgent || '')}</span>
-        </div>
-        <div class="side-empty">This agent's window is no longer present.</div>`;
-        return;
-    }
-    const dot = agentDotColor(a);
-    const type = _agentType(a);
-
-    // "Message" only when there's no wall to type into directly (terminals off).
-    const actions = [];
-    if (!(typeof TERMINALS_ON !== 'undefined' && TERMINALS_ON)) {
-        actions.push(`<button onclick="chela.openSendMsg('${attrEsc(a.name)}')">Message</button>`);
-    }
-    if (a.has_schedules) actions.push(`<button onclick="chela.triggerSchedule('${attrEsc(a.name)}')">Trigger</button>`);
-    if (a.claude_running) {
-        actions.push(`<button onclick="chela.restartAgent('${attrEsc(a.name)}')">Restart</button>`);
-        actions.push(`<button class="btn-danger" onclick="chela.stopAgent('${attrEsc(a.name)}')">Stop</button>`);
-    } else {
-        actions.push(`<button class="btn-accent" onclick="chela.startAgent('${attrEsc(a.name)}')">Start</button>`);
-    }
-
-    const rows = [
-        ['Window', escHtml(a.window_id || '—')],
-        ['Type', escHtml(type)],
-        ['Role', escHtml(_ROLE_LABEL[_agentRole(a)])],
-        ['Claude', a.claude_running ? 'running' : 'stopped'],
-        ['Status', escHtml(a.session_status || (a.claude_running ? 'running' : 'offline'))],
-        ['Liveness', escHtml(a.liveness || '—')],
-        ['CWD', escHtml(a.cwd || '—')],
-    ];
-    if (a.schedule_next_run) rows.push(['Next run', shortTime(a.schedule_next_run)]);
-    if (a.schedule_last_run) rows.push(['Last run', shortTime(a.schedule_last_run)]);
-    if (a.ai_title) rows.push(['Title', escHtml(a.ai_title)]);
-
-    let pr = '';
-    if (a.pr && a.pr.url) {
-        // CMX-41: say when the PR is history — a transcript's pr-link outlives the merge.
-        const st = (a.pr.state === 'merged' || a.pr.state === 'closed') ? ` · ${a.pr.state}` : '';
-        const label = (a.pr.number ? `PR #${a.pr.number}` : 'PR') + st;
-        pr = ` <a class="pr-badge" href="${attrEsc(a.pr.url)}" target="_blank" rel="noopener noreferrer">${escHtml(label)}</a>`;
-    }
-
-    let recap = '';
-    if (a.recap) {
-        const age = a.recap_ts ? ` · ${ageStr((Date.now() - new Date(a.recap_ts)) / 1000)}` : '';
-        recap = `<h4 style="margin-top:16px;">Recap${age}</h4><div class="detail-recap">${escHtml(a.recap)}</div>`;
-    }
-
-    host.innerHTML = `
-        <div class="detail-head">
-            <span class="detail-back" onclick="chela.selectView('${_agentDetailBackView()}')">← Back</span>
-            <span class="health-dot ${dot}"></span>
-            <span class="detail-title">${escHtml(a.name)}</span>${pr}
-        </div>
-        <div class="canvas-toolbar">${actions.join('')}</div>
-        <div class="detail-grid">
-            ${rows.map(([k, v]) => `<div class="k">${k}</div><div class="v">${v}</div>`).join('')}
-        </div>
-        <div class="context-bar-wrap" id="ctx-${attrEsc(a.name)}">
-            <div class="context-bar"><div class="context-bar-fill" style="width:0%"></div></div>
-            <span class="context-label">Context: --</span>
-        </div>
-        ${recap}`;
-}
+// The agent-detail island (frontend/src/features/agentdetail, CMX-219) draws it; what only
+// this module knows (the view switch, the role, the attention dot) it reads through its host.
+setAgentDetailHost({ selectView, roleLabel: a => _ROLE_LABEL[_agentRole(a)], dotColor: agentDotColor });
+// A launch lands on the Wall and the sidebar the sidebar controller owns (features/launcher, CMX-219).
+setLauncherHost({ focusPaneByWid, selectView, refreshSidebar });
 
 // --- Settings modal (CMX-287: tabbed, replaces the old off-canvas drawer) --
 //
@@ -2673,168 +1607,6 @@ function applyTermPrefsToIframes() {
     });
 }
 
-// --- "+ new" popover -------------------------------------------------------
-
-// The "+" menu is also the LAUNCH menu: Favorites + Recent live in it (launcher.js
-// fills #new-menu-launch). Re-render on open so a pin/launch from anywhere else is
-// already reflected when it appears.
-function openNewMenu(ev) {
-    if (ev) ev.stopPropagation();
-    const m = document.getElementById('new-menu');
-    if (!m) return;
-    if (typeof refreshLauncher === 'function') refreshLauncher();
-    const anchor = (ev && ev.currentTarget) || document.getElementById('btn-new');
-    // Show it BEFORE measuring: a display:none element has no offsetWidth.
-    m.style.display = 'block';
-    // Right-aligned to the button off the MEASURED width (placePopover). A
-    // hardcoded width here (it used to be 160, from the old popover) silently
-    // sent the menu off the RIGHT edge the moment the CSS got wider than the
-    // guess — which .launch-menu's 232px min-width did, on a button that sits
-    // ~55px from the viewport edge.
-    placePopover(m, anchor, { gap: 4 });
-    setTimeout(() => document.addEventListener('click', hideNewMenu, { once: true }), 0);
-}
-
-function hideNewMenu() {
-    const m = document.getElementById('new-menu');
-    if (m) m.style.display = 'none';
-}
-
-// Primary menu (a settings gear at the right of the sidebar foot's one row since
-// CMX-393 — a ⋮ in the foot since CMX-377, originally a topbar button): folds the three former topbar primaries — Jump
-// to… (#btn-palette), New… (#btn-new), overflow (#btn-overflow) — behind ONE
-// button (CMX-109 / CMX-108 Part A re-filed; cmx-108/#122's WALL toolbar fold —
-// grid presets + lock behind openLayoutMenu — was reverted in CMX-111: Liav
-// never asked for that one folded, only this one). Jump to…
-// and the old overflow's secondary actions (Share current, Notifications,
-// Settings) plus the usage/updated readouts are flat items here; New… reopens
-// the existing #new-menu (openNewMenuFromPrimary below) rather than duplicating
-// it, since #new-menu already serves the sidebar's own "+" trigger from a
-// different anchor. The safety kill-switch (#btn-shares) is deliberately NOT in
-// here — it stays visible whenever a share is live. Anchored + light-dismiss,
-// same pattern as the old openNewMenu/openOverflowMenu.
-function openPrimaryMenu(ev) {
-    if (ev) ev.stopPropagation();
-    const m = document.getElementById('primary-menu');
-    if (!m) return;
-    const anchor = (ev && ev.currentTarget) || document.getElementById('btn-primary-menu');
-    m.style.display = 'block';
-    // CMX-398: the button sits in the sidebar FOOT now, so "below it" is off
-    // the bottom of the screen — placePopover flips the menu above it.
-    placePopover(m, anchor, { gap: 6 });
-    setTimeout(() => document.addEventListener('click', hidePrimaryMenu, { once: true }), 0);
-}
-
-function hidePrimaryMenu() {
-    const m = document.getElementById('primary-menu');
-    if (m) m.style.display = 'none';
-}
-
-// The primary menu's "New…" row: close the primary menu and reopen #new-menu
-// (Favorites/Recent + Init a repo/Scheduled task/Shell window) anchored at
-// #btn-primary-menu — the exact same popover the sidebar's "+" trigger opens
-// from its own anchor, just from a second entry point.
-function openNewMenuFromPrimary() {
-    hidePrimaryMenu();
-    openNewMenu({ stopPropagation() {}, currentTarget: document.getElementById('btn-primary-menu') });
-}
-
-// Spawn a plain shell window. The backend spawn endpoint is currently behind
-// the terminals feature flag (it was the wall's spawner); until a non-gated
-// endpoint lands this surfaces the API's response rather than failing silently.
-async function newShellWindow() {
-    try {
-        const res = await api('/api/agents/spawn', { method: 'POST' });
-        if (res && res.ok) { setAgentsCache([]); refreshSidebar(); }
-        else alert((res && res.error) || 'Could not spawn a window (enable terminals, or use tmux directly).');
-    } catch (e) {
-        alert('Could not spawn a window (enable terminals, or use tmux directly).');
-    }
-}
-
-// New session → Sandboxed (CMX-403): a window running the container launcher
-// (chela.share_sandbox) — the only kind of window a share guest may type into. Asks
-// for the project directory, pre-filled with the most recent launch target; the server
-// refuses $HOME, secret dirs, or a host without docker/image/token, and says why.
-// `web` (CMX-418, the "· allow web access…" entry) opts THIS session into web access:
-// public hosts only, through the filtering egress proxy — confirmed before launch.
-async function newSandboxedSession(web) {
-    web = web === true;
-    const recent = (_launcherData.favorites || []).concat(_launcherData.recent || []);
-    const guess = recent.length ? recent[0].path : '';
-    const label = web ? 'Sandboxed session with WEB ACCESS' : 'Sandboxed session';
-    const cwd = (window.prompt(label + ': project directory (the guest sees ONLY this):', guess) || '').trim();
-    if (!cwd) return;
-    if (web && !window.confirm('Allow web access for this session?\n\n'
-            + 'It can fetch any PUBLIC web page (never your host or LAN), rate-limited, and every '
-            + 'request is logged. A web page can also make it SEND workspace contents to a public '
-            + 'site, so keep only the guest\'s own material in ' + cwd + '.')) return;
-    try {
-        const res = await api('/api/agents/spawn-sandboxed', {
-            method: 'POST', headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(web ? { cwd, web: true } : { cwd }),
-        });
-        if (!res || !res.ok) { alert('Sandboxed session refused: ' + ((res && res.error) || 'unknown error')); return; }
-        setAgentsCache([]);
-        selectView('terminals');
-        refreshSidebar();
-        refreshLauncher();
-    } catch (e) {
-        alert('Sandboxed session failed: ' + e);
-    }
-}
-
-// Touch-friendly tooltips. Native `title` only surfaces on hover, so on a
-// phone the rate-limit pills (and any other titled pill) have no tooltip at
-// all. Tapping a titled element pops a floating bubble; tapping elsewhere or
-// after a few seconds dismisses it. Desktop hover still uses the native title.
-(function () {
-    let tipEl = null, hideTimer = null;
-
-    function hideTip() {
-        if (hideTimer) { clearTimeout(hideTimer); hideTimer = null; }
-        if (tipEl) { tipEl.remove(); tipEl = null; }
-    }
-
-    function showTip(target, text) {
-        hideTip();
-        tipEl = document.createElement('div');
-        tipEl.className = 'tap-tip';
-        tipEl.textContent = text;
-        document.body.appendChild(tipEl);
-        // Centred under the target — or above it when the target sits at the
-        // bottom of the screen (the sidebar foot's CPU/RAM/Disk readouts) —
-        // clamped to the viewport.
-        placePopover(tipEl, target, { gap: 6, align: 'center' });
-        hideTimer = setTimeout(hideTip, 4000);
-    }
-
-    // Only react to touch — desktop keeps the native hover tooltip. CRITICAL:
-    // never touch interactive controls. preventDefault() on touchend suppresses
-    // the follow-up click, so hijacking a tap on a button/link/onclick row (the
-    // hamburger, bell, gear, sidebar rows…) would silently kill its action. Bail
-    // on anything actionable and let the tap through; only non-interactive titled
-    // elements (e.g. the rate-limit pills) get the tap-tooltip.
-    // CMX-301: nor anything React draws ([data-island]: an island's root, or a kit
-    // overlay portalled to <body>). Its onClick lives in React, not an onclick
-    // attribute, so this test cannot see it: a phone tap on a sidebar row popped
-    // "window: …" and the row never opened.
-    document.addEventListener('touchend', function (e) {
-        if (e.target.closest('button, a, input, select, textarea, label, [onclick], [role="button"], [data-island]')) {
-            hideTip();
-            return;
-        }
-        const el = e.target.closest('[title], [data-tip]');
-        if (!el) { hideTip(); return; }
-        const text = el.getAttribute('data-tip') || el.getAttribute('title');
-        if (!text) { hideTip(); return; }
-        e.preventDefault();
-        showTip(el, text);
-    }, { passive: false });
-
-    window.addEventListener('scroll', hideTip, true);
-})();
-
 // --- Command palette (⌘K / Ctrl-K) ----------------------------------------
 // One fuzzy jump-to for everything: agents (→ detail), views, project launches,
 // and a couple of global actions. The fastest way to navigate once you're past a
@@ -2867,19 +1639,20 @@ function _paletteItems(skipWids) {
     if (TERMINALS_ON) {
         (_agentsCache || []).forEach(a => {
             if (!a.window_id) return;
-            const shared = typeof _sharedWids !== 'undefined' && _sharedWids.has(a.window_id);
+            const shared = isShared(a.window_id);
             items.push({ icon: shared ? lucideIcon('x') : lucideIcon('share-2'),
                          title: (shared ? 'Stop sharing ' : 'Share ') + _agentLabel(a),
                          sub: shared ? 'shared session' : 'session',
                          run: () => {
                              const sel = '.gs-share-btn[data-wid="' + (window.CSS && CSS.escape ? CSS.escape(a.window_id) : a.window_id) + '"]';
                              const btn = document.querySelector(sel);
-                             if (shared) _stopShare(a.window_id); else shareBtnClick(btn, a.window_id);
+                             if (shared) stopShare(a.window_id); else shareBtnClick(btn, a.window_id);
                          } });
         });
     }
 
-    if (TERMINALS_ON && typeof _launcherData !== 'undefined' && _launcherData) {
+    const _launcherData = launcher.get();
+    if (TERMINALS_ON && _launcherData) {
         const seen = new Set();
         [...(_launcherData.favorites || []), ...(_launcherData.recent || [])].forEach(e => {
             if (!e || seen.has(e.path)) return;
@@ -3130,8 +1903,8 @@ function closeShortcuts() {
 document.body.dataset.theme = localStorage.getItem('chela_theme') || 'dark';
 
 // --- Stage 0: ES-module exports ---
-export { sidebarOrder, altSwitchKeydown, setAltHeld, openSidebarRow, archiveKeys, rowMenuAction, jumpToOrchestrator, refreshArchive, refreshLayout, toggleArchivedSection, unarchiveKeys, unarchiveRow, _closeRecentUndoToast, closeShortcuts, deleteCustomGroup, newCustomGroup, groupMenuAction, groupNewSession, moveToGroup, renameCustomGroup, toggleGroup, viewMenuAction, dispatcherToggleLabel, openPalette, openShortcuts, refreshRecentSessions, refreshSidebar, renderAgentDetail, renderNav, renderRecentSessions, renderSidebarAgents, selectView, updateCtxCache };
+export { closeShortcuts, openPalette, openShortcuts, renderNav, selectView };
 
 // --- Stage 0: window.chela — surface reachable from inline HTML handlers ---
 window.chela = window.chela || {};
-Object.assign(window.chela, { sidebarOrder, _updateFlowDeps, applyUpdate, archiveKeys, rowMenuAction, jumpToOrchestrator, toggleArchivedSection, unarchiveKeys, unarchiveRow, groupMenuAction, groupNewSession, moveToGroup, newCustomGroup, renameCustomGroup, deleteCustomGroup, viewMenuAction, clearRecentSessions, clearSettingsSearch, closePalette, closeShortcuts, closeSidebar, dismissRecentSession, hideNewMenu, hidePrimaryMenu, newSandboxedSession, newShellWindow, openNewMenu, openNewMenuFromPrimary, openPalette, openPrimaryMenu, openShortcuts, _palRun, _renderPalette, resumeSession, saveDispatch, saveProjectsDir, saveTiming, selectAgent, setConcurrency, setTelegramDelete, deleteArchivedTopics, selectSettingsTab, selectView, setAgentModel, setAgentPermissionMode, setCollabName, setFileDrop, setRemoteControl, setRunToastsMuted, setShareTyping, setTermFont, setTermLatin, setTermSize, setTheme, settingsSearch, sidebarJumpInput, toggleDispatcherSessions, toggleGroup, toggleSettings, toggleSidebar, undoDismissRecent });
+Object.assign(window.chela, { _updateFlowDeps, applyUpdate, clearSettingsSearch, closePalette, closeShortcuts, openPalette, openShortcuts, _palRun, _renderPalette, saveDispatch, saveProjectsDir, saveTiming, selectAgent, setConcurrency, setTelegramDelete, deleteArchivedTopics, selectSettingsTab, selectView, setAgentModel, setAgentPermissionMode, setCollabName, setFileDrop, setRemoteControl, setRunToastsMuted, setApprovalNotify, setShareTyping, setTermFont, setTermLatin, setTermSize, setTheme, settingsSearch, sidebarJumpInput, toggleSettings });

@@ -1,28 +1,29 @@
-// ⚖️🔌 CMX-103 wiring: the REAL page runs the Pending-approvals surface. approvals.test.mjs
-// proves the module's logic in isolation; this loads main.js (the browser's entry point,
-// harness copied from update_banner_wiring.test.mjs) and proves each hop that connects it:
+// ⚖️🔌 CMX-103 wiring: the REAL page runs the Pending-approvals surface. The approvals island's
+// own tests (frontend/src/features/approvals/tests) prove its logic; this boots the page (the
+// islands, then the legacy graph, as index.html loads them) and proves each hop between them:
 //
-//   1. 🔴 main.js's refresh() poll calls tickApprovals() — the pill shows on EVERY tab with
-//      its count, before anyone opens anything. Drop that call and the pill never appears.
-//   2. 🔴 the pill markup index.html actually ships opens the sheet — its inline onclick
-//      reaches `chela.openApprovals`. The markup is read from the template, not retyped.
-//   3. 🔴 an SSE `overrides` frame re-fetches /api/overrides (sse.js) — and updates the
-//      count — between refresh() ticks.
-//   4. 🔴 Settings → Notifications' "Approval requests" select reaches setApprovalNotify:
-//      choosing "Browser notification" stores the opt-in, and the drawer re-renders it
-//      selected; choosing "Off" clears it.
+//   1. 🔴 the refresh loop runs the approvals lane: the pill shows on EVERY view with its
+//      count, before anyone opens anything.
+//   2. 🔴 the pill, in the slot index.html actually ships, opens the sheet. The slot is read
+//      from the template, not retyped.
+//   3. 🔴 an SSE `overrides` frame re-fetches /api/overrides, and updates the count, between
+//      refresh ticks.
+//   4. 🔴 Settings → Notifications' "Approval requests" select (legacy nav.js) reaches
+//      setApprovalNotify: choosing "Browser notification" stores the opt-in, and the drawer
+//      re-renders it selected; choosing "Off" clears it.
 //
-// runScripts:'dangerously' is ONLY so jsdom compiles inline on* attributes (2, 4) — the
-// page carries no <script> of its own.
+// runScripts:'dangerously' is ONLY so jsdom compiles inline on* attributes (4): the page
+// carries no <script> of its own.
 //
 // Run: pnpm exec vitest run tests/approvals_wiring.test.mjs (tests/test_js_suites.py runs it).
 import { beforeAll, test } from 'vitest';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { JSDOM } from 'jsdom';   // needs `pnpm install` — tests/test_js_suites.py enforces it
+import { exposeDomConstructors, mountIslands } from './js_helpers/dashboard_dom.mjs';
 
 const TEMPLATE = readFileSync(new URL('../chela/dashboard/templates/index.html', import.meta.url), 'utf8');
-const PILL = TEMPLATE.match(/<button[^>]*id="btn-approvals"[\s\S]*?<\/button>/)[0];
+const PILL = TEMPLATE.match(/<span class="island-slot" id="approvals-island"><\/span>/)[0];
 
 const PANEL = `
 <header><span id="hdr-agents"></span><span id="hdr-next"></span><span id="hdr-updated"></span></header>
@@ -42,7 +43,8 @@ const PANEL = `
   <div class="decisions-list" id="decisions-list"></div>
 </section>
 <aside class="drawer" id="settings-drawer"><div class="drawer-body" id="drawer-body"></div></aside>
-<div class="safety-float">${PILL}</div>`;
+<div class="safety-float">${PILL}</div>
+<div id="overlays-island"></div>`;
 
 const AGENTS = [{ name: 'shell', window_id: '@1', online: true }];
 const ORCH_STATUS = { wid: null, name: null, state: 'unregistered', why: '', queued: 0 };
@@ -108,26 +110,31 @@ beforeAll(async () => {
     globalThis.window.chela = globalThis.window.chela || {};
     globalThis.setInterval = () => 0;
 
+    exposeDomConstructors(dom.window);
+    await mountIslands(dom.window);
     await import('../chela/dashboard/frontend/src/boot.ts');
     // refresh() awaits a chain of polls before tickApprovals(); let them settle. Only the
     // page's own load is allowed to show the pill — nothing below has run yet.
-    for (let i = 0; i < 40 && document.getElementById('btn-approvals').hidden; i++) await flush();
-    pillShownByRefresh = !document.getElementById('btn-approvals').hidden;
+    const shown = () => document.getElementById('btn-approvals')?.hidden === false;
+    for (let i = 0; i < 40 && !shown(); i++) await flush();
+    pillShownByRefresh = shown();
 });
 
 test('the page\'s own refresh poll shows the pill with the pending count', () => {
     const pill = document.getElementById('btn-approvals');
-    assert.ok(pillShownByRefresh, 'refresh() never ran tickApprovals() — no pill on page load');
+    assert.ok(pillShownByRefresh, 'the refresh loop never ran the approvals lane: no pill on page load');
     assert.match(pill.textContent, /1 pending approval\b/);
 });
 
 test('the pill index.html ships opens the Pending approvals sheet', async () => {
     document.getElementById('btn-approvals').click();
-    for (let i = 0; i < 10 && !document.getElementById('approvals-backdrop'); i++) await flush();
-    const sheet = document.getElementById('approvals-backdrop');
+    for (let i = 0; i < 10 && !document.querySelector('.approvals-sheet'); i++) await flush();
+    const sheet = document.querySelector('.approvals-sheet');
     assert.ok(sheet, 'clicking the shipped pill did not open the sheet');
     assert.equal(sheet.querySelectorAll('.pa-row').length, 1);
-    window.chela.closeApprovals();
+    sheet.querySelector('.ss-close').click();
+    await flush();
+    assert.equal(document.querySelector('.approvals-sheet'), null, 'the sheet\'s close button did not close it');
 });
 
 test('an SSE `overrides` frame re-fetches the list and updates the count', async () => {

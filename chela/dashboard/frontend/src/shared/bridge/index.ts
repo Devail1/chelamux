@@ -4,7 +4,7 @@
 // tearing). Legacy code reaches the same stores through window.chelaBridge (`.get()` to read,
 // `.set()` to publish) until CMX-212 P03 turns that into imports; it is bundled since P01.
 import { useSyncExternalStore } from 'react';
-import type { SidebarState } from '../../features/sidebar/model.ts';
+import type { NavState, RecentState, SidebarState } from '../../features/sidebar/model.ts';
 
 export interface Store<T> {
   get(): T;
@@ -38,19 +38,25 @@ export function useStore<T>(store: Store<T>): T {
 /** One row of /api/agents, as legacy fetched it. Typed loosely until the sidebar port. */
 export type Agent = { window_id?: string; name?: string } & Record<string, unknown>;
 
-/** nav.js's `_layout` (CMX-82, /api/sidebar/layout), published whole on every change. */
+/** The sidebar's server layout (CMX-82, /api/sidebar/layout), published whole on every change. */
 export interface SidebarLayout {
   order: string[];
   custom: Record<string, unknown> | null;
   view: Record<string, unknown> | null;
+  /** The desktop sidebar's width in px (CMX-278); null = the default. */
+  width: number | null;
   loaded: boolean;
 }
 
 export interface Bridge {
   agents: Store<Agent[]>;
   sidebarLayout: Store<SidebarLayout>;
-  /** nav.js `renderSidebarAgents()`: what the sidebar island draws (CMX-276). */
+  /** `renderSidebarAgents()`: what the sidebar island draws (CMX-276). */
   sidebar: Store<SidebarState | null>;
+  /** The nav rows (views.js) and the Work badges (work.js) (CMX-278). */
+  nav: Store<NavState>;
+  /** Recent sessions: the /api/restore payload and its toggle and undo (CMX-278). */
+  recent: Store<RecentState>;
 }
 
 declare global {
@@ -62,8 +68,10 @@ declare global {
 export function createBridge(): Bridge {
   return {
     agents: createStore<Agent[]>([]),
-    sidebarLayout: createStore<SidebarLayout>({ order: [], custom: null, view: null, loaded: false }),
+    sidebarLayout: createStore<SidebarLayout>({ order: [], custom: null, view: null, width: null, loaded: false }),
     sidebar: createStore<SidebarState | null>(null),
+    nav: createStore<NavState>({ items: [], active: null, badges: {} }),
+    recent: createStore<RecentState>({ rows: [], dispatcher_rows: [], revealed: false, undo: null }),
   };
 }
 

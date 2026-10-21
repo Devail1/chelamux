@@ -17,7 +17,7 @@
 
 export function fakeArchiveServer(agents) {
     const st = { hidden: [], sessions: [], layout: null };
-    const LAYOUT_FIELDS = ['order', 'custom', 'view'];
+    const LAYOUT_FIELDS = ['order', 'custom', 'view', 'width'];
     const pick = body => Object.fromEntries(LAYOUT_FIELDS.filter(f => f in (body || {})).map(f => [f, body[f]]));
     const emptyLayout = () => ({ order: [], custom: { groups: [], assign: {} }, view: {} });
     const calls = [];

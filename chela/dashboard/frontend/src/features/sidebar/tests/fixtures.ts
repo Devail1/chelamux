@@ -40,5 +40,13 @@ export function actions() {
     newCustomGroup: vi.fn<SidebarActions['newCustomGroup']>(() => null),
     renameCustomGroup: vi.fn<SidebarActions['renameCustomGroup']>(),
     deleteCustomGroup: vi.fn<SidebarActions['deleteCustomGroup']>(),
+    selectView: vi.fn<SidebarActions['selectView']>(),
+    setSidebarWidth: vi.fn<SidebarActions['setSidebarWidth']>(),
+    resumeSession: vi.fn<SidebarActions['resumeSession']>(() => Promise.resolve(true)),
+    dismissRecentSession: vi.fn<SidebarActions['dismissRecentSession']>(),
+    clearRecentSessions: vi.fn<SidebarActions['clearRecentSessions']>(),
+    undoDismissRecent: vi.fn<SidebarActions['undoDismissRecent']>(),
+    closeRecentUndo: vi.fn<SidebarActions['closeRecentUndo']>(),
+    toggleDispatcherSessions: vi.fn<SidebarActions['toggleDispatcherSessions']>(),
   };
 }

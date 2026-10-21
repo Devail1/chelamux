@@ -18,7 +18,7 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { activateDom, bootDashboardDom, copyDashboard, flush } from './js_helpers/dashboard_dom.mjs';
+import { activateDom, bootDashboardDom, copyDashboard, flush, SIDEBAR } from './js_helpers/dashboard_dom.mjs';
 import { fakeArchiveServer } from './js_helpers/fake_archive.mjs';
 
 const BODY = `
@@ -61,9 +61,9 @@ async function bootDevice(name) {
     const { dom, modules } = await bootDashboardDom({
         body: BODY, canvasStub: true, terminalsEnabled: false, fetchImpl,
         jsRoot,
-        extraModules: ['util.js', 'nav.js'],
+        extraModules: ['util.js', 'nav.js', SIDEBAR],
     });
-    const dev = { name, dom, nav: modules.nav, util: modules.util };
+    const dev = { name, dom, nav: modules.nav, sidebar: modules.sidebar, util: modules.util };
     await settle();
     return dev;
 }
@@ -83,7 +83,7 @@ function use(dev) {
 // The periodic refresh, as the page runs it (agents + archive + layout, then a render).
 async function refresh(dev) {
     use(dev);
-    await dev.nav.refreshSidebar();
+    await dev.sidebar.refreshSidebar();
     await settle();
 }
 
@@ -114,8 +114,8 @@ beforeEach(async () => {
 test('a group REORDER on one device is read by the other', async () => {
     await refresh(phone);
     assert.deepEqual(groupKeys(), ['/srv/code/alpha', '/srv/code/beta', '/srv/code/gamma']);
-    phone.nav.groupMenuAction('/srv/code/gamma', 'up');
-    phone.nav.groupMenuAction('/srv/code/gamma', 'up');
+    phone.sidebar.groupMenuAction('/srv/code/gamma', 'up');
+    phone.sidebar.groupMenuAction('/srv/code/gamma', 'up');
     assert.deepEqual(groupKeys(), ['/srv/code/gamma', '/srv/code/alpha', '/srv/code/beta']);
     await settle();
 
@@ -126,9 +126,9 @@ test('a group REORDER on one device is read by the other', async () => {
 
 test('a CUSTOM GROUP and its membership made on one device show on the other', async () => {
     use(laptop);
-    laptop.nav.viewMenuAction('group:custom');
-    const g = laptop.nav.newCustomGroup('Infra');
-    laptop.nav.moveToGroup('w:@202', g.id);
+    laptop.sidebar.viewMenuAction('group:custom');
+    const g = laptop.sidebar.newCustomGroup('Infra');
+    laptop.sidebar.moveToGroup('w:@202', g.id);
     await settle();
 
     await refresh(phone);
@@ -140,7 +140,7 @@ test('a CUSTOM GROUP and its membership made on one device show on the other', a
 
 test('a VIEW change on one device is read by the other', async () => {
     use(phone);
-    phone.nav.viewMenuAction('group:none');
+    phone.sidebar.viewMenuAction('group:none');
     await settle();
 
     await refresh(laptop);
@@ -150,7 +150,7 @@ test('a VIEW change on one device is read by the other', async () => {
 
 test('COLLAPSED groups do NOT travel: per device, in localStorage, never sent to the server', async () => {
     await refresh(phone);
-    phone.nav.toggleGroup('/srv/code/beta');
+    phone.sidebar.toggleGroup('/srv/code/beta');
     assert.ok(group('/srv/code/beta').classList.contains('collapsed'));
     assert.deepEqual(JSON.parse(localStorage.getItem('chela_grp_collapsed')), ['/srv/code/beta'],
         'the phone keeps its collapsed groups in its own localStorage');
@@ -198,7 +198,7 @@ test('MIGRATION RACE: two devices both saw "no layout"; the second one\'s import
     localStorage.setItem('chela_sb_group_order', JSON.stringify(['/srv/code/gamma']));
     let release;
     layoutGate = { promise: new Promise(r => { release = r; }) };
-    const slow = laptop.nav.refreshLayout();   // will answer "layout: null"
+    const slow = laptop.sidebar.refreshLayout();   // will answer "layout: null"
     layoutGate = null;
     await settle();
     // meanwhile the phone imports its layout first
@@ -213,7 +213,7 @@ test('MIGRATION RACE: two devices both saw "no layout"; the second one\'s import
     await settle();
     assert.deepEqual(server.st.layout.order, ['/srv/code/beta', '/srv/code/alpha'],
         'the second device\'s import overwrote the first device\'s layout');
-    laptop.nav.renderSidebarAgents(ROWS);
+    laptop.sidebar.renderSidebarAgents(ROWS);
     assert.deepEqual(groupKeys(), ['/srv/code/beta', '/srv/code/alpha', '/srv/code/gamma'],
         'the second device did not adopt the winner\'s layout');
     assert.equal(localStorage.getItem('chela_sb_group_order'), null);
@@ -233,11 +233,11 @@ test('NO WRITE-BACK before the first load: renders and choices on an unloaded pa
     const fresh = await bootDevice('fresh');
     use(fresh);
     fresh.util.setAgentsCache(ROWS);
-    fresh.nav.renderSidebarAgents(ROWS);
-    fresh.nav.groupMenuAction('/srv/code/beta', 'down');
-    fresh.nav.viewMenuAction('sort:name');
-    fresh.nav.newCustomGroup('Scratch');
-    fresh.nav.renderSidebarAgents(ROWS);
+    fresh.sidebar.renderSidebarAgents(ROWS);
+    fresh.sidebar.groupMenuAction('/srv/code/beta', 'down');
+    fresh.sidebar.viewMenuAction('sort:name');
+    fresh.sidebar.newCustomGroup('Scratch');
+    fresh.sidebar.renderSidebarAgents(ROWS);
     await settle();
     assert.equal(layoutPosts().length, 0, 'an unloaded page wrote its defaults over the saved layout');
     assert.deepEqual(server.st.layout, saved);
@@ -247,7 +247,7 @@ test('NO WRITE-BACK before the first load: renders and choices on an unloaded pa
     release();
     layoutGate = null;
     await settle();
-    fresh.nav.renderSidebarAgents(ROWS);
+    fresh.sidebar.renderSidebarAgents(ROWS);
     await settle();
     assert.deepEqual(groupKeys(), ['/srv/code/gamma', '/srv/code/beta', '/srv/code/alpha']);
     assert.deepEqual(server.st.layout, {
@@ -259,14 +259,14 @@ test('once loaded, a slow refresh that started BEFORE a write never undoes it', 
     await refresh(phone);
     let release;
     layoutGate = { promise: new Promise(r => { release = r; }) };
-    const slow = phone.nav.refreshLayout();   // reads the server as it is NOW (no order yet)
+    const slow = phone.sidebar.refreshLayout();   // reads the server as it is NOW (no order yet)
     layoutGate = null;
-    phone.nav.groupMenuAction('/srv/code/gamma', 'up');
+    phone.sidebar.groupMenuAction('/srv/code/gamma', 'up');
     await settle();
     assert.deepEqual(server.st.layout.order, ['/srv/code/alpha', '/srv/code/gamma', '/srv/code/beta']);
     release();
     await slow;
-    phone.nav.renderSidebarAgents(ROWS);
+    phone.sidebar.renderSidebarAgents(ROWS);
     assert.deepEqual(groupKeys(), ['/srv/code/alpha', '/srv/code/gamma', '/srv/code/beta'],
         'a stale read put the old order back over the write');
 });
@@ -276,19 +276,19 @@ test('once loaded, a slow refresh that started BEFORE a write never undoes it', 
 // `if (st.layout)` path, which must check freshness too.
 test('once loaded, a slow read of a SAVED layout that started before a write never undoes it', async () => {
     await refresh(phone);
-    phone.nav.groupMenuAction('/srv/code/gamma', 'up');
+    phone.sidebar.groupMenuAction('/srv/code/gamma', 'up');
     await settle();
     assert.deepEqual(server.st.layout.order, ['/srv/code/alpha', '/srv/code/gamma', '/srv/code/beta']);
     let release;
     layoutGate = { promise: new Promise(r => { release = r; }) };
-    const slow = phone.nav.refreshLayout();   // reads the SAVED layout as it is NOW
+    const slow = phone.sidebar.refreshLayout();   // reads the SAVED layout as it is NOW
     layoutGate = null;
-    phone.nav.groupMenuAction('/srv/code/gamma', 'up');
+    phone.sidebar.groupMenuAction('/srv/code/gamma', 'up');
     await settle();
     assert.deepEqual(server.st.layout.order, ['/srv/code/gamma', '/srv/code/alpha', '/srv/code/beta']);
     release();
     await slow;
-    phone.nav.renderSidebarAgents(ROWS);
+    phone.sidebar.renderSidebarAgents(ROWS);
     assert.deepEqual(groupKeys(), ['/srv/code/gamma', '/srv/code/alpha', '/srv/code/beta'],
         'a stale read of the saved layout put the old order back over the write');
 });
@@ -301,10 +301,10 @@ test('CONCURRENT refreshes on one page: the second never resets the layout the f
     use(phone);
     localStorage.setItem('chela_sb_view', JSON.stringify({ groupBy: 'custom' }));
     localStorage.setItem('chela_sb_custom_groups', JSON.stringify({ groups: [{ id: 'g1', name: 'Infra' }], assign: {} }));
-    const first = phone.nav.refreshLayout();          // answers "layout: null" at once
+    const first = phone.sidebar.refreshLayout();          // answers "layout: null" at once
     let release;
     layoutGate = { promise: new Promise(r => { release = r; }) };
-    const second = phone.nav.refreshLayout();         // also "layout: null", but late
+    const second = phone.sidebar.refreshLayout();         // also "layout: null", but late
     layoutGate = null;
     await first;
     await settle();
@@ -312,7 +312,7 @@ test('CONCURRENT refreshes on one page: the second never resets the layout the f
     release();
     await second;
     await settle();
-    phone.nav.renderSidebarAgents(ROWS);
+    phone.sidebar.renderSidebarAgents(ROWS);
     // only Custom groups draws an "Ungrouped" group (an empty "Infra" is not drawn);
     // the defaults would draw the folders alpha/beta/gamma
     assert.deepEqual(groupLabels(), ['Ungrouped'],

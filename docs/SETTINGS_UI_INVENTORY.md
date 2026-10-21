@@ -78,13 +78,14 @@ scan, and matter to a redesign precisely because they're invisible to it:
   from any settings surface: it's an actor stamp a launched orchestrator process exports
   into its own window, never a human preference (see `[[feedback_orchestrator...]]`-style
   guidance in `chela/config.py:345-352`).
-- **Six ttyd/terminal-wall knobs read only by `scripts/agent-terminals.sh`** (shell, not
+- **Seven ttyd/terminal-wall knobs read only by `scripts/agent-terminals.sh`** (shell, not
   Python, so the Python-side grep never sees them): `CHELA_TERM_BASE`, `CHELA_TERM_POLL`,
   `CHELA_TERM_MAX_CLIENTS`, `CHELA_TERM_FONT`, `CHELA_TERM_FONTSIZE`,
-  `CHELA_TERM_BACKOFF_MAX`. A "Terminal wall" tab that only covers the Python-side knobs
+  `CHELA_TERM_BACKOFF_MAX`, `CHELA_TERM_RENDERER` (xterm renderer, default `dom` for
+  Hebrew bidi, CMX-302). A "Terminal wall" tab that only covers the Python-side knobs
   (`CHELA_TERMINALS_ENABLED/EXPOSE/TERM_COLS/TERM_ROWS/TERM_THEME/WALL_TILE_DISPATCHED`)
   would still be missing the port range, font, and client cap the supervisor itself reads.
-  (`CHELA_TERM_THEME` was the seventh until CMX-381: the dashboard now reads it too, so
+  (`CHELA_TERM_THEME` was one of them too until CMX-381: the dashboard now reads it too, so
   it is in the table under group 8.)
 
 Neither group is in the 58, and neither should be added to the count above (that count is

@@ -28,7 +28,7 @@
 // tests/test_js_suites.py; needs `pnpm install` for jsdom).
 import { beforeAll, test } from 'vitest';
 import assert from 'node:assert/strict';
-import { bootDashboardDom, flush, sliceTemplate } from './js_helpers/dashboard_dom.mjs';
+import { bootDashboardDom, clickIsland, flush, sliceTemplate } from './js_helpers/dashboard_dom.mjs';
 
 // The REAL agent-detail + Work panels, sliced straight out of index.html — not
 // hand-typed — so a mutation to panel-work's pre-set `active` class (exactly
@@ -143,46 +143,37 @@ test('the boot tick paints the Work board on a terminals-off boot — the canvas
     assert.equal(empty.querySelector('.work-empty-title')?.textContent, 'A board for work in flight');
 });
 
-// --- the agent-detail "← Back" link, both renderAgentDetail call sites -------
+// --- the agent-detail "← Back" control, both branches ---------------------
 //
-// nav.js's _agentDetailBackView() falls back to 'work' when TERMINALS_ON is
-// false (the only branch reachable in THIS file's boot). Both call sites are
-// driven — the not-found branch (nav.js:560, an agent absent from
-// _agentsCache) and the normal/found branch (nav.js:608) — per DEFEAT_SHAPES
-// shape 7 ("two callers, one guarded"): a fixture that only ever drives one
-// would miss a corruption at the other.
-function _invokeOnclick(el, chelaStub) {
-    const handler = new Function('chela', el.getAttribute('onclick') || '');
-    handler.call(el, chelaStub);
-}
-
-function _assertBackLinkTargetsWork(label) {
+// The agent-detail island (features/agentdetail, CMX-219) falls back to 'work' when terminals
+// are off (the only branch reachable in THIS file's boot). Both paths are driven: the
+// not-found branch (an agent absent from the agents cache) and the found one, per
+// DEFEAT_SHAPES shape 7 ("two callers, one guarded").
+async function _assertBackLinkTargetsWork(label) {
+    await flush();
     const back = document.querySelector('#agent-detail .detail-back');
     assert.ok(back, `${label}: no .detail-back node rendered into #agent-detail`);
-    assert.match(back.getAttribute('onclick'), /chela\.selectView\('work'\)/,
-        `${label}: the "← Back" link is not wired to chela.selectView('work') — it points at a view ` +
-        "that no longer exists (or was never re-pointed at the new default) on a terminals-off deployment");
-    const calls = [];
-    _invokeOnclick(back, { selectView: (...args) => calls.push(args) });
-    assert.deepEqual(calls, [['work']],
-        `${label}: the "← Back" link's onclick did not actually CALL chela.selectView('work')`);
+    clickIsland(back);
+    assert.equal(util.currentTab, 'work',
+        `${label}: the "← Back" control did not select Work: it points at a view that no longer exists ` +
+        '(or was never re-pointed at the new default) on a terminals-off deployment');
 }
 
-test('agent-detail "← Back" (not-found branch) returns to Work, not the deleted Agents view', () => {
+test('agent-detail "← Back" (not-found branch) returns to Work, not the deleted Agents view', async () => {
     nav.renderNav();
-    window.chela.selectAgent('cmx279-rework-ghost-agent');   // unresolved -> not-found branch (nav.js:560)
-    _assertBackLinkTargetsWork('not-found branch');
+    window.chela.selectAgent('cmx279-rework-ghost-agent');   // unresolved -> not-found branch
+    assert.equal(util.currentTab, 'agent-detail');
+    await _assertBackLinkTargetsWork('not-found branch');
 });
 
-test('agent-detail "← Back" (found branch) also returns to Work, not the deleted Agents view', () => {
+test('agent-detail "← Back" (found branch) also returns to Work, not the deleted Agents view', async () => {
     nav.renderNav();
-    // A resolvable agent with no window_id: selectAgent's wall-focus branch
-    // (TERMINALS_ON && a.window_id) never applies even if TERMINALS_ON flips —
-    // this always falls through to showAgentDetail's FOUND path (nav.js:608),
-    // the other of the two call sites.
+    // A resolvable agent with no window_id: selectAgent's wall-focus branch never applies,
+    // so this always falls through to showAgentDetail's FOUND path.
     util.setAgentsCache([{ name: 'cmx279-rework-known-agent', online: true }]);
     window.chela.selectAgent('cmx279-rework-known-agent');
-    _assertBackLinkTargetsWork('found branch');
+    assert.equal(util.currentTab, 'agent-detail');
+    await _assertBackLinkTargetsWork('found branch');
 });
 
 // --- CMX-41: the agent-detail PR badge says when the PR is history ----------
@@ -191,7 +182,7 @@ test('agent-detail "← Back" (found branch) also returns to Work, not the delet
 // badge must carry the resolved state for a merged/closed PR — and nothing
 // for open/draft/unknown, where it has no history to report. Read back off
 // the real renderAgentDetail paint, not the source.
-test('CMX-41: agent-detail PR badge reads "PR #N · merged/closed" for a dead PR, bare "PR #N" otherwise', () => {
+test('CMX-41: agent-detail PR badge reads "PR #N · merged/closed" for a dead PR, bare "PR #N" otherwise', async () => {
     const URL = 'https://github.com/acme/widgets/pull/613';
     const CASES = [
         ['merged', 'PR #613 · merged'], ['closed', 'PR #613 · closed'],
@@ -202,6 +193,7 @@ test('CMX-41: agent-detail PR badge reads "PR #N · merged/closed" for a dead PR
         util.setAgentsCache([{ name: 'cmx41-pr-agent', online: true,
             pr: { url: URL, number: 613, state } }]);
         window.chela.selectAgent('cmx41-pr-agent');
+        await flush();
         const badge = document.querySelector('#agent-detail .pr-badge');
         assert.ok(badge, `state=${state}: no .pr-badge rendered`);
         assert.equal(badge.textContent, want, `state=${state}: badge reads "${badge.textContent}"`);

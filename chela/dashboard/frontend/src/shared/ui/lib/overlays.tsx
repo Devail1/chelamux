@@ -7,8 +7,8 @@ import * as RM from '@radix-ui/react-dropdown-menu';
 import * as RP from '@radix-ui/react-popover';
 import * as RToast from '@radix-ui/react-toast';
 import * as RT from '@radix-ui/react-tooltip';
-import { Check, ChevronRight, type LucideIcon } from 'lucide-react';
-import { useLayoutEffect, useRef, type ReactElement, type ReactNode, type SyntheticEvent } from 'react';
+import { Check, ChevronRight, X, type LucideIcon } from 'lucide-react';
+import { useLayoutEffect, useMemo, useRef, type ReactElement, type ReactNode, type RefObject, type SyntheticEvent } from 'react';
 
 const cx = (...names: (string | false | undefined)[]) => names.filter(Boolean).join(' ');
 
@@ -43,17 +43,36 @@ export type DialogProps = {
   description?: ReactNode;
   /** Extra class on the .modal box (e.g. `modal-newtask` for its width). */
   className?: string;
+  /** `sheet`: the safety sheets' look (anchored top right, a bottom sheet on a phone), with
+   * the title in a header row beside its icon and a close button (CMX-240). */
+  variant?: 'modal' | 'sheet';
+  icon?: LucideIcon;
   /** The title names the dialog for assistive tech only: the content draws its own heading. */
   hideTitle?: boolean;
   children?: ReactNode;
 };
+
+const SURFACE = {
+  modal: { overlay: 'modal-overlay active', box: 'modal', desc: 'modal-desc' },
+  sheet: { overlay: 'shares-backdrop ui-sheet', box: 'shares-sheet', desc: 'ss-sub' },
+} as const;
 
 /**
  * A modal dialog: focus moves in, is trapped, and returns to whatever had it when the dialog
  * opened (Radix returns it only to its own Trigger, and a legacy opener is not one); Escape
  * and an outside click close it.
  */
-export function Dialog({ open, onOpenChange, title, description, className, hideTitle, children }: DialogProps) {
+export function Dialog({
+  open,
+  onOpenChange,
+  title,
+  description,
+  className,
+  hideTitle,
+  variant = 'modal',
+  icon: Icon,
+  children,
+}: DialogProps) {
   const opener = useRef<Element | null>(null);
   // Remembered as it opens. Radix skips onOpenAutoFocus when an autoFocus field already holds
   // focus, so the opener is read here, from the focus history, not there.
@@ -61,13 +80,18 @@ export function Dialog({ open, onOpenChange, title, description, className, hide
     if (open) opener.current = openerNow();
   }, [open]);
   if (!title.trim()) throw new Error('<Dialog> needs a title: it is the dialog\'s accessible name');
+  const surface = SURFACE[variant];
+  const heading = (
+    <RD.Title asChild>
+      <h3 className={hideTitle ? 'sr-only' : undefined}>{title}</h3>
+    </RD.Title>
+  );
   return (
     <RD.Root open={open} onOpenChange={onOpenChange}>
       <RD.Portal>
-        <RD.Overlay className="modal-overlay active">
+        <RD.Overlay className={surface.overlay}>
           <RD.Content
-            data-island
-            className={cx('modal', className)}
+            className={cx(surface.box, className)}
             {...(description ? {} : { 'aria-describedby': undefined })}
             onCloseAutoFocus={(e) => {
               // A dialog handing over to another (a Decisions row opening its task) needs nothing
@@ -78,10 +102,22 @@ export function Dialog({ open, onOpenChange, title, description, className, hide
               }
             }}
           >
-            <RD.Title asChild>
-              <h3 className={hideTitle ? 'sr-only' : undefined}>{title}</h3>
-            </RD.Title>
-            {description && <RD.Description className="modal-desc">{description}</RD.Description>}
+            {variant === 'sheet' ? (
+              <div className="ss-hd">
+                {Icon && (
+                  <span className="ss-hd-ic">
+                    <Icon aria-hidden size={15} />
+                  </span>
+                )}
+                {heading}
+                <RD.Close className="ss-close" aria-label="Close">
+                  <X aria-hidden size={16} />
+                </RD.Close>
+              </div>
+            ) : (
+              heading
+            )}
+            {description && <RD.Description className={surface.desc}>{description}</RD.Description>}
             {children}
           </RD.Content>
         </RD.Overlay>
@@ -92,6 +128,45 @@ export function Dialog({ open, onOpenChange, title, description, className, hide
 
 /** Wrap a button in it to close the enclosing Dialog. */
 export const DialogClose = RD.Close;
+
+/**
+ * A Dialog in the safety sheets' look (.shares-backdrop / .shares-sheet, the approvals and
+ * access-request sheets): its title in the .ss-hd row beside a close button, then `children`.
+ * Same behaviour as Dialog (focus trap and return, Escape, outside click).
+ */
+export function Sheet({ open, onOpenChange, title, className, children }: Omit<DialogProps, 'description' | 'hideTitle'>) {
+  const opener = useRef<Element | null>(null);
+  // remembered as it opens, as Dialog does
+  useLayoutEffect(() => {
+    if (open) opener.current = openerNow();
+  }, [open]);
+  if (!title.trim()) throw new Error('<Sheet> needs a title: it is the dialog\'s accessible name');
+  return (
+    <RD.Root open={open} onOpenChange={onOpenChange}>
+      <RD.Portal>
+        <RD.Overlay className="shares-backdrop">
+          <RD.Content className={cx('shares-sheet', className)} aria-describedby={undefined}
+            onCloseAutoFocus={(e) => {
+              if (opener.current instanceof HTMLElement && opener.current.isConnected) {
+                e.preventDefault();
+                opener.current.focus();
+              }
+            }}>
+            <div className="ss-hd">
+              <RD.Title asChild>
+                <span>{title}</span>
+              </RD.Title>
+              <RD.Close className="ss-close" aria-label="Close">
+                <X size={14} aria-hidden />
+              </RD.Close>
+            </div>
+            {children}
+          </RD.Content>
+        </RD.Overlay>
+      </RD.Portal>
+    </RD.Root>
+  );
+}
 
 export type PopoverProps = {
   /** The control it anchors to: one element that takes a ref (a Button, an IconButton). */
@@ -110,7 +185,52 @@ export function Popover({ trigger, children, open, onOpenChange, align = 'end', 
     <RP.Root open={open} onOpenChange={onOpenChange}>
       <RP.Trigger asChild>{trigger}</RP.Trigger>
       <RP.Portal>
-        <RP.Content data-island className={cx('popover ui-floating', className)} aria-label={label} side="bottom" align={align} sideOffset={GAP} collisionPadding={MARGIN}>
+        <RP.Content className={cx('popover ui-floating', className)} aria-label={label} side="bottom" align={align} sideOffset={GAP} collisionPadding={MARGIN}>
+          {children}
+        </RP.Content>
+      </RP.Portal>
+    </RP.Root>
+  );
+}
+
+export type AnchoredPopoverProps = Omit<PopoverProps, 'trigger' | 'open' | 'onOpenChange'> & {
+  /** The element it hangs off; null = closed. One popover can open from several controls. */
+  anchor: HTMLElement | null;
+  onClose: () => void;
+};
+
+/**
+ * A Popover with no trigger of its own: it opens at whichever element `anchor` names (the
+ * launch menu opens from the sidebar button, the phone "+" and the gear menu's New...).
+ * An outside click or Escape closes it; focus leaving it does not (the control that opened
+ * it may take focus back after the popover appears).
+ */
+export function AnchoredPopover({ anchor, onClose, children, align = 'end', className, label }: AnchoredPopoverProps) {
+  // Radix measures a virtual anchor through a ref-shaped object
+  const ref = useMemo(() => ({ current: anchor }), [anchor]);
+  // no Trigger for Radix to return focus to: the last anchor gets it back
+  const last = useRef<HTMLElement | null>(null);
+  useLayoutEffect(() => {
+    if (anchor) last.current = anchor;
+  }, [anchor]);
+  return (
+    <RP.Root open={!!anchor} onOpenChange={(o) => {
+        if (!o) onClose();
+      }}>
+      <RP.Anchor virtualRef={ref as RefObject<HTMLElement>} />
+      <RP.Portal>
+        <RP.Content className={cx('popover ui-floating', className)} aria-label={label} side="bottom" align={align} sideOffset={GAP} collisionPadding={MARGIN}
+          onFocusOutside={(e) => e.preventDefault()}
+          onCloseAutoFocus={(e) => {
+            if (last.current?.isConnected) {
+              e.preventDefault();
+              last.current.focus();
+            }
+          }}
+          onInteractOutside={(e) => {
+            // a click on the control that opened it reopens it there, not close-then-open
+            if (anchor && e.target instanceof Node && anchor.contains(e.target)) e.preventDefault();
+          }}>
           {children}
         </RP.Content>
       </RP.Portal>
@@ -181,6 +301,8 @@ export type MenuProps = {
   /** Controlled open state, for a menu that also opens another way (a right-click). */
   open?: boolean;
   onOpenChange?: (open: boolean) => void;
+  /** Read-only content under the items (the gear menu's usage readouts). */
+  footer?: ReactNode;
 };
 
 // A portal still bubbles React events up the React tree: a pick inside the menu must not
@@ -193,17 +315,20 @@ const containContext = (e: SyntheticEvent) => {
 };
 
 /** A dropdown menu, named by its trigger: arrow keys move, Enter picks, typing jumps, Escape closes. */
-export function Menu({ trigger, items, className, open, onOpenChange }: MenuProps) {
+export function Menu({ trigger, items, className, open, onOpenChange, footer }: MenuProps) {
+  // A trigger with an id of its own keeps it (Radix's would be overwritten), so name the menu by it.
+  const triggerId = (trigger.props as { id?: string }).id;
   return (
     <RM.Root open={open} onOpenChange={onOpenChange}>
       <RM.Trigger asChild>{trigger}</RM.Trigger>
       <RM.Portal>
-        <RM.Content data-island className={cx('popover overflow-menu ui-floating', className)} align="end" sideOffset={GAP} collisionPadding={MARGIN}
-          onClick={contain} onContextMenu={containContext}>
+        <RM.Content className={cx('popover overflow-menu ui-floating', className)} align="end" sideOffset={GAP} collisionPadding={MARGIN}
+          onClick={contain} onContextMenu={containContext} {...(triggerId ? { 'aria-labelledby': triggerId } : {})}>
           {items.map((it, i) =>
             // keyed by label too: a new page's items are new nodes, so refocus() sees focus leave
             it === 'separator' ? <RM.Separator key={i} className="popover-sep" /> : <MenuEntry key={`${i}:${it.label}`} it={it} />,
           )}
+          {footer}
         </RM.Content>
       </RM.Portal>
     </RM.Root>
@@ -217,7 +342,7 @@ export function Tooltip({ content, children }: { content: ReactNode; children: R
       <RT.Root>
         <RT.Trigger asChild>{children}</RT.Trigger>
         <RT.Portal>
-          <RT.Content data-island className="tap-tip ui-floating" side="top" sideOffset={GAP} collisionPadding={MARGIN}>
+          <RT.Content className="tap-tip ui-floating" side="top" sideOffset={GAP} collisionPadding={MARGIN}>
             {content}
           </RT.Content>
         </RT.Portal>
