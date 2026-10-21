@@ -55,7 +55,8 @@ export function NewTask() {
     if (!form.title.trim()) return setError('A title is required.');
     setError('');
     setBusy(true);
-    const res = await create({ ...form, workflow });
+    // Only the picks this workflow still offers: a blocker hidden from the list is never sent.
+    const res = await create({ ...form, workflow, blocked: form.blocked.filter((id) => choices.some((c) => c.id === id)) });
     setBusy(false);
     if ('error' in res) return setError(res.error);
     setForm((f) => ({ ...f, ...EMPTY }));

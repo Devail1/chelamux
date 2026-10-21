@@ -165,6 +165,9 @@ test('a run row × asks, then POSTs the delete and refreshes Work; Cancel restor
   await act(async () => fireEvent.click(screen.getByRole('button', { name: 'Delete' })));
   expect(calls.map((c) => [c.url, c.init?.method, c.init?.body])).toEqual([['/api/dispatcher/delete', 'POST', JSON.stringify({ kind: 'run', task_id: 'CMX-1' })]]);
   expect(polls).toHaveBeenCalledTimes(1);
+  // The poll here did not drop the row (a stub): it comes back, never stuck on "Deleting…".
+  expect(row().className).toBe('');
+  expect(row().querySelector('.row-confirm-cell')).toBeNull();
 });
 
 test('a source-line delete posts file + text; a refusal shows the error and Close restores', async () => {

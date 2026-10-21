@@ -25,6 +25,6 @@ export async function postWorkDelete(payload: DeletePayload): Promise<string | n
   }
   if (!resp.ok || !data.ok) return data.error || `HTTP ${resp.status}`;
   // Idempotent on the server ("already gone" = "just deleted"): the redraw is the confirmation.
-  void refreshWork();
+  await refreshWork();
   return null;
 }

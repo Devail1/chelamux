@@ -114,7 +114,7 @@ function AddForm() {
   const agentName = names.includes(agent) ? agent : (names[0] ?? '');
   async function add() {
     const body = { agent_name: agentName, schedule_type: type, schedule_value: value.trim(), prompt: prompt.trim() };
-    if (!body.schedule_value || !body.prompt) return;
+    if (!body.agent_name || !body.schedule_value || !body.prompt) return;
     await api('/api/schedules', { method: 'POST', headers: JSON_HEADERS, body: JSON.stringify(body) });
     adding.set(false);
     refreshSchedules();

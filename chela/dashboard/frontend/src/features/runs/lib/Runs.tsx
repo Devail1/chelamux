@@ -43,7 +43,8 @@ function DeletableRow({ payload, cols, taskId, children }: { payload: DeletePayl
   async function remove(p: DeletePayload) {
     setConfirm('busy');
     const err = await postWorkDelete(p);
-    if (err) setConfirm({ error: err });
+    // Deleted: the refreshed payload has already dropped the row; if it has not, it is back.
+    setConfirm(err ? { error: err } : null);
   }
   return (
     <tr data-task-id={taskId} className={confirm ? 'row-confirming' : undefined}>
@@ -114,7 +115,7 @@ function RunRow({ r, linear }: { r: Run; linear: boolean }) {
 
 function RunsTable({ runs, label, linear }: { runs: Run[]; label: string; linear: boolean }) {
   if (!runs.length) return <div className="runs-empty">No {label}.</div>;
-  return <Table heads={RUN_COLS}>{runs.map((r, i) => <RunRow key={r.task_id || i} r={r} linear={linear} />)}</Table>;
+  return <Table heads={RUN_COLS}>{runs.map((r, i) => <RunRow key={`${r.task_id ?? ''}:${r.attempt ?? ''}:${i}`} r={r} linear={linear} />)}</Table>;
 }
 
 function OpenTasks({ tasks }: { tasks: OpenTask[] }) {

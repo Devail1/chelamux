@@ -193,3 +193,15 @@ test('Create is disabled while the POST is in flight', async () => {
   await act(async () => release({ status: 200, body: { ok: true, issue: { identifier: 'CMX-1' } } }));
   expect(dialog()).toBeNull();
 });
+
+test('a pick whose issue left the list (a poll dropped it) is never sent as a blocker', async () => {
+  open();
+  fill({ blocked: ['CMX-1', 'CMX-2'] });
+  const next = payload();
+  const wf = next.workflows?.[0];
+  if (wf) wf.active_runs = [];
+  act(() => work.set(next));
+  expect([...blockers().selectedOptions].map((o) => o.value)).toEqual(['CMX-1']);
+  await submit();
+  expect(JSON.parse(String(created()[0]?.init?.body)).blocked_by).toEqual(['CMX-1']);
+});

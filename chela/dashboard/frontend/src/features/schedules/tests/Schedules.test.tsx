@@ -143,3 +143,15 @@ test('model: each type has its own hint and an unknown one falls back to interva
   expect(scheduleHint('bogus')).toEqual(scheduleHint('interval'));
   expect([clip('abc', 3), clip('abcd', 3), clip('abcd', 3, '...')]).toEqual(['abc', 'abc…', 'abc...']);
 });
+
+test('with no agent to pick, Add sends nothing', async () => {
+  agents.set([]);
+  await shown();
+  act(() => showAddSchedule());
+  fireEvent.change(screen.getByRole('textbox', { name: 'Interval (e.g. 30s, 5m, 1h)' }), { target: { value: '5m' } });
+  fireEvent.change(screen.getByRole('textbox', { name: 'Prompt' }), { target: { value: 'go' } });
+  calls = [];
+  await act(async () => fireEvent.click(screen.getByRole('button', { name: 'Add' })));
+  expect(calls).toEqual([]);
+  fireEvent.click(screen.getByRole('button', { name: 'Cancel' }));
+});
