@@ -12,10 +12,11 @@ import { dashboardPort } from './needsyou'
 
 export const REASON_CHARS = 200
 
-// whitespace collapsed to single spaces, clipped to `limit` with an ellipsis
+// whitespace collapsed to single spaces, clipped to `limit` code points (as the daemon's
+// inbox._one_line clips) with an ellipsis; never splits a surrogate pair
 export function oneLine(text: unknown, limit: number): string {
-  const s = String(text ?? '').split(/\s+/).filter(Boolean).join(' ')
-  return s.length > limit ? `${s.slice(0, limit - 1)}…` : s
+  const s = Array.from(String(text ?? '').split(/\s+/).filter(Boolean).join(' '))
+  return s.length > limit ? `${s.slice(0, limit - 1).join('')}…` : s.join('')
 }
 
 export function denialBody(e: any, wid: string) {

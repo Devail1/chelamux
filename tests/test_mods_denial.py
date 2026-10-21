@@ -214,6 +214,16 @@ def test_a_body_without_a_window_or_a_key_is_refused_and_files_nothing(client, b
     assert _queued() == []
 
 
+def test_a_body_that_is_not_json_typed_is_a_415_and_files_nothing(client):
+    """🔴 GUARD: a cross-origin page can POST text/plain with no CORS preflight; this route
+    reads application/json only, so such a post cannot forge a notice."""
+    resp = client.post("/api/inbox/denial", data=json.dumps(CASES["body"]),
+                       content_type="text/plain")
+    assert (resp.status_code, resp.get_json()) == (
+        415, {"ok": False, "error": "Content-Type must be application/json"})
+    assert _queued() == []
+
+
 def test_a_body_that_is_not_an_object_is_a_400(client):
     resp = client.post("/api/inbox/denial", data="[1]", content_type="application/json")
     assert (resp.status_code, resp.get_json()) == (

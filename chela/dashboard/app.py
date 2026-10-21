@@ -3888,7 +3888,10 @@ def api_needs_you():
 def api_inbox_denial():
     if (request.content_length or 0) > hooks.MAX_BODY:
         return jsonify({"ok": False, "error": "body too large"}), 413
-    body = request.get_json(force=True, silent=True)
+    # application/json only: a cross-origin page can send text/plain with no preflight, never this
+    if not request.is_json:
+        return jsonify({"ok": False, "error": "Content-Type must be application/json"}), 415
+    body = request.get_json(silent=True)
     if not isinstance(body, dict):
         return jsonify({"ok": False, "error": "a JSON object is required"}), 400
     try:

@@ -83,4 +83,7 @@ test('the reason is one line, clipped to 200 characters with an ellipsis', () =>
   expect(oneLine(undefined, 200)).toBe('')
   expect(oneLine('x'.repeat(200), 200)).toBe('x'.repeat(200))
   expect(oneLine('x'.repeat(201), 200)).toBe(`${'x'.repeat(199)}…`)
+  // code points, as the daemon counts: 200 emoji are 400 UTF-16 units and still fit
+  expect(oneLine('😀'.repeat(200), 200)).toBe('😀'.repeat(200))
+  expect(oneLine('😀'.repeat(201), 200)).toBe(`${'😀'.repeat(199)}…`)
 })
