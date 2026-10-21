@@ -960,7 +960,8 @@ def _sweep(worktree: Path, base: str, test_cmd: str, *, timeout: float, select_t
     if err:
         report.cannot_verify = err
         return report
-    muts, err = collect_mutations(worktree, base, lines)
+    muts, err = (collect_mutations(worktree, base) if lines is None else
+                 collect_mutations(worktree, base, lines))
     if err:
         report.cannot_verify = err
         return report
