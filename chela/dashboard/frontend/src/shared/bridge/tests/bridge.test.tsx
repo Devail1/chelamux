@@ -38,7 +38,7 @@ test('installBridge puts one bridge on the window, starting empty, and keeps it 
   const bridge = installBridge(win);
   expect(win.chelaBridge).toBe(bridge);
   expect(bridge.agents.get()).toEqual([]);
-  expect(bridge.sidebarLayout.get()).toEqual({ order: [], custom: null, view: null, loaded: false });
+  expect(bridge.sidebarLayout.get()).toEqual({ order: [], custom: null, view: null, width: null, loaded: false });
   bridge.agents.set([{ window_id: '@1' }]);
   expect(installBridge(win)).toBe(bridge);
   expect(installBridge(win).agents.get()).toEqual([{ window_id: '@1' }]);

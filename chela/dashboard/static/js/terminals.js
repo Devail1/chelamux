@@ -1,6 +1,7 @@
 // --- Stage 0: ES-module imports ---
 import { $, BASE_PATH, TERMINALS_ON, WALL_TILE_DISPATCHED, _agentsCache, api, attrEsc, currentTab, escHtml, icon, lucideIcon, setAgentsCache, updateTabSignal, wantsHuman } from './util';
-import { altSwitchKeydown, openPalette, renderSidebarAgents, selectView, setAltHeld, sidebarOrder, updateCtxCache } from './nav';
+import { openPalette, selectView } from './nav';
+import { altSwitchKeydown, renderSidebarAgents, setAltHeld, sidebarOrder, updateCtxCache } from '../../frontend/src/features/sidebar/controller';
 import { orderByList, windowRunDot } from '../../frontend/src/features/sidebar/model';
 import { applyRoomAccents, bezierPath, resolveDrop } from './wire';
 import { onOrchestratorChange, orchestratorRelease, orchestratorState, orchestratorSubscribe } from '../../frontend/src/shared/orchestrator';

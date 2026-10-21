@@ -18,7 +18,7 @@ import { clickIsland } from './js_helpers/dashboard_dom.mjs';
 import { KEY, bootPhone, pane, sel, settle, shown, stored } from './js_helpers/term_pane_fixture.mjs';
 
 const SIDEBAR = ['/srv/code/beta', '/srv/code/gamma', '/srv/code/alpha'];   // sidebar rows: @202, @203, @201
-let nav, terminals, chela, bootPane;
+let nav, sidebar, terminals, chela, bootPane;
 const storedWid = () => JSON.parse(localStorage.getItem(KEY)).wid;
 async function reload() {
     sel().innerHTML = '';
@@ -27,13 +27,13 @@ async function reload() {
 }
 
 beforeAll(async () => {
-    ({ nav, terminals, chela } = await bootPhone({ order: SIDEBAR, seed: { [KEY]: stored('@203', 's-c', 'c') } }));
+    ({ nav, sidebar, terminals, chela } = await bootPhone({ order: SIDEBAR, seed: { [KEY]: stored('@203', 's-c', 'c') } }));
     await settle();
     bootPane = pane();
 });
 
 beforeEach(async () => {
-    await nav.refreshSidebar();
+    await sidebar.refreshSidebar();
     await settle();
 });
 

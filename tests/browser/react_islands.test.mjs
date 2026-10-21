@@ -115,3 +115,65 @@ test('a sidebar row gives its title the width before its metadata', { skip: why 
     assert.deepEqual(errors, []);
     await page.close();
 });
+
+// CMX-278: the width handle on the real page. A drag widens the column (the canvas gives way),
+// the release saves it to the SERVER layout, and a fresh page (another device) opens at that
+// width. The phone drawer and the collapsed rail ignore it.
+test('dragging the sidebar edge resizes it, the width persists via the layout API, clamped', { skip: why }, async () => {
+    if (failed) throw failed;
+    const open = async viewport => {
+        const page = await browser.newPage({ viewport });
+        const errors = [];
+        page.on('pageerror', e => errors.push(String(e)));
+        await page.goto(`${base}/`);
+        await page.waitForFunction(() => window.chelaBridge?.sidebarLayout.get().loaded === true, null, { timeout: 15_000 });
+        return { page, errors };
+    };
+    const width = page => page.evaluate(() => Math.round(document.querySelector('aside.sidebar').getBoundingClientRect().width));
+    const saved = async () => (await (await fetch(`${base}/api/sidebar/layout`)).json()).layout?.width ?? null;
+
+    const { page, errors } = await open({ width: 1440, height: 900 });
+    assert.equal(await width(page), 288, 'the default width');
+    const h = await page.locator('.sidebar-resize').boundingBox();
+    const y = h.y + h.height / 2, x = h.x + h.width / 2;
+    await page.mouse.move(x, y);
+    await page.mouse.down();
+    await page.mouse.move(x + 60, y, { steps: 4 });
+    await page.mouse.move(x + 100, y, { steps: 4 });
+    assert.equal(await width(page), 388, 'the column follows the drag');
+    await page.mouse.up();
+    await page.waitForFunction(() => window.chelaBridge.sidebarLayout.get().width === 388, null, { timeout: 5_000 });
+    for (let i = 0; i < 50 && await saved() !== 388; i++) await new Promise(r => setTimeout(r, 100));
+    assert.equal(await saved(), 388, 'the width is not in the server layout');
+    const canvas = await page.evaluate(() => Math.round(document.getElementById('canvas').getBoundingClientRect().left));
+    assert.equal(canvas, 388, 'the canvas did not give way to the wider column');
+
+    // a drag far past the edge stops at the bounds
+    await page.mouse.move(x + 100, y);
+    await page.mouse.down();
+    await page.mouse.move(x + 900, y, { steps: 4 });
+    await page.mouse.up();
+    assert.equal(await width(page), 480);
+    for (let i = 0; i < 50 && await saved() !== 480; i++) await new Promise(r => setTimeout(r, 100));
+    assert.equal(await saved(), 480);
+    assert.deepEqual(errors, []);
+    await page.close();
+
+    // another device opens at the saved width; its collapsed rail hides the handle
+    const other = await open({ width: 1280, height: 800 });
+    await other.page.waitForFunction(() => Math.round(document.querySelector('aside.sidebar').getBoundingClientRect().width) === 480,
+        null, { timeout: 5_000 });
+    await other.page.evaluate(() => window.chela.toggleSidebar());
+    assert.equal(await width(other.page), 60, 'the collapsed rail is not 60px');
+    assert.equal(await other.page.locator('.sidebar-resize').isVisible(), false, 'the rail shows the handle');
+    await other.page.evaluate(() => window.chela.toggleSidebar());
+    await other.page.close();
+
+    // the phone drawer keeps its own width, and has no handle
+    const phone = await open({ width: 390, height: 844 });
+    await phone.page.evaluate(() => window.chela.toggleSidebar(true));
+    assert.equal(await width(phone.page), 264);
+    assert.equal(await phone.page.locator('.sidebar-resize').isVisible(), false, 'the phone drawer shows the handle');
+    assert.deepEqual(phone.errors, []);
+    await phone.page.close();
+});

@@ -1,6 +1,13 @@
 import { act } from 'react';
-import { expect, test, vi } from 'vitest';
+import { afterEach, expect, test, vi } from 'vitest';
 import { boot } from './islands.tsx';
+
+// Each test resets document.body. A dialog left open keeps its portal there; the reset
+// orphans it and a later commit that removes it throws (NotFoundError). So none stays open.
+const escape = () => act(async () => document.activeElement?.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true })));
+afterEach(() => {
+  expect(document.querySelector('[role="dialog"]')).toBeNull();
+});
 
 test('boot installs the bridge and mounts the version island into #version-island', async () => {
   vi.stubGlobal('fetch', () => Promise.resolve({ ok: true, json: () => Promise.resolve({ version: 'v9' }) }));
@@ -44,6 +51,7 @@ test('boot mounts the Work view (Board, Runs, Schedules), its toasts and the New
   const { openNewTask } = await import('./features/newtask/index.ts');
   await act(async () => openNewTask());
   expect(document.querySelector('[role="dialog"] h3')?.textContent).toBe('New task');
+  await escape();
   await act(async () => work.set(null));
   vi.unstubAllGlobals();
 });
@@ -68,9 +76,7 @@ test('boot mounts the chrome into its slots (CMX-219): pills, gear, New session,
   const { openSendMsg } = await import('./features/agentdetail/index.ts');
   await act(async () => openSendMsg('w1'));
   expect(document.querySelector('[role="dialog"] h3')?.textContent).toBe('Send Message to w1');
-  // closed before the next test resets the body, as the diff modal's test does
-  await act(async () => document.activeElement?.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true })));
-  expect(document.querySelector('[role="dialog"]')).toBeNull();
+  await escape();
   vi.unstubAllGlobals();
 });
 

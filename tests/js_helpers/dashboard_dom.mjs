@@ -41,6 +41,9 @@ const MANIFEST = JSON.parse(readFileSync(join(DASHBOARD_ROOT, 'static', 'app', '
 export const ENTRY_URL = new URL(
     `../../chela/dashboard/frontend/${Object.keys(MANIFEST).find(k => MANIFEST[k].name === 'main')}`, import.meta.url).href;
 const DEFAULT_JS_ROOT = new URL('../../chela/dashboard/static/js/', import.meta.url).href;
+/** CMX-278: the sidebar's state and commands (they left nav.js), for `extraModules`; it is
+ * returned as `modules.sidebar`. */
+export const SIDEBAR = ['sidebar', '../../frontend/src/features/sidebar/controller.ts'];
 const SRC_URL = new URL('../../chela/dashboard/frontend/src/', import.meta.url).href;
 
 /** CMX-217: index.html's boot config block (frontend/src/shared/api readBoot), for a fixture
@@ -214,7 +217,7 @@ export function flush() {
  * @param {(string|[string, string])[]} [extraModules] - dashboard module paths (relative to
  *   `chela/dashboard/static/js/`, e.g. `'launcher.js'`) to import AFTER
  *   the boot and return, keyed by their filename minus `.js`; or a `[name, path]` pair for a
- *   module that moved into frontend/src (ORCHESTRATOR below).
+ *   module that moved into frontend/src (SIDEBAR, ORCHESTRATOR).
  * @param {string} [jsRoot] - a URL (ending in `/`) of the `static/js/` directory to
  *   import from. Defaults to the repo's. A suite that needs TWO independent pages (two
  *   devices — tests/sidebar_layout_shared.test.mjs) boots each from its own copy

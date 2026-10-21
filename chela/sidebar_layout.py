@@ -13,7 +13,8 @@ the screen you are holding, not about how you organise your sessions.
 * :func:`state` — ``{"layout": {...}}``, or ``{"layout": None}`` while nothing has been
   saved yet. ``None`` is load-bearing: it is how a browser knows it may import its old
   ``localStorage`` values (:func:`import_once`).
-* :func:`update` — replace the fields a write names (``order`` / ``custom`` / ``view``)
+* :func:`update` — replace the fields a write names (``order`` / ``custom`` / ``view`` /
+  ``width``)
   and leave the others alone, so a reorder on one device does not undo a View change
   another device made a moment earlier.
 * :func:`import_once` — the one-time migration: written ONLY when there is no layout
@@ -26,7 +27,11 @@ Store shape (``CHELA_DIR/sidebar-layout.json``)::
 
     {"order":  ["<group key>", ...],
      "custom": {"groups": [{"id": "...", "name": "..."}, ...], "assign": {"<item key>": "<id>"}},
-     "view":   {"groupBy": "...", "sort": "...", ...}}
+     "view":   {"groupBy": "...", "sort": "...", ...},
+     "width":  288}
+
+``width`` (CMX-278) is the desktop sidebar's width in CSS px, clamped to
+[:data:`MIN_WIDTH`, :data:`MAX_WIDTH`]; ``None`` until someone drags it (the default).
 """
 from __future__ import annotations
 
@@ -39,7 +44,7 @@ from chela.config import CHELA_DIR
 _STORE = CHELA_DIR / "sidebar-layout.json"
 _LOCK = threading.Lock()
 
-FIELDS = ("order", "custom", "view")
+FIELDS = ("order", "custom", "view", "width")
 
 # Bounds — a layout is a few dozen keys; anything far larger is a bug or abuse, never a
 # sidebar. Over-long values are dropped, not truncated into something that half-means.
@@ -85,7 +90,19 @@ def _clean_view(v: object) -> dict:
     return out
 
 
-_CLEAN = {"order": _clean_order, "custom": _clean_custom, "view": _clean_view}
+# The same bounds as the sidebar's drag handle (frontend/src/features/sidebar, CMX-278). The
+# floor is the width the sidebar's foot (CPU/RAM/Disk + the gear) was laid out for.
+MIN_WIDTH = 264
+MAX_WIDTH = 480
+
+
+def _clean_width(v: object) -> int | None:
+    if isinstance(v, bool) or not isinstance(v, (int, float)) or v != v or v in (float("inf"), float("-inf")):
+        return None
+    return max(MIN_WIDTH, min(MAX_WIDTH, round(v)))
+
+
+_CLEAN = {"order": _clean_order, "custom": _clean_custom, "view": _clean_view, "width": _clean_width}
 
 
 def _read() -> dict | None:

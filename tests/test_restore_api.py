@@ -72,6 +72,12 @@ def no_dispatcher_runs(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def no_live_sessions(monkeypatch):
+    """No Claude session is running (CMX-278): never spawn the real ``claude agents``."""
+    monkeypatch.setattr(dash.agent_manager, "session_status_map", lambda *a, **k: {})
+
+
+@pytest.fixture(autouse=True)
 def cwd_alive_by_default(monkeypatch):
     """Every pre-CMX-330 test uses a fake cwd path (``/home/liav/projects/five`` etc.)
     that doesn't exist on the test runner's real filesystem — stub liveness True by
@@ -860,3 +866,59 @@ def test_resume_refuses_a_session_whose_run_the_dispatcher_will_relaunch(client,
     assert resp.status_code == 409 and spawned == []
     assert resp.get_json()["error"] == ("the dispatcher will relaunch run CMX-137 itself in this "
                                         "worktree — resuming here would be two agents on one task")
+
+
+# --------------------------------------------------------------------------
+# GET /api/restore — CMX-278 (Liav, 10-19): a live session is never "recent", and a
+# judge's session is never resumable
+# --------------------------------------------------------------------------
+
+@pytest.mark.parametrize("live,rows", [
+    ({101: SID_DEAD}, 0),          # running now, under any window: left out
+    ({101: "another-sid"}, 1),     # negative control: another session running
+    ({}, 1),
+])
+def test_a_session_running_now_is_not_listed(client, monkeypatch, live, rows):
+    monkeypatch.setattr(restore_mod, "plan", lambda *a, **k: [_manual()])
+    monkeypatch.setattr(dash.agent_manager, "session_status_map",
+                        lambda *a, **k: {"session_by_pid": live})
+    data = client.get("/api/restore").get_json()
+    assert (len(data["rows"]), data["dispatcher_rows"]) == (rows, [])
+
+
+def test_a_live_session_is_left_out_of_the_dispatcher_rows_too(client, monkeypatch):
+    monkeypatch.setattr(restore_mod, "plan", lambda *a, **k: [_judge_row_manual()])
+    monkeypatch.setattr(dash, "_cwd_is_live", lambda cwd: False)
+    monkeypatch.setattr(dash.agent_manager, "session_status_map",
+                        lambda *a, **k: {"session_by_pid": {7: JUDGE_SID}})
+    assert client.get("/api/restore").get_json() == {"rows": [], "dispatcher_rows": [], "hidden": 0}
+
+
+def test_an_unreadable_session_feed_leaves_the_list_as_it_was(client, monkeypatch):
+    """The server-side filter is off when ``claude agents`` cannot be read (the page
+    still drops a row whose session one of its windows reports)."""
+    def boom(*a, **k):
+        raise RuntimeError("feed down")
+    monkeypatch.setattr(restore_mod, "plan", lambda *a, **k: [_manual()])
+    monkeypatch.setattr(dash.agent_manager, "session_status_map", boom)
+    assert [r["session_id"] for r in client.get("/api/restore").get_json()["rows"]] == [SID_DEAD]
+
+
+@pytest.mark.parametrize("status", ["running", "done"])
+def test_a_session_in_a_runs_judge_worktree_is_never_resumable(client, monkeypatch, tmp_path, status):
+    """The 10-19 shape: a reboot left the judge's worktree on disk and renumbered its
+    window, so neither the (wid, epoch) join nor a gone cwd caught it, and it got Resume."""
+    root = tmp_path / "worktrees"
+    wf = tmp_path / "WORKFLOW.md"
+    wf.write_text(f"---\nproject_key: CMX\nworkspace:\n  root: {root}\n---\nbody\n")
+    row = _manual(wid="@9", session_id=JUDGE_SID, cwd=str(root / "judge-CMX-251"),
+                  label="judge-liavacc/cmx-251", stamped_epoch="9000-1")
+    other = _manual(wid="@10", session_id="human-sid", cwd=str(root / "CMX-251"), label="human")
+    monkeypatch.setattr(restore_mod, "plan", lambda *a, **k: [row, other])
+    monkeypatch.setattr(dash.dispatcher, "list_runs", lambda: [
+        {"task_id": "CMX-251", "status": status, "attempt": 1, "workflow_path": str(wf),
+         "window_id": "@300", "window_epoch": OLD, "worktree_path": None}])
+    data = client.get("/api/restore").get_json()
+    assert [r["label"] for r in data["rows"]] == ["human"]
+    assert [r["label"] for r in data["dispatcher_rows"]] == ["judge-liavacc/cmx-251"]
+    assert "session_id" not in data["dispatcher_rows"][0]

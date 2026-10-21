@@ -86,7 +86,7 @@
         </label>
       </div>
 
-      <!-- Primary navigation. NOT written here: nav.js renders these rows from the
+      <!-- Primary navigation. NOT written here: the sidebar island (CMX-278) draws these rows from the
            view REGISTRY (static/js/views.js) — one declaration per view, so adding
            or deleting a view is one entry there and nothing here.
 
@@ -118,23 +118,10 @@
         <div class="side-list" id="sidebar-agents"></div>
       </section>
 
-      <!-- Recent (dead) sessions — CMX-208. A UI over `chela restore`'s already-tested
-           classification (chela/restore.py): a Claude session a hard tmux death (or
-           `wsl --shutdown`) orphaned, with enough on record (cwd + session id) to
-           relaunch. Hidden entirely when there is nothing to resume — this is a
-           rare-but-important recovery affordance, not a permanent fixture like
-           Navigate/Sessions above, so nav.js's renderRecentSessions toggles `hidden`
-           rather than always reserving the space. -->
-      <section class="side-section" id="side-recent-section" hidden>
-        <div class="side-head">
-          <span class="side-title">Recent sessions</span>
-          <span class="side-count" id="hdr-recent">0</span>
-          <button class="recent-clear-all" id="recent-clear-all" hidden
-                  title="Dismiss every recent session (transcripts are kept)"
-                  onclick="chela.clearRecentSessions()">Clear all</button>
-        </div>
-        <div class="side-list" id="side-recent"></div>
-      </section>
+      <!-- Recent (dead) sessions (CMX-208): resuming a prior Claude conversation by its session
+           id, drawn by the sidebar island (CMX-278, features/sidebar/lib/Recent.tsx) and absent
+           when there is nothing to resume. -->
+      <div class="side-recent-slot" id="side-recent-island"></div>
 
     </div><!-- /sidebar-scroll -->
 
@@ -153,6 +140,8 @@
       <span class="island-slot" id="primary-menu-island"></span>
     </div>
 
+    <!-- CMX-278: the desktop width handle (features/sidebar/lib/Resize.tsx). -->
+    <div class="sidebar-resize-slot" id="sidebar-resize"></div>
   </aside>
 
   <!-- Main canvas: context-driven by sidebar selection -->

@@ -1,7 +1,7 @@
 // CMX-169's shared fixture: the real dashboard booted in jsdom at phone width, in single
 // mode, over three sessions whose /api/agents order (@201, @202, @203) is never the
 // sidebar order a test saves. One boot per test file (the module graph loads once).
-import { bootDashboardDom, flush, sliceTemplate } from './dashboard_dom.mjs';
+import { SIDEBAR, bootDashboardDom, flush, sliceTemplate } from './dashboard_dom.mjs';
 import { fakeArchiveServer } from './fake_archive.mjs';
 
 export const KEY = 'pc_term_last_wid';
@@ -45,8 +45,8 @@ export async function bootPhone({ order, seed = {}, layoutGate = null }) {
     const booted = await bootDashboardDom({
         body: BODY, phone: true, canvasStub: true, fetchImpl,
         seedLocalStorage: { pc_term_mode: 'single', ...seed },
-        extraModules: ['nav.js', 'terminals.js'],
+        extraModules: ['nav.js', 'terminals.js', SIDEBAR],
     });
     globalThis.fetch = fetchImpl;
-    return { nav: booted.modules.nav, terminals: booted.modules.terminals, chela: booted.chela };
+    return { nav: booted.modules.nav, sidebar: booted.modules.sidebar, terminals: booted.modules.terminals, chela: booted.chela };
 }

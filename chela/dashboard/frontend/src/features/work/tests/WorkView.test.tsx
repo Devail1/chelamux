@@ -3,6 +3,7 @@
 // half of tests/sse_owners.test.mjs, which drove legacy work.js).
 import { act, fireEvent, render, screen } from '@testing-library/react';
 import { afterEach, beforeEach, expect, test, vi } from 'vitest';
+import { installBridge } from '../../../shared/bridge/index.ts';
 import { dispatch } from '../../../shared/events/index.ts';
 import { refresh, registerLane } from '../../../shared/scheduler/index.ts';
 import { launcher } from '../../../shared/store/launcher.ts';
@@ -11,6 +12,8 @@ import { refreshWork, work, type WorkPayload } from '../../../shared/store/work.
 import { NewTask } from '../../newtask/index.ts';
 import { SEGMENTS, SEGMENT_KEY, WorkToasts, WorkView, pollWork, toasts } from '../index.ts';
 import { must, stubFetch } from './setup.ts';
+
+const bridge = installBridge(window);
 
 let dispatcher: WorkPayload | null = { configured: true, workflows: [] };
 let calls: ReturnType<typeof stubFetch> = [];
@@ -187,17 +190,16 @@ test('a refusal alerts its reason (or a fallback); a throw alerts too; the butto
 // --- the poll -----------------------------------------------------------------------------------
 
 test('the poll publishes the payload and fills the sidebar badges; a failed read keeps the last one', async () => {
-  document.body.innerHTML = '<span id="side-runs-count">0</span><span id="side-pr-count">0 PR</span>';
   dispatcher = { configured: true, workflows: [{ path: '/a', active_runs: [{}, {}], awaiting_review_runs: [{}] }, { path: '/b', active_runs: [{}] }] };
   await pollWork();
   expect(work.get()).toBe(dispatcher);
-  expect([document.getElementById('side-runs-count')?.textContent, document.getElementById('side-pr-count')?.textContent]).toEqual(['3', '1 PR']);
+  expect(bridge.nav.get()?.badges).toMatchObject({ 'side-runs-count': '3', 'side-pr-count': '1 PR' });
   const err = vi.spyOn(console, 'error').mockImplementation(() => {});
   vi.stubGlobal('fetch', () => Promise.reject(new Error('down')));
   await pollWork();
   expect(work.get()).toBe(dispatcher);
   expect(err).toHaveBeenCalledWith('pollWork', expect.any(Error));
-  expect(document.getElementById('side-runs-count')?.textContent).toBe('3');
+  expect(bridge.nav.get()?.badges['side-runs-count']).toBe('3');
 });
 
 test('it is a scheduler lane, and refreshWork runs it', async () => {
