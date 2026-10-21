@@ -45,7 +45,7 @@ function ModeControl({ wid, entry, options, now }: { wid: string; entry: ShareEn
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
   const confirmRef = useRef<HTMLDivElement>(null);
-  const grant = arming && cur !== 'unsandboxed' ? upgradeBody(offer, draft) : null;
+  const grant = upgradeBody(offer, draft);
 
   useEffect(() => {
     if (arming) confirmRef.current?.querySelector<HTMLInputElement>('input')?.focus();
@@ -187,7 +187,6 @@ export function SharesSheet() {
   const now = useNow();
   if (!target) return null;
   const wids = [...list.keys()];
-  const focus = target.focus && list.has(target.focus) ? target.focus : null;
   return (
     <Dialog
       open
@@ -199,7 +198,7 @@ export function SharesSheet() {
     >
       <div className="ss-list">
         {wids.length ? (
-          wids.map((w) => <ShareRow key={`${target.seq}:${w}`} wid={w} entry={list.get(w) as ShareEntry} focused={w === focus} now={now} />)
+          wids.map((w) => <ShareRow key={`${target.seq}:${w}`} wid={w} entry={list.get(w) as ShareEntry} focused={w === target.focus} now={now} />)
         ) : (
           <div className="ss-empty">No active shares.</div>
         )}

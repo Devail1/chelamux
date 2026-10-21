@@ -17,6 +17,7 @@ const pill = () => must(document.getElementById('btn-shares'));
 test('hidden while nothing is shared', () => {
   render(<SharesPill id="btn-shares" />);
   expect(pill().hidden).toBe(true);
+  expect(pill().getAttribute('aria-label')).toBe('Active shares');
 });
 
 test('a view-only share: "1 sharing", the eye, and a label that says view only', () => {
@@ -103,4 +104,15 @@ test('the countdown moves on its own every 30 s', () => {
   expect(pill().querySelector('.si-text')?.textContent).toBe('UNSANDBOXED: guest can type · 5m left');
   act(() => vi.advanceTimersByTime(60_000));
   expect(pill().querySelector('.si-text')?.textContent).toBe('UNSANDBOXED: guest can type · 4m left');
+});
+
+test('the countdown keeps ticking while another pill is still on the page', () => {
+  vi.useFakeTimers();
+  vi.setSystemTime(1_700_000_000_000);
+  const a = render(<SharesPill id="btn-shares" />);
+  render(<SharesPill id="term-shares" />);
+  act(() => applyShared({ '@1': { mode: 'unsandboxed', expires_at: 1_700_000_000 + 5 * 60 + 10 } }, true));
+  a.unmount();
+  act(() => vi.advanceTimersByTime(60_000));
+  expect(document.querySelector('#term-shares .si-text')?.textContent).toBe('UNSANDBOXED: guest can type · 4m left');
 });

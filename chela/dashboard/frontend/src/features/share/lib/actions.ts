@@ -62,15 +62,13 @@ export async function fetchShareInfo(wid: string): Promise<ShareInfo & { share_e
   }
 }
 
-/** Adopt the server's truth (/api/term/shared). False when it could not be read. */
-export async function reconcileShares(): Promise<boolean> {
+/** Adopt the server's truth (/api/term/shared). An unreadable answer changes nothing. */
+export async function reconcileShares(): Promise<void> {
   try {
     const s = await api('/api/term/shared');
-    if (!s || typeof s !== 'object') return false;
-    applyShared(s as SharedMap, true);
-    return true;
+    if (s && typeof s === 'object') applyShared(s as SharedMap, true);
   } catch {
-    return false;
+    // offline or transient: keep the best-effort list
   }
 }
 
@@ -92,7 +90,10 @@ export async function stopShare(wid: string): Promise<boolean> {
   } catch {
     ok = false;
   }
-  if (!ok && !((await reconcileShares()) && !isShared(wid))) return false;
+  if (!ok) {
+    await reconcileShares();
+    if (isShared(wid)) return false;
+  }
   dropShare(wid);
   stopOwnerPresence(wid);
   reloadPane(wid);
@@ -126,7 +127,7 @@ let seq = 0;
 
 /** Open the Active shares sheet, then reconcile the list against the server. */
 export function openSharesSheet(focusWid?: string) {
-  sheet.set({ focus: typeof focusWid === 'string' ? focusWid : null, seq: ++seq });
+  sheet.set({ focus: focusWid ?? null, seq: ++seq });
   void reconcileShares();
 }
 

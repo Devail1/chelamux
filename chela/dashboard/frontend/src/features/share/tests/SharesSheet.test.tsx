@@ -53,6 +53,7 @@ test('a labelled sheet; a view-only row presses View only and never says guests 
   expect(must(opt('typing')).textContent).toBe(' Allow typing');
   expect(document.querySelector('.shares-sheet')?.textContent).not.toMatch(/watch and type/);
   expect(desc()).toMatch(/Nothing they type reaches this machine/);
+  expect(must(row().querySelector('.ss-mode-desc')).className).toBe('ss-mode-desc');
 });
 
 test('a typing share says guests can type', async () => {

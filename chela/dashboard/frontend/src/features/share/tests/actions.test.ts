@@ -154,3 +154,18 @@ test('a pane whose terminal cannot be read mints without a size', async () => {
   await settle();
   expect(s.mintPosts).toEqual([{ on: true, mode: 'view' }]);
 });
+
+test('a null share-info answer is no share: the dialog opens', async () => {
+  stubFetch((url) => (url.endsWith('/share-info') ? null : {}));
+  await act(() => shareSession('@1'));
+  expect(document.querySelector('.share-dialog')).toBeTruthy();
+});
+
+test('a pane size is sent only when both its columns and rows are known', async () => {
+  const s = serve({ info: {}, shared: {} });
+  frames = [frame({ cols: 80, rows: 0 })];
+  await act(() => shareSession('@1'));
+  act(() => must(document.querySelector<HTMLButtonElement>('.sd-share')).click());
+  await settle();
+  expect(s.mintPosts).toEqual([{ on: true, mode: 'view' }]);
+});

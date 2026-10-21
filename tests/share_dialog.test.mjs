@@ -314,3 +314,27 @@ test('the palette offers Stop sharing on a shared session and Share on an unshar
     await flush(); await flush();
     assert.ok(dialog(), 'Share from the palette opens the access dialog');
 });
+
+test("the mint carries THIS pane's live size, read from its own ttyd frame", async () => {
+    const ifr = [...document.querySelectorAll('#term-stage iframe.term-frame')].find(f => /\/term\/%401\//.test(f.getAttribute('src')));
+    assert.ok(ifr, 'the pane must render its ttyd frame');
+    ifr.contentWindow.term = { cols: 99, rows: 33 };
+    await open({ share_typing: false, window_name: 'shell-1' });
+    await mint('view');
+    assert.deepEqual([posts[0].cols, posts[0].rows], [99, 33]);
+    delete ifr.contentWindow.term;
+});
+
+test('a pane header drawn while an override is live shows the red banner from its first render', () => {
+    const banner = () => {
+        const host = document.createElement('div');
+        host.innerHTML = terminals.paneHead('@1', false);
+        return host.querySelector('.gs-unsafe-banner[data-banner-for="@1"]');
+    };
+    share.noteShare('@1', 'unsandboxed', null);
+    assert.deepEqual([banner().hidden, banner().textContent], [false, '⚠ UNSANDBOXED: guest can type']);
+    share.noteShare('@1', 'typing', null);
+    assert.equal(banner().hidden, true, 'a typing share shows no banner');
+    share.dropShare('@1');
+    assert.equal(banner().hidden, true, 'an unshared pane shows no banner');
+});

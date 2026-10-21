@@ -3295,7 +3295,7 @@ onEvent('term-ready', d => {
 });
 
 // --- Stage 0: ES-module exports ---
-export { adoptSidebarDefault, stepAgentMobile, _absorbFreshTerminals, _applyTermFocus, _cssEsc, _displayLabel, _paneKeyLabel, _jsStr, _minimized, _orderedWids, _refreshPaneLabels, _renderedWids, _shareBtnHTML, _stopReadyPoll, _updateShareBtns, _swapToFrame, _termReady, dropTerminalPane, focusPaneByWid, isWallVisible, minimizePane, renderTerminals, setTermMode, termTick, shareBtnClick, startTermTimer, stopTermTimer };
+export { adoptSidebarDefault, stepAgentMobile, _absorbFreshTerminals, _applyTermFocus, _cssEsc, _displayLabel, _paneKeyLabel, _jsStr, _minimized, paneHead, _orderedWids, _refreshPaneLabels, _renderedWids, _shareBtnHTML, _stopReadyPoll, _updateShareBtns, _swapToFrame, _termReady, dropTerminalPane, focusPaneByWid, isWallVisible, minimizePane, renderTerminals, setTermMode, termTick, shareBtnClick, startTermTimer, stopTermTimer };
 
 // --- Stage 0: window.chela — surface reachable from inline HTML handlers ---
 window.chela = window.chela || {};
