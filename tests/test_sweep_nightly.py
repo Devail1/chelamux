@@ -779,3 +779,13 @@ def test_label_nodes_without_an_id_or_of_another_name_are_ignored(tmp_path):
     out = _source(tmp_path, t).create_issue("T", "B", labels=("sweep",))
     assert out["warnings"] == []
     assert next(v for n, v in t.calls if n == "create")["input"]["labelIds"] == ["new-sweep"]
+
+
+def test_same_shape_sites_are_exact_text_lines_of_mutatable_source(tmp_path):
+    repo = _repo(tmp_path, prs=[({
+        "size.py": WEAK,
+        "near.py": "def f(x):\n    if x > 100:  # a comment makes it another shape\n        return 1\n",
+        "tests/test_size.py": "def test_x():\n    x = 1\n    if x > 100:\n        pass\n",
+        "NOTES.md": "    if x > 100:\n",
+    }, "PR (#1)", None)])
+    assert sweep_nightly.same_shape_sites(repo, "if x > 100:") == ["size.py:2"]
