@@ -70,8 +70,7 @@ def main() -> int:
         print(f"stale: {p}")
     if problems:
         print(f"{BUILT} does not match a fresh build of {FRONTEND / 'src'}. Rebuild and "
-              "commit it: pnpm -C chela/dashboard/frontend build (and update BUNDLE in "
-              "tests/test_frontend_build.py to the new hashed name)")
+              "commit it: pnpm -C chela/dashboard/frontend build")
     return 1 if problems else 0
 
 

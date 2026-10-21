@@ -21,10 +21,10 @@ from tests.test_frontend import _did_not_run
 ROOT = Path(__file__).resolve().parent.parent
 FRONTEND = ROOT / "chela" / "dashboard" / "frontend"
 BUILT = ROOT / "chela" / "dashboard" / "static" / "app"
-# The committed bundle, by its full path: the judge's test selection runs a test file that
-# NAMES a mutated file, so a mutation of the bundle runs THIS file (seconds), not the whole
-# suite. Its name is a content hash, so a rebuild renames it: update this line with it.
-BUNDLE = "chela/dashboard/static/app/assets/main-DwC-MfUO.js"
+# 🏭 CMX-300: the bundle's hashed name is read from the manifest, never pinned here. A pinned
+# name changed in every port PR, so two of them always conflicted on this line too — a source
+# conflict, which the base merge's rebuild (chela/basemerge.py) must send back. The pin was for
+# the judge's test selection, and the judge never mutates a generated file (CMX-284).
 
 
 def _need_vite():
@@ -45,8 +45,8 @@ def test_the_committed_build_matches_a_fresh_build_of_src():
     _need_vite()
     assert fb.check() == []
     entry = json.loads((BUILT / "manifest.json").read_text())["src/main.tsx"]
-    assert entry["isEntry"] is True and f"chela/dashboard/static/app/{entry['file']}" == BUNDLE
-    assert (ROOT / BUNDLE).is_file()
+    assert entry["isEntry"] is True and entry["file"].startswith("assets/main-")
+    assert (BUILT / entry["file"]).is_file()
 
 
 def _copy_dashboard(tmp_path: Path) -> Path:
