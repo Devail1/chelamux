@@ -1,7 +1,7 @@
 // --- Stage 0: ES-module imports ---
 import { $, attrEsc, escHtml, closeModal, lucideIcon, shortTime, showModal } from './util';
-import { _runDisplayId, _runPrCell } from './dispatcher';
-import { runStatusBadgeClass } from './runstate';
+import { runDisplayId as _runDisplayId, runStatusBadgeClass } from '../../frontend/src/features/runs/model';
+import { runPrCellHtml as _runPrCell } from '../../frontend/src/features/runs/legacy';
 import { briefHtml, briefSource, defaultTab, displayTitle, riskChip, timelineSteps, trackerHref } from './taskmodalmodel';
 import { knMd, knInline } from './knowledge';
 
