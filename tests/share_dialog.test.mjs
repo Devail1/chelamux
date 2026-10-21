@@ -2,19 +2,19 @@
 // what it mints lands on the page, in a REAL DOM running the real terminals.js with the share
 // islands mounted. Since CMX-239/240 the dialog, the pill and the Active shares sheet are React
 // (frontend/src/features/share): their own rules are tested there (ShareDialog, SharesPill,
-// SharesSheet .test.tsx). This suite keeps what crosses into the still-legacy pane header.
+// SharesSheet .test.tsx). This suite keeps what crosses between them and the pane header,
+// itself React since CMX-241 (frontend/src/features/panehead; its Share row's mode glyph and
+// first-render rules are tested in PaneHead.test.tsx).
 //
 // Guards here:
 //   - Share on an unshared pane opens the dialog; View only mints mode:"view" with the
 //     pane's live size;
-//   - "Allow typing" mints mode:"typing" and the pill reads ⌨;
+//   - "Allow typing" mints mode:"typing" and the pill reads typing;
 //   - the override, armed by the typed window name, POSTs mode/confirm/minutes;
-//   - the share pill reads 👁 for view only, and the red "UNSANDBOXED: guest can type"
-//     banner shows on the pill AND the pane while an override is live, and not otherwise;
-//   - CMX-419: the time left shows on the red banner and in Active shares;
-//   - the pane's share pill carries the mode (glyph, title, data-mode) from its first render,
-//     follows the share state, and a shared pane with no recorded mode reads View only
-//     (moved here from tests/share_mode_sheet.test.mjs, CMX-421).
+//   - the share pill reads view only, and the red "UNSANDBOXED: guest can type" banner
+//     shows on the pill AND the live pane header while an override is live, and not
+//     otherwise, following the share state;
+//   - CMX-419: the time left shows on the red banner and in Active shares.
 //
 // Run: pnpm exec vitest run tests/share_dialog.test.mjs (pytest runs it via
 // tests/test_js_suites.py; needs `pnpm install` for jsdom).
@@ -131,7 +131,7 @@ async function mint(mode) {
 
 async function open(options) {
     OPTIONS = options;
-    await terminals.shareBtnClick(null, '@1');
+    await share.shareSession('@1');   // what the pane header's Share row runs
     assert.ok(dialog(), 'Share on an unshared pane must open the access dialog');
 }
 
@@ -162,7 +162,7 @@ test('⭐ setting on + verified sandbox ⇒ Allow typing mints mode:"typing" and
     await mint('typing');
     assert.equal(posts[0].mode, 'typing');
     assert.equal(document.getElementById('btn-shares').dataset.mode, 'typing');
-    assert.equal(document.querySelector('.gs-share-btn[data-wid="@1"] .gs-share-mode').textContent, '⌨');
+    assert.equal(share.shareMode('@1'), 'typing', 'the state the pane header\'s Share row draws');
 });
 
 test('UNSANDBOXED override: armed only by the typed window name; POSTs mode, confirm, minutes', async () => {
@@ -200,7 +200,7 @@ test('negative control: a view-only share says view only and shows no UNSANDBOXE
     await mint('view');
     const pill = document.getElementById('btn-shares');
     assert.equal(pill.dataset.mode, 'view');
-    assert.equal(document.querySelector('.gs-share-btn[data-wid="@1"] .gs-share-mode').textContent, '👁');
+    assert.equal(share.shareMode('@1'), 'view');
     assert.equal(pill.classList.contains('si-unsandboxed'), false);
     assert.equal(document.querySelector('.gs-unsafe-banner[data-banner-for="@1"]').hidden, true);
 });
@@ -235,64 +235,18 @@ test('time left reads "12d 4h left" on the red banner and in Active shares', asy
     await share.stopShare('@1');
 });
 
-// --- the pane's share pill (still legacy, P26), fed by the share state ----------------
+// --- the live pane header follows the share state --------------------------------------
 
-// The pane's Share row as _shareBtnHTML renders it, before any _updateShareBtns runs.
-function freshPill(wid) {
-    const host = document.createElement('div');
-    host.innerHTML = terminals._shareBtnHTML(wid);
-    document.body.appendChild(host);
-    const btn = host.querySelector('.gs-share-btn');
-    const g = btn.querySelector('.gs-share-mode');
-    const snap = () => ({ glyph: g.textContent, hidden: g.hidden, title: g.title || '',
-                          mode: btn.dataset.mode, pressed: btn.getAttribute('aria-pressed'),
-                          on: btn.classList.contains('on') });
-    return { host, snap };
-}
-
-test('the pane pill carries the mode from its FIRST render, identical to after an update', () => {
-    const want = {
-        view: { glyph: '👁', title: '👁 View only' },
-        typing: { glyph: '⌨', title: '⌨ Allow typing' },
-        unsandboxed: { glyph: '⚠', title: '⚠ Full access: UNSANDBOXED' },
-    };
-    for (const [m, w] of Object.entries(want)) {
-        share.noteShare('@7', m, null);
-        const { host, snap } = freshPill('@7');
-        const first = snap();
-        assert.deepEqual(first, { glyph: w.glyph, hidden: false, title: w.title, mode: m, pressed: 'true', on: true },
-            `a ${m} share's pill must show its mode on first render`);
-        terminals._updateShareBtns('@7');
-        assert.deepEqual(snap(), first, `first render and update must agree (${m})`);
-        host.remove();
-    }
-    share.dropShare('@7');
-    const { host, snap } = freshPill('@7');
-    const first = snap();
-    assert.deepEqual(first, { glyph: '', hidden: true, title: '', mode: '', pressed: 'false', on: false });
-    terminals._updateShareBtns('@7');
-    assert.deepEqual(snap(), first);
-    host.remove();
-});
-
-test('a shared pane with no recorded mode renders as View only, never typing', () => {
-    share.markShared('@7');
-    const { host, snap } = freshPill('@7');
-    assert.deepEqual([snap().glyph, snap().mode], ['👁', 'view']);
-    host.remove();
-    share.dropShare('@7');
-});
-
-test('⭐ a change to the share state repaints the pane pill and banner, and a stop clears them', () => {
-    const btn = document.querySelector('.gs-share-btn[data-wid="@1"]');
-    const g = btn.querySelector('.gs-share-mode');
+test('⭐ a change to the share state repaints the live pane\'s banner, and a stop clears it', () => {
     const banner = document.querySelector('.gs-unsafe-banner[data-banner-for="@1"]');
+    assert.ok(banner, 'the pane header must carry the banner');
     share.noteShare('@1', 'typing', null);
-    assert.deepEqual([g.hidden, g.textContent, g.title, btn.dataset.mode, banner.hidden], [false, '⌨', '⌨ Allow typing', 'typing', true]);
+    assert.equal(banner.hidden, true, 'a typing share shows no banner');
     share.noteShare('@1', 'unsandboxed', null);
-    assert.deepEqual([g.textContent, banner.hidden, banner.textContent], ['⚠', false, '⚠ UNSANDBOXED: guest can type']);
+    assert.equal(banner.hidden, false);
+    assert.equal(banner.textContent.trim(), 'UNSANDBOXED: guest can type');
     share.dropShare('@1');
-    assert.deepEqual([g.hidden, g.textContent, btn.dataset.mode, btn.getAttribute('aria-pressed'), banner.hidden], [true, '', '', 'false', true]);
+    assert.equal(banner.hidden, true, 'a stop clears it');
 });
 
 test('the palette offers Stop sharing on a shared session and Share on an unshared one', async () => {
@@ -328,18 +282,4 @@ test("the mint carries THIS pane's live size, read from its own ttyd frame", asy
     await mint('view');
     assert.deepEqual([posts[0].cols, posts[0].rows], [99, 33]);
     delete ifr.contentWindow.term;
-});
-
-test('a pane header drawn while an override is live shows the red banner from its first render', () => {
-    const banner = () => {
-        const host = document.createElement('div');
-        host.innerHTML = terminals.paneHead('@1', false);
-        return host.querySelector('.gs-unsafe-banner[data-banner-for="@1"]');
-    };
-    share.noteShare('@1', 'unsandboxed', null);
-    assert.deepEqual([banner().hidden, banner().textContent], [false, '⚠ UNSANDBOXED: guest can type']);
-    share.noteShare('@1', 'typing', null);
-    assert.equal(banner().hidden, true, 'a typing share shows no banner');
-    share.dropShare('@1');
-    assert.equal(banner().hidden, true, 'an unshared pane shows no banner');
 });

@@ -10,7 +10,7 @@ import { launchProject, newShellWindow } from '../../launcher/index.ts';
 import { openNewTask } from '../../newtask/index.ts';
 import { showAddSchedule } from '../../schedules/index.ts';
 import { openSettings, settings } from '../../settings/index.ts';
-import { isShared, stopShare } from '../../share/index.ts';
+import { isShared, shareSession, stopShare } from '../../share/index.ts';
 import { ATTENTION_RANK, DOT_CLASS, STATUS_WORD, rankItems, type PaletteItem } from '../model.ts';
 
 export type PaletteHost = {
@@ -34,7 +34,6 @@ export type PaletteHost = {
     /** Leave single-terminal mode for the wall. */
     showWall(): void;
     focus(wid: string): void;
-    share(wid: string): void;
   };
 };
 
@@ -70,7 +69,7 @@ function baseItems(h: PaletteHost, skip?: Set<string>): PaletteItem[] {
       if (!wid) continue;
       const shared = isShared(wid);
       items.push({ icon: shared ? 'close' : 'share', title: (shared ? 'Stop sharing ' : 'Share ') + h.label(a), sub: shared ? 'shared session' : 'session',
-        run: () => { if (shared) void stopShare(wid); else h.wall.share(wid); } });
+        run: () => { if (shared) void stopShare(wid); else void shareSession(wid); } });
     }
     const seen = new Set<string>();
     const l = launcher.get();

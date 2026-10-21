@@ -24,7 +24,7 @@ export const ORIGIN = 'http://chela.test';
 // these same fields, so matching marks are a fact about the product, not the
 // fixture. @2 is shared so `.safety-float`'s kill-switch pill is on screen.
 // ai_title on EVERY agent: it is what renders the pane header's dim subtitle
-// (terminals.js paneHead), and a fixture without one never draws the subtitle at
+// (features/panehead PaneHead), and a fixture without one never draws the subtitle at
 // all — so a guard on "title and subtitle share one line" had nothing to measure
 // (judge on #545, round 1: flex-direction:column on .gs-grip survived).
 export const AGENTS = [

@@ -191,7 +191,7 @@ test('once popped, the wall never re-docks it — the human owns the tile from t
     // And the converse: minimize it BY HAND (the real header button's real handler) and
     // the wall leaves it alone too — including when it blocks again. Past the first
     // pop-out, the tile is the human's to place.
-    window.chela.termMinFor(tile(WORKER).querySelector('.gs-min-btn'));
+    tile(WORKER).querySelector('.gs-min-btn').click();
     assert.ok(isDocked(WORKER));
     AGENTS = fleet({ needsHuman: true });
     await terminals.termTick();

@@ -3,9 +3,9 @@
 // bundled by the build (no CDN). An icon is aria-hidden unless it is the only label.
 import {
   ArrowUpToLine, Ban, Bell, CalendarClock, Check, ChevronDown, ChevronRight, ChevronUp, Circle,
-  CircleDashed, CircleDot, CircleHelp, CircleMinus, Columns3, Crown, Ellipsis, ExternalLink, Eye,
-  FlaskConical, GitMerge, GitPullRequest, Hand, Inbox, Keyboard, LayoutGrid, Lock, Menu, Minus,
-  NotebookPen, OctagonX, Play, Plus, RefreshCw, RotateCw, Scale, Search, Settings, Share2,
+  CircleDashed, CircleDot, CircleHelp, CircleMinus, Columns3, Crown, Ellipsis, EllipsisVertical, ExternalLink, Eye,
+  FlaskConical, GitMerge, GitPullRequest, Globe, Hand, Inbox, Keyboard, LayoutGrid, Link2, Lock, Maximize2, Menu, Minimize2, Minus,
+  NotebookPen, OctagonX, Pin, Play, Plug, Plus, RefreshCw, RotateCw, Scale, Search, Settings, Share2,
   SlidersHorizontal, Snowflake, SquareCheck, SquareTerminal, Star, TriangleAlert, Workflow, X,
 } from 'lucide-react';
 
@@ -68,6 +68,16 @@ export const icons = {
   launch: Play,
   shell: SquareTerminal,
   favorite: Star,
+  // CMX-241: the pane header
+  paneMenu: EllipsisVertical,
+  wire: Link2,
+  room: Plug,
+  pin: Pin,
+  minimize: Minus,
+  maximize: Maximize2,
+  restore: Minimize2,
+  kill: X,
+  web: Globe,
 } as const;
 
 /** A meaning in the map, for a pure model that names the icon its renderer draws. */

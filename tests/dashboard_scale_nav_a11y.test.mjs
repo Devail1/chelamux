@@ -263,7 +263,7 @@ const TERMINALS = src('static/js/terminals.js');
 const VIEWS_SRC = src('static/js/views.js');
 
 // --- jsdom fixtures: mount the REAL style.css and a concrete, hand-written
-// fragment of REAL markup (mirroring terminals.js's paneHead()/
+// fragment of REAL markup (mirroring features/panehead's PaneHead and terminals.js's
 // _wallTileHTML()/_ctxBarHTML(), nav.js's _agentRowHtml(), and index.html's
 // sidebar section closely enough to match every selector these guards read —
 // verified against those sources as of round 9) in jsdom, then read jsdom's
@@ -540,8 +540,7 @@ test('full-space Wall (CMX-377): .grid-stack resolves ZERO padding and ZERO marg
 // span (or the text it carries) and leaving only the colour class must fail.
 
 // 3a. The wall's .gs-state pill: tileState() (wallmodel.ts, pure) is the ONE
-// source both the initial paneHead markup and every live repaint
-// (_applyWallTileFrame) draw from — see terminals.js below. The pill draws only
+// source the pane header (features/panehead) draws it from. The pill draws only
 // the WORD (CMX-393: the shape is `.gs-dot`; CMX-236 dropped the never-drawn
 // glyph), so every state must carry a non-empty word, and no two states the same
 // one; blanking or merging any (idle/working/needs-you/done/unknown) fails here.
@@ -561,23 +560,8 @@ test('non-hue cue — wall .gs-state pill: every tileState() result carries its 
     assert.equal(new Set(words).size, cases.length, `two states share a word, so only colour tells them apart: ${words}`);
 });
 
-test('non-hue cue — wall .gs-state pill: both the initial paint AND every live repaint set the word text node', () => {
-    // Initial paint: paneHead's own literal markup (terminals.js), before the
-    // first live repaint ever runs. `[^<]+`-style: the word must be non-empty.
-    // CMX-393: the pill is the WORD only — its shape partner is the header's
-    // `.gs-dot` (a glyph in here drew every state twice); tests/wallnav.test.mjs
-    // 12c guards that the pill stays glyph-free through a live repaint.
-    assert.match(TERMINALS, /<span class="gs-state gs-state-idle"[^>]*><span class="gs-state-word">idle<\/span><\/span>/,
-        'paneHead\'s initial .gs-state markup no longer carries the word "idle" (and only it)');
-    // Live repaint: _applyWallTileFrame must write the word text node from
-    // tileState()'s result, not just recolour the pill via className.
-    const frame = TERMINALS.slice(TERMINALS.indexOf('function _applyWallTileFrame'));
-    const body = frame.slice(0, frame.indexOf('\nfunction ', 10));
-    assert.match(body, /el\.className\s*=\s*'gs-state gs-state-'\s*\+\s*s\.cls/,
-        '_applyWallTileFrame must still recolour the pill from tileState().cls');
-    assert.match(body, /w\.textContent\s*=\s*s\.word/,
-        '_applyWallTileFrame no longer repaints the word text node — a live state change would go hue-only');
-});
+// The pill's paint (first render and every live change writing the word, not just the
+// class) is the React pane header's since CMX-241: features/panehead/tests/PaneHead.test.tsx.
 
 // 3b. The palette's status words: idle/working/waiting, each a real word on the row's sub-line
 // (features/palette, CMX-221; nav.js's _AGENT_STATUS_WORD before). The sidebar's own row is read

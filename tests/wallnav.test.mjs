@@ -150,7 +150,7 @@ let CTX = [];
 function fakeFetch(url, opts) {
     const path = String(url);
     // CMX-117 property 16 (the orchestrator ring) drives real subscribe/release
-    // round-trips through window.chela.orchestratorBtnClick — echo back whatever
+    // round-trips through the pane menu's Orchestrator row — echo back whatever
     // wid the POST body named, the same contract chela/dashboard/app.py's real
     // routes have (orchestrator.js only applies a response with `ok: true`).
     if (path.endsWith('/api/orchestrator/subscribe') && opts && opts.body) {
@@ -230,6 +230,9 @@ beforeAll(async () => {
     }
     globalThis.GridStack = fakeGridStack();
     globalThis.fetch = fakeFetch;
+    // The pane header's ⋯ menu is Radix's (CMX-241): its popper and modal layer need these.
+    globalThis.ResizeObserver = class { observe() {} unobserve() {} disconnect() {} };
+    globalThis.MutationObserver = dom.window.MutationObserver;
     dom.window.document.elementFromPoint = () => null;
     dom.window.Element.prototype.scrollIntoView = () => {};   // jsdom has no layout engine
     dom.window.HTMLCanvasElement.prototype.getContext = () => new Proxy({}, {
@@ -256,9 +259,9 @@ beforeAll(async () => {
     (await import('../chela/dashboard/frontend/src/features/sidebar/controller.ts')).renderSidebarAgents(AGENTS);
 });
 
-beforeEach(() => {
+beforeEach(async () => {
     // No pane overflow menu should carry over open between tests.
-    document.querySelectorAll('.pane-overflow-menu').forEach(m => { m.hidden = true; });
+    await closeMenus();
     // focusPaneByWid's flash clears itself after 1100ms, but tests only wait 120ms —
     // without this a later test's flashed(wid) assertion could pass on a PRIOR
     // test's leftover flash instead of its own dispatch (a vacuous pass).
@@ -266,6 +269,36 @@ beforeEach(() => {
 });
 
 const tile = wid => document.querySelector(`#term-stage .grid-stack-item[gs-id="${wid}"]`);
+// Radix opens and closes across a few turns (passive effects, then its own setTimeout(0)
+// that arms the outside-press listener): let them all land.
+const tick = async () => { for (let i = 0; i < 4; i++) await new Promise(resolve => setTimeout(resolve, 0)); };
+// CMX-241: the pane's ⋯ menu is the kit's Menu (Radix), portaled to <body> only while open.
+// Open it the way the keyboard does (Enter on the trigger), or the way a click does (a
+// primary-button pointerdown on the trigger).
+const openMenu = async wid => {
+    const trigger = tile(wid).querySelector('.gs-menu-btn');
+    // Enter TOGGLES: on an open menu it would close it
+    if (trigger.getAttribute('aria-expanded') !== 'true') {
+        trigger.dispatchEvent(new window.KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+        await tick();
+    }
+    return document.querySelector('.pane-overflow-menu');
+};
+const pressMenu = async wid => {
+    tile(wid).querySelector('.gs-menu-btn').dispatchEvent(new window.MouseEvent('pointerdown', { bubbles: true, button: 0 }));
+    await tick();
+};
+async function closeMenus() {
+    document.querySelectorAll('.pane-overflow-menu').forEach(m =>
+        m.dispatchEvent(new window.KeyboardEvent('keydown', { key: 'Escape', bubbles: true })));
+    await tick();
+}
+// Pick a row of `wid`'s menu (opening it first), as a click does.
+const pickRow = async (wid, sel) => {
+    const row = (await openMenu(wid)).querySelector(sel);
+    row.click();
+    await tick(); await tick();
+};
 // The window id of the Nth sidebar row as drawn — what Alt+N opens (CMX-85).
 const rowWid = n => {
     const row = document.querySelectorAll('#sidebar-agents .agent-row[data-agent]')[n - 1];
@@ -281,33 +314,26 @@ const geom = wid => {
 // split it back apart into a standalone "⋯" (.gs-menu-btn) beside a plain status
 // dot (.gs-dot)). Wire/Share/Orchestrator/Pin live behind the "⋯", not loose in
 // the header — and stay the SAME real buttons, just moved.
-test('a pane\'s "⋯" menu is hidden by default, and opening it reveals Wire/Share/Orchestrator/Pin', () => {
+test('a pane\'s "⋯" menu is closed by default, and opening it reveals Wire/Share/Orchestrator/Pin', async () => {
     const wid = '@1';
     const badge = tile(wid).querySelector('.gs-menu-btn');
-    const menu = tile(wid).querySelector('.pane-overflow-menu');
     assert.ok(badge, 'every wall tile gets a menu trigger');
-    assert.ok(menu, 'every wall tile gets an overflow menu');
-    assert.equal(menu.hidden, true, 'starts closed');
+    assert.equal(document.querySelector('.pane-overflow-menu'), null, 'starts closed');
     assert.equal(badge.getAttribute('aria-expanded'), 'false');
-    // The trigger itself must be wired to togglePaneOverflow — jsdom doesn't execute
-    // inline onclick attributes without runScripts:"dangerously" (not set here), so
-    // calling togglePaneOverflow directly below would still pass even if this wiring
-    // were stripped from the markup. Assert the wiring as a source fact instead.
-    assert.match(badge.getAttribute('onclick'), /chela\.togglePaneOverflow\(event,\s*this\)/,
-        'the "⋯" must carry the togglePaneOverflow onclick itself — it IS the menu trigger, ' +
-        'not a menu that merely opens when the handler happens to be invoked directly');
 
-    window.chela.togglePaneOverflow({ stopPropagation() {} }, badge);
-    assert.equal(menu.hidden, false, 'opens on click');
+    const menu = await openMenu(wid);
+    assert.ok(menu, 'the trigger opens the pane\'s menu');
     assert.equal(badge.getAttribute('aria-expanded'), 'true');
     // The controls the header used to show inline now live INSIDE this pane's menu.
     assert.ok(menu.querySelector('.gs-port'), 'wire port is inside the menu');
     assert.ok(menu.querySelector('.gs-share-btn'), 'share toggle is inside the menu');
     assert.ok(menu.querySelector('.gs-orch-btn'), 'orchestrator toggle is inside the menu');
     assert.ok(menu.querySelector('.gs-pin-btn'), 'pin toggle is inside the menu');
+    assert.equal(tile(wid).querySelector('.gs-port, .gs-share-btn, .gs-orch-btn, .gs-pin-btn'), null,
+        'none of them sits loose in the header');
 
-    window.chela.togglePaneOverflow({ stopPropagation() {} }, badge);
-    assert.equal(menu.hidden, true, 'closes on a second click');
+    await closeMenus();
+    assert.equal(document.querySelector('.pane-overflow-menu'), null, 'Escape closes it');
     assert.equal(badge.getAttribute('aria-expanded'), 'false');
 });
 
@@ -315,11 +341,9 @@ test('a pane\'s "⋯" menu is hidden by default, and opening it reveals Wire/Sha
 // #primary-menu, not the icon-only strip cmx-111 shipped: a vertical list of
 // `.popover-item.ov-item` rows, each a lucide icon PLUS a text label, still wired to
 // the same state-bearing buttons.
-test('the "⋯" overflow renders a labeled vertical list, like the topbar #primary-menu — not an icon-only strip', () => {
+test('the "⋯" overflow renders a labeled vertical list, like the topbar #primary-menu — not an icon-only strip', async () => {
     const wid = '@3';
-    const badge = tile(wid).querySelector('.gs-menu-btn');
-    const menu = tile(wid).querySelector('.pane-overflow-menu');
-    window.chela.togglePaneOverflow({ stopPropagation() {} }, badge);
+    const menu = await openMenu(wid);
 
     // Reuses the topbar's exact classes, not a bespoke lookalike.
     assert.ok(menu.classList.contains('overflow-menu'),
@@ -332,44 +356,40 @@ test('the "⋯" overflow renders a labeled vertical list, like the topbar #prima
         assert.ok(row.textContent.trim().length > 0, 'every row must carry a non-empty text label, not just an icon');
     });
 
-    // The state-bearing elements are the SAME rows (restyled in place), not a
-    // decorative wrapper around a still-hidden original button — a relabel that
-    // dropped the real element (breaking _updateShareBtns/_updateOrchBtns/the pin
-    // toggle's DOM queries) would fail here.
+    // The state-bearing classes are on the rows themselves (presence-owner.js finds the
+    // Share row's count by them).
     const share = menu.querySelector('.gs-share-btn.popover-item.ov-item');
     const orch = menu.querySelector('.gs-orch-btn.popover-item.ov-item');
     const pinRow = menu.querySelector('.gs-pin-btn.popover-item.ov-item');
-    assert.ok(share, 'the Share row must still BE .gs-share-btn (the state-bearing element)');
-    assert.ok(orch, 'the Orchestrator row must still BE .gs-orch-btn (the state-bearing element)');
-    assert.ok(pinRow, 'the Pin row must still BE .gs-pin-btn (the state-bearing element)');
+    assert.ok(share, 'the Share row must BE .gs-share-btn');
+    assert.ok(orch, 'the Orchestrator row must BE .gs-orch-btn');
+    assert.ok(pinRow, 'the Pin row must BE .gs-pin-btn');
     assert.equal(share.getAttribute('data-wid'), wid);
     assert.equal(orch.getAttribute('data-wid'), wid);
 
-    // Toggling still flips aria-pressed/`.on` on the right element (the relabel must
-    // not have broken the wiring _updateShareBtns/_updateOrchBtns/termPinToggle rely on).
-    assert.equal(pinRow.getAttribute('aria-pressed'), 'false');
-    window.chela.termPinToggle(pinRow, wid);
-    assert.equal(pinRow.getAttribute('aria-pressed'), 'true', 'pin row still toggles aria-pressed on itself');
-    assert.ok(pinRow.classList.contains('on'), 'pin row still gets the `.on` state class');
-    window.chela.termPinToggle(pinRow, wid);   // leave state as found for later tests
-    assert.equal(pinRow.getAttribute('aria-pressed'), 'false');
-
-    window.chela.togglePaneOverflow({ stopPropagation() {} }, badge);
+    // Picking Pin flips its checked state and `.on` on the row itself.
+    assert.equal(pinRow.getAttribute('aria-checked'), 'false');
+    await pickRow(wid, '.gs-pin-btn');
+    const on = (await openMenu(wid)).querySelector('.gs-pin-btn');
+    assert.equal(on.getAttribute('aria-checked'), 'true', 'the Pin row reads checked once picked');
+    assert.ok(on.classList.contains('on'), 'the Pin row gets the `.on` state class');
+    await closeMenus();
+    await pickRow(wid, '.gs-pin-btn');   // leave state as found for later tests
+    assert.equal((await openMenu(wid)).querySelector('.gs-pin-btn').getAttribute('aria-checked'), 'false');
+    await closeMenus();
 });
 
-// 1b — Only one pane's overflow is open at a time (opening a second closes the first).
-test('opening one pane\'s "⋯" overflow closes any other pane\'s open overflow', () => {
-    const btn1 = tile('@1').querySelector('.gs-menu-btn');
-    const btn2 = tile('@2').querySelector('.gs-menu-btn');
-    const menu1 = tile('@1').querySelector('.pane-overflow-menu');
-    const menu2 = tile('@2').querySelector('.pane-overflow-menu');
+// 1b — Only one pane's overflow is open at a time (pressing a second's trigger closes the first).
+test('opening one pane\'s "⋯" overflow closes any other pane\'s open overflow', async () => {
+    await pressMenu('@1');
+    assert.equal(tile('@1').querySelector('.gs-menu-btn').getAttribute('aria-expanded'), 'true');
 
-    window.chela.togglePaneOverflow({ stopPropagation() {} }, btn1);
-    assert.equal(menu1.hidden, false);
-
-    window.chela.togglePaneOverflow({ stopPropagation() {} }, btn2);
-    assert.equal(menu2.hidden, false, 'the second pane\'s menu opens');
-    assert.equal(menu1.hidden, true, 'the first pane\'s menu must close — only one open at a time');
+    await pressMenu('@2');
+    assert.equal(tile('@2').querySelector('.gs-menu-btn').getAttribute('aria-expanded'), 'true', 'the second pane\'s menu opens');
+    assert.equal(tile('@1').querySelector('.gs-menu-btn').getAttribute('aria-expanded'), 'false',
+        'the first pane\'s menu must close — only one open at a time');
+    assert.equal(document.querySelectorAll('.pane-overflow-menu').length, 1);
+    await closeMenus();
 });
 
 // 2 — THE TOOLBAR REVERT. No Layout menu: the grid presets + lock are directly on the
@@ -390,14 +410,12 @@ test('the wall toolbar has no Layout menu — grid presets and lock are inline',
 });
 
 // 3 — THE PIN. Reflowing the wall must never touch a pinned pane's geometry.
-test('a pinned pane keeps its exact geometry through a grid-preset reflow', () => {
+test('a pinned pane keeps its exact geometry through a grid-preset reflow', async () => {
     const PINNED = '@2', OTHER = '@1';
-    const pinBtn = tile(PINNED).querySelector('.gs-pin-btn');
-    assert.ok(pinBtn, 'every wall tile gets a pin button');
-    assert.equal(pinBtn.getAttribute('aria-pressed'), 'false');
+    assert.ok((await openMenu(PINNED)).querySelector('.gs-pin-btn'), 'every wall tile gets a pin row');
+    await closeMenus();
 
-    window.chela.termPinToggle(pinBtn, PINNED);
-    assert.equal(pinBtn.getAttribute('aria-pressed'), 'true', 'toggled on');
+    await pickRow(PINNED, '.gs-pin-btn');
     assert.ok(tile(PINNED).classList.contains('pane-pinned'), 'tile wears the pinned class');
     assert.ok(JSON.parse(localStorage.getItem('pc_wall_pinned') || '[]').includes(PINNED),
         'the pin is persisted so a reload remembers it');
@@ -413,9 +431,9 @@ test('a pinned pane keeps its exact geometry through a grid-preset reflow', () =
 
     // Unpin and confirm the next reflow reaches it again — the exemption isn't sticky
     // past the toggle.
-    window.chela.termPinToggle(pinBtn, PINNED);
-    assert.equal(pinBtn.getAttribute('aria-pressed'), 'false');
+    await pickRow(PINNED, '.gs-pin-btn');
     assert.ok(!tile(PINNED).classList.contains('pane-pinned'));
+    assert.ok(!JSON.parse(localStorage.getItem('pc_wall_pinned') || '[]').includes(PINNED));
     window.chela.applyGridLayout(3, 1);
     assert.notEqual(geom(PINNED), before.pinned, 'once unpinned, a reflow may move it again');
 });
@@ -749,12 +767,14 @@ test('typing a query drops the panes-first section and fuzzy-matches everything,
 // STATIC source-text fact: the higher-specificity form must exist, and a bare
 // lower-specificity form (which the popover-item rule can still outrank
 // regardless of source order) must be gone.
-test('the pane-menu ON-state fill rules repeat the `.pane-overflow-menu button` prefix so they outrank the popover-item base rule', () => {
+test('the pane-menu ON-state fill rules repeat the `.pane-overflow-menu` prefix so they outrank the popover-item base rule', () => {
+    // CMX-241: the rows are the kit Menu's items (Radix), not <button>s, so the prefix is
+    // `.pane-overflow-menu .X.on` (0,3,0) over the base `.pane-overflow-menu .popover-item` (0,2,0).
     ['gs-share-btn', 'gs-orch-btn', 'gs-pin-btn'].forEach(cls => {
-        const strong = new RegExp(String.raw`^\.pane-overflow-menu\s+button\.${cls}\.on\s*\{[^}]*background:`, 'm');
+        const strong = new RegExp(String.raw`^\.pane-overflow-menu\s+\.${cls}\.on\s*\{[^}]*background:`, 'm');
         assert.ok(strong.test(CSS),
-            `.pane-overflow-menu button.${cls}.on { background: ... } must exist — higher specificity ` +
-            '(0,3,1) than .pane-overflow-menu button.popover-item (0,2,1)');
+            `.pane-overflow-menu .${cls}.on { background: ... } must exist — higher specificity ` +
+            '(0,3,0) than .pane-overflow-menu .popover-item (0,2,0)');
 
         const bare = new RegExp(String.raw`^\.${cls}\.on\s*\{[^}]*background:`, 'm');
         assert.ok(!bare.test(CSS),
@@ -775,8 +795,10 @@ test('the pane-menu ON-state fill rules repeat the `.pane-overflow-menu button` 
     // genuinely prove — unlike the rule's rendered WIDTH, a cascade fact that belongs with the
     // manual-verify cues above (a higher-specificity override could collapse it and no source
     // parse would rank that correctly).
-    assert.match(CSS, /^\.pane-overflow-menu\s+button\.popover-item\s*\{/m,
-        'the base row rule `.pane-overflow-menu button.popover-item { ... }` must exist (rescoped off .gs-keys)');
+    assert.match(CSS, /^\.pane-overflow-menu\s+\.popover-item\s*\{/m,
+        'the base row rule `.pane-overflow-menu .popover-item { ... }` must exist (rescoped off .gs-keys)');
+    assert.doesNotMatch(CSS, /\.pane-overflow-menu\s+button\./,
+        'a `.pane-overflow-menu button.` rule matches nothing: the rows are not buttons (CMX-241)');
     assert.doesNotMatch(CSS, /^\.gs-keys\s+button\.popover-item\s*\{/m,
         'a stale `.gs-keys button.popover-item` base rule must not exist — .gs-keys no longer wraps the menu');
 });
@@ -1347,17 +1369,19 @@ test('the header dot gains a ring iff its pane owns the decisions inbox, in lock
     // CMX-32: the ring rides the dot's unclipped wrapper, not the dot (see 16b).
     const ownerBadge = tile(owner).querySelector('.gs-dot-ring');
     const otherBadge = tile(other).querySelector('.gs-dot-ring');
-    const orchBtn = tile(owner).querySelector('.gs-orch-btn');
     assert.equal(ownerBadge.classList.contains('gs-dot-orch'), false, 'sanity: nobody owns the slot yet');
 
-    await window.chela.orchestratorBtnClick(orchBtn, owner);
+    await pickRow(owner, '.gs-orch-btn');
     assert.equal(ownerBadge.classList.contains('gs-dot-orch'), true,
-        'subscribing must add the ring — the same onOrchestratorChange signal the menu row repaints from');
-    assert.equal(orchBtn.classList.contains('on'), true, 'sanity: the menu row agrees it is now owned');
+        'subscribing must add the ring — the same orchestrator store the menu row draws from');
+    const row = (await openMenu(owner)).querySelector('.gs-orch-btn');
+    assert.equal(row.classList.contains('on'), true, 'sanity: the menu row agrees it is now owned');
+    assert.equal(row.getAttribute('aria-checked'), 'true');
+    await closeMenus();
     assert.equal(otherBadge.classList.contains('gs-dot-orch'), false,
         'ownership is exclusive — a non-owning pane\'s dot must never also show the ring');
 
-    await window.chela.orchestratorBtnClick(orchBtn, owner);   // release, leave state as found
+    await pickRow(owner, '.gs-orch-btn');   // release, leave state as found
     assert.equal(ownerBadge.classList.contains('gs-dot-orch'), false, 'releasing must remove the ring');
 });
 
@@ -1375,11 +1399,11 @@ test('the header dot gains a ring iff its pane owns the decisions inbox, in lock
 test('CMX-32: the orchestrator ring resolves visible, unclipped, for working, waiting, idle AND done', async () => {
     const owner = '@2';
     const agent = AGENTS[1];
-    const orchBtn = tile(owner).querySelector('.gs-orch-btn');
-    // The button TOGGLES — read its `.on` first, so a prior test that failed before
+    const owns = () => tile(owner).querySelector('.gs-dot-ring').classList.contains('gs-dot-orch');
+    // The row TOGGLES — read the ring first, so a prior test that failed before
     // releasing can't turn this subscribe into a release.
-    if (!orchBtn.classList.contains('on')) await window.chela.orchestratorBtnClick(orchBtn, owner);
-    assert.ok(orchBtn.classList.contains('on'), `sanity: ${owner} should own the decisions inbox now`);
+    if (!owns()) await pickRow(owner, '.gs-orch-btn');
+    assert.ok(owns(), `sanity: ${owner} should own the decisions inbox now`);
     const CASES = {
         working: { session_status: 'busy' },
         waiting: { needs_human: true },
@@ -1424,7 +1448,7 @@ test('CMX-32: the orchestrator ring resolves visible, unclipped, for working, wa
     } finally {
         Object.assign(agent, { session_status: undefined, pr: undefined, needs_human: undefined });
         await terminals.termTick();
-        if (orchBtn.classList.contains('on')) await window.chela.orchestratorBtnClick(orchBtn, owner);   // release
+        if (owns()) await pickRow(owner, '.gs-orch-btn');   // release
     }
 });
 
@@ -1439,20 +1463,19 @@ test('CMX-32: the orchestrator ring resolves visible, unclipped, for working, wa
 // the NEXT unrelated document click. This asserts what jsdom CAN prove; the "no
 // shrink" finding itself is a live-browser fact, stated in the PR, not a jsdom guard
 // for a layout question jsdom cannot see.
-test('starting a wire from the badge menu closes the menu immediately, and Escape fully cleans up — CMX-117 F', () => {
+test('starting a wire from the badge menu closes the menu immediately, and Escape fully cleans up — CMX-117 F', async () => {
     const wid = '@1';
-    const badge = tile(wid).querySelector('.gs-menu-btn');
-    const menu = tile(wid).querySelector('.pane-overflow-menu');
     const gsEl = document.querySelector('.grid-stack');
     const stage = document.getElementById('term-stage');
 
-    window.chela.togglePaneOverflow({ stopPropagation() {} }, badge);
-    assert.equal(menu.hidden, false, 'sanity: the menu is open before the drag starts');
+    const menu = await openMenu(wid);
+    assert.ok(menu, 'sanity: the menu is open before the drag starts');
 
-    const port = menu.querySelector('.gs-port');
-    window.chela.wireDragStart({ preventDefault() {}, stopPropagation() {} }, port, wid);
+    // The press on the Wire row is what starts the gesture (PaneHead's onMouseDown).
+    menu.querySelector('.gs-port').dispatchEvent(new window.MouseEvent('mousedown', { bubbles: true, buttons: 1, clientX: 5, clientY: 5 }));
+    await tick();
 
-    assert.equal(menu.hidden, true, 'the popover must close the instant the wire gesture starts');
+    assert.equal(document.querySelector('.pane-overflow-menu'), null, 'the menu must close the instant the wire gesture starts');
     assert.ok(gsEl.classList.contains('gs-dragging'), 'the grid enters the wire-drag state');
     assert.ok(stage.classList.contains('wire-live'), 'every tile sprouts a drop socket');
     assert.ok(stage.querySelector('.wire-overlay'), 'the wire SVG overlay is appended above the grid');
@@ -1547,7 +1570,7 @@ test('CMX-133: mobile keeps the pane header (shorter) instead of hiding it, and 
     // its rightmost compound is `*`, which never textually contains `.gs-win-ctl`,
     // yet it structurally matches that exact element (the real DOM's only child of
     // `.gs-keys`) and hides it — and everything inside it — same as a named rule
-    // would. Map each button class to its real ancestor chain (paneHead's actual
+    // would. Map each button class to its real ancestor chain (PaneHead's actual
     // markup: .gs-keys > .gs-win-ctl > the three buttons) so a wildcard descendant
     // selector rooted at any of those ancestors counts as targeting it too.
     const ANCESTORS = {
@@ -1694,7 +1717,7 @@ test('CMX-133: mobile keeps the pane header (shorter) instead of hiding it, and 
 // 133-WIRING — the CSS guard above only proves the mobile stylesheet keeps `.gs-keys`
 // visible and never hides `.gs-kill-btn`; it says nothing about whether the mobile
 // header actually RENDERS a kill button in the first place. Every other DOM test in
-// this file builds WALL tiles (paneHead(wid, draggable=true) via buildWall) — none of
+// this file builds WALL tiles (PaneHead with wall=true via buildWall) — none of
 // them ever construct the single-pane header (draggable=false) that phones force
 // renderTerminals into. Gating `kill` on `draggable` (wall-only) would leave the CSS
 // un-hiding a button that is never there, and every guard above would stay green.
@@ -1845,20 +1868,20 @@ test('CMX-146: a pane\'s ai_title renders as a dim subtitle under the name, and 
     }
 });
 
-// A brand-new wid forces buildWall to construct its tile FRESH through paneHead
+// A brand-new wid forces buildWall to construct its tile FRESH through PaneHead
 // itself (the wall's `_termSig` is keyed on the wid set — see the comment on
 // `_displayLabel` above — so a new window always rebuilds, unlike an ai_title
 // change on an EXISTING wid, which only ever reaches the DOM through
 // `_refreshPaneLabels`, covered separately above). This is the only test in the
-// file that exercises paneHead's initial markup for the subtitle, not the
+// file that exercises PaneHead's first render for the subtitle, not the
 // refresh path — the two are genuinely different code paths in terminals.js.
-test('CMX-146: a NEW pane (never refreshed) still shows its ai_title from paneHead\'s own initial markup', async () => {
+test('CMX-146: a NEW pane (never refreshed) still shows its ai_title from PaneHead\'s first render', async () => {
     const withNewAgent = [...AGENTS, { name: 'delta', window_id: '@4', online: true, ai_title: 'Ship the delta feature' }];
     try {
         util.setAgentsCache(withNewAgent);
         await terminals.renderTerminals();
         const sub = tile('@4').querySelector('.gs-grip .pane-subtitle');
-        assert.ok(sub, 'a freshly-built tile (via paneHead, not _refreshPaneLabels) must carry the subtitle');
+        assert.ok(sub, 'a freshly-built tile (via PaneHead, not _refreshPaneLabels) must carry the subtitle');
         assert.equal(paneTitle('@4'), 'Ship the delta feature');
         assert.equal(sub.textContent, 'delta');
     } finally {

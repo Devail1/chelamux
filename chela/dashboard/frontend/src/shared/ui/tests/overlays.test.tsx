@@ -360,3 +360,24 @@ test('an AnchoredPopover hands focus back to the control it hung off when it clo
   expect(document.activeElement).toBe(anchor);
   anchor.remove();
 });
+
+test('Menu: a row can carry its own class, title, data attributes, trailing content and a press handler', () => {
+  const press = vi.fn();
+  render(
+    <Menu trigger={<Button>Pane</Button>}
+      items={[
+        { label: 'Wire', onSelect: () => {}, className: 'gs-port', title: 'drag to a peer', data: { 'data-wid': '@1' }, onMouseDown: press, trailing: <span className="tail">3</span> },
+        { label: 'Plain', onSelect: () => {} },
+      ]} />,
+  );
+  fireEvent.keyDown(screen.getByText('Pane'), { key: 'Enter' });
+  const [wire, plain] = screen.getAllByRole('menuitem');
+  expect(wire?.className).toBe('popover-item ov-item gs-port');
+  expect(wire?.getAttribute('title')).toBe('drag to a peer');
+  expect(wire?.getAttribute('data-wid')).toBe('@1');
+  expect(wire?.querySelector('.ov-label + .tail')?.textContent).toBe('3');
+  fireEvent.mouseDown(must(wire));
+  expect(press).toHaveBeenCalledTimes(1);
+  expect(plain?.className).toBe('popover-item ov-item');
+  expect(plain?.hasAttribute('title')).toBe(false);
+});

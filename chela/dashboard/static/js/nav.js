@@ -3,7 +3,7 @@ import { $$, TERMINALS_ON, _agentsCache, agentDotColor, setCurrentTab, updateTab
 import { onOrchestratorChange, orchestratorState } from '../../frontend/src/shared/orchestrator';
 import { refreshSummary } from '../../frontend/src/features/primarymenu';
 import { detailAgent, redrawAgentDetail, setAgentDetailHost } from '../../frontend/src/features/agentdetail';
-import { _displayLabel, adoptSidebarDefault, _minimized, _orderedWids, _renderedWids, focusPaneByWid, isWallVisible, minimizePane, setTermMode, shareBtnClick } from './terminals';
+import { _displayLabel, adoptSidebarDefault, _minimized, _orderedWids, _renderedWids, focusPaneByWid, isWallVisible, minimizePane, setTermMode } from './terminals';
 import { launchProject, setLauncherHost } from '../../frontend/src/features/launcher';
 import { setPaletteHost } from '../../frontend/src/features/palette';
 import { VIEWS } from './views';
@@ -219,7 +219,6 @@ setPaletteHost({
         visible: isWallVisible,
         showWall: () => setTermMode('wall'),
         focus: focusPaneByWid,
-        share: wid => shareBtnClick(document.querySelector(`.gs-share-btn[data-wid="${window.CSS && CSS.escape ? CSS.escape(wid) : wid}"]`), wid),
     },
 });
 

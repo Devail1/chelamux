@@ -4,7 +4,7 @@ import { act, fireEvent, render, screen } from '@testing-library/react';
 import STYLE_CSS from '../../../../../static/style.css?raw';
 import { useState } from 'react';
 import { afterAll, beforeAll, expect, test, vi } from 'vitest';
-import { BADGE_TONE, BUTTON_VARIANT, Badge, Button, FieldRow, NumberInput, RadioGroup, SectionHeader, Select, Tabs, TextInput, Toggle, useMediaQuery } from '../index.ts';
+import { BADGE_TONE, BUTTON_VARIANT, Badge, Button, FieldRow, InlineEdit, NumberInput, RadioGroup, SectionHeader, Select, Tabs, TextInput, Toggle, useMediaQuery } from '../index.ts';
 import { must } from './setup.ts';
 
 let sheet: HTMLStyleElement;
@@ -328,4 +328,64 @@ test('TextInput plain: no autocomplete, no spellcheck (a typed confirmation); de
   const [plain, free] = [screen.getByRole('textbox', { name: 'plain' }), screen.getByRole('textbox', { name: 'free' })];
   expect([plain.getAttribute('autocomplete'), plain.getAttribute('spellcheck')]).toEqual(['off', 'false']);
   expect([free.getAttribute('autocomplete'), free.getAttribute('spellcheck')]).toEqual([null, null]);
+});
+
+test('InlineEdit opens focused with its text selected; Enter commits the typed value once', () => {
+  const commit = vi.fn();
+  const cancel = vi.fn();
+  render(<InlineEdit initial="win-1" label="Window name" className="pane-title-edit" onCommit={commit} onCancel={cancel} />);
+  const input = screen.getByRole('textbox', { name: 'Window name' }) as HTMLInputElement;
+  expect(input.className).toBe('pane-title-edit');
+  expect(document.activeElement).toBe(input);
+  expect([input.selectionStart, input.selectionEnd]).toEqual([0, 5]);
+  fireEvent.change(input, { target: { value: 'win-2' } });
+  fireEvent.keyDown(input, { key: 'Enter' });
+  fireEvent.blur(input);
+  expect(commit).toHaveBeenCalledTimes(1);
+  expect(commit).toHaveBeenCalledWith('win-2');
+  expect(cancel).not.toHaveBeenCalled();
+});
+
+test('InlineEdit: Escape cancels, once; leaving the field commits', () => {
+  const commit = vi.fn();
+  const cancel = vi.fn();
+  const { unmount } = render(<InlineEdit initial="a" label="Name" onCommit={commit} onCancel={cancel} />);
+  const input = screen.getByRole('textbox');
+  fireEvent.keyDown(input, { key: 'Escape' });
+  fireEvent.blur(input);
+  expect(cancel).toHaveBeenCalledTimes(1);
+  expect(commit).not.toHaveBeenCalled();
+  unmount();
+  render(<InlineEdit initial="b" label="Name" onCommit={commit} onCancel={cancel} />);
+  fireEvent.blur(screen.getByRole('textbox'));
+  expect(commit).toHaveBeenCalledWith('b');
+});
+
+test('InlineEdit keeps its keys and presses to itself (no page shortcut, no drag of its parent)', () => {
+  const parent = document.createElement('div');
+  document.body.append(parent);
+  const down = vi.fn();
+  const touch = vi.fn();
+  const key = vi.fn();
+  const pointer = vi.fn();
+  parent.addEventListener('pointerdown', pointer);
+  parent.addEventListener('mousedown', down);
+  parent.addEventListener('touchstart', touch);
+  parent.addEventListener('keydown', key);
+  const root = document.createElement('div');   // React's root sits below the listening parent
+  parent.append(root);
+  const { unmount } = render(<InlineEdit initial="a" label="Name" onCommit={() => {}} onCancel={() => {}} />, { container: root });
+  const input = screen.getByRole('textbox');
+  input.dispatchEvent(new MouseEvent('mousedown', { bubbles: true }));
+  input.dispatchEvent(new Event('touchstart', { bubbles: true }));
+  input.dispatchEvent(new Event('pointerdown', { bubbles: true }));
+  fireEvent.keyDown(input, { key: 'x' });
+  expect([down.mock.calls.length, touch.mock.calls.length, pointer.mock.calls.length, key.mock.calls.length]).toEqual([0, 0, 0, 0]);
+  unmount();
+  // its listeners leave with it
+  const again = document.createElement('input');
+  parent.append(again);
+  again.dispatchEvent(new MouseEvent('mousedown', { bubbles: true }));
+  expect(down).toHaveBeenCalledTimes(1);
+  parent.remove();
 });

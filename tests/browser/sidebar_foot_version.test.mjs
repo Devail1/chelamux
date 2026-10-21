@@ -96,6 +96,8 @@ describe('CMX-291 desktop 1440×900: the build string is in Settings, not the si
             return m.classList.contains('open') && getComputedStyle(m).opacity === '1';
         }, null, { timeout: 5000 });
         const badge = page.locator('#settings-drawer #version-island .version-badge');
+        // CMX-221: the badge mounts with the modal and reads /api/version then.
+        await badge.waitFor({ state: 'attached', timeout: 5000 }).catch(() => {});
         assert.equal(await badge.count(), 1, 'the Settings modal has no version badge');
         assert.equal(await badge.textContent(), `build ${ASSET_VERSION}`);
         assert.ok(await badge.isVisible(), 'the version badge is not on screen in the open modal');

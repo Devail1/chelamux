@@ -47,7 +47,7 @@ const MIN_PX = 16;
 const CONTROLS = 'input, textarea, select';
 
 // Controls built by JS outside the Settings drawer, in the markup shape the
-// modules emit (terminals.js renamePane). The share dialog, its copy rows and the Active
+// modules emit (the pane header's rename field, features/panehead). The share dialog, its copy rows and the Active
 // shares sheet are React since CMX-239/240, the Decisions inbox since CMX-228: their inputs
 // are the kit's .s-input, which the drawer's rows already cover. Also the UI kit's dialog
 // fields as the Work view's islands draw them (Init a repo, New task, Add schedule, CMX-231).

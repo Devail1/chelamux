@@ -6,7 +6,7 @@
 import * as RRG from '@radix-ui/react-radio-group';
 import * as RS from '@radix-ui/react-select';
 import * as RSw from '@radix-ui/react-switch';
-import { createContext, useContext, useId, useState, type ReactElement, type ReactNode } from 'react';
+import { createContext, useContext, useEffect, useId, useRef, useState, type ReactElement, type ReactNode } from 'react';
 import { icons } from '../../icons/index.ts';
 import { Button } from './basics.tsx';
 import { Tooltip } from './overlays.tsx';
@@ -80,6 +80,58 @@ export function TextInput({ value, onChange, lockedBy, disabled, label, placehol
       {...(plain ? { spellCheck: false } : {})}
       onChange={(e) => onChange(e.target.value)}
     />,
+  );
+}
+
+/**
+ * A label edited in place (a pane title): it opens focused with its text selected; Enter or
+ * leaving it commits, Escape cancels, and each fires once. Its keys and presses stay inside it:
+ * a press must not start a drag of whatever it sits in (a Gridstack handle listens on its own
+ * element, below React's root), and a key must not reach a page shortcut.
+ */
+export function InlineEdit({ initial, label, className, onCommit, onCancel }: { initial: string; label: string; className?: string; onCommit: (value: string) => void; onCancel: () => void }) {
+  const [value, setValue] = useState(initial);
+  const done = useRef(false);
+  const ref = useRef<HTMLInputElement>(null);
+  useEffect(() => {
+    const el = ref.current;
+    if (!el) return;
+    el.focus();
+    el.select();
+    const stop = (e: Event) => e.stopPropagation();
+    const presses = ['pointerdown', 'mousedown', 'touchstart'] as const;
+    for (const t of presses) el.addEventListener(t, stop, { passive: true });
+    return () => {
+      for (const t of presses) el.removeEventListener(t, stop);
+    };
+  }, []);
+  const finish = (save: boolean) => {
+    if (done.current) return;
+    done.current = true;
+    if (save) onCommit(value);
+    else onCancel();
+  };
+  return (
+    <input
+      ref={ref}
+      className={className}
+      type="text"
+      aria-label={label}
+      title="Enter to save, Esc to cancel"
+      value={value}
+      onChange={(e) => setValue(e.target.value)}
+      onBlur={() => finish(true)}
+      onKeyDown={(e) => {
+        e.stopPropagation();
+        if (e.key === 'Enter') {
+          e.preventDefault();
+          finish(true);
+        } else if (e.key === 'Escape') {
+          e.preventDefault();
+          finish(false);
+        }
+      }}
+    />
   );
 }
 

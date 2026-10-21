@@ -25,7 +25,7 @@ const host = {
   resolveWid: (q: string, wids: string[]) => (wids.includes(q.trim()) ? q.trim() : null),
   wall: {
     rendered: () => ['@2', '@1', '@9'], minimized: () => new Set(['@9']), ordered: (w: string[]) => w.slice().sort(),
-    visible: vi.fn(() => true), showWall: vi.fn(), focus: vi.fn(), share: vi.fn(),
+    visible: vi.fn(() => true), showWall: vi.fn(), focus: vi.fn(),
   },
 } satisfies PaletteHost;
 
@@ -106,7 +106,7 @@ test('"@3" pins the exact window first, once; running it jumps (never toggles), 
   expect(palette.get().open).toBe(false);
 });
 
-test('a session row runs the row click (selectAgent); a view row its view; a share row shares that pane', () => {
+test('a session row runs the row click (selectAgent); a view row its view; a share row shares that pane', async () => {
   open();
   typeQ('charlie');
   fireEvent.click(row('charlie'));
@@ -115,10 +115,14 @@ test('a session row runs the row click (selectAgent); a view row its view; a sha
   typeQ('work');
   fireEvent.click(row('Work'));
   expect(host.selectView.mock.calls).toEqual([['work']]);
+  const fetches = vi.fn((...args: [string]) => Promise.resolve({ json: () => Promise.resolve(args.length ? {} : null) }));
+  vi.stubGlobal('fetch', fetches);
   open();
   typeQ('share bravo');
   fireEvent.click(row('Share bravo'));
-  expect(host.wall.share.mock.calls).toEqual([['@2']]);
+  await act(async () => { await new Promise((r) => setTimeout(r, 0)); });
+  // the share feature's shareSession: it asks whether @2 is already shared, then offers the dialog
+  expect(fetches.mock.calls.map(([u]) => String(u))).toContain('/api/term/%402/share-info');
 });
 
 test('the arrows move the selection (wrapping), the pointer moves it too, Enter runs the selected row', () => {

@@ -147,8 +147,8 @@ def test_no_inline_js_style_pairs_an_accent_fill_with_white():
     [
         ".popover-item:hover",
         ".overflow-menu .ov-item:hover .ov-ic",
-        ".pane-overflow-menu button.popover-item:hover",
-        ".pane-overflow-menu button.popover-item:hover .ov-ic",
+        ".pane-overflow-menu .popover-item:hover",
+        ".pane-overflow-menu .popover-item:hover .ov-ic",
     ],
 )
 def test_menu_hover_rows_read_the_token(selector):

@@ -174,6 +174,24 @@ The desktop width (CMX-278) is `--sidebar-w` on the root element, set from the l
 (clamped to 264-480 px, default 288; `chela/sidebar_layout.py` clamps the same). The handle sets
 it live while dragging and saves it on release. The phone drawer keeps its own 264 px.
 
+### The pane headers
+
+The Wall's tiles are still built by legacy `terminals.js`; their headers are React
+(`src/features/panehead`, CMX-241, plan P26), the first Wall surface ported inside out. Every
+header on the page is ONE root, portaled into a slot each tile's markup carries
+(`<div class="island-slot" data-head-for="@N" data-head-wall="1">`, `display: contents`).
+`terminals.js` calls `mountPaneHeads(scope)` right after inserting tiles, and BEFORE
+Gridstack adopts them: Gridstack finds each tile's `.gs-grip` drag handle (the title) when it
+inits. A slot that leaves the page is dropped on the next paint.
+
+Paints are synchronous (`flushSync`), on a mount and on every publish of the stores a header
+reads: `agents`, the share state, `orchestrator` and `pinnedPanes` (`shared/store/wall.ts`,
+which the legacy grid code reads too). What a header asks of the Wall (minimize, drop a killed
+tile, start a wire, leave a room, relabel the dock) goes through the host `terminals.js` hands
+`configurePaneHeads()`. Three header elements are still filled by vanilla code, so they
+render with no React children: the facepile `.gs-presence` and the Share row's
+`.gs-share-count` (`collab/presence-owner.js`), and the room badge `.gs-room` (`wire.ts`).
+
 ### Markdown
 
 `src/shared/markdown` renders the task briefs and judge reports (`markdownHtml`, `inlineHtml`).
