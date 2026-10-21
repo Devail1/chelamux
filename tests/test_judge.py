@@ -3634,8 +3634,8 @@ def test_cmd_judge_prints_the_stale_head_notice_not_every_guard_held(capsys):
 
 def test_taskmodal_judge_badge_key_matches_j_blocked_race_value():
     """⚖️🧊 CMX-239 round 4: the judge corrupted `J_BLOCKED_RACE`'s VALUE (not a call site)
-    and the suite stayed green. `taskmodal.js`'s `_JUDGE_BADGE` is keyed on the literal
-    ``'blocked_race'``, and `tests/taskmodal_judge_badge.test.mjs` only pins that SAME
+    and the suite stayed green. The task modal's `JUDGE_BADGE` (features/taskmodal/model.ts)
+    is keyed on the literal ``'blocked_race'``, and its Vitest test only pins that SAME
     hardcoded literal against itself — it never looks at `judge.py`. Every Python test, in
     turn, references the SYMBOL `judge.J_BLOCKED_RACE`, never its string value, so neither
     side of the language boundary would notice the two drifting apart. If they do,
@@ -3646,18 +3646,18 @@ def test_taskmodal_judge_badge_key_matches_j_blocked_race_value():
 
     This test is the only thing that reads BOTH sides: it takes `judge.J_BLOCKED_RACE`'s
     live value and requires that exact string to appear as a key in the real
-    `taskmodal.js` source. Corrupt the constant's value in `judge.py` alone (JS untouched)
+    TypeScript source. Corrupt the constant's value in `judge.py` alone (JS untouched)
     and this goes red, because the JS source no longer has a key matching the new value.
     """
-    js_path = (Path(__file__).resolve().parent.parent / "chela" / "dashboard" / "static"
-               / "js" / "taskmodal.js")
+    js_path = (Path(__file__).resolve().parent.parent / "chela" / "dashboard" / "frontend"
+               / "src" / "features" / "taskmodal" / "model.ts")
     src = js_path.read_text()
-    match = re.search(r"const _JUDGE_BADGE = \{(.*?)\n\};", src, re.DOTALL)
-    assert match, "taskmodal.js's _JUDGE_BADGE object literal not found — did it move or get renamed?"
+    match = re.search(r"export const JUDGE_BADGE: Record<string, string> = \{(.*?)\n\};", src, re.DOTALL)
+    assert match, "the task modal's JUDGE_BADGE object literal not found — did it move or get renamed?"
     keys = set(re.findall(r"^\s*(\w+):", match.group(1), re.MULTILINE))
     assert judge.J_BLOCKED_RACE in keys, (
-        f"_JUDGE_BADGE has no key matching judge.J_BLOCKED_RACE ({judge.J_BLOCKED_RACE!r}) — "
-        f"the Python↔JS judge_state contract has drifted. _JUDGE_BADGE keys: {sorted(keys)}"
+        f"JUDGE_BADGE has no key matching judge.J_BLOCKED_RACE ({judge.J_BLOCKED_RACE!r}) — "
+        f"the Python↔JS judge_state contract has drifted. JUDGE_BADGE keys: {sorted(keys)}"
     )
 
 

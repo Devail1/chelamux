@@ -50,7 +50,7 @@ function withEnvTip(lockedBy: string | undefined, el: ReactElement) {
 }
 
 /**
- * `plain` is for a typed confirmation: no autocomplete, no spellcheck. `list` names a
+ * `plain` is for a typed confirmation or a search: no autocomplete, no spellcheck. `list` names a
  * <datalist> of suggestions; `autoFocus` takes focus when a Dialog opens.
  */
 export function TextInput({ value, onChange, lockedBy, disabled, label, placeholder, plain, list, autoFocus }: InputProps<string> & { placeholder?: string; plain?: boolean; list?: string; autoFocus?: boolean }) {

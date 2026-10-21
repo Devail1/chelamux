@@ -15,7 +15,7 @@
 // tests/test_js_suites.py)
 import { beforeAll, beforeEach, test } from 'vitest';
 import assert from 'node:assert/strict';
-import { bootDashboardDom } from './js_helpers/dashboard_dom.mjs';
+import { bootDashboardDom, ORCHESTRATOR } from './js_helpers/dashboard_dom.mjs';
 import { buildItems, DISPATCHED_KEY, runState } from '../chela/dashboard/frontend/src/features/sidebar/model.ts';
 
 const BODY = `
@@ -42,7 +42,7 @@ beforeAll(async () => {
             }
             return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve(body) });
         },
-        extraModules: ['util.js', 'nav.js', 'orchestrator.js'],
+        extraModules: ['util.js', 'nav.js', ORCHESTRATOR],
     }));
 });
 

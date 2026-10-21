@@ -26,18 +26,37 @@ test('boot mounts the keybar and diff modal islands into their slots (CMX-237)',
   vi.unstubAllGlobals();
 });
 
-test('boot mounts the Work islands: Runs, Schedules and the New-task dialog (CMX-231)', async () => {
+test('boot mounts the Work view (Board, Runs, Schedules), its toasts and the New-task dialog (CMX-231, CMX-233)', async () => {
   vi.stubGlobal('fetch', () => Promise.resolve({ ok: true, json: () => Promise.resolve([]) }));
-  document.body.innerHTML = '<div id="work-runs"></div><div id="work-schedules"></div><div id="newtask-island"></div>';
+  vi.stubGlobal('matchMedia', () => ({ matches: false, addEventListener() {}, removeEventListener() {} })); // jsdom has none
+  document.body.innerHTML = '<div id="panel-work"></div><div id="work-toasts"></div><div id="newtask-island"></div>';
   Reflect.deleteProperty(window, 'chelaBridge');
   await act(async () => boot(window));
   const { work } = await import('./shared/store/work.ts');
   await act(async () => work.set({ configured: false }));
-  expect(document.querySelector('#work-runs .work-empty-title')?.textContent).toBe('Turn a TODO list into pull requests');
-  expect(document.querySelector('#work-schedules .canvas-toolbar')?.textContent).toBe('+ Add Task');
+  expect(document.querySelector('#panel-work #work-seg')?.textContent).toBe('BoardRunsSchedules');
+  expect(document.querySelector('#panel-work #work-board .work-empty-title')?.textContent).toBe('A board for work in flight');
+  expect(document.querySelector('#panel-work #work-runs .work-empty-title')?.textContent).toBe('Turn a TODO list into pull requests');
+  expect(document.querySelector('#panel-work #work-schedules .canvas-toolbar')?.textContent).toBe('+ Add Task');
+  const { showToast } = await import('./features/work/index.ts');
+  await act(async () => showToast('a note'));
+  expect(document.querySelector('#work-toasts .run-toast')?.textContent).toBe('a note');
   const { openNewTask } = await import('./features/newtask/index.ts');
   await act(async () => openNewTask());
   expect(document.querySelector('[role="dialog"] h3')?.textContent).toBe('New task');
   await act(async () => work.set(null));
+  vi.unstubAllGlobals();
+});
+
+test('boot mounts the Decisions inbox into its slot and the task modal island (CMX-228)', async () => {
+  vi.stubGlobal('fetch', () => Promise.resolve({ ok: true, json: () => Promise.resolve({}) }));
+  document.body.innerHTML = '<span id="decisions-island"></span><div id="task-modal-island"></div>';
+  Reflect.deleteProperty(window, 'chelaBridge');
+  await act(async () => boot(window));
+  expect(document.querySelector('#decisions-island #btn-decisions')).not.toBeNull();
+  const { openTaskModal, closeTaskModal } = await import('./features/taskmodal/index.ts');
+  await act(async () => openTaskModal({ title: 'a task' }));
+  expect(document.querySelector('[role="dialog"].modal-task')?.textContent).toContain('a task');
+  await act(async () => closeTaskModal());
   vi.unstubAllGlobals();
 });

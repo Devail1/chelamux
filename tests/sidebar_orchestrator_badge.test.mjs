@@ -11,30 +11,26 @@
 //
 // Everything runs the REAL nav.js render into a REAL #sidebar-agents, the orchestrator
 // slot set through a REAL /api/orchestrator/{subscribe,release} round trip, and the
-// inbox icon is the REAL index.html markup, clicked through its own onclick attribute.
+// inbox icon is the REAL Decisions island (CMX-228) in the REAL index.html slot, clicked.
 //
 // Run: pnpm exec vitest run tests/sidebar_orchestrator_badge.test.mjs  (pytest runs it via tests/test_js_suites.py)
 import { closeMenu, menu, menuItems, openMenu } from './js_helpers/side_menu.mjs';
 import { beforeAll, beforeEach, test } from 'vitest';
 import assert from 'node:assert/strict';
-import { bootDashboardDom, clickOnclick, flush, sliceTemplate } from './js_helpers/dashboard_dom.mjs';
+import { bootDashboardDom, clickIsland, flush, sliceTemplate, ORCHESTRATOR } from './js_helpers/dashboard_dom.mjs';
 
-const INBOX_BTN = sliceTemplate('<button class="icon-btn" id="btn-decisions"', '</button>');
-// the end marker is the NEXT block's comment opener — cut it off, or it swallows the rest
-const DECISIONS_MENU = sliceTemplate('<div class="palette-overlay" id="decisions-menu"', '\n<!-- Launcher:')
-    .replace(/<!-- Launcher:$/, '');
+const INBOX_SLOT = sliceTemplate('<span class="decisions-island" id="decisions-island"', '</span>');
 
 const BODY = `
 <aside class="sidebar">
-  <div class="sidebar-head">${INBOX_BTN}</div>
+  <div class="sidebar-head">${INBOX_SLOT}</div>
   <div class="side-list" id="sidebar-agents"></div>
 </aside>
 <div id="agent-detail"></div>
-${DECISIONS_MENU}
 <span id="hdr-agents"></span><span id="hdr-next"></span><span id="hdr-updated"></span>`;
 
 const ok = body => Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve(body) });
-let nav, util, orchestrator;
+let nav, util, orchestrator, decisions;
 
 beforeAll(async () => {
     ({ modules: { util, nav, orchestrator } } = await bootDashboardDom({
@@ -55,8 +51,9 @@ beforeAll(async () => {
             if (u.includes('/api/sidebar/archive')) return ok({ hidden: [], sessions: [] });
             return ok(/\/api\/(agents|summary|log)/.test(u) && !u.includes('/api/log') ? [] : {});
         },
-        extraModules: ['util.js', 'nav.js', 'orchestrator.js'],
+        extraModules: ['util.js', 'nav.js', ORCHESTRATOR],
     }));
+    decisions = await import('../chela/dashboard/frontend/src/features/decisions/index.ts');
 });
 
 const ROWS = [
@@ -82,11 +79,11 @@ async function setOrchestrator(wid) {
 const rowFor = name => document.querySelector(`#sidebar-agents .agent-row[data-agent="${name}"]`);
 const badged = () => [...document.querySelectorAll('#sidebar-agents .agent-row')]
     .filter(r => r.querySelector('.ar-orch')).map(r => r.dataset.agent);
-const menuOpen = () => document.getElementById('decisions-menu').classList.contains('open');
+const menuOpen = () => decisions.inboxOpen.get();
 
 beforeEach(async () => {
     localStorage.clear();
-    window.chela.hideDecisionsMenu();
+    decisions.closeDecisions();
     await setOrchestrator(null);
     render();
 });
@@ -127,7 +124,7 @@ test('CMX-76 / CMX-72 regression: the orchestrator\'s row is still in its folder
 test('CMX-76: the REAL inbox icon\'s click selects the orchestrator\'s window — and still opens the log', async () => {
     await setOrchestrator('@1');
     assert.equal(rowFor('orch').classList.contains('active'), false);
-    clickOnclick(document.getElementById('btn-decisions'));
+    clickIsland(document.getElementById('btn-decisions'));
     assert.equal(document.querySelector('#agent-detail .detail-title').textContent, 'orch',
         'the inbox icon did not jump to the orchestrator\'s window');
     assert.ok(rowFor('orch').classList.contains('active'), 'the orchestrator\'s row was not selected');
@@ -148,7 +145,7 @@ test('CMX-76: the jump expands the orchestrator\'s folder group when it is colla
 test('CMX-76: with no orchestrator the inbox icon only opens the log, as before', async () => {
     await setOrchestrator(null);
     window.chela.selectAgent('proj');   // something else is selected; the click must not move it
-    clickOnclick(document.getElementById('btn-decisions'));
+    clickIsland(document.getElementById('btn-decisions'));
     assert.ok(menuOpen(), 'the inbox icon stopped opening the decisions log');
     assert.equal(document.querySelector('#agent-detail .detail-title').textContent, 'proj');
     assert.equal(nav.jumpToOrchestrator(), false);
