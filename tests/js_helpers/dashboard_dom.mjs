@@ -41,6 +41,7 @@ const MANIFEST = JSON.parse(readFileSync(join(DASHBOARD_ROOT, 'static', 'app', '
 export const ENTRY_URL = new URL(
     `../../chela/dashboard/frontend/${Object.keys(MANIFEST).find(k => MANIFEST[k].name === 'main')}`, import.meta.url).href;
 const DEFAULT_JS_ROOT = new URL('../../chela/dashboard/static/js/', import.meta.url).href;
+const SRC_URL = new URL('../../chela/dashboard/frontend/src/', import.meta.url).href;
 
 /** CMX-217: index.html's boot config block (frontend/src/shared/api readBoot), for a fixture
  * page. Fields left out take readBoot's defaults, as on a page without the block. */
@@ -56,9 +57,14 @@ export function copyDashboard(dir) {
     for (const d of ['static/js', 'static/collab', 'frontend/src']) {
         cpSync(join(DASHBOARD_ROOT, d), join(dir, d), { recursive: true });
     }
+    // CMX-228: its tsconfig too, so the copy's .tsx compiles with the same JSX runtime.
+    cpSync(join(DASHBOARD_ROOT, 'frontend', 'tsconfig.json'), join(dir, 'frontend', 'tsconfig.json'));
     symlinkSync(join(DASHBOARD_ROOT, 'frontend', 'node_modules'), join(dir, 'frontend', 'node_modules'), 'dir');
     return pathToFileURL(join(dir, 'static', 'js') + '/').href;
 }
+
+/** extraModules' entry for shared/orchestrator (static/js/orchestrator.js until CMX-228). */
+export const ORCHESTRATOR = ['orchestrator', '../../frontend/src/shared/orchestrator/index.ts'];
 
 /** Pull a fragment out of the REAL index.html between two literal markers
  * (inclusive of both). Throws — loudly, at fixture-build time, not as a
@@ -115,11 +121,12 @@ export function exposeDomConstructors(win) {
 
 /** CMX-276: what the page's React islands do before the legacy graph boots (index.html loads
  * them first): a bridge on `win`, the sidebar island drawing its #sidebar-agents, the diff
- * modal and keybar islands (CMX-237), and the Work view's islands (CMX-231). From
+ * modal and keybar islands (CMX-237), the Work view's islands (CMX-231), and the Decisions and
+ * task modal islands (CMX-228). From
  * src/, so a mutation of the TypeScript reaches every suite that boots the page. Each page
  * (window) gets its own bridge and root. A suite that hand-rolls its jsdom boot calls this
  * before it imports boot.ts / nav.js. */
-export async function mountIslands(win) {
+export async function mountIslands(win, src = SRC_URL) {
     const doc = win.document;
     // CMX-237: the diff modal and keybar islands, where the page has their slots.
     if (doc.getElementById('diff-modal-island')) {
@@ -139,6 +146,19 @@ export async function mountIslands(win) {
         const { mountKeybar } = await import('../../chela/dashboard/frontend/src/features/keybar/index.ts');
         mountKeybar(win);
         await flush();   // React commits the bars (and the keybar binds its pin) on its next turn
+    }
+    // CMX-228: the Decisions inbox (its button's slot) and the task modal islands.
+    if (doc.getElementById('decisions-island')) {
+        // From the page's own source tree (a copyDashboard copy's, for a suite of several pages):
+        // the inbox registers its log lane with THAT tree's scheduler, the one its boot.ts runs.
+        const { mountDecisions } = await import(new URL('features/decisions/index.ts', src).href);
+        mountDecisions(win);
+        await flush();
+    }
+    if (doc.getElementById('task-modal-island')) {
+        const { TaskModal } = await import(new URL('features/taskmodal/index.ts', src).href);
+        const { mountIsland } = await import('../../chela/dashboard/frontend/src/shared/islands/index.tsx');
+        mountIsland('task-modal-island', TaskModal, {}, doc);
     }
     // A page with no sidebar has no sidebar island to mount.
     if (!doc.getElementById('sidebar-agents')) return;
@@ -179,9 +199,10 @@ export function flush() {
  *   `localStorage` BEFORE the module graph loads, for module-scope restores
  *   (nav.js's collapsed-sidebar read, for one) that only run once at import
  *   time, not on demand.
- * @param {string[]} [extraModules] - dashboard module paths (relative to
+ * @param {(string|[string, string])[]} [extraModules] - dashboard module paths (relative to
  *   `chela/dashboard/static/js/`, e.g. `'kanban.js'`) to import AFTER
- *   the boot and return, keyed by their filename minus `.js`.
+ *   the boot and return, keyed by their filename minus `.js`; or a `[name, path]` pair for a
+ *   module that moved into frontend/src (ORCHESTRATOR below).
  * @param {string} [jsRoot] - a URL (ending in `/`) of the `static/js/` directory to
  *   import from. Defaults to the repo's. A suite that needs TWO independent pages (two
  *   devices — tests/sidebar_layout_shared.test.mjs) boots each from its own copy
@@ -233,12 +254,12 @@ export async function bootDashboardDom({
         // page only, so this page mounts its own (CMX-276).
         if (!dom.window.chelaBridge) await mountIslands(dom.window);
     } else {
-        await mountIslands(dom.window);
+        await mountIslands(dom.window, new URL('../../frontend/src/', jsRoot).href);
         await import(new URL('../../frontend/src/boot.ts', jsRoot).href);
     }
     const modules = {};
-    for (const path of extraModules) {
-        const name = path.replace(/\.js$/, '');
+    for (const entry of extraModules) {
+        const [name, path] = Array.isArray(entry) ? entry : [entry.replace(/\.js$/, ''), entry];
         modules[name] = await import(new URL(path, jsRoot).href);
     }
     return { dom, chela: globalThis.window.chela, modules };

@@ -135,6 +135,7 @@ test('trackerHref links https only; riskChip knows three levels and never guesse
   expect(riskChip({ risk: 'low' })).toEqual({ label: 'risk: low', cls: 'risk-low', reason: '' });
   expect(riskChip({ risk: 'extreme' })).toBe(null);
   expect(riskChip({ risk: 3 })).toBe(null);
+  expect(riskChip({ risk: 'constructor' })).toBe(null); // a prototype key is not a level (CMX-228)
 });
 
 test('runBuckets: needs_human leaves every bucket for its own; linearGroups splits by group', () => {

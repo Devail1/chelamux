@@ -58,10 +58,13 @@ export function SectionHeader({ title, children }: { title: string; children?: R
   );
 }
 
-export type Tab = { value: string; label: string; content: ReactNode };
+export type Tab = { value: string; label: string; content: ReactNode; className?: string };
+
+/** The tab strip's classes, for a surface whose look predates the kit (the task modal's). */
+export type TabsClasses = { list?: string; tab?: string };
 
 /** Tabs: arrow keys move between them (Radix); the active tab carries `.active` as legacy did. */
-export function Tabs({ tabs, value, onValueChange, label }: { tabs: Tab[]; value?: string; onValueChange?: (v: string) => void; label: string }) {
+export function Tabs({ tabs, value, onValueChange, label, classes }: { tabs: Tab[]; value?: string; onValueChange?: (v: string) => void; label: string; classes?: TabsClasses }) {
   const [own, setOwn] = useState(tabs[0]?.value ?? '');
   // A tab that left the list falls back to the first, never a blank panel.
   const wanted = value ?? own;
@@ -70,17 +73,18 @@ export function Tabs({ tabs, value, onValueChange, label }: { tabs: Tab[]; value
     setOwn(v);
     onValueChange?.(v);
   };
+  const tab = classes?.tab ?? 'tab';
   return (
     <RTabs.Root value={current} onValueChange={change}>
-      <RTabs.List className="tabs" aria-label={label}>
+      <RTabs.List className={classes?.list ?? 'tabs'} aria-label={label}>
         {tabs.map((t) => (
-          <RTabs.Trigger key={t.value} value={t.value} className={t.value === current ? 'tab active' : 'tab'}>
+          <RTabs.Trigger key={t.value} value={t.value} className={t.value === current ? `${tab} active` : tab}>
             {t.label}
           </RTabs.Trigger>
         ))}
       </RTabs.List>
       {tabs.map((t) => (
-        <RTabs.Content key={t.value} value={t.value}>
+        <RTabs.Content key={t.value} value={t.value} className={t.className}>
           {t.content}
         </RTabs.Content>
       ))}

@@ -10,7 +10,6 @@ import '../../static/js/launcher';
 import { startWorkPoll } from '../../static/js/work';
 import { VIEWS } from '../../static/js/views';
 import { findView } from '../../static/js/viewreg';
-import '../../static/js/decisions';
 import '../../static/js/resources';
 import '../../static/js/statushealth';
 import '../../static/js/version';

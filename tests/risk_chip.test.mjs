@@ -1,6 +1,6 @@
-// ⚖️🎚️ CMX-405 — a run's RISK level is VISIBLE: on its Work-board card and in its task
-// modal. Runs the REAL kanban.js (renderKanban) and taskmodal.js (openTaskModal) against a
-// real DOM and reads the rendered chip back, plus riskChip()'s own mapping.
+// ⚖️🎚️ CMX-405 — a run's RISK level is VISIBLE on its Work-board card. Runs the REAL
+// kanban.js (renderKanban) against a real DOM and reads the rendered chip back. riskChip()'s
+// own mapping and the task modal's chip are tested in features/taskmodal/tests (CMX-228).
 //
 // Run: pnpm exec vitest run tests/risk_chip.test.mjs (tests/test_js_suites.py runs every .test.mjs
 // inside pytest, by discovery; needs `pnpm install` for jsdom.)
@@ -16,21 +16,14 @@ const BODY = `
   </div>
   <div class="kanban-board" id="kanban-board"></div>
   <div id="kanban-empty" class="work-empty" style="display:none;"></div>
-</div>
-<div id="modal-task" class="modal">
-  <div id="task-modal-content"></div>
 </div>`;
 
 let renderKanban;
-let taskmodal;
-let riskChip;
 
 beforeAll(async () => {
-    ({ modules: { kanban: { renderKanban }, taskmodal } } = await bootDashboardDom({
-        body: BODY, extraModules: ['kanban.js', 'taskmodal.js'],
+    ({ modules: { kanban: { renderKanban } } } = await bootDashboardDom({
+        body: BODY, extraModules: ['kanban.js'],
     }));
-    // After the boot: taskmodalmodel.js -> knowledge.js -> util.js reads `window` at load.
-    ({ riskChip } = await import('../chela/dashboard/static/js/taskmodalmodel.js'));
 });
 
 function _run(over) {
@@ -50,17 +43,6 @@ function _payload(run) {
     };
 }
 
-test('riskChip: each level is its own WORD; anything else renders nothing', () => {
-    assert.equal(riskChip({ risk: 'high' }).label, 'risk: high');
-    assert.equal(riskChip({ risk: 'normal' }).label, 'risk: normal');
-    assert.equal(riskChip({ risk: 'low' }).label, 'risk: low');
-    assert.notEqual(riskChip({ risk: 'high' }).cls, riskChip({ risk: 'low' }).cls);
-    assert.equal(riskChip({ risk: 'low', risk_reason: 'marker' }).reason, 'marker');
-    assert.equal(riskChip({}), null);
-    assert.equal(riskChip({ risk: null }), null);
-    assert.equal(riskChip({ risk: 'extreme' }), null);
-});
-
 test('the Work-board card shows the run\'s risk level, with its reason as the tooltip', () => {
     renderKanban(_payload(_run({ risk: 'low', risk_reason: 'marker' })));
     const card = document.querySelector('.kanban-card[data-task-id="abc123"]');
@@ -73,13 +55,4 @@ test('the Work-board card shows the run\'s risk level, with its reason as the to
     renderKanban(_payload(_run({ risk: 'high', risk_reason: "inferred: BOUNDARIES touch 'judge.py'" })));
     const high = document.querySelector('.kanban-card[data-task-id="abc123"] .kanban-risk-chip');
     assert.equal(high.textContent, 'risk: high');
-});
-
-test('the task modal shows the run\'s risk level and why it has it', () => {
-    taskmodal.openTaskModal(_run({ risk: 'high', risk_reason: "inferred: BOUNDARIES touch 'judge.py'" }));
-    const content = document.querySelector('#task-modal-content');
-    const chip = content.querySelector('.kanban-risk-chip');
-    assert.ok(chip, `no risk chip in the modal: ${content.innerHTML}`);
-    assert.equal(chip.textContent, 'risk: high');
-    assert.match(content.innerHTML, /inferred: BOUNDARIES touch/);
 });

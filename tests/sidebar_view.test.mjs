@@ -10,7 +10,7 @@
 // Run: pnpm exec vitest run tests/sidebar_view.test.mjs  (pytest runs it via tests/test_js_suites.py)
 import { beforeAll, beforeEach, test } from 'vitest';
 import assert from 'node:assert/strict';
-import { bootDashboardDom, flush } from './js_helpers/dashboard_dom.mjs';
+import { bootDashboardDom, flush, ORCHESTRATOR } from './js_helpers/dashboard_dom.mjs';
 import { clickMenu, closeMenu, menu, menuItems, openMenu, rightClick } from './js_helpers/side_menu.mjs';
 import { fakeArchiveServer } from './js_helpers/fake_archive.mjs';
 import {
@@ -50,7 +50,7 @@ beforeAll(async () => {
                 : /\/api\/(agents|summary)/.test(u) ? [] : {};
             return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve(body) });
         },
-        extraModules: ['util.js', 'nav.js', 'orchestrator.js'],
+        extraModules: ['util.js', 'nav.js', ORCHESTRATOR],
     }));
 });
 

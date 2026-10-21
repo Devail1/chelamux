@@ -146,10 +146,11 @@ test('.sidebar-foot in the REAL index.html has exactly one primary button', () =
 });
 
 test('#btn-decisions lives in .sidebar-head in the REAL index.html (CMX-393)', () => {
+    // CMX-228: the Decisions island draws the button into its slot, after the toggle.
     const head = HTML.match(/<div class="sidebar-head">[\s\S]*?\n    <\/div>/)[0];
-    const buttonIds = [...head.matchAll(/<button[^>]*\bid="([^"]+)"/g)].map(m => m[1]);
-    assert.deepEqual(buttonIds, ['btn-menu', 'btn-decisions'],
-        `.sidebar-head has unexpected buttons: ${buttonIds.join(', ')}`);
+    const ids = [...head.matchAll(/<(?:button|span)[^>]*\bid="([^"]+)"/g)].map(m => m[1]);
+    assert.deepEqual(ids, ['btn-menu', 'decisions-island'],
+        `.sidebar-head has unexpected controls: ${ids.join(', ')}`);
 });
 
 test('#btn-shares lives in .safety-float, not .sidebar-foot, in the REAL index.html', () => {
@@ -284,6 +285,8 @@ test('CMX-377: the REAL rendered DOM has no <header class="topbar">, and inbox/w
     const { bootDashboardDom, sliceTemplate } = await import('./js_helpers/dashboard_dom.mjs');
     const APP_HTML = sliceTemplate('<div class="app">', '</main>\n\n</div>');
     await bootDashboardDom({ body: APP_HTML });
+    // The islands commit on a later turn than the boot's own reads: wait for the inbox's.
+    for (let i = 0; i < 100 && !document.querySelector('#btn-decisions'); i++) await new Promise(r => setTimeout(r, 5));
 
     assert.equal(document.querySelector('header.topbar'), null,
         'a <header class="topbar"> element still exists in the real rendered DOM — CMX-377 must remove it entirely');

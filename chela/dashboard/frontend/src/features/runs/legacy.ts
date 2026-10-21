@@ -1,6 +1,6 @@
-// CMX-231: the HTML-string forms of a run's PR link and task-progress chip, for the two legacy
-// renderers that still build cards as strings (kanban.js, taskmodal.js). The Runs tables draw
-// the same things as React (lib/Runs.tsx). Deleted when those renderers are ported (P09, P12).
+// CMX-231: the HTML-string forms of a run's PR link and task-progress chip, for the legacy
+// renderer that still builds cards as strings (kanban.js). The Runs tables draw
+// the same things as React (lib/Runs.tsx). Deleted when kanban.js is ported (P12).
 import type { TaskProgress } from '../../shared/store/work.ts';
 import { prLabel, taskProgress } from './model.ts';
 
