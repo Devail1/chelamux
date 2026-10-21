@@ -84,8 +84,10 @@ for (const ev of CASES.events) {
     const { hook_event_name, ...fields } = ev as any
     await ($.classic as any)[hook_event_name](fields)
     await clock.settle()
-    expect(w.posts.length).toBe(1)
-    const p = w.posts[0]
+    // a PermissionDenied also goes to the inbox directly (denial.test.ts); only /hooks here
+    const hooks = w.posts.filter(p => p.url.startsWith(`${URL}/hooks/`))
+    expect(hooks.length).toBe(1)
+    const p = hooks[0]
     expect(p.url).toBe(`${URL}/hooks/${hook_event_name}`)
     expect(p.init.method).toBe('POST')
     expect(p.init.headers['Content-Type']).toBe('application/json')
