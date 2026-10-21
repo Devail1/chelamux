@@ -68,6 +68,9 @@ test('boot mounts the chrome into its slots (CMX-219): pills, gear, New session,
   const { openSendMsg } = await import('./features/agentdetail/index.ts');
   await act(async () => openSendMsg('w1'));
   expect(document.querySelector('[role="dialog"] h3')?.textContent).toBe('Send Message to w1');
+  // closed before the next test resets the body, as the diff modal's test does
+  await act(async () => document.activeElement?.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true })));
+  expect(document.querySelector('[role="dialog"]')).toBeNull();
   vi.unstubAllGlobals();
 });
 

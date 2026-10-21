@@ -212,16 +212,12 @@
                         style="margin-left:6px;"></button>
                 </span>
             </span>
-            <!-- CMX-422: the active-shares pill's in-row copy (terminals.js
-                 _renderSharesIndicator drives both). Desktop only: it takes the
-                 row's flow slot at its right end, and while it shows, the floating
+            <!-- CMX-422: the active-shares pill's in-row copy, #term-shares (the share
+                 feature's pill island, CMX-240, draws both copies). Desktop only: it takes
+                 the row's flow slot at its right end, and while it shows, the floating
                  #btn-shares is hidden so it can't be drawn over the row. CMX-135: the
                  same for pending approvals (#term-approvals, the approvals island). -->
-            <button class="shares-indicator" id="term-shares" hidden onclick="chela.openSharesSheet()"
-                    title="Active shares, tap to manage or stop" aria-label="Active shares">
-                <span class="si-dot" aria-hidden="true"></span>
-                <span class="si-text">0 sharing</span>
-            </button>
+            <span class="shares-pill-slot" id="shares-pill-row"></span>
             <span class="island-slot" id="term-approvals-island"></span>
         </div>
         <div id="term-stage"></div>
@@ -265,12 +261,9 @@
   <!-- Global active-shares indicator (safety kill-switch): shown on EVERY tab +
        mobile whenever any session is shared, so a forgotten live share (= an
        exposed terminal via a public link) is always one tap from Stop. NOT in
-       the menu above — it must stay visible whenever a share is live. -->
-  <button class="shares-indicator" id="btn-shares" hidden onclick="chela.openSharesSheet()"
-          title="Active shares, tap to manage or stop" aria-label="Active shares">
-    <span class="si-dot" aria-hidden="true"></span>
-    <span class="si-text">0 sharing</span>
-  </button>
+       the menu above — it must stay visible whenever a share is live. The share
+       feature's pill island (CMX-240) draws it here as #btn-shares. -->
+  <span class="shares-pill-slot" id="shares-pill-float"></span>
   <!-- Sandboxed guests' access requests (CMX-7) and pending approvals (CMX-103), each shown
        only while one waits: the safety islands (frontend/src/features/accessreq, approvals). -->
   <span class="island-slot" id="access-req-island"></span>
@@ -392,6 +385,8 @@
 <div id="diff-modal-island"></div>
 <!-- The Work toasts (a run changed state; a board note): outside every panel, so they show on any view. -->
 <div id="work-toasts"></div>
+<!-- The Active shares sheet (CMX-240): the kill switch's list, opened by either pill. -->
+<div id="shares-sheet-island"></div>
 
 <!-- CMX-217: the boot config the bundle reads (frontend/src/shared/api readBoot). -->
 <script type="application/json" id="chela-boot">{{ boot|tojson }}</script>

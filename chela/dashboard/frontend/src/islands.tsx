@@ -4,6 +4,7 @@
 import { mountDecisions } from './features/decisions/index.ts';
 import { DiffModal } from './features/diffmodal/index.ts';
 import { mountKeybar } from './features/keybar/index.ts';
+import { mountShares } from './features/share/index.ts';
 import { NewTask } from './features/newtask/index.ts';
 import { mountSidebar } from './features/sidebar/index.ts';
 import { TaskModal } from './features/taskmodal/index.ts';
@@ -28,6 +29,7 @@ export function boot(win: Window = window) {
   mountIsland('task-modal-island', TaskModal, {}, win.document);
   mountChrome(win.document);
   installTapTips(win);
+  mountShares(win.document);
 }
 
 boot();

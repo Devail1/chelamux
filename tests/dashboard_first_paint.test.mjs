@@ -4,8 +4,8 @@
 //
 //   1. the Wall toolbar row (CMX-135): no "+ New shell" in it any more — the
 //      New menu is the one place a shell starts — and its in-row pill copies
-//      (#term-shares, #term-approvals) ship [hidden], so neither paints before
-//      the modules have counted anything, at either width.
+//      ship empty: #term-approvals and #term-shares as empty island slots
+//      (CMX-240), so neither paints before the modules have counted anything.
 //   2. the collapsed desktop sidebar — nav.js restores it, but as a module it
 //      runs late; index.html's inline <body> script must restore it first.
 //
@@ -48,13 +48,16 @@ test('the Wall toolbar renders no "+ New shell" button (CMX-135)', () => {
 for (const [name, vp] of [['@390', PHONE], ['@1440', DESKTOP]]) {
     test(`${name} before any JS: neither in-row pill paints`, () => {
         const dom = toolbarDom(vp);
-        const el = dom.window.document.getElementById('term-shares');
-        assert.ok(el, '#term-shares is missing from index.html');
-        assert.equal(dom.window.getComputedStyle(el).display, 'none', `#term-shares paints before JS at ${name}`);
         // CMX-219: #term-approvals is the approvals island's: before JS its slot draws nothing
-        const slot = dom.window.document.getElementById('term-approvals-island');
-        assert.ok(slot, '#term-approvals-island is missing from index.html');
-        assert.equal(slot.childNodes.length, 0, `#term-approvals-island has content before JS at ${name}`);
+        const approvals = dom.window.document.getElementById('term-approvals-island');
+        assert.ok(approvals, '#term-approvals-island is missing from index.html');
+        assert.equal(approvals.childNodes.length, 0, `#term-approvals-island has content before JS at ${name}`);
+        // CMX-240: #term-shares is the share feature's pill island; before JS its slot is
+        // empty and draws no box of its own.
+        const slot = dom.window.document.getElementById('shares-pill-row');
+        assert.ok(slot, "#term-shares's island slot is missing from index.html");
+        assert.equal(slot.children.length, 0, `the shares pill slot ships content at ${name}`);
+        assert.equal(dom.window.getComputedStyle(slot).display, 'contents', `the shares pill slot draws a box at ${name}`);
     });
 }
 

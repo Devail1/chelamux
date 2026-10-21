@@ -55,7 +55,9 @@ test('#btn-shares lives in .safety-float, not .sidebar-foot, in the REAL index.h
     assert.ok(!foot.includes('btn-shares'), '#btn-shares is inside .sidebar-foot: it must stay in .safety-float');
     const safetyFloat = HTML.match(/<div class="safety-float">[\s\S]*?\n<\/div>/);
     assert.ok(safetyFloat, '.safety-float block not found in index.html');
-    assert.ok(safetyFloat[0].includes('id="btn-shares"'), '#btn-shares is missing from .safety-float');
+    // CMX-240: #btn-shares is the share feature's pill island, mounted into this slot
+    // (SharesPill.test.tsx pins that the slot gets it).
+    assert.ok(safetyFloat[0].includes('id="shares-pill-float"'), "#btn-shares's island slot is missing from .safety-float");
 });
 
 // --- the real page ----------------------------------------------------------------------

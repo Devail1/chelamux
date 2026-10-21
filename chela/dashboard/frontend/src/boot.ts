@@ -6,12 +6,15 @@ import { REFRESH_MS } from '../../static/js/util';
 import { renderNav, selectView } from '../../static/js/nav';
 import { VIEWS } from '../../static/js/views';
 import { findView } from '../../static/js/viewreg';
+import { startShares } from './features/share/index.ts';
 import { BOOT } from './shared/api/index.ts';
 import { openEvents } from './shared/events/index.ts';
 import { refresh, setViewTicks, startScheduler } from './shared/scheduler/index.ts';
 
 setViewTicks((id) => findView(VIEWS, id)?.tick ?? null);
 renderNav(); // the sidebar's view list, from the registry, before anything selects one
+// The shares already live light the pill on load, whichever view is showing (CMX-240).
+startShares();
 // The Wall is the default canvas when terminals are on; selectView runs the boot tick.
 if (BOOT.terminalsEnabled) selectView('terminals');
 else void refresh();
