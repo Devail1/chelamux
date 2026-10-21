@@ -7,7 +7,7 @@ import * as RM from '@radix-ui/react-dropdown-menu';
 import * as RP from '@radix-ui/react-popover';
 import * as RToast from '@radix-ui/react-toast';
 import * as RT from '@radix-ui/react-tooltip';
-import { Check, ChevronRight, type LucideIcon } from 'lucide-react';
+import { Check, ChevronRight, X, type LucideIcon } from 'lucide-react';
 import { useLayoutEffect, useRef, type ReactElement, type ReactNode, type SyntheticEvent } from 'react';
 
 const cx = (...names: (string | false | undefined)[]) => names.filter(Boolean).join(' ');
@@ -43,17 +43,36 @@ export type DialogProps = {
   description?: ReactNode;
   /** Extra class on the .modal box (e.g. `modal-newtask` for its width). */
   className?: string;
+  /** `sheet`: the safety sheets' look (anchored top right, a bottom sheet on a phone), with
+   * the title in a header row beside its icon and a close button (CMX-240). */
+  variant?: 'modal' | 'sheet';
+  icon?: LucideIcon;
   /** The title names the dialog for assistive tech only: the content draws its own heading. */
   hideTitle?: boolean;
   children?: ReactNode;
 };
+
+const SURFACE = {
+  modal: { overlay: 'modal-overlay active', box: 'modal', desc: 'modal-desc' },
+  sheet: { overlay: 'shares-backdrop ui-sheet', box: 'shares-sheet', desc: 'ss-sub' },
+} as const;
 
 /**
  * A modal dialog: focus moves in, is trapped, and returns to whatever had it when the dialog
  * opened (Radix returns it only to its own Trigger, and a legacy opener is not one); Escape
  * and an outside click close it.
  */
-export function Dialog({ open, onOpenChange, title, description, className, hideTitle, children }: DialogProps) {
+export function Dialog({
+  open,
+  onOpenChange,
+  title,
+  description,
+  className,
+  hideTitle,
+  variant = 'modal',
+  icon: Icon,
+  children,
+}: DialogProps) {
   const opener = useRef<Element | null>(null);
   // Remembered as it opens. Radix skips onOpenAutoFocus when an autoFocus field already holds
   // focus, so the opener is read here, from the focus history, not there.
@@ -61,12 +80,18 @@ export function Dialog({ open, onOpenChange, title, description, className, hide
     if (open) opener.current = openerNow();
   }, [open]);
   if (!title.trim()) throw new Error('<Dialog> needs a title: it is the dialog\'s accessible name');
+  const surface = SURFACE[variant];
+  const heading = (
+    <RD.Title asChild>
+      <h3 className={hideTitle ? 'sr-only' : undefined}>{title}</h3>
+    </RD.Title>
+  );
   return (
     <RD.Root open={open} onOpenChange={onOpenChange}>
       <RD.Portal>
-        <RD.Overlay className="modal-overlay active">
+        <RD.Overlay className={surface.overlay}>
           <RD.Content
-            className={cx('modal', className)}
+            className={cx(surface.box, className)}
             {...(description ? {} : { 'aria-describedby': undefined })}
             onCloseAutoFocus={(e) => {
               // A dialog handing over to another (a Decisions row opening its task) needs nothing
@@ -77,10 +102,22 @@ export function Dialog({ open, onOpenChange, title, description, className, hide
               }
             }}
           >
-            <RD.Title asChild>
-              <h3 className={hideTitle ? 'sr-only' : undefined}>{title}</h3>
-            </RD.Title>
-            {description && <RD.Description className="modal-desc">{description}</RD.Description>}
+            {variant === 'sheet' ? (
+              <div className="ss-hd">
+                {Icon && (
+                  <span className="ss-hd-ic">
+                    <Icon aria-hidden size={15} />
+                  </span>
+                )}
+                {heading}
+                <RD.Close className="ss-close" aria-label="Close">
+                  <X aria-hidden size={16} />
+                </RD.Close>
+              </div>
+            ) : (
+              heading
+            )}
+            {description && <RD.Description className={surface.desc}>{description}</RD.Description>}
             {children}
           </RD.Content>
         </RD.Overlay>

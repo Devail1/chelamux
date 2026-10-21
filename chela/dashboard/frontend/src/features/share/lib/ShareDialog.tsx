@@ -5,9 +5,10 @@
 // UNSANDBOXED" override, armed only by the window name TYPED (twice past 4 h, CMX-419).
 import { useState } from 'react';
 import { icons } from '../../../shared/icons/index.ts';
-import { Button, Dialog, FieldRow, RadioGroup, Select, TextInput, type RadioOption } from '../../../shared/ui/index.ts';
+import { Button, Dialog, RadioGroup, type RadioOption } from '../../../shared/ui/index.ts';
 import { mintShare, type MintResponse } from './api.ts';
-import { durLabel, isLong, mintBody, shareOffer, type ShareMode, type ShareOptions } from './model.ts';
+import { mintBody, shareOffer, type ShareMode, type ShareOptions } from './model.ts';
+import { UnsafeConfirm, type ConfirmDraft } from './UnsafeConfirm.tsx';
 
 export type PaneDims = { cols: number; rows: number };
 
@@ -38,13 +39,11 @@ function OptionText({ icon: Icon, title, desc, reason }: { icon: typeof icons.sh
 export function ShareDialog({ wid, title, options, dims, onClose, onMinted }: ShareDialogProps) {
   const [offer] = useState(() => shareOffer(options));
   const [mode, setMode] = useState<ShareMode>('view');
-  const [minutes, setMinutes] = useState(offer.mins);
-  const [confirm, setConfirm] = useState('');
-  const [confirmLong, setConfirmLong] = useState('');
+  const [draft, setDraft] = useState<ConfirmDraft>({ minutes: offer.mins, confirm: '', confirmLong: '' });
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
   const unsafe = mode === 'unsandboxed';
-  const body = mintBody(offer, { mode, minutes, confirm, confirmLong });
+  const body = mintBody(offer, { mode, ...draft });
   // Once Share is pressed the mint is underway: it cannot be cancelled, only awaited.
   const dismiss = () => {
     if (!busy) onClose();
@@ -91,21 +90,7 @@ export function ShareDialog({ wid, title, options, dims, onClose, onMinted }: Sh
   return (
     <Dialog open onOpenChange={(open) => !open && dismiss()} title={`Share ${title}`} className="share-dialog">
       <RadioGroup label="Who can type" value={mode} onChange={(v) => setMode(v as ShareMode)} options={choices} />
-      {unsafe && (
-        <div className="sd-confirm">
-          <FieldRow label="Lasts">
-            <Select label="How long full access lasts" value={String(minutes)} onChange={(v) => setMinutes(Number(v))} options={offer.choices.map((n) => ({ value: String(n), label: durLabel(n) }))} />
-          </FieldRow>
-          <FieldRow label={`Type ${offer.name} to confirm`}>
-            <TextInput plain value={confirm} onChange={setConfirm} placeholder={offer.name} />
-          </FieldRow>
-          {isLong(offer, minutes) && (
-            <FieldRow label={`Longer than 4 h: type ${offer.name} again`}>
-              <TextInput plain value={confirmLong} onChange={setConfirmLong} placeholder={offer.name} />
-            </FieldRow>
-          )}
-        </div>
-      )}
+      {unsafe && <UnsafeConfirm className="sd-confirm" offer={offer} draft={draft} onChange={setDraft} />}
       {error && (
         <p className="sd-error" role="alert">
           {error}

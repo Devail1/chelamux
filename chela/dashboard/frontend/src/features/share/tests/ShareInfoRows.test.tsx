@@ -2,7 +2,7 @@
 // _shareInfoRowsHTML/_wireShareCopyButtons) and the pane toast.
 import { act, fireEvent, render, screen } from '@testing-library/react';
 import { expect, test, vi } from 'vitest';
-import { mountedInfoRows, paneToast, renderShareInfoRows, ShareInfoRows } from '../index.ts';
+import { paneToast, ShareInfoRows } from '../index.ts';
 import './setup.ts';
 
 const values = (root: ParentNode) => [...root.querySelectorAll('input')].map((i) => [i.readOnly, i.value]);
@@ -63,33 +63,6 @@ test.each([
     fireEvent.click(screen.getByRole('button'));
   });
   expect(screen.getByRole('button').textContent).toBe('Copy');
-});
-
-test('renderShareInfoRows paints into a legacy element synchronously, and repaints it in place', () => {
-  const el = document.createElement('div');
-  document.body.append(el);
-  renderShareInfoRows(el, { pairing_code: 'A' }, '');
-  expect(values(el)).toEqual([[true, 'A']]);
-  renderShareInfoRows(el, { pairing_code: 'B' }, '');
-  expect(values(el)).toEqual([[true, 'B']]);
-  el.remove();
-});
-
-test('a rebuilt sheet does not leak a root per row: rows that left the page are unmounted', () => {
-  const rows = [document.createElement('div'), document.createElement('div')];
-  for (const r of rows) {
-    document.body.append(r);
-    renderShareInfoRows(r, { pairing_code: 'A' }, '');
-  }
-  // The earlier test's detached row went with the first of these renders.
-  expect(mountedInfoRows()).toBe(2);
-  rows.forEach((r) => r.remove());
-  const next = document.createElement('div');
-  document.body.append(next);
-  renderShareInfoRows(next, { pairing_code: 'B' }, '');
-  expect(mountedInfoRows()).toBe(1);
-  expect(values(next)).toEqual([[true, 'B']]);
-  next.remove();
 });
 
 test('paneToast lands under the pane header, replaces the previous one, and goes after 4 s', () => {

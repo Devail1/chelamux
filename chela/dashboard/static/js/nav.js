@@ -5,7 +5,7 @@ import { refreshSummary } from './header';
 import { checkContext } from './agents';
 import { showAddSchedule } from '../../frontend/src/features/schedules';
 import { openNewTask } from '../../frontend/src/features/newtask';
-import { _displayLabel, adoptSidebarDefault, _minimized, _orderedWids, _renderedWids, _sharedWids, _stopShare, focusPaneByWid, isWallVisible, minimizePane, setTermMode, shareBtnClick } from './terminals';
+import { _displayLabel, adoptSidebarDefault, _minimized, _orderedWids, _renderedWids, focusPaneByWid, isWallVisible, minimizePane, setTermMode, shareBtnClick } from './terminals';
 import { _launcherData, launchProject, refreshLauncher } from './launcher';
 import { VIEWS } from './views';
 import { findView, navViews, otherViews, paletteViews, panelId } from './viewreg';
@@ -15,6 +15,7 @@ import { refreshCostTab } from './usage';
 import { resolveWindowId } from './windowid';
 import { followUpdate } from './updateflow';
 import { memNote, stepPayload, workflowNote } from './concurrencymodel';
+import { isShared, stopShare } from '../../frontend/src/features/share';
 import { ARCHIVED_SECTION_KEY, isArchivable, moveGroup, normalizeView, sidebarModel, sidebarOrder as modelSidebarOrder } from '../../frontend/src/features/sidebar/model';
 
 // The sidebar (agent list + WORK badges) is always visible, so it refreshes on every tick
@@ -2863,14 +2864,14 @@ function _paletteItems(skipWids) {
     if (TERMINALS_ON) {
         (_agentsCache || []).forEach(a => {
             if (!a.window_id) return;
-            const shared = typeof _sharedWids !== 'undefined' && _sharedWids.has(a.window_id);
+            const shared = isShared(a.window_id);
             items.push({ icon: shared ? lucideIcon('x') : lucideIcon('share-2'),
                          title: (shared ? 'Stop sharing ' : 'Share ') + _agentLabel(a),
                          sub: shared ? 'shared session' : 'session',
                          run: () => {
                              const sel = '.gs-share-btn[data-wid="' + (window.CSS && CSS.escape ? CSS.escape(a.window_id) : a.window_id) + '"]';
                              const btn = document.querySelector(sel);
-                             if (shared) _stopShare(a.window_id); else shareBtnClick(btn, a.window_id);
+                             if (shared) stopShare(a.window_id); else shareBtnClick(btn, a.window_id);
                          } });
         });
     }
