@@ -762,7 +762,7 @@ def run_suite(
     try:
         # 🧠 CMX-119: one of the box's K suite slots, then a memory-capped scope of its own.
         with (suite_guard.slot(cwd, on_wait=_run_ctx.get("on_slot_wait"),
-                               max_wait=suite_guard.SLOT_WAIT_TIMEOUTS * timeout),
+                               max_wait=suite_guard.max_wait(timeout)),
               suite_guard.bounded(test_cmd) as (cmd, check),
               tempfile.TemporaryDirectory(prefix="chela-suite-") as scratch):
             env = _suite_env(Path(scratch))

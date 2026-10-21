@@ -187,6 +187,16 @@ def slots() -> int:
     return default_slots() if n is None else n
 
 
+def max_wait(timeout: float) -> float:
+    """How long a run with this suite ``timeout`` waits for a slot:
+    ``CHELA_SUITE_SLOT_MAX_WAIT`` (seconds, > 0) > ``SLOT_WAIT_TIMEOUTS`` x ``timeout``."""
+    try:
+        override = float(os.environ.get("CHELA_SUITE_SLOT_MAX_WAIT", ""))
+    except ValueError:
+        override = 0.0
+    return override if override > 0 else SLOT_WAIT_TIMEOUTS * timeout
+
+
 def busy_clock() -> float:
     """``time.monotonic()`` minus what this process spent waiting for a slot — the clock a
     wall-clock BUDGET reads, so a queued run is not charged for the queue."""

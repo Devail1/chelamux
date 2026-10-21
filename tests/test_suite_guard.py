@@ -208,6 +208,7 @@ def test_mem_total_reads_meminfo_and_fails_closed(tmp_path):
 
 
 def _holder(k_inside, entered, release, errors, **kw):
+    kw.setdefault("max_wait", 10)       # a broken slot loop fails the test, never hangs it
     def body():
         try:
             with suite_guard.slot("/wt", poll=0.01, **kw):
@@ -227,7 +228,8 @@ def test_the_semaphore_admits_k_and_queues_the_rest(slots_on, monkeypatch, capsy
     gates = [threading.Event() for _ in range(3)]
     waits = []
     threads = [threading.Thread(target=_holder(inside, g, release, errors,
-                                               on_wait=waits.append)) for g in gates]
+                                               on_wait=waits.append), daemon=True)
+               for g in gates]
     for t, g in zip(threads[:2], gates[:2]):
         t.start()
         assert g.wait(5)
@@ -274,7 +276,7 @@ def test_a_wait_past_max_wait_raises_slot_timeout(slots_on, monkeypatch):
     import threading
     monkeypatch.setenv("CHELA_SUITE_SLOTS", "1")
     inside, errors, release, gate = [], [], threading.Event(), threading.Event()
-    t = threading.Thread(target=_holder(inside, gate, release, errors))
+    t = threading.Thread(target=_holder(inside, gate, release, errors), daemon=True)
     t.start()
     assert gate.wait(5)
     try:
@@ -406,10 +408,38 @@ def test_run_suite_takes_a_slot_with_its_cwd_hook_and_bounded_wait(guard_on, mon
         seen.append((cwd, on_wait, max_wait))
         yield
     hook = object()
+    monkeypatch.delenv("CHELA_SUITE_SLOT_MAX_WAIT", raising=False)
     monkeypatch.setattr(judge.suite_guard, "slot", fake_slot)
     monkeypatch.setitem(judge._run_ctx, "on_slot_wait", hook)
     assert judge.run_suite("true", guard_on, timeout=30).green
     assert seen == [(guard_on, hook, 120)]
+
+
+@pytest.mark.parametrize("env,want", [(None, 120.0), ("7", 7.0), ("0", 120.0), ("-3", 120.0),
+                                      ("soon", 120.0)])
+def test_slot_max_wait_env_then_four_timeouts(monkeypatch, env, want):
+    monkeypatch.delenv("CHELA_SUITE_SLOT_MAX_WAIT", raising=False)
+    if env is not None:
+        monkeypatch.setenv("CHELA_SUITE_SLOT_MAX_WAIT", env)
+    assert suite_guard.max_wait(30) == want
+
+
+def test_no_working_scope_with_a_ceiling_on_says_so(guard_on, monkeypatch, caplog):
+    monkeypatch.setattr(suite_guard, "_scope_works", lambda: False)
+    with suite_guard.bounded("x"):
+        pass
+    assert "runs WITHOUT a memory ceiling" in caplog.text
+    caplog.clear()
+    monkeypatch.setenv("CHELA_SUITE_MEMORY_MAX", "0")
+    with suite_guard.bounded("x"):
+        pass
+    assert "WITHOUT" not in caplog.text
+
+
+def test_waits_in_an_unresolvable_worktree_is_none(monkeypatch):
+    monkeypatch.setattr(suite_guard.Path, "resolve",
+                        lambda self, *a, **k: (_ for _ in ()).throw(OSError("gone")))
+    assert suite_guard.waits_in("/wt") is None
 
 
 def test_run_suite_that_never_gets_a_slot_is_cannot_verify(guard_on, monkeypatch):

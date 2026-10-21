@@ -350,6 +350,8 @@ os.environ.setdefault("CHELA_SEED_RESEND_SETTLE_SECONDS", "0")
 # must not each pay a systemd scope; tests/test_suite_guard.py turns both back on where tested.
 os.environ["CHELA_SUITE_MEMORY_MAX"] = "0"
 os.environ["CHELA_SUITE_SLOTS"] = "0"      # ...nor queue on each other's suite slots
+# A mutation that breaks the slot loop fails a run_suite in 5s instead of hanging the suite.
+os.environ["CHELA_SUITE_SLOT_MAX_WAIT"] = "5"
 
 
 class LiveNotificationEscape(BaseException):
