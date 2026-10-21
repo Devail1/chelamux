@@ -1015,3 +1015,68 @@ def test_no_survivor_never_reads_the_key_store(tmp_path, notices):
     sweep_nightly.state_dir(chela).mkdir(parents=True)
     (sweep_nightly.state_dir(chela) / "filed.json").write_text("{torn")
     assert _run(repo, chela, Filer())["status"] == "clean"
+
+
+# --- the base branch, the fetch, the root commit (mutation-sweep gaps) -------------------------
+
+
+def test_a_non_default_base_branch_is_the_one_swept(tmp_path, notices):
+    """``workspace.base_branch: main`` reads ``origin/main``, not a hardcoded ``origin/dev``."""
+    repo, chela = _repo(tmp_path), tmp_path / "chela"
+    base = _git(repo, "rev-parse", "HEAD~2")
+    _git(repo, "checkout", "-q", "-b", "main", base)
+    main_only = "def main_only(x):\n    if x > 9:\n        return 1\n    return 2\n"
+    sha = _commit(repo, {"mainonly.py": main_only}, "PR M: main only (#9)")
+    _git(repo, "push", "-q", "origin", "main")
+    wf_path = repo / "WORKFLOW.md"
+    wf_path.write_text(wf_path.read_text().replace("base_branch: dev", "base_branch: main"))
+    res = _run(repo, chela, Filer())
+    assert res["head"] == sha
+    assert res["prs"] == [f"{sha[:12]} PR M: main only (#9)"]
+
+
+def test_the_sweep_fetches_the_base_so_a_tip_that_advanced_is_read(tmp_path, notices):
+    """origin/dev moves AFTER the local clone's last fetch: only a real fetch of the base
+    branch lets the sweep see the new tip."""
+    repo, chela = _repo(tmp_path), tmp_path / "chela"
+    other = tmp_path / "other"
+    subprocess.run(["git", "clone", "-q", str(tmp_path / "origin.git"), str(other)],
+                   check=True, capture_output=True)
+    (other / "late.py").write_text("LATE = 1\n")
+    _git(other, "add", "-A")
+    _git(other, "commit", "-qm", "PR late (#7)")
+    _git(other, "push", "-q", "origin", "dev")
+    tip = _git(other, "rev-parse", "HEAD")
+    assert _git(repo, "rev-parse", "origin/dev") != tip      # the local ref is stale
+    res = _run(repo, chela, Filer())
+    assert res["head"] == tip
+    assert any("PR late (#7)" in p for p in res["prs"])
+
+
+def test_the_fetch_names_origin_and_the_base_branch(tmp_path, notices, monkeypatch):
+    repo, chela = _repo(tmp_path), tmp_path / "chela"
+    seen: list[tuple[str, ...]] = []
+    real = sweep_nightly._git
+
+    def spy(cwd, *args, **kw):
+        seen.append(args)
+        return real(cwd, *args, **kw)
+    monkeypatch.setattr(sweep_nightly, "_git", spy)
+    _run(repo, chela, Filer())
+    assert ("fetch", "--quiet", "origin", "dev") in seen
+
+
+def test_a_root_commit_in_the_window_is_diffed_against_the_empty_tree(tmp_path):
+    """A parentless commit has no ``first``: its files are the whole tree, not nothing."""
+    wf = load_workflow(_repo(tmp_path / "w") / "WORKFLOW.md")
+    root = tmp_path / "rootrepo"
+    root.mkdir()
+    _git(root, "init", "-q", "-b", "dev")
+    (root / "a.py").write_text("A = 1\n")
+    (root / "pkg").mkdir()
+    (root / "pkg" / "b.py").write_text("B = 2\n")
+    _git(root, "add", "-A")
+    _git(root, "commit", "-qm", "root (#1)")
+    got = sweep_nightly.merged_commits(root, "HEAD", 0, wf)
+    assert len(got) == 1 and sorted(got[0]["files"]) == ["a.py", "pkg/b.py"]
+    assert got[0]["introduced"] == [got[0]["sha"]]
