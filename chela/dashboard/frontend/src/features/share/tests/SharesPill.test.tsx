@@ -73,7 +73,10 @@ test('a tap opens the Active shares sheet', async () => {
 
 test('mountShares puts each pill copy in its slot, and the sheet in its own', async () => {
   document.body.innerHTML = '<div class="safety-float"><span id="shares-pill-float"></span></div><span id="shares-pill-row"></span><div id="shares-sheet-island"></div>';
-  act(() => mountShares(document));
+  let roots: ReturnType<typeof mountShares> = [];
+  act(() => {
+    roots = mountShares(document);
+  });
   act(() => applyShared({ '@1': { mode: 'view' } }, true));
   expect(document.querySelector('.safety-float > #shares-pill-float > #btn-shares')).toBeTruthy();
   expect(document.querySelector('#shares-pill-row > #term-shares')).toBeTruthy();
@@ -81,4 +84,23 @@ test('mountShares puts each pill copy in its slot, and the sheet in its own', as
   fireEvent.click(must(document.getElementById('term-shares')));
   await settle();
   expect(document.querySelector('.shares-sheet .ss-row[data-wid="@1"]')).toBeTruthy();
+  act(() => roots.forEach((r) => r?.unmount()));
+});
+
+test('the countdown clock ticks while a pill is on the page, and stops with the last one', () => {
+  vi.useFakeTimers();
+  const { unmount } = render(<SharesPill id="btn-shares" />);
+  expect(vi.getTimerCount()).toBe(1);
+  unmount();
+  expect(vi.getTimerCount()).toBe(0);
+});
+
+test('the countdown moves on its own every 30 s', () => {
+  vi.useFakeTimers();
+  vi.setSystemTime(1_700_000_000_000);
+  render(<SharesPill id="btn-shares" />);
+  act(() => applyShared({ '@1': { mode: 'unsandboxed', expires_at: 1_700_000_000 + 5 * 60 + 10 } }, true));
+  expect(pill().querySelector('.si-text')?.textContent).toBe('UNSANDBOXED: guest can type · 5m left');
+  act(() => vi.advanceTimersByTime(60_000));
+  expect(pill().querySelector('.si-text')?.textContent).toBe('UNSANDBOXED: guest can type · 4m left');
 });

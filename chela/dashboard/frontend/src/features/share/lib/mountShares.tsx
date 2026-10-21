@@ -5,7 +5,9 @@ import { SharesPill } from './SharesPill.tsx';
 import { SharesSheet } from './SharesSheet.tsx';
 
 export function mountShares(doc: Document = document) {
-  mountIsland('shares-pill-float', SharesPill, { id: 'btn-shares' }, doc);
-  mountIsland('shares-pill-row', SharesPill, { id: 'term-shares' }, doc);
-  mountIsland('shares-sheet-island', SharesSheet, {}, doc);
+  return [
+    mountIsland('shares-pill-float', SharesPill, { id: 'btn-shares' }, doc),
+    mountIsland('shares-pill-row', SharesPill, { id: 'term-shares' }, doc),
+    mountIsland('shares-sheet-island', SharesSheet, {}, doc),
+  ];
 }

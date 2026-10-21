@@ -390,3 +390,33 @@ test('the sheet forgets its focused share on close, and a focus on an unlisted s
   await settle();
   expect(document.querySelector('.ss-row-focus')).toBeNull();
 });
+
+test('each row badge names its mode', async () => {
+  await openSheet('typing', SANDBOXED);
+  expect(must(row().querySelector('.ss-mode')).getAttribute('title')).toBe('Guest may type (sandboxed session)');
+  act(() => closeSharesSheet());
+  await openSheet('view', SANDBOXED);
+  expect(must(row().querySelector('.ss-mode')).getAttribute('aria-label')).toBe('View only');
+});
+
+test('Stop and Stop all say "Stopping…" while the request is in flight', async () => {
+  const s = serve({ shared: { '@1': { mode: 'view' }, '@2': { mode: 'view' } }, options: SANDBOXED });
+  applyShared(s.shared as Record<string, { mode: ShareMode }>, true);
+  render(<SharesSheet />);
+  act(() => openSharesSheet());
+  await settle();
+  const stop = within(row('@1')).getByRole('button', { name: 'Stop' }) as HTMLButtonElement;
+  act(() => stop.click());
+  expect([stop.textContent, stop.disabled]).toEqual(['Stopping…', true]);
+  const all = screen.getByRole('button', { name: /Stop all sharing/ }) as HTMLButtonElement;
+  act(() => all.click());
+  expect([all.textContent, all.disabled]).toEqual(['Stopping…', true]);
+  await settle();
+});
+
+test('a non-object /api/term/shared answer is unreadable: a refused Stop keeps the share', async () => {
+  const s = await openSheet('view', SANDBOXED, { stop: 'refuse' });
+  s.shared = 'oops' as unknown as Server['shared'];
+  await click(within(row()).getByRole('button', { name: 'Stop' }));
+  expect([...shares.get().keys()]).toEqual(['@1']);
+});

@@ -111,16 +111,12 @@ function ShareRow({ wid, entry, focused, now }: { wid: string; entry: ShareEntry
   const [stopFailed, setStopFailed] = useState(false);
   const rowRef = useRef<HTMLDivElement>(null);
 
+  // A row is keyed by its wid, so a late answer can only land on its own row (or on none).
   useEffect(() => {
-    let live = true;
     void Promise.all([fetchShareInfo(wid), fetchShareOptions(wid)]).then(([i, o]) => {
-      if (!live) return;
       setInfo(i);
       setOptions(o);
     });
-    return () => {
-      live = false;
-    };
   }, [wid]);
   useEffect(() => {
     if (focused) rowRef.current?.scrollIntoView({ block: 'nearest' });

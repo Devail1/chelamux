@@ -25,6 +25,7 @@ import { exposeDomConstructors } from './js_helpers/dashboard_dom.mjs';
 
 const PANEL = `
 <span id="shares-pill-float"></span><div id="shares-sheet-island"></div>
+<div class="palette-overlay" id="palette"><div class="palette"><input id="palette-input"><div id="palette-list"></div></div></div>
 <div class="panel" id="panel-terminals">
   <button id="term-mode-single"></button>
   <button id="term-mode-wall"></button>
@@ -292,4 +293,24 @@ test('⭐ a change to the share state repaints the pane pill and banner, and a s
     assert.deepEqual([g.textContent, banner.hidden, banner.textContent], ['⚠', false, '⚠ UNSANDBOXED: guest can type']);
     share.dropShare('@1');
     assert.deepEqual([g.hidden, g.textContent, btn.dataset.mode, btn.getAttribute('aria-pressed'), banner.hidden], [true, '', '', 'false', true]);
+});
+
+test('the palette offers Stop sharing on a shared session and Share on an unshared one', async () => {
+    const row = re => [...document.querySelectorAll('#palette-list .palette-item')].find(r => re.test(r.textContent));
+    share.noteShare('@1', 'view', null);
+    window.chela._renderPalette('sharing');
+    const stop = row(/Stop sharing/);
+    assert.ok(stop, 'a shared session must offer Stop sharing');
+    window.chela._palRun(Number(stop.dataset.i));
+    await flush(); await flush();
+    assert.deepEqual(posts, [{ on: false }]);
+    assert.equal(dialog(), null, 'Stop must not open the share dialog');
+    assert.equal(share.isShared('@1'), false);
+    window.chela._renderPalette('share');
+    const go = row(/^\s*Share shell\s/);
+    assert.ok(go, 'an unshared session must offer Share');
+    OPTIONS = { share_typing: false, window_name: 'shell-1' };
+    window.chela._palRun(Number(go.dataset.i));
+    await flush(); await flush();
+    assert.ok(dialog(), 'Share from the palette opens the access dialog');
 });
