@@ -51,7 +51,7 @@ export function ShareDialog({ wid, title, options, dims, onClose, onMinted }: Sh
   };
 
   const share = async () => {
-    if (!body || busy) return;
+    if (!body) return; // never: Share is disabled while there is no body, and while busy
     setBusy(true);
     setError('');
     const d = dims?.();

@@ -44,5 +44,5 @@ export async function openShareDialog({ wid, title, dims, onMinted }: OpenShareD
 
 export function closeShareDialog(): void {
   gen++;
-  if (root && host?.isConnected) paint(null);
+  if (host?.isConnected) paint(null);
 }
