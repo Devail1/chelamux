@@ -1,26 +1,17 @@
 // CMX-276: the sidebar's session list (#sidebar-agents): Needs you, the groups in their
-// order (Dispatched last), the Archived section. Read-only: every action is legacy's
-// (nav.js, through `actions`) until slice B ports the menus and the archive.
+// order (Dispatched last), the Archived group, and their menus (CMX-277). What an action
+// DOES is legacy's (nav.js, through `actions`): the layout, the archive and the collapsed
+// groups are its state until slice C.
 import { useRef, useState, type MouseEvent, type ReactNode } from 'react';
 import { icons } from '../../../shared/icons/index.ts';
 import {
   ARCHIVED_SECTION_KEY, DISPATCHED_KEY, type Group, type Item, type SidebarState, sidebarModel,
 } from '../model.ts';
+import type { SidebarActions } from './actions.ts';
+import { GroupMenu, RowMenu, useMenuOpen } from './menus.tsx';
 import { type Meta, type MetaKind, ago, rowView } from './rowview.ts';
 
-/** What nav.js's popover menus read off the event: the anchor and the two cancels. */
-export type MenuEvent = Pick<MouseEvent, 'preventDefault' | 'stopPropagation' | 'currentTarget'>;
-
-export interface SidebarActions {
-  selectAgent(name: string): void;
-  toggleGroup(key: string): void;
-  openGroupMenu(ev: MenuEvent, key: string): void;
-  openRowMenu(ev: MenuEvent, key: string): void;
-  groupNewSession(key: string): void;
-  toggleArchivedSection(): void;
-  toggleShowArchived(): void;
-  unarchiveRow(btn: null, key: string): unknown;
-}
+export type { SidebarActions } from './actions.ts';
 
 const META_ICON: Partial<Record<MetaKind, (typeof icons)[keyof typeof icons]>> = {
   orchestrator: icons.orchestrator,
@@ -71,19 +62,15 @@ interface RowProps {
 }
 
 function Row({ it, s, actions, archived = false, altNum, children }: RowProps) {
+  const menu = useMenuOpen();
   const v = rowView(it, s);
   if (!v) return null;
   const name = v.agent.name ?? '';
   const cls = ['agent-row', 'rich', name === s.active && 'active', v.onWall && 'on-wall',
     v.runId && 'run-row', archived && 'archived'].filter(Boolean).join(' ');
-  const menu = v.runId ? 'Run menu' : 'Row menu';
-  const openMenu = (e: MouseEvent) => {
-    e.stopPropagation();
-    actions.openRowMenu(e, it.key);
-  };
   return (
     <div className={cls} data-agent={name} data-run={v.runId ?? undefined} data-item={it.key} title={v.title}
-      onClick={() => actions.selectAgent(name)} onContextMenu={e => actions.openRowMenu(e, it.key)}>
+      onClick={() => actions.selectAgent(name)} onContextMenu={menu.onContext}>
       <span className={`term-status-dot ${v.dotCls}`} role="img" aria-label={v.dotLabel} title={v.dotLabel} />
       <span className="agent-row-name" data-key={v.windowKey || undefined}
         title={v.windowKey ? `window: ${v.windowKey}` : undefined}>{v.label}</span>
@@ -92,9 +79,7 @@ function Row({ it, s, actions, archived = false, altNum, children }: RowProps) {
         {/* CMX-417: the `@N` that chela peek and the inbox use, shown on hover */}
         {v.agent.window_id && <span className="ar-more"><span className="ar-wid">{v.agent.window_id}</span></span>}
       </span>
-      <button className="row-more" title={menu} aria-label={menu} onClick={openMenu}>
-        <icons.more size={14} aria-hidden="true" />
-      </button>
+      <RowMenu it={it} s={s} actions={actions} menu={menu} />
       {children}
       {altNum ? <span className="ar-altnum" aria-hidden="true">{altNum}</span> : null}
     </div>
@@ -120,12 +105,15 @@ function SessionRow({ it, s, actions }: { it: Item; s: SidebarState; actions: Si
 
 interface GroupProps {
   g: Group;
+  index: number;
+  count: number;
   s: SidebarState;
   actions: SidebarActions;
   alt: Map<string, number>;
 }
 
-function GroupView({ g, s, actions, alt }: GroupProps) {
+function GroupView({ g, index, count, s, actions, alt }: GroupProps) {
+  const menu = useMenuOpen();
   const rows = g.items.map(it => <Row key={it.key} it={it} s={s} actions={actions} altNum={alt.get(it.key)} />);
   if (g.flat) {
     // Group by ▸ None: one flat list, no header.
@@ -140,13 +128,12 @@ function GroupView({ g, s, actions, alt }: GroupProps) {
   return (
     <div className={`side-group${collapsed ? ' collapsed' : ''}${n ? '' : ' empty'}`} data-g={g.key}>
       <div className="group-head" data-g={g.key} aria-expanded={!collapsed}
-        onClick={() => actions.toggleGroup(g.key)} onContextMenu={e => actions.openGroupMenu(e, g.key)}>
+        onClick={() => actions.toggleGroup(g.key)} onContextMenu={menu.onContext}>
         <span className="group-name" title={g.cwd || g.label}>{g.label}</span>
         {g.key === DISPATCHED_KEY && <span className="group-count" title={`${n} run${n === 1 ? '' : 's'}`}>{n}</span>}
         <span className="group-caret"><icons.expand size={12} aria-hidden="true" /></span>
         <span className="group-actions">
-          <button className="group-more" data-g={g.key} title="Group menu" aria-label={`${g.label} menu`}
-            onClick={stop(e => actions.openGroupMenu(e, g.key))}><icons.more size={14} aria-hidden="true" /></button>
+          <GroupMenu g={g} index={index} count={count} s={s} actions={actions} menu={menu} />
           {g.cwd && (
             <button className="group-add" data-g={g.key} title={`New session in ${g.label}`}
               aria-label={`New session in ${g.label}`} onClick={stop(() => actions.groupNewSession(g.key))}>
@@ -186,7 +173,9 @@ export function Sidebar({ state: s, actions }: { state: SidebarState | null; act
           {model.needsYou.map(it => <Row key={it.key} it={it} s={s} actions={actions} altNum={alt.get(it.key)} />)}
         </div>
       )}
-      {model.groups.map(g => <GroupView key={g.key} g={g} s={s} actions={actions} alt={alt} />)}
+      {model.groups.map((g, i) => (
+        <GroupView key={g.key} g={g} index={i} count={model.groups.length} s={s} actions={actions} alt={alt} />
+      ))}
       {drawsArchive && (
         <div className={`side-group side-archived${archivedOpen ? '' : ' collapsed'}`} data-g={ARCHIVED_SECTION_KEY}>
           <div className="group-head" data-g={ARCHIVED_SECTION_KEY} aria-expanded={archivedOpen}
@@ -208,11 +197,6 @@ export function Sidebar({ state: s, actions }: { state: SidebarState | null; act
       )}
       {!model.needsYou.length && !model.groups.length && !drawsArchive
         && <div className="side-empty">No sessions match this view</div>}
-      {(nArch > 0 || showArchived) && (
-        <button className="side-archived-toggle" onClick={() => actions.toggleShowArchived()}>
-          {showArchived ? 'Hide archived' : `Show archived (${nArch})`}
-        </button>
-      )}
     </>
   );
 }

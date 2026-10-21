@@ -366,7 +366,9 @@ export interface View {
 }
 
 export const VIEW_DEFAULTS: Readonly<View> = Object.freeze({
-    status: 'active',
+    // All: the live rows AND, when anything is archived, the collapsed Archived group at the
+    // bottom, the ONE archived control (Liav, 10-18). Status Active hides the group entirely.
+    status: 'all',
     // Everything except Judges: a judge window is a dispatched run's reviewer, and the
     // run's own row already says "judging" — the bare judge window is noise by default.
     env: ['interactive', 'dispatched', 'background'],
