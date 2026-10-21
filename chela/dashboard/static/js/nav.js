@@ -9,6 +9,7 @@ import { _launcherData, launchProject, refreshLauncher } from './launcher';
 import { VIEWS } from './views';
 import { findView, navViews, otherViews, paletteViews, panelId } from './viewreg';
 import { refresh, registerLane } from '../../frontend/src/shared/scheduler';
+import { placePopover, placedPopover } from '../../frontend/src/shared/popover';
 import { refreshCostTab } from './usage';
 import { resolveWindowId } from './windowid';
 import { followUpdate } from './updateflow';
@@ -971,7 +972,7 @@ function _showMenuPage(m, html, onAct) {
         e.stopPropagation();
         if (el) onAct(el.dataset.act);
     };
-    const placed = _placedPopovers.get(m);
+    const placed = placedPopover(m);
     if (placed && placed.anchor.isConnected) placePopover(m, placed.anchor, placed.opts);
 }
 
@@ -2920,65 +2921,6 @@ function applyTermPrefsToIframes() {
     });
 }
 
-// --- Popover placement (CMX-398) ---------------------------------------------
-
-// The margin every anchored popover keeps from each viewport edge.
-const POPOVER_MARGIN = 8;
-// Open popovers placed by placePopover, re-placed on window resize. Keyed by
-// the popover; an entry drops out once its popover is hidden or detached.
-const _placedPopovers = new Map();
-
-function _popoverOpen(m) {
-    return m.isConnected && !m.hidden && m.style.display !== 'none';
-}
-
-// Anchor a position:fixed popover to a control: BELOW it when it fits,
-// otherwise ABOVE it (`top = r.top - gap - h`) — the sidebar-foot gear
-// (#btn-primary-menu, CMX-377) sits at the bottom of the screen, where the old
-// topbar's "always below" math opened the menu almost entirely off-screen.
-// Horizontally right-aligned to the anchor (`align: 'center'` centres it
-// instead), and clamped inside the viewport with POPOVER_MARGIN on every side.
-// A popover taller than the viewport allows gets a max-height and scrolls
-// (.popover already has overflow-y:auto) instead of overflowing. The popover
-// must be displayed before this is called — a display:none element has no
-// size to measure.
-function placePopover(m, anchor, { gap = 6, align = 'right' } = {}) {
-    if (!m || !anchor) return;
-    const M = POPOVER_MARGIN;
-    const vw = window.innerWidth, vh = window.innerHeight;
-    // Measure the popover's own height, not a max-height a previous (smaller)
-    // viewport left behind.
-    m.style.maxHeight = '';
-    m.style.overflowY = '';
-    const room = Math.max(0, vh - 2 * M);
-    let h = m.offsetHeight;
-    if (h > room) {
-        m.style.maxHeight = room + 'px';
-        m.style.overflowY = 'auto';
-        h = room;
-    }
-    const w = m.offsetWidth;
-    const r = anchor.getBoundingClientRect();
-    let top;
-    if (r.bottom + gap + h <= vh - M) top = r.bottom + gap;       // below
-    else if (r.top - gap - h >= M) top = r.top - gap - h;         // above
-    // Neither side has room: on the roomier side, pushed back inside.
-    else top = (vh - r.bottom >= r.top) ? r.bottom + gap : r.top - gap - h;
-    top = Math.max(M, Math.min(top, vh - M - h));
-    let left = align === 'center' ? r.left + r.width / 2 - w / 2 : r.right - w;
-    left = Math.max(M, Math.min(left, vw - M - w));
-    m.style.top = top + 'px';
-    m.style.left = left + 'px';
-    _placedPopovers.set(m, { anchor, opts: { gap, align } });
-}
-
-window.addEventListener('resize', () => {
-    for (const [m, { anchor, opts }] of _placedPopovers) {
-        if (_popoverOpen(m) && anchor.isConnected) placePopover(m, anchor, opts);
-        else _placedPopovers.delete(m);
-    }
-});
-
 // --- "+ new" popover -------------------------------------------------------
 
 // The "+" menu is also the LAUNCH menu: Favorites + Recent live in it (launcher.js
@@ -3439,4 +3381,4 @@ export { sidebarOrder, altSwitchKeydown, setAltHeld, openSidebarRow, archiveKeys
 
 // --- Stage 0: window.chela — surface reachable from inline HTML handlers ---
 window.chela = window.chela || {};
-Object.assign(window.chela, { sidebarOrder, _updateFlowDeps, applyUpdate, archiveKeys, rowMenuAction, inboxClick, jumpToOrchestrator, toggleArchivedSection, unarchiveKeys, unarchiveRow, groupMenuAction, groupNewSession, hideSideMenus, moveToGroup, openGroupMenu, openRowMenu, openViewMenu, toggleShowArchived, viewMenuAction, clearRecentSessions, clearSettingsSearch, closePalette, closeShortcuts, closeSidebar, dismissRecentSession, hideNewMenu, hidePrimaryMenu, newSandboxedSession, newShellWindow, openNewMenu, openNewMenuFromPrimary, openPalette, openPrimaryMenu, openShortcuts, _palRun, placePopover, _renderPalette, resumeSession, saveDispatch, saveProjectsDir, saveTiming, selectAgent, setConcurrency, setTelegramDelete, deleteArchivedTopics, selectSettingsTab, selectView, setAgentModel, setAgentPermissionMode, setCollabName, setFileDrop, setRemoteControl, setRunToastsMuted, setShareTyping, setTermFont, setTermLatin, setTermSize, setTheme, settingsSearch, sidebarJumpInput, toggleDispatcherSessions, toggleGroup, toggleSettings, toggleSidebar, undoDismissRecent });
+Object.assign(window.chela, { sidebarOrder, _updateFlowDeps, applyUpdate, archiveKeys, rowMenuAction, inboxClick, jumpToOrchestrator, toggleArchivedSection, unarchiveKeys, unarchiveRow, groupMenuAction, groupNewSession, hideSideMenus, moveToGroup, openGroupMenu, openRowMenu, openViewMenu, toggleShowArchived, viewMenuAction, clearRecentSessions, clearSettingsSearch, closePalette, closeShortcuts, closeSidebar, dismissRecentSession, hideNewMenu, hidePrimaryMenu, newSandboxedSession, newShellWindow, openNewMenu, openNewMenuFromPrimary, openPalette, openPrimaryMenu, openShortcuts, _palRun, _renderPalette, resumeSession, saveDispatch, saveProjectsDir, saveTiming, selectAgent, setConcurrency, setTelegramDelete, deleteArchivedTopics, selectSettingsTab, selectView, setAgentModel, setAgentPermissionMode, setCollabName, setFileDrop, setRemoteControl, setRunToastsMuted, setShareTyping, setTermFont, setTermLatin, setTermSize, setTheme, settingsSearch, sidebarJumpInput, toggleDispatcherSessions, toggleGroup, toggleSettings, toggleSidebar, undoDismissRecent });

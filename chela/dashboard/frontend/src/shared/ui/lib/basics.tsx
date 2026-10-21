@@ -1,0 +1,81 @@
+// CMX-218 (CMX-212 P04): buttons, badges, section headers and tabs, as style.css's classes.
+import * as RTabs from '@radix-ui/react-tabs';
+import { useState, type ButtonHTMLAttributes, type ReactNode } from 'react';
+
+export type ButtonVariant = 'primary' | 'secondary' | 'danger' | 'ghost';
+export type ButtonSize = 'sm' | 'md';
+
+/** The class each variant and size draws with. */
+export const BUTTON_VARIANT: Record<ButtonVariant, string> = {
+  primary: 'btn btn-primary',
+  secondary: 'btn',
+  danger: 'btn btn-danger',
+  ghost: 'btn btn-ghost',
+};
+const BUTTON_SIZE: Record<ButtonSize, string> = { sm: 'btn-sm', md: 'btn-md' };
+
+export function Button({ variant = 'secondary', size = 'md', className, type = 'button', ...rest }: ButtonHTMLAttributes<HTMLButtonElement> & { variant?: ButtonVariant; size?: ButtonSize }) {
+  return <button type={type} className={[BUTTON_VARIANT[variant], BUTTON_SIZE[size], className].filter(Boolean).join(' ')} {...rest} />;
+}
+
+/**
+ * A chip's tone, by meaning: ok (ci green), warn (RESTART, awaiting), bad (failed, off),
+ * info (rework N), alert (needs a human), muted (done). Each is an existing .badge-* class.
+ */
+export type BadgeTone = 'ok' | 'warn' | 'bad' | 'info' | 'alert' | 'muted';
+export const BADGE_TONE: Record<BadgeTone, string> = {
+  ok: 'badge-on',
+  warn: 'badge-awaiting',
+  bad: 'badge-off',
+  info: 'badge-rework',
+  alert: 'badge-needs-human',
+  muted: 'badge-done',
+};
+
+export function Badge({ tone = 'muted', title, children }: { tone?: BadgeTone; title?: string; children: ReactNode }) {
+  return (
+    <span className={`badge ${BADGE_TONE[tone]}`} title={title}>
+      {children}
+    </span>
+  );
+}
+
+/** A section's heading (the Settings cards' accent-barred h4), with optional actions at its right. */
+export function SectionHeader({ title, children }: { title: string; children?: ReactNode }) {
+  return (
+    <div className="section-header">
+      <h4>{title}</h4>
+      {children}
+    </div>
+  );
+}
+
+export type Tab = { value: string; label: string; content: ReactNode };
+
+/** Tabs: arrow keys move between them (Radix); the active tab carries `.active` as legacy did. */
+export function Tabs({ tabs, value, onValueChange, label }: { tabs: Tab[]; value?: string; onValueChange?: (v: string) => void; label: string }) {
+  const [own, setOwn] = useState(tabs[0]?.value ?? '');
+  // A tab that left the list falls back to the first, never a blank panel.
+  const wanted = value ?? own;
+  const current = tabs.some((t) => t.value === wanted) ? wanted : (tabs[0]?.value ?? '');
+  const change = (v: string) => {
+    setOwn(v);
+    onValueChange?.(v);
+  };
+  return (
+    <RTabs.Root value={current} onValueChange={change}>
+      <RTabs.List className="tabs" aria-label={label}>
+        {tabs.map((t) => (
+          <RTabs.Trigger key={t.value} value={t.value} className={t.value === current ? 'tab active' : 'tab'}>
+            {t.label}
+          </RTabs.Trigger>
+        ))}
+      </RTabs.List>
+      {tabs.map((t) => (
+        <RTabs.Content key={t.value} value={t.value}>
+          {t.content}
+        </RTabs.Content>
+      ))}
+    </RTabs.Root>
+  );
+}

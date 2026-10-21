@@ -521,8 +521,35 @@ def _looks_like_claude(pid: int) -> bool:
     return any("claude" in arg for arg in _cmdline_argv(pid))
 
 
+def pane_root_is_claude(pane_pid: int) -> bool:
+    """Is the pane's OWN process claude — a window tmux launched as ``claude …`` directly,
+    with no shell in between (CMX-198)?
+
+    Every resolver below otherwise looks at the pane's CHILDREN only, so such a window had
+    no claude at all: no cwd/session/status in ``/api/agents`` (the sidebar filed it under
+    "Other"), and :func:`chela.agent_manager.window_type` called it a shell, so Telegram
+    auto-topics never bound it. It is checked BEFORE the children, because a claude's own
+    children carry "claude" too — its Bash-tool subshells run
+    ``bash -c source ~/.claude/shell-snapshots/…`` — and the substring rule the child scan
+    uses would name one of those instead of the claude above it.
+
+    Stricter than :func:`_looks_like_claude` on purpose: the pane root is whatever tmux
+    was told to run, and a dev server started as ``python ~/projects/x-claude/app.py``
+    carries "claude" in its argv without being one. Only the process's own NAME counts —
+    its ``comm``, or its argv[0]'s basename (what ``ps`` stands in for ``comm`` with, and
+    what a node-installed claude rewrites its title to). A shell pane fails both.
+    """
+    if _comm(pane_pid) == "claude":
+        return True
+    argv = _cmdline_argv(pane_pid)
+    return bool(argv) and os.path.basename(argv[0]) == "claude"
+
+
 def _claude_pid(pane_pid: int) -> int | None:
-    """The claude process running in a pane (breadth-first, a couple of generations)."""
+    """The claude process running in a pane (breadth-first, a couple of generations) — or
+    the pane's own process, when tmux launched claude with no shell (CMX-198)."""
+    if pane_root_is_claude(pane_pid):
+        return pane_pid
     frontier = [pane_pid]
     for _ in range(_MAX_DEPTH):
         nxt: list[int] = []
@@ -547,7 +574,13 @@ def _direct_claude_pid(pane_pid: int) -> int | None:
     ``comm`` does when the command line is empty, which is what procps matches then — and
     the LOWEST such pid, the first line pgrep prints. Uncapped, unlike :func:`_children`:
     pgrep has no cap.
+
+    Except a pane whose own process is claude (:func:`pane_root_is_claude`, CMX-198): that
+    pid IS the window's claude, ahead of any child. ``agent_manager.claude_pid`` makes the
+    same check first, so the two stay interchangeable.
     """
+    if pane_root_is_claude(pane_pid):
+        return pane_pid
     table = _PS.get()
     if table is not None:
         hits = [k for k in table.children(pane_pid)
