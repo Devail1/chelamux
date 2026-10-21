@@ -13,7 +13,8 @@ import { shares } from './state.ts';
 const PILL_ICON = { view: icons.viewOnly, typing: icons.typing, unsandboxed: icons.unsandboxed } as const;
 
 export function SharesPill({ id }: { id: string }) {
-  const v = pillView([...useStore(shares).values()], useNow());
+  const entries = [...useStore(shares).values()];
+  const v = pillView(entries, useNow(entries.some((e) => e.mode === 'unsandboxed')));
   const Icon = PILL_ICON[v.mode];
   return (
     <IconButton id={id} className={v.mode === 'unsandboxed' ? 'shares-indicator si-unsandboxed' : 'shares-indicator'} data-mode={v.mode} hidden={v.count === 0} label={v.count ? v.label : 'Active shares'} onClick={() => openSharesSheet()}>

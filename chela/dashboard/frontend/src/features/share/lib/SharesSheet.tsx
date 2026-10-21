@@ -184,7 +184,7 @@ function StopAll({ wids }: { wids: string[] }) {
 export function SharesSheet() {
   const target = useStore(sheet);
   const list = useStore(shares);
-  const now = useNow();
+  const now = useNow([...list.values()].some((e) => e.mode === 'unsandboxed'));
   if (!target) return null;
   const wids = [...list.keys()];
   return (

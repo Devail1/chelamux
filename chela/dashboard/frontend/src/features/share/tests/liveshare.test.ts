@@ -116,3 +116,11 @@ test('an update that changes nothing notifies nobody (the agents poll runs every
   expect(n).toBe(2);
   off();
 });
+
+test('with several overrides the pill counts down to the one that lasts longest', () => {
+  const short = e('unsandboxed', at(10 * 60 + 10));
+  const long = e('unsandboxed', at(6 * 3600 + 10));
+  expect(pillView([short, long], NOW).text).toBe('UNSANDBOXED: guest can type · 6h 0m left');
+  expect(pillView([long, short], NOW).text).toBe('UNSANDBOXED: guest can type · 6h 0m left');
+  expect(pillView([short, e('unsandboxed'), long], NOW).text).toBe('UNSANDBOXED: guest can type');
+});

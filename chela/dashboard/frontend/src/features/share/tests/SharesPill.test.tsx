@@ -88,9 +88,12 @@ test('mountShares puts each pill copy in its slot, and the sheet in its own', as
   act(() => roots.forEach((r) => r?.unmount()));
 });
 
-test('the countdown clock ticks while a pill is on the page, and stops with the last one', () => {
+test('the countdown clock ticks only while an override is on a pill, and stops with the last one', () => {
   vi.useFakeTimers();
   const { unmount } = render(<SharesPill id="btn-shares" />);
+  act(() => applyShared({ '@1': { mode: 'view' } }, true));
+  expect(vi.getTimerCount()).toBe(0);
+  act(() => applyShared({ '@1': { mode: 'unsandboxed', expires_at: null } }, true));
   expect(vi.getTimerCount()).toBe(1);
   unmount();
   expect(vi.getTimerCount()).toBe(0);

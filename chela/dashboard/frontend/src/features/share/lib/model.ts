@@ -116,7 +116,10 @@ export type PillView = { count: number; mode: ShareMode; text: string; label: st
 
 export function pillView(entries: readonly { mode: ShareMode; expiresAt: number | null }[], nowMs: number): PillView {
   const n = entries.length;
-  const unsafe = entries.find((e) => e.mode === 'unsandboxed');
+  // With several overrides, the one that lasts longest (no expiry lasts longest) is the exposure.
+  const unsafe = entries
+    .filter((e) => e.mode === 'unsandboxed')
+    .reduce<{ expiresAt: number | null } | undefined>((a, e) => (!a ? e : a.expiresAt === null || (e.expiresAt !== null && a.expiresAt >= e.expiresAt) ? a : e), undefined);
   const mode: ShareMode = unsafe ? 'unsandboxed' : entries.some((e) => e.mode === 'typing') ? 'typing' : 'view';
   const label =
     (unsafe ? 'UNSANDBOXED: a guest can type into a real shell. ' : '') +
