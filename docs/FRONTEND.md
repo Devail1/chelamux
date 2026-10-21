@@ -30,8 +30,11 @@ any change under `src/` **or `static/js/`** (and the `static/collab/` modules it
 pnpm -C chela/dashboard/frontend build    # then commit static/app/ with your change
 ```
 
-The bundle's name is a content hash, so a rebuild renames it: update `BUNDLE` in
-`tests/test_frontend_build.py` to the new name.
+The bundle's name is a content hash, so a rebuild renames it; nothing pins the name (the
+manifest names it). When two PRs both rebuilt it, the second one conflicts with the base only
+on `static/app/`: the dispatcher's base merge (CMX-300, `chela/basemerge.py`) then rebuilds
+the bundle on the merge, runs the stale-asset check and pushes it, instead of sending the PR
+back. A conflict on any other file, or a rebuild that fails, is still sent back.
 
 What each test suite runs: the `tests/browser/` Playwright suites load the **committed
 bundle** (what Flask serves), so they see a legacy edit only after the rebuild; the jsdom

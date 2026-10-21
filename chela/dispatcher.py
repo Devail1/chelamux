@@ -2468,8 +2468,9 @@ def _inbox_ci_flake(row, sha: str) -> None:
 def _resolve_base_conflict(conn: sqlite3.Connection, wf: WorkflowDef, row, head: str) -> str:
     """🔀 CMX-262. Merge ``origin/<base>`` into a CONFLICTING PR's branch in a scratch
     worktree (:func:`chela.basemerge.attempt`): clean and green ⇒ pushed, recorded on the PR
-    ("base merged automatically"), and the judge grades the new head as usual. A conflict or
-    a red merge ⇒ a rework that is NOT charged against the cap. Returns ``merged``,
+    ("base merged automatically"), and the judge grades the new head as usual. 🏭 CMX-300: a
+    conflict ONLY in the generated bundle is rebuilt and pushed the same way. A conflict, a
+    failed rebuild or a red merge ⇒ a rework that is NOT charged against the cap. Returns ``merged``,
     ``rework``, or ``none`` (nothing could be measured, or nothing to do)."""
     from chela import basemerge
     task_id = row["task_id"]
@@ -2482,15 +2483,19 @@ def _resolve_base_conflict(conn: sqlite3.Connection, wf: WorkflowDef, row, head:
         log.warning("Task %s: PR conflicts with origin/%s but the base merge could not be "
                     "tried (%s) — retried next tick", task_id, base, e)
         return "none"
-    if res["outcome"] in (basemerge.MERGED, basemerge.CURRENT):
+    if res["outcome"] in (basemerge.MERGED, basemerge.REBUILT, basemerge.CURRENT):
         conn.execute("UPDATE runs SET conflict_sha=? WHERE task_id=?", (head, task_id))
         conn.commit()
         if res["outcome"] == basemerge.CURRENT:
             return "none"
         tests = (f"{len(res['files'])} targeted test file(s) green" if res["files"]
                  else "no targeted tests ran; CI gates it")
+        how = (" (it conflicted only in the generated bundle, so the bundle was rebuilt from "
+               "the merged source and passed the stale-asset check)"
+               if res["outcome"] == basemerge.REBUILT else "")
         _post_pr_comment(row["pr_url"], repo,
-                         f"🔀 Base merged automatically: origin/{base} `{res['base_sha'][:12]}` "
+                         f"🔀 Base merged automatically{how}: origin/{base} "
+                         f"`{res['base_sha'][:12]}` "
                          f"→ merge commit `{res['merge_sha'][:12]}` ({tests}). A local checkout "
                          "of this branch needs `git pull --ff-only` before its next commit.")
         log.warning("Task %s: base merged automatically (origin/%s %s → %s)", task_id, base,

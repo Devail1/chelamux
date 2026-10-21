@@ -35,6 +35,19 @@ def is_generated(rel: str) -> bool:
     return any(_matches(rel, p) for p in PATTERNS)
 
 
+# 🔀 CMX-300: the generated paths a base merge REBUILDS instead of sending back
+# (:func:`chela.basemerge.attempt`) — only the Vite bundle, which a build regenerates whole and
+# CI's freshness check verifies. Not the lockfiles: both sides of a lockfile conflict changed a
+# dependency, and taking one side would silently drop the other's. Not ``*.min.js``: vendored,
+# nothing here rebuilds it.
+REBUILT = ("chela/dashboard/static/app/**",)
+
+
+def is_rebuilt(rel: str) -> bool:
+    rel = posixpath.normpath(rel.strip())
+    return any(_matches(rel, p) for p in REBUILT)
+
+
 def note(count: int) -> str:
     """The round's note for ``count`` skipped generated files ("" when none)."""
     if not count:
