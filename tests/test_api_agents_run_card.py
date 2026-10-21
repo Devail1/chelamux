@@ -124,3 +124,16 @@ def test_only_a_claimed_row_is_matched_by_name_a_newer_settled_row_with_no_id_is
              "window_id": None, "window_name": "liavacc/cmx-37-theme"}
     agents = _by_wid(runs=[ghost] + RUNS)
     assert agents["@7"]["run"]["task_id"] == "CMX-37"
+
+
+def test_each_row_carries_the_session_its_window_runs_now():
+    """CMX-278: Recent sessions drops a session that is live in a window of this epoch,
+    matched by this id (never by window address); a window with no Claude has none."""
+    sids = {"@1": "sid-orch", "@7": "sid-agent"}
+    pids = {wid: 1000 + i for i, wid in enumerate(LIVE.values())}
+    entries = {pid: {"status": "idle", "cwd": None, "name": None, "moved": False, "session_id": sids.get(wid)}
+               for wid, pid in pids.items() if wid != "@4"}
+    with _fleet(RUNS), patch("chela.agent_manager.session_entry", side_effect=lambda pid, _m: entries.get(pid)):
+        rows = {a["window_id"]: a for a in dash.app.test_client().get("/api/agents").get_json()}
+    assert {w: rows[w]["session_id"] for w in ("@1", "@7", "@8", "@4")} == {
+        "@1": "sid-orch", "@7": "sid-agent", "@8": None, "@4": None}

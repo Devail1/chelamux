@@ -91,7 +91,7 @@
         </label>
       </div>
 
-      <!-- Primary navigation. NOT written here: nav.js renders these rows from the
+      <!-- Primary navigation. NOT written here: the sidebar island (CMX-278) draws these rows from the
            view REGISTRY (static/js/views.js) — one declaration per view, so adding
            or deleting a view is one entry there and nothing here.
 
@@ -122,23 +122,10 @@
         <div class="side-list" id="sidebar-agents"></div>
       </section>
 
-      <!-- Recent (dead) sessions — CMX-208. A UI over `chela restore`'s already-tested
-           classification (chela/restore.py): a Claude session a hard tmux death (or
-           `wsl --shutdown`) orphaned, with enough on record (cwd + session id) to
-           relaunch. Hidden entirely when there is nothing to resume — this is a
-           rare-but-important recovery affordance, not a permanent fixture like
-           Navigate/Sessions above, so nav.js's renderRecentSessions toggles `hidden`
-           rather than always reserving the space. -->
-      <section class="side-section" id="side-recent-section" hidden>
-        <div class="side-head">
-          <span class="side-title">Recent sessions</span>
-          <span class="side-count" id="hdr-recent">0</span>
-          <button class="recent-clear-all" id="recent-clear-all" hidden
-                  title="Dismiss every recent session (transcripts are kept)"
-                  onclick="chela.clearRecentSessions()">Clear all</button>
-        </div>
-        <div class="side-list" id="side-recent"></div>
-      </section>
+      <!-- Recent (dead) sessions (CMX-208): resuming a prior Claude conversation by its session
+           id, drawn by the sidebar island (CMX-278, features/sidebar/lib/Recent.tsx) and absent
+           when there is nothing to resume. -->
+      <div class="side-recent-slot" id="side-recent-island"></div>
 
     </div><!-- /sidebar-scroll -->
 
@@ -173,6 +160,8 @@
       </button>
     </div>
 
+    <!-- CMX-278: the desktop width handle (features/sidebar/lib/Resize.tsx). -->
+    <div class="sidebar-resize-slot" id="sidebar-resize"></div>
   </aside>
 
   <!-- Main canvas: context-driven by sidebar selection -->
@@ -232,16 +221,12 @@
                         style="margin-left:6px;"></button>
                 </span>
             </span>
-            <!-- CMX-422: the active-shares pill's in-row copy (terminals.js
-                 _renderSharesIndicator drives both). Desktop only: it takes the
-                 row's flow slot at its right end, and while it shows, the floating
+            <!-- CMX-422: the active-shares pill's in-row copy, #term-shares (the share
+                 feature's pill island, CMX-240, draws both copies). Desktop only: it takes
+                 the row's flow slot at its right end, and while it shows, the floating
                  #btn-shares is hidden so it can't be drawn over the row. CMX-135: the
                  same for pending approvals (#term-approvals, approvals.js). -->
-            <button class="shares-indicator" id="term-shares" hidden onclick="chela.openSharesSheet()"
-                    title="Active shares, tap to manage or stop" aria-label="Active shares">
-                <span class="si-dot" aria-hidden="true"></span>
-                <span class="si-text">0 sharing</span>
-            </button>
+            <span class="shares-pill-slot" id="shares-pill-row"></span>
             <button class="shares-indicator approvals-indicator" id="term-approvals" hidden
                     onclick="chela.openApprovals()"
                     title="Requests waiting for your approval, tap to review" aria-label="Pending approvals">
@@ -302,12 +287,9 @@
   <!-- Global active-shares indicator (safety kill-switch): shown on EVERY tab +
        mobile whenever any session is shared, so a forgotten live share (= an
        exposed terminal via a public link) is always one tap from Stop. NOT in
-       the menu above — it must stay visible whenever a share is live. -->
-  <button class="shares-indicator" id="btn-shares" hidden onclick="chela.openSharesSheet()"
-          title="Active shares, tap to manage or stop" aria-label="Active shares">
-    <span class="si-dot" aria-hidden="true"></span>
-    <span class="si-text">0 sharing</span>
-  </button>
+       the menu above — it must stay visible whenever a share is live. The share
+       feature's pill island (CMX-240) draws it here as #btn-shares. -->
+  <span class="shares-pill-slot" id="shares-pill-float"></span>
   <!-- 🙋 Sandboxed guests' access requests (CMX-7): shown only while one waits for a
        decision. Text + count, never hue alone. -->
   <button class="shares-indicator access-req-indicator" id="btn-access-req" hidden
@@ -528,6 +510,8 @@
 <div id="diff-modal-island"></div>
 <!-- The Work toasts (a run changed state; a board note): outside every panel, so they show on any view. -->
 <div id="work-toasts"></div>
+<!-- The Active shares sheet (CMX-240): the kill switch's list, opened by either pill. -->
+<div id="shares-sheet-island"></div>
 
 <!-- CMX-217: the boot config the bundle reads (frontend/src/shared/api readBoot). -->
 <script type="application/json" id="chela-boot">{{ boot|tojson }}</script>

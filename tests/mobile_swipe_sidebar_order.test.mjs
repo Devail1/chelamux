@@ -16,7 +16,7 @@
 // Run: pnpm exec vitest run tests/mobile_swipe_sidebar_order.test.mjs  (pytest runs it via tests/test_js_suites.py)
 import { beforeAll, beforeEach, test } from 'vitest';
 import assert from 'node:assert/strict';
-import { bootDashboardDom, flush, sliceTemplate } from './js_helpers/dashboard_dom.mjs';
+import { bootDashboardDom, flush, sliceTemplate, SIDEBAR } from './js_helpers/dashboard_dom.mjs';
 import { fakeArchiveServer } from './js_helpers/fake_archive.mjs';
 
 const BASE = [
@@ -70,14 +70,15 @@ function fetchImpl(url, opts) {
     return json(body);
 }
 
-let nav, terminals, chela;
+let nav, terminals, chela, sidebar;
 beforeAll(async () => {
     const booted = await bootDashboardDom({
         body: BODY, phone: true, canvasStub: true, fetchImpl,
         seedLocalStorage: { pc_term_mode: 'single' },
-        extraModules: ['nav.js', 'terminals.js'],
+        extraModules: ['nav.js', 'terminals.js', SIDEBAR],
     });
     nav = booted.modules.nav;
+    sidebar = booted.modules.sidebar;
     terminals = booted.modules.terminals;
     chela = booted.chela;
     globalThis.fetch = fetchImpl;
@@ -87,7 +88,7 @@ beforeAll(async () => {
 async function settle() { for (let i = 0; i < 8; i++) await flush(); }
 async function setLayout(fields) {
     server.handle('/api/sidebar/layout', { method: 'POST', body: JSON.stringify(fields) });
-    await nav.refreshSidebar();
+    await sidebar.refreshSidebar();
     await settle();
 }
 // The swipe's full cycle. A switch re-renders, and the render rebuilds #term-agent from
@@ -210,7 +211,7 @@ test('an archived run keeps its windows, at the Archived section (the bottom), n
     assert.deepEqual(groupKeys(), ['/srv/code/alpha', '/srv/code/beta', '/srv/code/gamma', '~dispatched']);
     assert.deepEqual(swipe(), ['@201', '@202', '@203', '@204', '@205', ...TAIL]);
     server.handle('/api/sidebar/archive', { method: 'POST', body: JSON.stringify({ keys: ['run:CMX-7'] }) });
-    await nav.refreshSidebar();
+    await sidebar.refreshSidebar();
     await settle();
     assert.ok(!groupKeys().includes('~dispatched'), 'the run left its group');
     assert.deepEqual(swipe(), ['@201', '@202', '@203', '@204', '@205', ...TAIL]);

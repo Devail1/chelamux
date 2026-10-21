@@ -77,7 +77,7 @@ function fakeGridStack() {
     return { init: () => grid };
 }
 
-let terminals, util, nav, clipboard = [];
+let terminals, util, nav, clipboard = [], sidebar;
 
 beforeAll(async () => {
     const dom = new JSDOM(`<!doctype html><html><body>${PANEL}</body></html>`,
@@ -104,11 +104,12 @@ beforeAll(async () => {
     await import('../chela/dashboard/frontend/src/boot.ts');
     util = await import('../chela/dashboard/static/js/util.js');
     nav = await import('../chela/dashboard/static/js/nav.js');
+    sidebar = await import('../chela/dashboard/frontend/src/features/sidebar/controller.ts');
     terminals = await import('../chela/dashboard/static/js/terminals.js');
     util.setCurrentTab('terminals');
     util.setAgentsCache(AGENTS);
     await terminals.renderTerminals();
-    nav.renderSidebarAgents(AGENTS);
+    sidebar.renderSidebarAgents(AGENTS);
 });
 
 const tile = wid => document.querySelector(`#term-stage .grid-stack-item[gs-id="${wid}"]`);

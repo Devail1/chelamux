@@ -26,7 +26,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
-import { bootDashboardDom, sliceTemplate, flush } from './js_helpers/dashboard_dom.mjs';
+import { bootDashboardDom, sliceTemplate, flush, SIDEBAR } from './js_helpers/dashboard_dom.mjs';
 import { cssForViewport, resolveVars, shapeSignature, DESKTOP, DESKTOP_DARK } from './js_helpers/css_viewport.mjs';
 
 const CSS = readFileSync(join(dirname(fileURLToPath(import.meta.url)), '..', 'chela', 'dashboard', 'static', 'style.css'), 'utf8');
@@ -68,15 +68,15 @@ beforeAll(async () => {
     const body = sliceTemplate('<div class="app">', '\n  </main>') + '</div>';
     const { dom, modules } = await bootDashboardDom({
         body, fetchImpl: fakeFetch, canvasStub: true,
-        extraModules: ['util.js', 'terminals.js', 'nav.js'],
+        extraModules: ['util.js', 'terminals.js', 'nav.js', SIDEBAR],
     });
     win = dom.window;
     win.document.elementFromPoint = () => null;
-    const { util, terminals, nav } = modules;
+    const { util, terminals, sidebar } = modules;
     util.setCurrentTab('terminals');
     util.setAgentsCache(AGENTS);
     await terminals.renderTerminals();   // real paneHead() markup, real status tick
-    nav.renderSidebarAgents(AGENTS);     // real sidebar rows
+    sidebar.renderSidebarAgents(AGENTS);     // real sidebar rows
     await flush();
     sheet = win.document.createElement('style');
     win.document.head.appendChild(sheet);

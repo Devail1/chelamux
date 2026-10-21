@@ -1,4 +1,4 @@
-// CMX-178 — the legacy side of the React state bridge: util.js and nav.js publish what they
+// CMX-178 — the legacy side of the React state bridge: util.js and (CMX-278) the sidebar controller publish what they
 // still own (the agents list, the sidebar layout) to the stores the islands read
 // (chela/dashboard/frontend/src/shared/bridge). CMX-217: util.js's `_agentsCache` and
 // `currentTab` are a facade over the store's `agents` and `view` slices, imported, not looked
@@ -7,7 +7,7 @@
 // Run: pnpm exec vitest run tests/react_bridge_publish.test.mjs  (pytest runs it via tests/test_js_suites.py)
 import { beforeAll, beforeEach, test } from 'vitest';
 import assert from 'node:assert/strict';
-import { bootDashboardDom, flush } from './js_helpers/dashboard_dom.mjs';
+import { bootDashboardDom, flush, SIDEBAR } from './js_helpers/dashboard_dom.mjs';
 import { fakeArchiveServer } from './js_helpers/fake_archive.mjs';
 
 const ROWS = [{ name: 'a', window_id: '@301', online: true, session_status: 'idle', cwd: '/srv/code/alpha' }];
@@ -18,14 +18,14 @@ function fetchImpl(url, opts) {
     return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve(body) });
 }
 
-let util, nav, agents, view;
+let util, nav, agents, view, sidebar;
 const sets = { agents: [], sidebarLayout: [] };
 const recorder = name => ({ set: v => sets[name].push(v) });
 
 beforeAll(async () => {
-    ({ modules: { util, nav } } = await bootDashboardDom({
+    ({ modules: { util, nav, sidebar } } = await bootDashboardDom({
         body: '<aside class="sidebar"><div class="side-list" id="sidebar-agents"></div></aside><div id="agent-detail"></div>',
-        canvasStub: true, terminalsEnabled: false, fetchImpl, extraModules: ['util.js', 'nav.js'],
+        canvasStub: true, terminalsEnabled: false, fetchImpl, extraModules: ['util.js', 'nav.js', SIDEBAR],
     }));
     ({ agents } = await import('../chela/dashboard/frontend/src/shared/store/agents.ts'));
     ({ view } = await import('../chela/dashboard/frontend/src/shared/store/view.ts'));
@@ -73,20 +73,27 @@ test('with no bridge on window, the layout publish is a no-op and the agents cac
     assert.equal(util._agentsCache, rows);
     assert.equal(agents.get(), rows);
     window.chelaBridge = { sidebarLayout: null };
-    nav.viewMenuAction('group:none');
+    sidebar.viewMenuAction('group:none');
     assert.deepEqual(sets.sidebarLayout, []);
 });
 
 test('a layout read from the server is published whole, loaded, without the private gen counter', async () => {
-    await nav.refreshSidebar();
+    // The page already holds the server's layout (boot read it), so another device's change
+    // is what a refresh publishes. CMX-278: an unchanged layout is not re-published.
+    await sidebar.refreshSidebar();
+    for (let i = 0; i < 8; i++) await flush();
+    assert.deepEqual(sets.sidebarLayout, [], 'an unchanged layout was re-published');
+    await fetchImpl('/api/sidebar/layout', { method: 'POST', body: JSON.stringify({ order: ['/srv/elsewhere'] }) });
+    await sidebar.refreshSidebar();
     for (let i = 0; i < 8; i++) await flush();
     const last = sets.sidebarLayout.at(-1);
-    assert.deepEqual(Object.keys(last).sort(), ['custom', 'loaded', 'order', 'view']);
+    assert.deepEqual(last.order, ['/srv/elsewhere']);
+    assert.deepEqual(Object.keys(last).sort(), ['custom', 'loaded', 'order', 'view', 'width']);
     assert.equal(last.loaded, true);
 });
 
 test('a local layout change is published at once, before the server answers', () => {
-    nav.viewMenuAction('group:none');
+    sidebar.viewMenuAction('group:none');
     assert.equal(sets.sidebarLayout.length, 1);
     assert.equal(sets.sidebarLayout[0].view.groupBy, 'none');
     assert.equal('gen' in sets.sidebarLayout[0], false);

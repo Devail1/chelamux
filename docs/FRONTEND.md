@@ -82,8 +82,10 @@ Legacy code owns the fetches until the component reading their result is ported.
 | Store | Published by legacy from | Value |
 |---|---|---|
 | `agents` | `util.js` `setAgentsCache()` | the `/api/agents` rows |
-| `sidebarLayout` | `nav.js` `_setLayout()` / `_writeLayout()` | `{order, custom, view, loaded}` (CMX-82) |
-| `sidebar` | `nav.js` `renderSidebarAgents()` (and Alt held, the active row) | `SidebarState`: what the sidebar island draws (CMX-276) |
+| `sidebarLayout` | the sidebar controller's layout (`features/sidebar/lib/layout.ts`) | `{order, custom, view, width, loaded}` (CMX-82, CMX-278) |
+| `sidebar` | the sidebar controller's `renderSidebarAgents()` (and Alt held, the active row) | `SidebarState`: what the sidebar island draws (CMX-276) |
+| `nav` | `nav.js` `renderNav()` / `selectView()`, `work.js` (the badges) | the nav rows, the active view, the Work badge counts (CMX-278) |
+| `recent` | the sidebar controller (`/api/restore`, dismiss, Undo) | Recent sessions (CMX-278) |
 
 A store is a value plus listeners (`createStore`: `get`, `set`, `subscribe`; `set` with the
 same value notifies nobody, so always publish a NEW array or object, never one mutated in place). React reads it with `useStore(store)`, a one-line
@@ -115,18 +117,30 @@ call `publish('<name>', value)` wherever legacy changes it.
 
 ### The sidebar island
 
-`#sidebar-agents` is the sidebar island's (`src/features/sidebar`, CMX-276), and so is the VIEW
-menu's slot on the Sessions header, `#sidebar-view-menu` (a second root over the same store,
-CMX-277). Its group, row and VIEW menus are the kit's `Menu`; what a choice does is still
-legacy's (`groupMenuAction`, `rowMenuAction`, `viewMenuAction`, … on `window.chela`), and so are
-the layout, the archive and the collapsed groups, until slice C. It repaints
-synchronously (`flushSync`) on every publish of the `sidebar` store, because legacy code reads
-the rows straight back (Alt+N, jump to the orchestrator). Its clicks call the legacy handlers on
-`window.chela`, looked up at call time. Legacy `nav.js` / `terminals.js` import its pure
-model, `src/features/sidebar/model.ts`, as source. `tests/js_helpers/dashboard_dom.mjs` mounts it (from
-`src/`) for every suite that boots the page; a suite with its own jsdom boot calls
-`mountIslands(window)` before it imports `src/boot.ts`. Icons come from `src/shared/icons`, a map
-from a meaning to a Lucide icon.
+The sidebar is `src/features/sidebar` (CMX-172: slices CMX-276, CMX-277, CMX-278). Its roots
+draw into slots `index.html` keeps: the session list `#sidebar-agents`, the VIEW menu
+`#sidebar-view-menu`, the nav rows `#side-nav`, Recent sessions `#side-recent-island` and the
+width handle `#sidebar-resize`. Its group, row and VIEW menus are the kit's `Menu`.
+
+Its state and commands are `controller.ts`, the module's second entry point (the pure
+`model.ts` is the third): the `/api/agents` read the sidebar draws (its scheduler lane), the
+per-device collapsed groups, the server layout and archive, Recent sessions, the collapsed rail
+and phone drawer, the Alt fast switch, and the width. What it needs from the rest of the page
+(a window's label, the wall, opening a pane, the launcher, the orchestrator slot) it reaches
+through the host `nav.js` gives `configureSidebar()`, so it imports no legacy module; legacy
+(`nav.js`, `terminals.js`, `launcher.js`, `work.js`) imports it. The islands' clicks reach it
+through `window.chela` (`legacyActions`, looked up at call time).
+
+Every root repaints synchronously (`flushSync`) on a publish of its stores, because legacy
+code reads the rows straight back (Alt+N, jump to the orchestrator).
+`tests/js_helpers/dashboard_dom.mjs` mounts the islands (from `src/`) for every suite that boots
+the page, and returns the controller as `modules.sidebar` (`extraModules: [SIDEBAR]`); a suite
+with its own jsdom boot calls `mountIslands(window)` before it imports `src/boot.ts`. Icons come
+from `src/shared/icons`, a map from a meaning to a Lucide icon.
+
+The desktop width (CMX-278) is `--sidebar-w` on the root element, set from the layout's `width`
+(clamped to 264-480 px, default 288; `chela/sidebar_layout.py` clamps the same). The handle sets
+it live while dragging and saves it on release. The phone drawer keeps its own 264 px.
 
 ### Markdown
 

@@ -258,7 +258,7 @@ beforeAll(async () => {
     util.setAgentsCache(AGENTS);
     await terminals.renderTerminals();
     // CMX-85: Alt+N targets the sidebar's rows — draw them.
-    (await import('../chela/dashboard/static/js/nav.js')).renderSidebarAgents(AGENTS);
+    (await import('../chela/dashboard/frontend/src/features/sidebar/controller.ts')).renderSidebarAgents(AGENTS);
 });
 
 beforeEach(() => {
@@ -1070,7 +1070,7 @@ test("CMX-377: the header dot reaches the 'done' class for a finished pane, not 
 // header still calling it "busy" while the sidebar calls it "working", or the pane
 // header never reaching "done" at all — test 12a-2's regression) fails here.
 test('CMX-377: sidebar row and pane header dot use the SAME class for each of the 4 states', async () => {
-    const nav = await import('../chela/dashboard/static/js/nav.js');
+    const sidebar = await import('../chela/dashboard/frontend/src/features/sidebar/controller.ts');
 
     // A throwaway sidebar host — renderSidebarAgents only ever needs #sidebar-agents
     // to exist; it is not part of the shared PANEL fixture the wall tests mount.
@@ -1092,7 +1092,7 @@ test('CMX-377: sidebar row and pane header dot use the SAME class for each of th
     ];
 
     for (const c of CASES) {
-        nav.renderSidebarAgents([c.row]);
+        sidebar.renderSidebarAgents([c.row]);
         const sideDot = host.querySelector('.term-status-dot');
         assert.ok(sideDot, `${c.label}: sidebar row did not render a .term-status-dot`);
         const sideCls = ['working', 'waiting', 'idle', 'done'].find(k => sideDot.classList.contains(k));
