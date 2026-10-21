@@ -3,7 +3,7 @@
 // adopt-first, the post-mint reload, the server's mode answer, and the boot read.
 import { act } from '@testing-library/react';
 import { afterEach, beforeEach, expect, test, vi } from 'vitest';
-import { configureShareHost, followAgents, setShareMode, shares, shareSession, startShares, stopShare } from '../index.ts';
+import { closeShareDialog, configureShareHost, followAgents, setShareMode, shares, shareSession, startShares, stopShare } from '../index.ts';
 import { INFO, resetShares, serve, settle } from './server.ts';
 import { must, stubFetch } from './setup.ts';
 
@@ -28,6 +28,7 @@ beforeEach(() => {
   vi.spyOn(console, 'warn').mockImplementation(() => {});
 });
 afterEach(() => {
+  act(() => closeShareDialog());
   document.body.innerHTML = '';
   vi.restoreAllMocks();
 });
@@ -119,4 +120,37 @@ test('page load lights the pill for the shares already live, and a failed read l
 test('the agents poll is followed', () => {
   followAgents([{ window_id: '@2', shared: true, share_mode: 'typing' }]);
   expect(shares.get().get('@2')?.mode).toBe('typing');
+});
+
+const JSON_POST = (body: unknown) => ({ method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+
+test('the exact requests: Stop POSTs {on:false} to the share; a mode change POSTs to /share-mode', async () => {
+  const calls = stubFetch(() => ({ ok: true, mode: 'typing' }));
+  await stopShare('a b');
+  await setShareMode('a b', { mode: 'typing' });
+  expect(calls).toEqual([
+    { url: '/api/term/a%20b/share', init: JSON_POST({ on: false }) },
+    { url: '/api/term/a%20b/share-mode', init: JSON_POST({ mode: 'typing' }) },
+  ]);
+});
+
+test('a refused Stop reads /api/term/shared before it gives up', async () => {
+  const calls = stubFetch((url) => (url.endsWith('/shared') ? { '@1': { mode: 'view' } } : { ok: false }));
+  expect(await stopShare('@1')).toBe(false);
+  expect(calls.map((c) => c.url)).toEqual(['/api/term/%401/share', '/api/term/shared']);
+});
+
+test('a pane whose terminal cannot be read mints without a size', async () => {
+  const s = serve({ info: {}, shared: {} });
+  const f = document.createElement('iframe');
+  Object.defineProperty(f, 'contentWindow', {
+    get() {
+      throw new Error('cross-frame');
+    },
+  });
+  frames = [{ frame: f, reload: vi.fn() }];
+  await act(() => shareSession('@1'));
+  act(() => must(document.querySelector<HTMLButtonElement>('.sd-share')).click());
+  await settle();
+  expect(s.mintPosts).toEqual([{ on: true, mode: 'view' }]);
 });
