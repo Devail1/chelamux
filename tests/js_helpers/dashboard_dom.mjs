@@ -89,9 +89,10 @@ const GLOBAL_WINDOW_PROPS = ['window', 'document', 'localStorage', 'navigator', 
  * to switch which page the globals (and so the next call into its modules) act on. */
 export function activateDom(dom) {
     // CMX-237: plus the DOM classes React and Radix reach for as globals (the diff modal
-    // island's Dialog: `instanceof HTMLInputElement`, MutationObserver, a NodeFilter walk).
+    // island's Dialog: `instanceof HTMLInputElement`, MutationObserver, a NodeFilter walk;
+    // CMX-231: the kit's Select, `new DocumentFragment()`).
     const domClasses = Object.getOwnPropertyNames(dom.window)
-        .filter(k => /^(HTML\w*Element|SVGElement|NodeFilter|MutationObserver|FocusEvent|PointerEvent)$/.test(k));
+        .filter(k => /^(HTML\w*Element|SVGElement|NodeFilter|MutationObserver|FocusEvent|PointerEvent|DocumentFragment)$/.test(k));
     for (const k of [...GLOBAL_WINDOW_PROPS, ...domClasses]) {
         // defineProperty, NOT assignment: from node 21 `globalThis.navigator` has
         // only a getter, and plain assignment throws.
@@ -102,8 +103,8 @@ export function activateDom(dom) {
 }
 
 /** CMX-276: what the page's React islands do before the legacy graph boots (index.html loads
- * them first): a bridge on `win`, the sidebar island drawing its #sidebar-agents, and the diff
- * modal and keybar islands (CMX-237). From
+ * them first): a bridge on `win`, the sidebar island drawing its #sidebar-agents, the diff
+ * modal and keybar islands (CMX-237), and the Work view's islands (CMX-231). From
  * src/, so a mutation of the TypeScript reaches every suite that boots the page. Each page
  * (window) gets its own bridge and root. A suite that hand-rolls its jsdom boot calls this
  * before it imports boot.ts / nav.js. */
@@ -114,6 +115,14 @@ export async function mountIslands(win) {
         const { DiffModal } = await import('../../chela/dashboard/frontend/src/features/diffmodal/index.ts');
         const { mountIsland } = await import('../../chela/dashboard/frontend/src/shared/islands/index.tsx');
         mountIsland('diff-modal-island', DiffModal, {}, doc);
+    }
+    // CMX-231: the Work view's Runs and Schedules segments and the New-task dialog.
+    for (const [id, feature, name] of [['work-runs', 'runs', 'Runs'], ['work-schedules', 'schedules', 'Schedules'],
+        ['newtask-island', 'newtask', 'NewTask']]) {
+        if (!doc.getElementById(id)) continue;
+        const mod = await import(`../../chela/dashboard/frontend/src/features/${feature}/index.ts`);
+        const { mountIsland } = await import('../../chela/dashboard/frontend/src/shared/islands/index.tsx');
+        mountIsland(id, mod[name], {}, doc);
     }
     if (doc.getElementById('keybar-island')) {
         const { mountKeybar } = await import('../../chela/dashboard/frontend/src/features/keybar/index.ts');

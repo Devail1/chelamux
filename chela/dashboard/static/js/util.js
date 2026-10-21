@@ -5,6 +5,7 @@ import { ICONS } from './icons';
 // their importers need no edit.
 import { ASSET_VERSION, BASE_PATH, BOOT, api, staticUrl } from '../../frontend/src/shared/api';
 import { onEvent } from '../../frontend/src/shared/events';
+import { relativeTime, shortTime } from '../../frontend/src/shared/format';
 import { agents as agentsStore } from '../../frontend/src/shared/store/agents';
 import { view as viewStore } from '../../frontend/src/shared/store/view';
 
@@ -145,27 +146,6 @@ function wantsHuman(a) {
 function $(sel) { return document.querySelector(sel); }
 function $$(sel) { return document.querySelectorAll(sel); }
 
-function shortTime(iso) {
-    if (!iso) return '-';
-    try {
-        const d = new Date(iso);
-        return d.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', hour12: false })
-            + ' ' + d.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
-    } catch { return iso; }
-}
-
-function relativeTime(iso) {
-    if (!iso) return '-';
-    try {
-        const diff = (new Date(iso) - Date.now()) / 1000;
-        if (diff < 0) return 'overdue';
-        if (diff < 60) return Math.round(diff) + 's';
-        if (diff < 3600) return Math.round(diff / 60) + 'm';
-        if (diff < 86400) return Math.round(diff / 3600) + 'h';
-        return Math.round(diff / 86400) + 'd';
-    } catch { return iso; }
-}
-
 function ageStr(seconds) {
     if (seconds == null) return 'never';
     if (seconds < 60) return Math.round(seconds) + 's ago';
@@ -286,39 +266,6 @@ document.addEventListener('click', e => {
     }
 });
 
-function humanSchedule(type, value) {
-    if (type === 'interval') return 'every ' + value;
-    if (type === 'once') return 'once';
-    if (type !== 'cron') return type + ' ' + value;
-    const parts = value.split(/\s+/);
-    if (parts.length !== 5) return 'cron ' + value;
-    const [min, hr, dom, mon, dow] = parts;
-    if (/^\*\/\d+$/.test(min) && hr === '*') return 'every ' + min.slice(2) + 'm';
-    if (/^\d+$/.test(min) && hr === '*') return 'every 1h at :' + min.padStart(2, '0');
-    if (/^\d+$/.test(min) && /^\*\/\d+$/.test(hr)) return 'every ' + hr.slice(2) + 'h at :' + min.padStart(2, '0');
-    if (/^\d+$/.test(min) && /^\d+$/.test(hr)) return 'daily at ' + hr.padStart(2, '0') + ':' + min.padStart(2, '0');
-    // N H1,H2,H3 * * * → 3x daily at HH:MM, HH:MM, HH:MM
-    if (/^\d+$/.test(min) && /^[\d,]+$/.test(hr) && dom === '*' && mon === '*' && dow === '*') {
-        const hrs = hr.split(',').map(Number).sort((a, b) => a - b);
-        const mm = min.padStart(2, '0');
-        if (hrs.length >= 2) {
-            const interval = hrs[1] - hrs[0];
-            if (hrs.every((h, i) => i === 0 || h - hrs[i-1] === interval))
-                return 'every ' + interval + 'h at :' + mm;
-        }
-        return hrs.length + 'x daily at ' + hrs.map(h => String(h).padStart(2, '0') + ':' + mm).join(', ');
-    }
-    if (/^[\d,]+$/.test(min) && hr === '*') {
-        const mins = min.split(',').map(Number).sort((a, b) => a - b);
-        if (mins.length >= 2) {
-            const interval = mins[1] - mins[0];
-            if (mins.every((m, i) => i === 0 || m - mins[i-1] === interval))
-                return 'every ' + interval + 'm';
-        }
-        return 'at :' + mins.map(m => String(m).padStart(2, '0')).join(',:');
-    }
-    return 'cron ' + value;
-}
 
 
 // --- Stage 0: setters for cross-module mutable state (imported bindings are read-only) ---
@@ -335,7 +282,7 @@ function publish(name, value) {
 }
 
 // --- Stage 0: ES-module exports ---
-export { $, $$, ASSET_VERSION, BASE_PATH, REFRESH_MS, TERMINALS_ON, WALL_TILE_DISPATCHED, _agentProject, _agentsCache, ageStr, agentDotColor, api, attrEsc, closeModal, currentTab, escHtml, humanSchedule, icon, lucideIcon, msgTargetAgent, publish, relativeTime, setAgentsCache, setCurrentTab, setMsgTarget, shortTime, showModal, staticUrl, updateTabSignal, wantsHuman };
+export { $, $$, ASSET_VERSION, BASE_PATH, REFRESH_MS, TERMINALS_ON, WALL_TILE_DISPATCHED, _agentProject, _agentsCache, ageStr, agentDotColor, api, attrEsc, closeModal, currentTab, escHtml, icon, lucideIcon, msgTargetAgent, publish, relativeTime, setAgentsCache, setCurrentTab, setMsgTarget, shortTime, showModal, staticUrl, updateTabSignal, wantsHuman };
 
 // --- Stage 0: window.chela — surface reachable from inline HTML handlers ---
 window.chela = window.chela || {};
