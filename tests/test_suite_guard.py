@@ -432,12 +432,16 @@ def test_run_suite_takes_a_slot_with_its_cwd_hook_and_bounded_wait(guard_on, mon
     assert seen == [(guard_on, hook, 120)]
 
 
-@pytest.mark.parametrize("env,want", [(None, 120.0), ("7", 7.0), ("0", 120.0), ("-3", 120.0),
-                                      ("soon", 120.0)])
-def test_slot_max_wait_env_then_four_timeouts(monkeypatch, env, want):
+@pytest.mark.parametrize("env,stored,want", [
+    (None, None, 120.0), ("7", 9, 7.0), (None, 9, 9.0), ("0", None, 120.0),
+    ("-3", None, 120.0), ("soon", 9, 9.0)])
+def test_slot_max_wait_env_then_config_then_four_timeouts(guard_on, monkeypatch, env,
+                                                          stored, want):
     monkeypatch.delenv("CHELA_SUITE_SLOT_MAX_WAIT", raising=False)
     if env is not None:
         monkeypatch.setenv("CHELA_SUITE_SLOT_MAX_WAIT", env)
+    if stored is not None:
+        userconfig.set_("suite_slot_max_wait", stored)
     assert suite_guard.max_wait(30) == want
 
 

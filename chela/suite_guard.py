@@ -189,11 +189,10 @@ def slots() -> int:
 
 def max_wait(timeout: float) -> float:
     """How long a run with this suite ``timeout`` waits for a slot:
-    ``CHELA_SUITE_SLOT_MAX_WAIT`` (seconds, > 0) > ``SLOT_WAIT_TIMEOUTS`` x ``timeout``."""
-    try:
-        override = float(os.environ.get("CHELA_SUITE_SLOT_MAX_WAIT", ""))
-    except ValueError:
-        override = 0.0
+    ``CHELA_SUITE_SLOT_MAX_WAIT`` > ``suite_slot_max_wait`` in config.json (seconds, > 0) >
+    ``SLOT_WAIT_TIMEOUTS`` x ``timeout``."""
+    override = config.dashboard_setting("suite_slot_max_wait", "CHELA_SUITE_SLOT_MAX_WAIT",
+                                        0.0, cast=float)
     return override if override > 0 else SLOT_WAIT_TIMEOUTS * timeout
 
 
