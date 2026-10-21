@@ -1,26 +1,24 @@
-// SHARE DIALOG (CMX-403) — the access choice made BEFORE a share is minted, in a REAL
-// DOM running the real terminals.js (same harness as tests/share_sheet.test.mjs).
+// SHARE DIALOG (CMX-403), page level: a pane's Share button opens the access dialog, and
+// what it mints lands on the page, in a REAL DOM running the real terminals.js (same harness
+// as tests/share_sheet.test.mjs). Since CMX-239 the dialog is React
+// (frontend/src/features/share): its own rules (the reasons, the override's typed name, the
+// duration picker and its second confirmation) are tested there, in ShareDialog.test.tsx.
 //
-// Guards (each corrupt→RED, recorded in the PR's self-check experiments):
-//   - "View only" is the default choice, and minting with it POSTs mode:"view";
-//   - "Allow typing" is DISABLED with "Typing is disabled in Settings" when the setting
-//     is off, and with "Not a sandboxed session. Start one from New session →
-//     Sandboxed" when the window isn't one; ENABLED with no reason when both hold
-//     (the accepted case, and the negative control for the two disabled ones);
-//   - the UNSANDBOXED override is offered only with the setting on AND a non-sandboxed
-//     window, and Share stays disabled until the window name is TYPED exactly;
-//   - CMX-419: the override's duration picker preselects the configured default and its
-//     choice is POSTed as `minutes`; a pick above 4 h keeps Share disabled until the
-//     window name is typed a SECOND time; the time left shows on the red banner and in
-//     Active shares;
+// Guards here:
+//   - Share on an unshared pane opens the dialog; View only mints mode:"view" with the
+//     pane's live size;
+//   - "Allow typing" mints mode:"typing" and the pill reads ⌨;
+//   - the override, armed by the typed window name, POSTs mode/confirm/minutes;
 //   - the share pill reads 👁 for view only, and the red "UNSANDBOXED: guest can type"
-//     banner shows on the pill AND the pane while an override is live — and not otherwise.
+//     banner shows on the pill AND the pane while an override is live, and not otherwise;
+//   - CMX-419: the time left shows on the red banner and in Active shares.
 //
 // Run: pnpm exec vitest run tests/share_dialog.test.mjs (pytest runs it via
 // tests/test_js_suites.py; needs `pnpm install` for jsdom).
 import { beforeAll, beforeEach, test } from 'vitest';
 import assert from 'node:assert/strict';
 import { JSDOM } from 'jsdom';
+import { exposeDomConstructors } from './js_helpers/dashboard_dom.mjs';
 
 const PANEL = `
 <button class="shares-indicator" id="btn-shares" hidden><span class="si-dot"></span><span class="si-text">0 sharing</span></button>
@@ -69,7 +67,7 @@ function fakeGridStack() {
     return { init: () => grid };
 }
 
-let terminals, util;
+let terminals, util, share;
 const flush = () => new Promise(r => setTimeout(r, 0));
 
 beforeAll(async () => {
@@ -80,6 +78,7 @@ beforeAll(async () => {
         'getComputedStyle', 'requestAnimationFrame', 'cancelAnimationFrame']) {
         Object.defineProperty(globalThis, k, { value: dom.window[k], writable: true, configurable: true });
     }
+    exposeDomConstructors(dom.window);   // CMX-239: the share dialog is React on Radix
     globalThis.GridStack = fakeGridStack();
     globalThis.fetch = fakeFetch;
     dom.window.document.elementFromPoint = () => null;
@@ -90,6 +89,7 @@ beforeAll(async () => {
     await import('../chela/dashboard/frontend/src/boot.ts');
     util = await import('../chela/dashboard/static/js/util.js');
     terminals = await import('../chela/dashboard/static/js/terminals.js');
+    share = await import('../chela/dashboard/frontend/src/features/share/index.ts');
     util.setCurrentTab('terminals');
     util.setAgentsCache(AGENTS);
     await terminals.renderTerminals();
@@ -98,15 +98,30 @@ beforeAll(async () => {
 beforeEach(async () => {
     MINT_MODE = 'view';
     MINT_EXPIRES = null;
-    terminals.closeShareDialog();
+    share.closeShareDialog();
     window.chela.closeSharesSheet && window.chela.closeSharesSheet();
     if (terminals._sharedWids.has('@1')) await terminals._stopShare('@1');
     posts = [];
 });
 
-const dialog = () => document.querySelector('#share-dialog-backdrop .share-dialog');
-const radio = v => dialog().querySelector(`input[name="sd-mode"][value="${v}"]`);
-const reasonText = () => (dialog().querySelector('.sd-reason') || { textContent: '' }).textContent;
+const dialog = () => document.querySelector('.share-dialog');
+const radio = v => dialog().querySelector(`[role="radio"][value="${v}"]`);
+const shareBtn = () => dialog().querySelector('.sd-share');
+
+// React reads a typed value through the input's native setter, then commits after the event.
+async function typeIn(labelStart, v) {
+    const label = [...dialog().querySelectorAll('label.field-label')].find(l => l.textContent.startsWith(labelStart));
+    const el = document.getElementById(label.htmlFor);
+    Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set.call(el, v);
+    el.dispatchEvent(new window.Event('input', { bubbles: true }));
+    await flush();
+}
+async function pick(v) { radio(v).click(); await flush(); }
+async function mint(mode) {
+    MINT_MODE = mode;
+    shareBtn().click();
+    await flush(); await flush(); await flush();
+}
 
 async function open(options) {
     OPTIONS = options;
@@ -114,72 +129,52 @@ async function open(options) {
     assert.ok(dialog(), 'Share on an unshared pane must open the access dialog');
 }
 
-test('"View only" is the default and mints mode:"view"', async () => {
+test('"View only" is the default and mints mode:"view", then opens Active shares', async () => {
     await open({ share_typing: true, sandboxed: true, typing_allowed: true, window_name: 'shell-1' });
-    assert.equal(radio('view').checked, true, 'View only must be the default choice');
-    assert.equal(radio('typing').checked, false);
-    dialog().querySelector('.sd-share').click();
-    await flush(); await flush();
+    assert.equal(radio('view').getAttribute('aria-checked'), 'true', 'View only must be the default choice');
+    assert.equal(radio('typing').getAttribute('aria-checked'), 'false');
+    await mint('view');
     assert.equal(posts.length, 1);
     assert.equal(posts[0].mode, 'view');
+    assert.equal(dialog(), null, 'the dialog closes once the share is minted');
+    assert.ok(document.querySelector('#shares-sheet-backdrop .ss-row[data-wid="@1"]'), 'Active shares lists the new share');
 });
 
 test('setting off ⇒ Allow typing disabled with "Typing is disabled in Settings"', async () => {
     await open({ share_typing: false, sandboxed: true, typing_allowed: false, window_name: 'shell-1' });
     assert.equal(radio('typing').disabled, true);
-    assert.equal(reasonText(), 'Typing is disabled in Settings');
+    assert.equal(dialog().querySelector('.sd-reason').textContent, 'Typing is disabled in Settings');
     assert.equal(radio('unsandboxed'), null, 'the override must not be offered with the setting off');
 });
 
-test('not a sandboxed session ⇒ Allow typing disabled with the New session → Sandboxed hint', async () => {
-    await open({ share_typing: true, sandboxed: false, typing_allowed: false,
-                 unsandboxed_offered: true, window_name: 'shell-1' });
-    assert.equal(radio('typing').disabled, true);
-    assert.equal(reasonText(), 'Not a sandboxed session. Start one from New session → Sandboxed');
-});
-
-test('⭐ setting on + verified sandbox ⇒ Allow typing enabled, no reason, mints mode:"typing"', async () => {
+test('⭐ setting on + verified sandbox ⇒ Allow typing mints mode:"typing" and the pill reads ⌨', async () => {
     await open({ share_typing: true, sandboxed: true, typing_allowed: true, window_name: 'shell-1' });
     assert.equal(radio('typing').disabled, false);
-    assert.equal(reasonText(), '');
-    assert.equal(radio('unsandboxed'), null, 'no override on a window that is already sandboxed');
-    radio('typing').checked = true;
-    radio('typing').onchange();
-    MINT_MODE = 'typing';
-    dialog().querySelector('.sd-share').click();
-    await flush(); await flush();
+    await pick('typing');
+    await mint('typing');
     assert.equal(posts[0].mode, 'typing');
     assert.match(document.querySelector('#btn-shares .si-text').textContent, /⌨/);
 });
 
-test('UNSANDBOXED override: Share stays disabled until the window name is typed', async () => {
+test('UNSANDBOXED override: armed only by the typed window name; POSTs mode, confirm, minutes', async () => {
     await open({ share_typing: true, sandboxed: false, typing_allowed: false,
                  unsandboxed_offered: true, unsandboxed_minutes: 30, window_name: 'shell-1' });
-    const r = radio('unsandboxed');
-    assert.ok(r, 'the override must be offered: setting on, window not sandboxed');
-    assert.match(r.closest('label').textContent,
-        /Full access, UNSANDBOXED: the guest can type into a real shell on this machine/);
-    r.checked = true; r.onchange();
-    const share = dialog().querySelector('.sd-share');
-    const confirmIn = dialog().querySelector('#sd-confirm-in');
-    assert.equal(share.disabled, true, 'no typed confirmation ⇒ Share must be disabled');
-    confirmIn.value = 'shell-2'; confirmIn.oninput();
-    assert.equal(share.disabled, true, 'a WRONG name must not arm it');
-    confirmIn.value = 'shell-1'; confirmIn.oninput();
-    assert.equal(share.disabled, false, 'the exact window name arms it');
-    MINT_MODE = 'unsandboxed';
-    share.click();
-    await flush(); await flush();
-    assert.deepEqual([posts[0].mode, posts[0].confirm], ['unsandboxed', 'shell-1']);
+    assert.ok(radio('unsandboxed'), 'the override must be offered: setting on, window not sandboxed');
+    await pick('unsandboxed');
+    assert.equal(shareBtn().disabled, true, 'no typed confirmation ⇒ Share must be disabled');
+    await typeIn('Type shell-1', 'shell-2');
+    assert.equal(shareBtn().disabled, true, 'a WRONG name must not arm it');
+    await typeIn('Type shell-1', 'shell-1');
+    assert.equal(shareBtn().disabled, false, 'the exact window name arms it');
+    await mint('unsandboxed');
+    assert.deepEqual([posts[0].mode, posts[0].confirm, posts[0].minutes], ['unsandboxed', 'shell-1', 30]);
 });
 
 test('the red UNSANDBOXED banner shows on the pill and the pane while an override is live', async () => {
     await open({ share_typing: true, sandboxed: false, unsandboxed_offered: true, window_name: 'shell-1' });
-    radio('unsandboxed').checked = true; radio('unsandboxed').onchange();
-    const c = dialog().querySelector('#sd-confirm-in'); c.value = 'shell-1'; c.oninput();
-    MINT_MODE = 'unsandboxed';
-    dialog().querySelector('.sd-share').click();
-    await flush(); await flush();
+    await pick('unsandboxed');
+    await typeIn('Type shell-1', 'shell-1');
+    await mint('unsandboxed');
     const pill = document.getElementById('btn-shares');
     assert.equal(pill.classList.contains('si-unsandboxed'), true);
     assert.match(pill.textContent, /UNSANDBOXED: guest can type/);
@@ -193,73 +188,33 @@ test('the red UNSANDBOXED banner shows on the pill and the pane while an overrid
 
 test('negative control: a view-only share shows 👁 and no UNSANDBOXED banner', async () => {
     await open({ share_typing: false, window_name: 'shell-1' });
-    dialog().querySelector('.sd-share').click();
-    await flush(); await flush();
+    await mint('view');
     const pill = document.getElementById('btn-shares');
     assert.match(pill.querySelector('.si-text').textContent, /👁/);
     assert.equal(pill.classList.contains('si-unsandboxed'), false);
     assert.equal(document.querySelector('.gs-unsafe-banner[data-banner-for="@1"]').hidden, true);
 });
 
-
-// --- CMX-419: the override's duration picker ------------------------------------------
-const UNSAFE_OPTS = { share_typing: true, sandboxed: false, typing_allowed: false, unsandboxed_offered: true,
-    unsandboxed_minutes: 30, unsandboxed_choices: [30, 240, 1440, 10080, 20160],
-    unsandboxed_long_minutes: 240, window_name: 'shell-1' };
-
-function pickUnsafe() {
-    radio('unsandboxed').checked = true; radio('unsandboxed').onchange();
-}
-function typeIn(sel, v) { const el = dialog().querySelector(sel); el.value = v; el.oninput(); }
-function pickDur(n) { const s = dialog().querySelector('#sd-dur'); s.value = String(n); s.onchange(); }
-
-test('⭐ the picker preselects the configured default and the default mints as before', async () => {
-    await open(UNSAFE_OPTS);
-    pickUnsafe();
-    const sel = dialog().querySelector('#sd-dur');
-    assert.deepEqual([...sel.options].map(o => o.textContent), ['30 min', '4 h', '1 day', '7 days', '14 days']);
-    assert.equal(sel.value, '30');
-    assert.equal(dialog().querySelector('.sd-confirm-long').hidden, true, 'no second confirmation at 30 min');
-    typeIn('#sd-confirm-in', 'shell-1');
-    assert.equal(dialog().querySelector('.sd-share').disabled, false);
-    MINT_MODE = 'unsandboxed';
-    dialog().querySelector('.sd-share').click();
-    await flush(); await flush();
-    assert.equal(posts[0].minutes, 30);
-    assert.equal('confirm_long' in posts[0], false);
-});
-
-test('the picker preselects a non-30 configured default', async () => {
-    await open({ ...UNSAFE_OPTS, unsandboxed_minutes: 240 });
-    assert.equal(dialog().querySelector('#sd-dur').value, '240');
-});
-
-test('a 7-day pick needs the window name typed twice, and POSTs minutes:10080', async () => {
-    await open(UNSAFE_OPTS);
-    pickUnsafe();
-    pickDur(10080);
-    const share = dialog().querySelector('.sd-share');
-    assert.equal(dialog().querySelector('.sd-confirm-long').hidden, false, '>4 h shows the second confirmation');
-    typeIn('#sd-confirm-in', 'shell-1');
-    assert.equal(share.disabled, true, 'one confirmation must not arm a >4 h grant');
-    typeIn('#sd-confirm-long-in', 'shell-2');
-    assert.equal(share.disabled, true, 'a WRONG second name must not arm it');
-    typeIn('#sd-confirm-long-in', 'shell-1');
-    assert.equal(share.disabled, false);
-    MINT_MODE = 'unsandboxed';
-    share.click();
-    await flush(); await flush();
-    assert.deepEqual([posts[0].minutes, posts[0].confirm, posts[0].confirm_long], [10080, 'shell-1', 'shell-1']);
+test('a refused mint leaves the page unshared and the dialog open with the reason', async () => {
+    await open({ share_typing: false, window_name: 'shell-1' });
+    const realFetch = globalThis.fetch;
+    globalThis.fetch = (url, opts) => /\/share$/.test(String(url))
+        ? Promise.resolve({ ok: true, json: () => Promise.resolve({ ok: false, error: 'relay down' }) })
+        : realFetch(url, opts);
+    try {
+        await mint('view');
+    } finally { globalThis.fetch = realFetch; }
+    assert.equal(dialog().querySelector('[role="alert"]').textContent, 'relay down');
+    assert.equal(terminals._sharedWids.has('@1'), false);
+    assert.equal(document.getElementById('btn-shares').hidden, true);
 });
 
 test('time left reads "12d 4h left" on the red banner and in Active shares', async () => {
-    await open(UNSAFE_OPTS);
-    pickUnsafe(); pickDur(20160);
-    typeIn('#sd-confirm-in', 'shell-1'); typeIn('#sd-confirm-long-in', 'shell-1');
-    MINT_MODE = 'unsandboxed';
+    await open({ share_typing: true, sandboxed: false, unsandboxed_offered: true, window_name: 'shell-1' });
+    await pick('unsandboxed');
+    await typeIn('Type shell-1', 'shell-1');
     MINT_EXPIRES = Date.now() / 1000 + (12 * 1440 + 4 * 60) * 60 + 30;
-    dialog().querySelector('.sd-share').click();
-    await flush(); await flush(); await flush();
+    await mint('unsandboxed');
     const banner = document.querySelector('.gs-unsafe-banner[data-banner-for="@1"]');
     assert.equal(banner.hidden, false);
     assert.match(banner.textContent, /UNSANDBOXED: guest can type · 12d 4h left/);

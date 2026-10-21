@@ -2,8 +2,8 @@
 // for `icons.orchestrator`, never for a Lucide name, so a meaning is chosen once. Lucide is
 // bundled by the build (no CDN). An icon is aria-hidden unless it is the only label.
 import {
-  ArrowUpToLine, ChevronDown, ChevronRight, ChevronUp, Columns3, Crown, Ellipsis, FlaskConical, GitPullRequest, Keyboard,
-  LayoutGrid, Plus, RotateCw, SlidersHorizontal, X,
+  ArrowUpToLine, ChevronDown, ChevronRight, ChevronUp, Columns3, Crown, Ellipsis, Eye, FlaskConical, GitPullRequest,
+  Keyboard, LayoutGrid, Plus, RotateCw, Share2, SlidersHorizontal, TriangleAlert, X,
 } from 'lucide-react';
 
 export const icons = {
@@ -14,6 +14,10 @@ export const icons = {
   chevronDown: ChevronDown,
   more: Ellipsis,
   add: Plus,
+  share: Share2,
+  viewOnly: Eye,
+  typing: Keyboard,
+  unsandboxed: TriangleAlert,
   close: X,
   chevronUp: ChevronUp,
   keyboard: Keyboard,
