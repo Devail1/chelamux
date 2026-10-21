@@ -7,8 +7,8 @@ import * as RM from '@radix-ui/react-dropdown-menu';
 import * as RP from '@radix-ui/react-popover';
 import * as RToast from '@radix-ui/react-toast';
 import * as RT from '@radix-ui/react-tooltip';
-import type { LucideIcon } from 'lucide-react';
-import { useRef, type ReactElement, type ReactNode } from 'react';
+import { Check, ChevronRight, type LucideIcon } from 'lucide-react';
+import { useRef, type ReactElement, type ReactNode, type SyntheticEvent } from 'react';
 
 const cx = (...names: (string | false | undefined)[]) => names.filter(Boolean).join(' ');
 
@@ -93,29 +93,90 @@ export function Popover({ trigger, children, open, onOpenChange, align = 'end', 
 }
 
 export type MenuItem =
-  | { label: string; onSelect: () => void; icon?: LucideIcon; disabled?: boolean }
+  | {
+      label: string;
+      onSelect: () => void;
+      icon?: LucideIcon;
+      disabled?: boolean;
+      /** The menu stays open after this pick (a page change, a multi-select, a toggle). */
+      keepOpen?: boolean;
+      /** A choice: drawn with a check when on, announced as a radio or a checkbox. */
+      check?: 'radio' | 'checkbox';
+      checked?: boolean;
+      /** A submenu's row: its current value at the right, then a chevron. */
+      value?: string;
+      submenu?: boolean;
+      /** A page's back row: a chevron pointing back. */
+      back?: boolean;
+    }
   | 'separator';
 
-/** A dropdown menu, named by its trigger: arrow keys move, Enter picks, typing jumps, Escape closes. */
-export function Menu({ trigger, items, className }: { trigger: ReactElement; items: MenuItem[]; className?: string }) {
+type Entry = Exclude<MenuItem, 'separator'>;
+
+// A page change swaps the items under the focused one: focus the new page's first item, so
+// the keyboard keeps its place in the menu.
+function refocus(content: Element | null) {
+  setTimeout(() => {
+    if (!content?.isConnected || content.contains(document.activeElement)) return;
+    content.querySelector<HTMLElement>('[role^="menuitem"]:not([data-disabled])')?.focus();
+  }, 0);
+}
+
+function MenuEntry({ it }: { it: Entry }) {
+  const onSelect = (e: Event) => {
+    if (it.keepOpen) {
+      e.preventDefault();
+      refocus((e.currentTarget as Element | null)?.closest('[role="menu"]') ?? null);
+    }
+    it.onSelect();
+  };
+  const role = it.check === 'radio' ? 'menuitemradio' : it.check === 'checkbox' ? 'menuitemcheckbox' : undefined;
   return (
-    <RM.Root>
+    <RM.Item className={cx('popover-item ov-item', it.checked && 'on', it.back && 'ov-back')} disabled={it.disabled} onSelect={onSelect}
+      {...(role ? { role, 'aria-checked': !!it.checked } : {})} {...(it.submenu ? { 'aria-haspopup': 'menu' as const } : {})}>
+      {it.back && <span className="ov-chev back"><ChevronRight size={12} aria-hidden /></span>}
+      {it.icon && (
+        <span className="ov-ic">
+          <it.icon aria-hidden />
+        </span>
+      )}
+      <span className="ov-label">{it.label}</span>
+      {it.value !== undefined && <span className="ov-val">{it.value}</span>}
+      {it.checked && <span className="ov-check"><Check size={12} aria-hidden /></span>}
+      {it.submenu && <span className="ov-chev"><ChevronRight size={12} aria-hidden /></span>}
+    </RM.Item>
+  );
+}
+
+export type MenuProps = {
+  trigger: ReactElement;
+  items: MenuItem[];
+  className?: string;
+  /** Controlled open state, for a menu that also opens another way (a right-click). */
+  open?: boolean;
+  onOpenChange?: (open: boolean) => void;
+};
+
+// A portal still bubbles React events up the React tree: a pick inside the menu must not
+// also reach whatever holds the trigger (a row that opens on click, a header that folds).
+// A right-click inside it opens no native menu over it either.
+const contain = (e: SyntheticEvent) => e.stopPropagation();
+const containContext = (e: SyntheticEvent) => {
+  e.preventDefault();
+  e.stopPropagation();
+};
+
+/** A dropdown menu, named by its trigger: arrow keys move, Enter picks, typing jumps, Escape closes. */
+export function Menu({ trigger, items, className, open, onOpenChange }: MenuProps) {
+  return (
+    <RM.Root open={open} onOpenChange={onOpenChange}>
       <RM.Trigger asChild>{trigger}</RM.Trigger>
       <RM.Portal>
-        <RM.Content className={cx('popover overflow-menu ui-floating', className)} align="end" sideOffset={GAP} collisionPadding={MARGIN}>
+        <RM.Content className={cx('popover overflow-menu ui-floating', className)} align="end" sideOffset={GAP} collisionPadding={MARGIN}
+          onClick={contain} onContextMenu={containContext}>
           {items.map((it, i) =>
-            it === 'separator' ? (
-              <RM.Separator key={i} className="popover-sep" />
-            ) : (
-              <RM.Item key={i} className="popover-item ov-item" disabled={it.disabled} onSelect={it.onSelect}>
-                {it.icon && (
-                  <span className="ov-ic">
-                    <it.icon aria-hidden />
-                  </span>
-                )}
-                <span>{it.label}</span>
-              </RM.Item>
-            ),
+            // keyed by label too: a new page's items are new nodes, so refocus() sees focus leave
+            it === 'separator' ? <RM.Separator key={i} className="popover-sep" /> : <MenuEntry key={`${i}:${it.label}`} it={it} />,
           )}
         </RM.Content>
       </RM.Portal>

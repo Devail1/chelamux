@@ -112,7 +112,11 @@ call `publish('<name>', value)` wherever legacy changes it.
 
 ### The sidebar island
 
-`#sidebar-agents` is the sidebar island's (`src/features/sidebar`, CMX-276). It repaints
+`#sidebar-agents` is the sidebar island's (`src/features/sidebar`, CMX-276), and so is the VIEW
+menu's slot on the Sessions header, `#sidebar-view-menu` (a second root over the same store,
+CMX-277). Its group, row and VIEW menus are the kit's `Menu`; what a choice does is still
+legacy's (`groupMenuAction`, `rowMenuAction`, `viewMenuAction`, … on `window.chela`), and so are
+the layout, the archive and the collapsed groups, until slice C. It repaints
 synchronously (`flushSync`) on every publish of the `sidebar` store, because legacy code reads
 the rows straight back (Alt+N, jump to the orchestrator). Its clicks call the legacy handlers on
 `window.chela`, looked up at call time. Legacy `nav.js` / `terminals.js` import its pure

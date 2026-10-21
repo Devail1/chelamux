@@ -150,7 +150,7 @@ test('an OPEN Archived section\'s rows are skipped by the numbers and by Alt+N',
     const hiddenRow = ROWS[0];
     server.st.hidden.push(`w:${hiddenRow.window_id}`);
     await nav.refreshArchive();
-    window.chela.toggleShowArchived();       // View ▸ Status ▸ All — the section is drawn
+    // View ▸ Status ▸ All (the default since CMX-277) draws the section
     window.chela.toggleArchivedSection();    // …and OPEN, so .side-group.collapsed cannot hide it
     const sec = host().querySelector('.side-archived');
     assert.ok(sec && !sec.classList.contains('collapsed'), 'fixture: the Archived section must be drawn open');

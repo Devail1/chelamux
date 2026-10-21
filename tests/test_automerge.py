@@ -89,9 +89,10 @@ def test_candidates_is_exactly_awaiting_review_and_judge_clean(repo):
     _seed_run(repo, "running1", status="running", judge_state=J_CLEAN)
     _seed_run(repo, "done1", status="done", judge_state=J_CLEAN)
     _seed_run(repo, "prose1", status="awaiting_review", judge_state="prose_only")  # CMX-208
+    _seed_run(repo, "std1", status="awaiting_review", judge_state="standard_no_judge")  # CMX-296
 
     ids = {run["task_id"] for run in automerge.candidates()}
-    assert ids == {"clean1", "prose1"}
+    assert ids == {"clean1", "prose1", "std1"}
 
 
 # --- candidates(): a clean verdict on a SUPERSEDED commit is never a candidate --------

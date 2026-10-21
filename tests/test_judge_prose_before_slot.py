@@ -222,12 +222,13 @@ def test_stamp_prose_only_on_a_real_docs_commit(repo):
 
 
 def test_stamp_prose_only_refuses_the_code_side_of_a_rename(repo):
+    """The rename lists `app.py` too, so it is never prose — CMX-296: it is standard."""
     def rename(r):
         (r / "docs").mkdir()
         _git("mv", "app.py", "docs/app.md", cwd=r)
     sha = _pr(repo, rename)
-    assert _stamp(repo, sha) is False
-    assert dispatcher.resolve_run("abc123")["judge_state"] is None
+    assert _stamp(repo, sha) is True
+    assert dispatcher.resolve_run("abc123")["judge_state"] == "standard_no_judge"
 
 
 def test_stamp_prose_only_refuses_a_head_the_repo_does_not_have(repo):

@@ -9,12 +9,12 @@ import { _launcherData, launchProject, refreshLauncher } from './launcher';
 import { VIEWS } from './views';
 import { findView, navViews, otherViews, paletteViews, panelId } from './viewreg';
 import { refresh, registerLane } from '../../frontend/src/shared/scheduler';
-import { placePopover, placedPopover } from '../../frontend/src/shared/popover';
+import { placePopover } from '../../frontend/src/shared/popover';
 import { refreshCostTab } from './usage';
 import { resolveWindowId } from './windowid';
 import { followUpdate } from './updateflow';
 import { memNote, stepPayload, workflowNote } from './concurrencymodel';
-import { ARCHIVED_SECTION_KEY, ENV_KINDS, GROUP_MODES, SORTS, VIEW_STATUS, VIEW_ACTIVITY, isArchivable, moveGroup, normalizeView, sidebarModel, sidebarOrder as modelSidebarOrder } from '../../frontend/src/features/sidebar/model';
+import { ARCHIVED_SECTION_KEY, isArchivable, moveGroup, normalizeView, sidebarModel, sidebarOrder as modelSidebarOrder } from '../../frontend/src/features/sidebar/model';
 
 // The sidebar (agent list + WORK badges) is always visible, so it refreshes on every tick
 // whatever the view; its /api/agents read is what lets the view's tick start (CMX-166).
@@ -698,84 +698,19 @@ function renderSidebarAgents(agents) {
     adoptSidebarDefault();    // CMX-169: a boot's default pane moves to the top sidebar row
 }
 
-// --- The group menu (CMX-35) -------------------------------------------------
-// Right-click a group header, or tap its ⋯ (phones have no right-click). Grouped by
-// dividers like the desktop's: New session · Move up / Move down · Collapse all /
-// Expand all · Archive all (N).
-//
-// "Archive all" archives the group's FINISHED rows (a `done` session, a window with no
-// Claude left in it, a settled run — see sidebarmodel.isArchivable), like the desktop
-// app (CMX-75): a plain session's window is CLOSED, server-side, after its resume record
-// is written (and refused when its session id is unknown); a settled run is only hidden.
-// Each comes back from the "Archived (N)" section at the bottom (Unarchive = resume). A
-// row that is working, blocked on you, the orchestrator or a judge mid-battery is never
-// archived, and a hidden row that wakes up comes back on its own.
-
-function _menuEl(id) {
-    let m = document.getElementById(id);
-    if (!m) {
-        m = document.createElement('div');
-        m.id = id;
-        m.className = 'popover side-menu';
-        m.setAttribute('role', 'menu');
-        m.style.display = 'none';
-        document.body.appendChild(m);
-    }
-    return m;
-}
-
-function _menuItem(label, action, { disabled = false } = {}) {
-    return `<div class="popover-item${disabled ? ' disabled' : ''}" role="menuitem"
-        ${disabled ? 'aria-disabled="true"' : `data-act="${attrEsc(action)}"`}>${escHtml(label)}</div>`;
-}
-
-const _SEP = '<div class="popover-sep"></div>';
-
-function _openMenu(m, ev, html, onAct) {
-    if (ev) { ev.preventDefault(); ev.stopPropagation(); }
-    hideSideMenus();
-    m.innerHTML = html;
-    m.onclick = e => {
-        const el = e.target.closest('[data-act]');
-        e.stopPropagation();
-        if (!el) return;
-        hideSideMenus();
-        onAct(el.dataset.act);
-    };
-    m.style.display = 'block';
-    const anchor = (ev && ev.currentTarget && ev.currentTarget.getBoundingClientRect) ? ev.currentTarget : null;
-    if (anchor) placePopover(m, anchor, { gap: 4 });
-    setTimeout(() => document.addEventListener('click', hideSideMenus, { once: true }), 0);
-}
-
-function hideSideMenus() {
-    for (const id of ['group-menu', 'row-menu', 'view-menu']) {
-        const m = document.getElementById(id);
-        if (m) m.style.display = 'none';
-    }
-}
+// --- The group and row menus' commands (CMX-35, CMX-81) ----------------------
+// The menus are the React island's (frontend/src/features/sidebar/lib/menus.tsx, CMX-277);
+// what a choice DOES is here. "Archive all" archives the group's FINISHED rows (a `done`
+// session, a window with no Claude left in it, a settled run — see sidebarmodel.isArchivable),
+// like the desktop app (CMX-75): a plain session's window is CLOSED, server-side, after its
+// resume record is written (and refused when its session id is unknown); a settled run is only
+// hidden. Each comes back from the Archived group at the bottom (Unarchive = resume). A row
+// that is working, blocked on you, the orchestrator or a judge mid-battery is never archived,
+// and a hidden row that wakes up comes back on its own.
 
 function _archivableIn(g) {
     const orchWid = orchestratorState().wid;
     return g.items.filter(it => isArchivable(it, { wants: wantsHuman, orchWid }));
-}
-
-function openGroupMenu(ev, key) {
-    const groups = _sb.groups;
-    const i = groups.findIndex(g => g.key === key);
-    if (i < 0) return;
-    const g = groups[i];
-    const n = _archivableIn(g).length;
-    let html = '';
-    if (g.cwd) html += _menuItem('New session', 'new') + _SEP;
-    html += _menuItem('Move up', 'up', { disabled: i === 0 })
-        + _menuItem('Move down', 'down', { disabled: i === groups.length - 1 })
-        + _SEP
-        + _menuItem('Collapse all', 'collapse-all')
-        + _menuItem('Expand all', 'expand-all')
-        + _SEP
-        + _menuItem(`Archive all (${n})`, 'archive', { disabled: n === 0 });
-    _openMenu(_menuEl('group-menu'), ev, html, act => groupMenuAction(key, act));
 }
 
 // The menu's actions, callable directly (tests and keyboard paths use the same entry).
@@ -800,14 +735,6 @@ function groupMenuAction(key, act) {
     renderSidebarAgents(_agentsCache || []);
 }
 
-// The foot link: "Show archived (N)" is View ▸ Status ▸ All, "Hide archived" is back
-// to Active.
-function toggleShowArchived() {
-    const v = _view();
-    _saveView({ ...v, status: v.status === 'active' ? 'all' : 'active' });
-    renderSidebarAgents(_agentsCache || []);
-}
-
 // `+` on a group header: a NEW session in that group's folder, through the launcher's
 // own spawn path (/api/agents/spawn — `chela spawn` semantics, remote control per
 // Settings). `fresh` skips the launcher's focus-the-existing-agent dedup: the header's
@@ -816,32 +743,6 @@ function groupNewSession(key) {
     const g = _sb.groups.find(x => x.key === key);
     if (!g || !g.cwd || typeof launchProject !== 'function') return;
     return launchProject(g.cwd, { fresh: true });
-}
-
-// CMX-74: "Move to group…" is offered only while the sidebar is grouped by Custom
-// groups — the only mode that DRAWS custom groups. Anywhere else the move would be
-// saved and invisible, so the item read as dead (Liav, 2026-10-10).
-function _rowMenuMoves() { return _view().groupBy === 'custom'; }
-
-// A row's menu: a run's opens its agent or judge pane; under Custom groups every row
-// can be moved to a custom group (CMX-66); and every row has its own Archive (CMX-81),
-// enabled by the same rule as "Archive all" (sidebarmodel.isArchivable) and sent down
-// the same archiveKeys path — a plain session is closed, a settled run only hidden.
-// `key` is the row's item key (a bare run id still resolves).
-function openRowMenu(ev, key) {
-    const it = _sb.items.get(key) || _sb.items.get(`run:${key}`);
-    if (!it) return;
-    const moves = _rowMenuMoves();
-    let html = '';
-    if (it.kind === 'run') {
-        if (it.agent) html += _menuItem('Open agent pane', 'agent');
-        html += _menuItem('Open judge pane', 'judge', { disabled: !it.judge });
-        html += _SEP;
-    }
-    if (moves) html += _menuItem('Move to group…', 'move') + _SEP;
-    html += _menuItem('Archive', 'archive', { disabled: !_rowArchivable(it) });
-    const m = _menuEl('row-menu');
-    _openMenu(m, ev, html, act => rowMenuAction(it.key, act));
 }
 
 // A row already in the Archived section is not archived twice (its way back is Unarchive).
@@ -854,35 +755,12 @@ function _rowArchivable(it) {
 function rowMenuAction(key, act) {
     const it = _sb.items.get(key);
     if (!it) return;
-    if (act === 'move') return _openMoveMenu(_menuEl('row-menu'), it.key);
     if (act === 'archive') {
         // re-checked at click time: the row may have woken up since the menu opened
         if (!_rowArchivable(it)) return null;
         return archiveKeys([it.key]);
     }
     _openPane(act === 'judge' ? it.judge : it.agent);
-}
-
-// "Move to group…" — a second page of the same popover (tap-reachable: no hover
-// flyout): every custom group, Ungrouped, and New group…. The current one is ✓.
-function _openMoveMenu(m, itemKey) {
-    const c = _custom();
-    const cur = c.assign[itemKey];
-    const has = cur != null && c.groups.some(g => g.id === cur);
-    const html = _vmBack('Move to group')
-        + c.groups.map(g => _vmChoice(g.name, `to:${g.id}`, g.id === cur)).join('')
-        + _vmChoice('Ungrouped', 'to:', !has)
-        + _SEP + _menuItem('New group…', 'new');
-    _showMenuPage(m, html, act => {
-        if (act === 'back') return openRowMenu(null, itemKey);
-        hideSideMenus();
-        if (act === 'new') {
-            const g = newCustomGroup();
-            if (g) moveToGroup(itemKey, g.id);
-            return;
-        }
-        if (act.startsWith('to:')) moveToGroup(itemKey, act.slice(3) || null);
-    });
 }
 
 // Assign a row (by its STABLE item key) to custom group `id`, or to Ungrouped (null).
@@ -931,118 +809,7 @@ function deleteCustomGroup(id) {
 }
 
 // --- The VIEW menu (CMX-66) ----------------------------------------------------------
-// The sliders button on the Sessions header — the desktop's view menu: Status /
-// Environment / Last activity / Group by / Sort by (each a submenu showing its current
-// value at the right, behind a chevron), Custom groups, and the Show empty groups / Show
-// PR status toggles. A submenu is a second PAGE of the same popover (‹ back at its top),
-// so it is reachable by tap on a phone — there is no hover-only flyout. Choosing keeps
-// the menu open, so several choices take one trip.
-
-const _STATUS_LABEL = { active: 'Active', all: 'All', archived: 'Archived' };
-const _ENV_LABEL = { interactive: 'Interactive', dispatched: 'Dispatched agents', judge: 'Judges', background: 'Background sessions' };
-const _ACTIVITY_LABEL = { '1d': '1d', '7d': '7d', '30d': '30d', all: 'All' };
-const _GROUP_LABEL = { date: 'Date', folder: 'Folder', state: 'State', custom: 'Custom groups', none: 'None' };
-const _SORT_LABEL = { activity: 'Last activity', name: 'Name', created: 'Created' };
-
-const _CHECK = '<span class="vm-check" aria-hidden="true">✓</span>';
-
-function _vmSub(label, value, act) {
-    return `<div class="popover-item vm-item" role="menuitem" aria-haspopup="menu" data-act="${attrEsc(act)}">`
-        + `<span class="vm-label">${escHtml(label)}</span><span class="vm-val">${escHtml(value)}</span>`
-        + `<span class="vm-chev">${lucideIcon('chevron-right', 12)}</span></div>`;
-}
-function _vmChoice(label, act, on, role = 'menuitemradio') {
-    return `<div class="popover-item vm-item${on ? ' on' : ''}" role="${role}" aria-checked="${on ? 'true' : 'false'}" data-act="${attrEsc(act)}">`
-        + `<span class="vm-label">${escHtml(label)}</span>${on ? _CHECK : ''}</div>`;
-}
-function _vmBack(title) {
-    return `<div class="popover-item vm-back" role="menuitem" data-act="back">`
-        + `<span class="vm-chev back">${lucideIcon('chevron-right', 12)}</span><span class="vm-label">${escHtml(title)}</span></div>` + _SEP;
-}
-
-// Swap the open popover's content for another page, keeping it open and anchored.
-// CMX-74: it re-SHOWS the popover too — _openMenu's click handler hides every side
-// menu before it runs the action, so a page opened from a menu item ("Move to group…")
-// was drawn into a hidden popover and the tap looked like it did nothing.
-function _showMenuPage(m, html, onAct) {
-    m.innerHTML = html;
-    m.style.display = 'block';
-    m.onclick = e => {
-        const el = e.target.closest('[data-act]');
-        e.stopPropagation();
-        if (el) onAct(el.dataset.act);
-    };
-    const placed = placedPopover(m);
-    if (placed && placed.anchor.isConnected) placePopover(m, placed.anchor, placed.opts);
-}
-
-function _viewPageHtml(page) {
-    const v = _view();
-    if (page === 'status') {
-        return _vmBack('Status') + VIEW_STATUS.map(k => _vmChoice(_STATUS_LABEL[k], `status:${k}`, v.status === k)).join('');
-    }
-    if (page === 'env') {
-        return _vmBack('Environment')
-            + ENV_KINDS.map(k => _vmChoice(_ENV_LABEL[k], `env:${k}`, v.env.includes(k), 'menuitemcheckbox')).join('');
-    }
-    if (page === 'activity') {
-        return _vmBack('Last activity')
-            + Object.keys(VIEW_ACTIVITY).map(k => _vmChoice(_ACTIVITY_LABEL[k], `activity:${k}`, v.activity === k)).join('');
-    }
-    if (page === 'group') {
-        // None sits apart, below a divider, as on the desktop
-        return _vmBack('Group by')
-            + GROUP_MODES.filter(k => k !== 'none').map(k => _vmChoice(_GROUP_LABEL[k], `group:${k}`, v.groupBy === k)).join('')
-            + _SEP + _vmChoice(_GROUP_LABEL.none, 'group:none', v.groupBy === 'none');
-    }
-    if (page === 'sort') {
-        return _vmBack('Sort by') + SORTS.map(k => _vmChoice(_SORT_LABEL[k], `sort:${k}`, v.sort === k)).join('');
-    }
-    if (page === 'custom') {
-        const c = _custom();
-        let html = _vmBack('Custom groups');
-        for (const g of c.groups) {
-            html += `<div class="popover-item vm-item vm-group" role="none"><span class="vm-label">${escHtml(g.name)}</span>`
-                + `<button class="vm-mini" role="menuitem" data-act="rename:${attrEsc(g.id)}">Rename</button>`
-                + `<button class="vm-mini" role="menuitem" data-act="delete:${attrEsc(g.id)}">Delete</button></div>`;
-        }
-        if (!c.groups.length) html += _menuItem('No custom groups yet', '', { disabled: true });
-        return html + _SEP + _menuItem('New group…', 'custom-new');
-    }
-    const n = v.env.length;
-    return _vmSub('Status', _STATUS_LABEL[v.status], 'page:status')
-        + _vmSub('Environment', `${n} selected`, 'page:env')
-        + _vmSub('Last activity', _ACTIVITY_LABEL[v.activity], 'page:activity')
-        + _SEP
-        + _vmSub('Group by', _GROUP_LABEL[v.groupBy], 'page:group')
-        + _vmSub('Sort by', _SORT_LABEL[v.sort], 'page:sort')
-        + _vmSub('Custom groups', String(_custom().groups.length), 'page:custom')
-        + _SEP
-        + _vmChoice('Show empty groups', 'toggle:showEmpty', v.showEmpty, 'menuitemcheckbox')
-        + _vmChoice('Show PR status', 'toggle:showPR', v.showPR, 'menuitemcheckbox');
-}
-
-function openViewMenu(ev) {
-    const m = _menuEl('view-menu');
-    m.classList.add('view-menu');
-    _openMenu(m, ev, _viewPageHtml('main'), () => {});
-    _showViewPage(m, 'main');
-}
-
-function _showViewPage(m, page) {
-    _showMenuPage(m, _viewPageHtml(page), act => {
-        const back = page === 'main' ? 'main' : page;
-        if (act === 'back') return _showViewPage(m, 'main');
-        if (act.startsWith('page:')) return _showViewPage(m, act.slice(5));
-        if (act === 'custom-new') { newCustomGroup(); return _showViewPage(m, 'custom'); }
-        if (act.startsWith('rename:')) { renameCustomGroup(act.slice(7)); return _showViewPage(m, 'custom'); }
-        if (act.startsWith('delete:')) { deleteCustomGroup(act.slice(7)); return _showViewPage(m, 'custom'); }
-        viewMenuAction(act);
-        // a single choice returns to the top page (its new value showing); a multi-select
-        // or a toggle stays where it is
-        _showViewPage(m, act.startsWith('env:') || act.startsWith('toggle:') ? back : 'main');
-    });
-}
+// The menu is the React island's (menus.tsx ViewMenu, on the Sessions header); its choices land here.
 
 // Apply one view-menu choice (`status:all`, `env:judge` (toggles), `activity:30d`,
 // `group:state`, `sort:name`, `toggle:showEmpty`) and re-render. Callable directly.
@@ -3377,8 +3144,8 @@ function closeShortcuts() {
 document.body.dataset.theme = localStorage.getItem('chela_theme') || 'dark';
 
 // --- Stage 0: ES-module exports ---
-export { sidebarOrder, altSwitchKeydown, setAltHeld, openSidebarRow, archiveKeys, rowMenuAction, inboxClick, jumpToOrchestrator, refreshArchive, refreshLayout, toggleArchivedSection, unarchiveKeys, unarchiveRow, _closeRecentUndoToast, closeShortcuts, deleteCustomGroup, newCustomGroup, groupMenuAction, groupNewSession, moveToGroup, openGroupMenu, openRowMenu, openViewMenu, renameCustomGroup, toggleGroup, toggleShowArchived, viewMenuAction, dispatcherToggleLabel, openPalette, openShortcuts, refreshRecentSessions, refreshSidebar, renderAgentDetail, renderNav, renderRecentSessions, renderSidebarAgents, selectView, updateCtxCache };
+export { sidebarOrder, altSwitchKeydown, setAltHeld, openSidebarRow, archiveKeys, rowMenuAction, inboxClick, jumpToOrchestrator, refreshArchive, refreshLayout, toggleArchivedSection, unarchiveKeys, unarchiveRow, _closeRecentUndoToast, closeShortcuts, deleteCustomGroup, newCustomGroup, groupMenuAction, groupNewSession, moveToGroup, renameCustomGroup, toggleGroup, viewMenuAction, dispatcherToggleLabel, openPalette, openShortcuts, refreshRecentSessions, refreshSidebar, renderAgentDetail, renderNav, renderRecentSessions, renderSidebarAgents, selectView, updateCtxCache };
 
 // --- Stage 0: window.chela — surface reachable from inline HTML handlers ---
 window.chela = window.chela || {};
-Object.assign(window.chela, { sidebarOrder, _updateFlowDeps, applyUpdate, archiveKeys, rowMenuAction, inboxClick, jumpToOrchestrator, toggleArchivedSection, unarchiveKeys, unarchiveRow, groupMenuAction, groupNewSession, hideSideMenus, moveToGroup, openGroupMenu, openRowMenu, openViewMenu, toggleShowArchived, viewMenuAction, clearRecentSessions, clearSettingsSearch, closePalette, closeShortcuts, closeSidebar, dismissRecentSession, hideNewMenu, hidePrimaryMenu, newSandboxedSession, newShellWindow, openNewMenu, openNewMenuFromPrimary, openPalette, openPrimaryMenu, openShortcuts, _palRun, _renderPalette, resumeSession, saveDispatch, saveProjectsDir, saveTiming, selectAgent, setConcurrency, setTelegramDelete, deleteArchivedTopics, selectSettingsTab, selectView, setAgentModel, setAgentPermissionMode, setCollabName, setFileDrop, setRemoteControl, setRunToastsMuted, setShareTyping, setTermFont, setTermLatin, setTermSize, setTheme, settingsSearch, sidebarJumpInput, toggleDispatcherSessions, toggleGroup, toggleSettings, toggleSidebar, undoDismissRecent });
+Object.assign(window.chela, { sidebarOrder, _updateFlowDeps, applyUpdate, archiveKeys, rowMenuAction, inboxClick, jumpToOrchestrator, toggleArchivedSection, unarchiveKeys, unarchiveRow, groupMenuAction, groupNewSession, moveToGroup, newCustomGroup, renameCustomGroup, deleteCustomGroup, viewMenuAction, clearRecentSessions, clearSettingsSearch, closePalette, closeShortcuts, closeSidebar, dismissRecentSession, hideNewMenu, hidePrimaryMenu, newSandboxedSession, newShellWindow, openNewMenu, openNewMenuFromPrimary, openPalette, openPrimaryMenu, openShortcuts, _palRun, _renderPalette, resumeSession, saveDispatch, saveProjectsDir, saveTiming, selectAgent, setConcurrency, setTelegramDelete, deleteArchivedTopics, selectSettingsTab, selectView, setAgentModel, setAgentPermissionMode, setCollabName, setFileDrop, setRemoteControl, setRunToastsMuted, setShareTyping, setTermFont, setTermLatin, setTermSize, setTheme, settingsSearch, sidebarJumpInput, toggleDispatcherSessions, toggleGroup, toggleSettings, toggleSidebar, undoDismissRecent });

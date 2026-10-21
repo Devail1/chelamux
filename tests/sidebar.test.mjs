@@ -539,7 +539,7 @@ const _RAIL_HIDDEN = [
     '.side-head', '.side-empty', '.side-badges', '.side-item-label', '.group-head',
     '.triage-head', '.agent-row .ar-main', '.agent-row.rich .agent-row-name',
     '.agent-row.rich .ar-meta', '.agent-row .row-unarchive', '.agent-row .recent-resume',
-    '.agent-row .recent-dismiss', '.agent-row .row-more', '.side-archived-toggle',
+    '.agent-row .recent-dismiss', '.agent-row .row-more',
 ];
 function _displayNoneSelectors(css) {
     const hidden = new Set();
