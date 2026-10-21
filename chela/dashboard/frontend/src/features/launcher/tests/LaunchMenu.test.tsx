@@ -168,8 +168,11 @@ test('a Claude launch into a dir with a live Claude focuses that pane instead (t
   expect(host.focusPaneByWid.mock.calls).toEqual([['@7']]);
   expect(posts()).toEqual([]);
   // a shell, or a fresh session (a group's "+"), always spawns
+  const live = [{ window_id: '@7', name: 'x', claude_running: true, cwd: '/rec/two' }];
   await act(() => launchProject('/rec/two', { shell: true }));
+  agents.set(live); // a launch empties the cache: the twin is still live for the next one
   await act(() => launchProject('/rec/two', { fresh: true }));
+  expect(host.focusPaneByWid).toHaveBeenCalledTimes(1);
   expect(posts()).toEqual([['/api/agents/spawn', { cwd: '/rec/two' }], ['/api/agents/spawn', { cwd: '/rec/two', command: 'claude' }]]);
   // a stopped Claude, or another dir, is no twin
   agents.set([{ window_id: '@8', claude_running: false, cwd: '/a' }, { window_id: '@9', claude_running: true, cwd: '/ab' }]);
