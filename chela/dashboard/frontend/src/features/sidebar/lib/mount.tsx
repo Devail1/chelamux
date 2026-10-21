@@ -3,7 +3,8 @@
 // back (Alt+N, jump to the orchestrator), so the DOM must be current when publish returns.
 // CMX-277: the VIEW menu on the Sessions header is a second root over the same store.
 import { flushSync } from 'react-dom';
-import { createRoot, type Root } from 'react-dom/client';
+import type { Root } from 'react-dom/client';
+import { createIslandRoot } from '../../../shared/islands/index.tsx';
 import type { Bridge } from '../../../shared/bridge/index.ts';
 import { ViewMenu } from './menus.tsx';
 import { Sidebar, type SidebarActions } from './Sidebar.tsx';
@@ -24,9 +25,9 @@ export function legacyActions(win: Window): SidebarActions {
 export function mountSidebar(win: Window, bridge: Bridge, actions = legacyActions(win)): Root | null {
   const el = win.document.getElementById('sidebar-agents');
   if (!el) return null;
-  const root = createRoot(el);
+  const root = createIslandRoot(el);
   const slot = win.document.getElementById('sidebar-view-menu');
-  const view = slot ? createRoot(slot) : null;
+  const view = slot ? createIslandRoot(slot) : null;
   const paint = () => flushSync(() => {
     const state = bridge.sidebar.get();
     root.render(<Sidebar state={state} actions={actions} />);

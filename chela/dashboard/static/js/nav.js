@@ -2815,8 +2815,12 @@ async function newSandboxedSession(web) {
     // hamburger, bell, gear, sidebar rows…) would silently kill its action. Bail
     // on anything actionable and let the tap through; only non-interactive titled
     // elements (e.g. the rate-limit pills) get the tap-tooltip.
+    // CMX-301: nor anything React draws ([data-island]: an island's root, or a kit
+    // overlay portalled to <body>). Its onClick lives in React, not an onclick
+    // attribute, so this test cannot see it: a phone tap on a sidebar row popped
+    // "window: …" and the row never opened.
     document.addEventListener('touchend', function (e) {
-        if (e.target.closest('button, a, input, select, textarea, label, [onclick], [role="button"]')) {
+        if (e.target.closest('button, a, input, select, textarea, label, [onclick], [role="button"], [data-island]')) {
             hideTip();
             return;
         }

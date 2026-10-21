@@ -181,7 +181,7 @@ export function Select({ value, onChange, options, lockedBy, disabled, label }: 
         </RS.Icon>
       </RS.Trigger>
       <RS.Portal>
-        <RS.Content className="popover ui-floating" position="popper" sideOffset={4} collisionPadding={8}>
+        <RS.Content data-island className="popover ui-floating" position="popper" sideOffset={4} collisionPadding={8}>
           <RS.Viewport>
             {options.map((o) => (
               <RS.Item key={o.value} value={o.value} className="popover-item">

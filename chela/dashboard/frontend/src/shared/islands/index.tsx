@@ -13,7 +13,16 @@ export function mountIsland<P extends object>(
 ): Root | null {
   const el = doc.getElementById(id);
   if (!el) return null;
-  const root = createRoot(el);
+  const root = createIslandRoot(el);
   root.render(<Component {...props} />);
   return root;
+}
+
+/** A React root on `el`, marked `data-island` (CMX-301). Legacy's touch tap-tip (nav.js) bails
+ * on that mark: it cannot see React's onClick, and its preventDefault on a titled descendant
+ * ate the tap, so a phone tap on a sidebar row showed the row's tooltip and never opened it.
+ * Every root goes through here; eslint refuses a bare createRoot anywhere else. */
+export function createIslandRoot(el: Element): Root {
+  el.setAttribute('data-island', '');
+  return createRoot(el);
 }

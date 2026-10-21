@@ -2,7 +2,8 @@
 // from /api/term/<wid>/share-info: /api/term/shared deliberately omits them (owner-only secrets,
 // see api_term_shared). The Active shares sheet (still legacy until P25) mounts it per row.
 import { flushSync } from 'react-dom';
-import { createRoot, type Root } from 'react-dom/client';
+import type { Root } from 'react-dom/client';
+import { createIslandRoot } from '../../../shared/islands/index.tsx';
 import { CopyField, FieldRow } from '../../../shared/ui/index.ts';
 
 export type ShareInfo = { join_url?: string; pairing_code?: string };
@@ -42,7 +43,7 @@ export function renderShareInfoRows(el: Element, info: ShareInfo | null, emptyMs
     }
   let root = roots.get(el);
   if (!root) {
-    root = createRoot(el);
+    root = createIslandRoot(el);
     roots.set(el, root);
   }
   const r = root;

@@ -169,6 +169,8 @@ test('Select shows the chosen option on an .s-select and picks another', () => {
   expect(trigger.className).toBe('s-select ui-select');
   expect(trigger.textContent).toBe('Alpha');
   fireEvent.keyDown(trigger, { key: 'Enter' });
+  // CMX-301: portalled out of every island, so it carries the mark nav.js's tap-tip bails on.
+  expect(screen.getByRole('listbox').closest('[data-island]')).not.toBeNull();
   fireEvent.click(screen.getByRole('option', { name: 'Beta' }));
   expect(onChange).toHaveBeenCalledWith('b');
 });

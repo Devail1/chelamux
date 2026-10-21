@@ -40,6 +40,9 @@ test('the Dialog is named by its title and drawn with .modal-overlay / .modal', 
   const dialog = screen.getByRole('dialog', { name: 'New task' });
   expect(dialog.className).toBe('modal modal-newtask');
   expect(dialog.parentElement?.className).toBe('modal-overlay active');
+  // CMX-301: a kit overlay is portalled to <body>, outside every island root, so it carries
+  // [data-island] itself: nav.js's touch tap-tip leaves what React draws alone.
+  expect(dialog.hasAttribute('data-island')).toBe(true);
   expect(dialog.querySelector('h3')?.textContent).toBe('New task');
   // No description: no aria-describedby pointing at an element that is not there.
   expect(dialog.hasAttribute('aria-describedby')).toBe(false);
@@ -88,6 +91,7 @@ test('Popover opens from its trigger as a .popover', () => {
   fireEvent.click(screen.getByText('More'));
   const box = screen.getByRole('dialog', { name: 'More actions' });
   expect(box.className).toBe('popover ui-floating launch-menu');
+  expect(box.hasAttribute('data-island')).toBe(true);
   expect(box.textContent).toBe('inside');
 });
 
@@ -98,6 +102,7 @@ test('Menu: keyboard opens it, items are .popover-item menuitems, Enter picks on
   fireEvent.keyDown(screen.getByText('Row'), { key: 'Enter' });
   const menu = screen.getByRole('menu', { name: 'Row' });
   expect(menu.className).toBe('popover overflow-menu ui-floating');
+  expect(menu.hasAttribute('data-island')).toBe(true);
   const items = screen.getAllByRole('menuitem');
   expect(items.map((i) => [i.className, i.textContent])).toEqual([
     ['popover-item ov-item', 'Rename'],
@@ -121,7 +126,31 @@ test('Tooltip shows on focus as a .tap-tip', async () => {
   await act(async () => {});
   const tip = screen.getByRole('tooltip');
   expect(tip.textContent).toBe('Set by CHELA_X');
-  expect(document.querySelector('.tap-tip.ui-floating')).not.toBeNull();
+  expect(document.querySelector('.tap-tip.ui-floating[data-island]')).not.toBeNull();
+});
+
+// CMX-301: iOS treats a tap that makes hover content appear as a hover and drops its click, so
+// the kit's Tooltip must never open on a touch pointer; a mouse hover still opens it.
+test.each([
+  ['touch', false],
+  ['mouse', true],
+] as const)('Tooltip on a %s pointer: opens = %s', (pointerType, opens) => {
+  render(
+    <Tooltip content="Set by CHELA_X">
+      <Button>knob</Button>
+    </Tooltip>,
+  );
+  const knob = screen.getByText('knob');
+  vi.useFakeTimers();
+  try {
+    fireEvent.pointerMove(knob, { pointerType });
+    act(() => {
+      vi.advanceTimersByTime(450);   // past the 400ms delayDuration
+    });
+    expect(screen.queryByRole('tooltip') !== null).toBe(opens);
+  } finally {
+    vi.useRealTimers();
+  }
 });
 
 test('Toast lands in the .run-toast-stack as a .run-toast, and leaves on close', () => {

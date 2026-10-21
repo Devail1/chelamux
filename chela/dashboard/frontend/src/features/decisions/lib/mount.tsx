@@ -1,6 +1,7 @@
 // The inbox island: #decisions-island, in the sidebar head. One root draws the button; the
 // dialog portals itself to <body>.
-import { createRoot, type Root } from 'react-dom/client';
+import type { Root } from 'react-dom/client';
+import { createIslandRoot } from '../../../shared/islands/index.tsx';
 import { DecisionsButton, type JumpToOrchestrator } from './DecisionsButton.tsx';
 import { DecisionsDialog } from './DecisionsDialog.tsx';
 
@@ -13,7 +14,7 @@ export function legacyJump(win: Window): JumpToOrchestrator {
 export function mountDecisions(win: Window, jump = legacyJump(win)): Root | null {
   const el = win.document.getElementById('decisions-island');
   if (!el) return null;
-  const root = createRoot(el);
+  const root = createIslandRoot(el);
   root.render(
     <>
       <DecisionsButton jump={jump} />

@@ -66,6 +66,7 @@ export function Dialog({ open, onOpenChange, title, description, className, hide
       <RD.Portal>
         <RD.Overlay className="modal-overlay active">
           <RD.Content
+            data-island
             className={cx('modal', className)}
             {...(description ? {} : { 'aria-describedby': undefined })}
             onCloseAutoFocus={(e) => {
@@ -109,7 +110,7 @@ export function Popover({ trigger, children, open, onOpenChange, align = 'end', 
     <RP.Root open={open} onOpenChange={onOpenChange}>
       <RP.Trigger asChild>{trigger}</RP.Trigger>
       <RP.Portal>
-        <RP.Content className={cx('popover ui-floating', className)} aria-label={label} side="bottom" align={align} sideOffset={GAP} collisionPadding={MARGIN}>
+        <RP.Content data-island className={cx('popover ui-floating', className)} aria-label={label} side="bottom" align={align} sideOffset={GAP} collisionPadding={MARGIN}>
           {children}
         </RP.Content>
       </RP.Portal>
@@ -197,7 +198,7 @@ export function Menu({ trigger, items, className, open, onOpenChange }: MenuProp
     <RM.Root open={open} onOpenChange={onOpenChange}>
       <RM.Trigger asChild>{trigger}</RM.Trigger>
       <RM.Portal>
-        <RM.Content className={cx('popover overflow-menu ui-floating', className)} align="end" sideOffset={GAP} collisionPadding={MARGIN}
+        <RM.Content data-island className={cx('popover overflow-menu ui-floating', className)} align="end" sideOffset={GAP} collisionPadding={MARGIN}
           onClick={contain} onContextMenu={containContext}>
           {items.map((it, i) =>
             // keyed by label too: a new page's items are new nodes, so refocus() sees focus leave
@@ -216,7 +217,7 @@ export function Tooltip({ content, children }: { content: ReactNode; children: R
       <RT.Root>
         <RT.Trigger asChild>{children}</RT.Trigger>
         <RT.Portal>
-          <RT.Content className="tap-tip ui-floating" side="top" sideOffset={GAP} collisionPadding={MARGIN}>
+          <RT.Content data-island className="tap-tip ui-floating" side="top" sideOffset={GAP} collisionPadding={MARGIN}>
             {content}
           </RT.Content>
         </RT.Portal>

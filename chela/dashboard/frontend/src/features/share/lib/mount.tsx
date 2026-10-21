@@ -3,7 +3,8 @@
 // dialog is in the DOM when openShareDialog resolves.
 import type { ReactNode } from 'react';
 import { flushSync } from 'react-dom';
-import { createRoot, type Root } from 'react-dom/client';
+import type { Root } from 'react-dom/client';
+import { createIslandRoot } from '../../../shared/islands/index.tsx';
 import { fetchShareOptions, type MintResponse } from './api.ts';
 import { ShareDialog, type PaneDims } from './ShareDialog.tsx';
 
@@ -18,7 +19,7 @@ function paint(node: ReactNode) {
     host = document.createElement('div');
     host.id = 'share-dialog-root';
     document.body.append(host);
-    root = createRoot(host);
+    root = createIslandRoot(host);
   }
   const r = root as Root;
   flushSync(() => r.render(node));
