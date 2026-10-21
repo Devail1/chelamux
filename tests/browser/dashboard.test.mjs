@@ -602,9 +602,11 @@ describe('CMX-393 fonts: pane headers, pane footers and modals are the Geist chr
         ready();
         if (await page.locator('[role="dialog"].modal-decisions').count()) await page.keyboard.press('Escape');
         await page.locator('#btn-primary-menu').click();
-        await page.waitForSelector('#primary-menu', { state: 'visible', timeout: 5000 });
-        const f = await familyOf('#primary-menu .popover-item');
-        assert.match(f, GEIST, `#primary-menu font-family is ${f}`);
+        // the gear menu (CMX-219: the primary-menu island, a kit Menu)
+        await page.waitForSelector('[role="menu"]', { state: 'visible', timeout: 5000 });
+        const f = await familyOf('[role="menu"] .popover-item');
+        assert.match(f, GEIST, `the gear menu's font-family is ${f}`);
+        await page.keyboard.press('Escape');
     });
 });
 
@@ -626,19 +628,20 @@ describe('CMX-393 phone 390×844: the drawer foot is one row, the "+" opens the 
         assert.ok(plus.x >= 0 && plus.y >= 0 && plus.x + plus.width <= 390 && plus.y + plus.height <= 844,
             `#btn-new-mobile ${JSON.stringify(plus)} is not inside the viewport`);
         await page.locator('#btn-new-mobile').click();
-        await page.waitForSelector('#new-menu', { state: 'visible', timeout: 5000 });
-        const menu = await box(page, '#new-menu');
+        // the launch menu (CMX-219: the launcher island, a kit popover)
+        await page.waitForSelector('.popover.launch-menu', { state: 'visible', timeout: 5000 });
+        const menu = await box(page, '.popover.launch-menu');
         assert.ok(menu.width > 0 && menu.x >= 0 && menu.x + menu.width <= 390 + px,
-            `#new-menu ${JSON.stringify(menu)} is not on screen`);
+            `the launch menu ${JSON.stringify(menu)} is not on screen`);
         const closed = await box(page, '.sidebar');
         assert.ok(closed.x + closed.width <= px, 'opening the launch menu also opened the drawer');
-        // openNewMenu arms its light-dismiss listener in a setTimeout(0). CDP input
-        // can outrun that timer on a loaded runner (CI 3.11, PR #555), so the click
-        // landed before the listener existed and the menu never closed. A later
-        // setTimeout(0) fires after the earlier one, so awaiting one means armed.
+        // The popover arms its light-dismiss listener in a setTimeout(0). CDP input can
+        // outrun that timer on a loaded runner (CI 3.11, PR #555), so the click landed
+        // before the listener existed and the menu never closed. A later setTimeout(0)
+        // fires after the earlier one, so awaiting one means armed.
         await page.evaluate(() => new Promise(r => setTimeout(r, 0)));
         await page.mouse.click(380, 830);   // light-dismiss
-        await page.waitForSelector('#new-menu', { state: 'hidden', timeout: 5000 });
+        await page.waitForSelector('.popover.launch-menu', { state: 'detached', timeout: 5000 });
     });
 
     test('.safety-float is still on screen with the drawer closed', async () => {
@@ -676,7 +679,8 @@ describe('CMX-393 phone 390×844: the drawer foot is one row, the "+" opens the 
 // topbar math (`top = r.bottom + 6`) opened it below a button at the bottom of
 // the screen: measured live at 1920×916, top=912 for a 324px menu. The whole
 // menu must be inside the viewport — above the gear, since there is no room
-// below it — and so must #new-menu reopened from its "New…" row.
+// below it — and so must the launch menu reopened from its "New…" row (CMX-219: both
+// are kit popovers now, placed by Radix; this holds them to the same claim).
 async function assertInViewport(page, selector, vp) {
     const b = await box(page, selector);
     assert.ok(b.width > 0 && b.height > 0 && b.x >= -px && b.y >= -px
@@ -696,23 +700,23 @@ for (const vp of [{ width: 1920, height: 916 }, { width: 1440, height: 900 }]) {
         });
         after(() => context && context.close());
 
-        test('#primary-menu is inside the viewport, above the gear', async () => {
+        test('the gear menu is inside the viewport, above the gear', async () => {
             ready();
             await page.locator('#btn-primary-menu').click();
-            await page.waitForSelector('#primary-menu', { state: 'visible', timeout: 5000 });
-            const menu = await assertInViewport(page, '#primary-menu', vp);
+            await page.waitForSelector('[role="menu"]', { state: 'visible', timeout: 5000 });
+            const menu = await assertInViewport(page, '[role="menu"]', vp);
             const gear = await box(page, '#btn-primary-menu');
             assert.ok(menu.y + menu.height <= gear.y + px,
-                `#primary-menu ${JSON.stringify(menu)} is not above the foot gear ${JSON.stringify(gear)}`);
+                `the gear menu ${JSON.stringify(menu)} is not above the foot gear ${JSON.stringify(gear)}`);
         });
 
-        test('New… from that menu opens #new-menu inside the viewport too', async () => {
+        test('New… from that menu opens the launch menu inside the viewport too', async () => {
             ready();
-            if (!await page.locator('#primary-menu').isVisible()) await page.locator('#btn-primary-menu').click();
-            await page.locator('#primary-menu .popover-item', { hasText: 'New…' }).click({ timeout: 5000 });
-            await page.waitForSelector('#new-menu', { state: 'visible', timeout: 5000 });
-            await assertInViewport(page, '#new-menu', vp);
-            await page.evaluate(() => window.chela.hideNewMenu());
+            if (!await page.locator('[role="menu"]').isVisible()) await page.locator('#btn-primary-menu').click();
+            await page.locator('[role="menu"] .popover-item', { hasText: 'New…' }).click({ timeout: 5000 });
+            await page.waitForSelector('.popover.launch-menu', { state: 'visible', timeout: 5000 });
+            await assertInViewport(page, '.popover.launch-menu', vp);
+            await page.keyboard.press('Escape');
         });
     });
 }
@@ -727,12 +731,12 @@ describe('CMX-398 phone 390×844: the "+" New-session menu is still wholly on sc
     });
     after(() => context && context.close());
 
-    test('#new-menu from #btn-new-mobile is inside the 390×844 viewport, below the "+"', async () => {
+    test('the launch menu from #btn-new-mobile is inside the 390×844 viewport, below the "+"', async () => {
         ready();
         await page.locator('#btn-new-mobile').click();
-        await page.waitForSelector('#new-menu', { state: 'visible', timeout: 5000 });
-        const menu = await assertInViewport(page, '#new-menu', vp);
+        await page.waitForSelector('.popover.launch-menu', { state: 'visible', timeout: 5000 });
+        const menu = await assertInViewport(page, '.popover.launch-menu', vp);
         const plus = await box(page, '#btn-new-mobile');
-        assert.ok(menu.y >= plus.y + plus.height - px, `#new-menu ${JSON.stringify(menu)} is not below the "+"`);
+        assert.ok(menu.y >= plus.y + plus.height - px, `the launch menu ${JSON.stringify(menu)} is not below the "+"`);
     });
 });

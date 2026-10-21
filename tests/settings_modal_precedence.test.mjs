@@ -39,7 +39,7 @@ const HTML = readFileSync(join(ROOT, 'templates', 'index.html'), 'utf8');
 // judge's own reported mutation) shows up here, not just in a fixture that
 // happens to agree with the file today.
 const SETTINGS_START = HTML.indexOf('<div class="drawer-scrim" id="drawer-scrim"');
-const SETTINGS_END = HTML.indexOf('<!-- "+ new" popover');
+const SETTINGS_END = HTML.indexOf('<!-- Overlays island');
 if (SETTINGS_START < 0 || SETTINGS_END < 0) throw new Error('index.html markers for the settings modal moved — update this test');
 const BODY = HTML.slice(SETTINGS_START, SETTINGS_END);
 

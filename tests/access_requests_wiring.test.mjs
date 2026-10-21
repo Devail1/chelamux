@@ -1,14 +1,14 @@
-// 🙋 CMX-7 wiring: main.js's refresh() poll must actually ASK the server for the guests'
-// access requests, so the pending pill (#btn-access-req — the ONLY way to open the sheet)
-// ever shows. access_requests.test.mjs proves the pill logic; this proves the real page runs
-// it — drop the tickAccessRequests() call from refresh() and the pill stays hidden here.
+// 🙋 CMX-7 wiring: the refresh loop must actually ASK the server for the guests' access
+// requests, so the pending pill (#btn-access-req, the ONLY way to open the sheet) ever shows.
+// The access-request island's own tests (frontend/src/features/accessreq/tests) prove the pill
+// logic; this proves the real page runs it: drop the lane and the pill never shows here.
 // Harness copied from update_banner_wiring.test.mjs.
 //
 // Run: pnpm exec vitest run tests/access_requests_wiring.test.mjs (tests/test_js_suites.py runs it).
 import { beforeAll, test } from 'vitest';
 import assert from 'node:assert/strict';
 import { JSDOM } from 'jsdom';   // needs `pnpm install` — tests/test_js_suites.py enforces it
-import { bootBlock } from './js_helpers/dashboard_dom.mjs';
+import { bootBlock, exposeDomConstructors, mountIslands } from './js_helpers/dashboard_dom.mjs';
 
 const PAGE_VERSION = 'aaaaaaaaaaaa';
 const ACCESS = { share_typing: true, default_minutes: 60, requests: [
@@ -17,8 +17,7 @@ const ACCESS = { share_typing: true, default_minutes: 60, requests: [
 ] };
 
 const PANEL = `
-<span id="hdr-agents"></span><span id="hdr-schedules"></span><span id="hdr-next"></span><span id="hdr-updated"></span>
-<button id="btn-access-req" hidden><span class="ar-pill-text"></span></button>
+<span class="island-slot" id="access-req-island"></span>
 <div class="panel" id="panel-terminals">
   <button id="term-mode-single"></button>
   <button id="term-mode-wall"></button>
@@ -100,15 +99,17 @@ beforeAll(async () => {
     globalThis.window.chela = globalThis.window.chela || {};
     globalThis.setInterval = () => 0;
 
+    exposeDomConstructors(dom.window);
+    await mountIslands(dom.window);
     await import('../chela/dashboard/frontend/src/boot.ts');
-    // refresh() awaits a chain of polls before the access-request tick; let them all settle.
-    for (let i = 0; i < 40 && document.getElementById('btn-access-req').hidden; i++) {
+    // the boot's refresh runs every lane; let them all settle
+    for (let i = 0; i < 40 && document.getElementById('btn-access-req')?.hidden !== false; i++) {
         await new Promise(resolve => setTimeout(resolve, 5));
     }
 });
 
 test("the page's own refresh poll shows the pending access-request pill", () => {
     const pill = document.getElementById('btn-access-req');
-    assert.equal(pill.hidden, false, 'refresh() never polled /api/share-requests — the pill never shows');
+    assert.equal(pill.hidden, false, 'the refresh loop never polled /api/share-requests: the pill never shows');
     assert.match(pill.textContent, /1 access request\b/);
 });

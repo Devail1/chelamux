@@ -11,7 +11,9 @@ import { TaskModal } from './features/taskmodal/index.ts';
 import { VersionBadge } from './features/version/index.ts';
 import { WorkToasts, WorkView } from './features/work/index.ts';
 import { installBridge } from './shared/bridge/index.ts';
+import { mountChrome } from './chrome.tsx';
 import { mountIsland } from './shared/islands/index.tsx';
+import { installTapTips } from './shared/popover/index.ts';
 
 export function boot(win: Window = window) {
   const bridge = installBridge(win);
@@ -25,6 +27,8 @@ export function boot(win: Window = window) {
   mountIsland('newtask-island', NewTask, {}, win.document);
   mountDecisions(win);
   mountIsland('task-modal-island', TaskModal, {}, win.document);
+  mountChrome(win.document);
+  installTapTips(win);
   mountShares(win.document);
 }
 

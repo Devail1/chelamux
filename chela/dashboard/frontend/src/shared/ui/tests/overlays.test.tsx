@@ -3,7 +3,7 @@ import { act, fireEvent, render, screen } from '@testing-library/react';
 import { Share2 } from 'lucide-react';
 import { useState } from 'react';
 import { expect, test, vi } from 'vitest';
-import { Button, Dialog, DialogClose, Menu, Popover, TextInput, Toast, ToastProvider, Tooltip } from '../index.ts';
+import { AnchoredPopover, Button, Dialog, DialogClose, ItemButton, Menu, Popover, Sheet, TextInput, Toast, ToastProvider, Tooltip } from '../index.ts';
 import { must } from './setup.ts';
 
 function DialogHarness({ onOpenChange = () => {} }: { onOpenChange?: (o: boolean) => void }) {
@@ -181,6 +181,101 @@ test('a Toast with no body renders its title alone', () => {
   expect(toast.textContent).toBe('Saved');
 });
 
+// CMX-219: the safety sheets' Dialog, the triggerless popover, the popover row and the menu's footer.
+
+function SheetHarness() {
+  const [open, setOpen] = useState(false);
+  return (
+    <>
+      <Button onClick={() => setOpen(true)}>Open sheet</Button>
+      <Sheet open={open} onOpenChange={setOpen} title="Pending approvals" className="approvals-sheet">
+        <button type="button">Approve</button>
+      </Sheet>
+    </>
+  );
+}
+
+test('a Sheet without a title throws: it is the accessible name', () => {
+  vi.spyOn(console, 'error').mockImplementation(() => {});
+  expect(() => render(<Sheet open onOpenChange={() => {}} title=" " />)).toThrow(/needs a title/);
+  vi.restoreAllMocks();
+});
+
+test('a Sheet is a named dialog in the shares-sheet look; its x and Escape close it, focus returns', async () => {
+  render(<SheetHarness />);
+  const opener = screen.getByText('Open sheet');
+  opener.focus();
+  fireEvent.click(opener);
+  const sheet = screen.getByRole('dialog', { name: 'Pending approvals' });
+  expect(sheet.className).toBe('shares-sheet approvals-sheet');
+  expect(must(sheet.parentElement).className).toBe('shares-backdrop');
+  expect(must(sheet.querySelector('.ss-hd')).textContent).toBe('Pending approvals');
+  const close = screen.getByRole('button', { name: 'Close' });
+  expect(close.className).toBe('ss-close');
+  fireEvent.click(close);
+  expect(screen.queryByRole('dialog')).toBeNull();
+  await act(() => new Promise((r) => setTimeout(r, 0)));
+  expect(document.activeElement).toBe(opener);
+  fireEvent.click(opener);
+  fireEvent.keyDown(document.activeElement ?? document.body, { key: 'Escape' });
+  expect(screen.queryByRole('dialog')).toBeNull();
+});
+
+test('a Sheet whose opener left the page does not throw on close', async () => {
+  function Gone() {
+    const [open, setOpen] = useState(false);
+    const [shown, setShown] = useState(true);
+    return (
+      <>
+        {shown && <Button onClick={() => { setOpen(true); setShown(false); }}>Go</Button>}
+        <Sheet open={open} onOpenChange={setOpen} title="S"><span /></Sheet>
+      </>
+    );
+  }
+  render(<Gone />);
+  const go = screen.getByText('Go');
+  go.focus();
+  fireEvent.click(go);
+  fireEvent.click(screen.getByRole('button', { name: 'Close' }));
+  await act(() => new Promise((r) => setTimeout(r, 0)));
+  expect(screen.queryByRole('dialog')).toBeNull();
+});
+
+test('an AnchoredPopover is open exactly while it has an anchor, named and classed; Escape asks to close', () => {
+  const anchor = document.createElement('button');
+  document.body.appendChild(anchor);
+  const onClose = vi.fn();
+  const { rerender } = render(<AnchoredPopover anchor={null} onClose={onClose} className="launch-menu" label="New">x</AnchoredPopover>);
+  expect(document.querySelector('.popover')).toBeNull();
+  rerender(<AnchoredPopover anchor={anchor} onClose={onClose} className="launch-menu" label="New"><ItemButton>Row</ItemButton></AnchoredPopover>);
+  const pop = must(document.querySelector<HTMLElement>('.popover'));
+  expect([pop.className, pop.getAttribute('aria-label')]).toEqual(['popover ui-floating launch-menu', 'New']);
+  fireEvent.keyDown(pop, { key: 'Escape' });
+  expect(onClose).toHaveBeenCalledTimes(1);
+  // focus moving away (to the control that opened it) does not close it
+  anchor.focus();
+  fireEvent.focusIn(anchor);
+  expect(onClose).toHaveBeenCalledTimes(1);
+  anchor.remove();
+});
+
+test('ItemButton is a real button drawn as a .popover-item row', () => {
+  render(<ItemButton className="lr-main" title="t">Go</ItemButton>);
+  const b = screen.getByRole('button', { name: 'Go' });
+  expect([b.className, b.getAttribute('type'), b.title]).toEqual(['popover-item lr-main', 'button', 't']);
+});
+
+test('a Menu draws its footer after its items, and is named by its trigger, whatever the trigger\'s id', () => {
+  render(<Menu items={[{ label: 'One', onSelect: () => {} }]} footer={<div className="ov-stat">5h usage</div>} trigger={<Button>Open menu</Button>} />);
+  fireEvent.keyDown(screen.getByText('Open menu'), { key: 'Enter' });
+  const menu = screen.getByRole('menu', { name: 'Open menu' });
+  expect(must(menu.lastElementChild).className).toBe('ov-stat');
+  fireEvent.keyDown(menu, { key: 'Escape' });
+  render(<Menu items={[{ label: 'Two', onSelect: () => {} }]} trigger={<Button id="my-trigger">Mine</Button>} />);
+  fireEvent.keyDown(screen.getByText('Mine'), { key: 'Enter' });
+  expect(screen.getByRole('menu', { name: 'Mine' }).getAttribute('aria-labelledby')).toBe('my-trigger');
+});
+
 test('Dialog: focus returns to the opener even when a field inside took focus with autoFocus (CMX-228)', async () => {
   function Harness() {
     const [open, setOpen] = useState(false);
@@ -228,4 +323,16 @@ test('Dialog: one dialog handing over to another leaves focus in the new one', a
   fireEvent.keyDown(screen.getByRole('dialog'), { key: 'Escape' });
   await act(() => new Promise((r) => setTimeout(r, 0)));
   expect(document.activeElement).toBe(opener); // B returns to what A was opened from
+});
+
+test('an AnchoredPopover hands focus back to the control it hung off when it closes', async () => {
+  const anchor = document.createElement('button');
+  document.body.appendChild(anchor);
+  const { rerender } = render(<AnchoredPopover anchor={anchor} onClose={() => {}} label="New"><ItemButton>Row</ItemButton></AnchoredPopover>);
+  await act(() => new Promise((r) => setTimeout(r, 0)));
+  screen.getByRole('button', { name: 'Row' }).focus();
+  rerender(<AnchoredPopover anchor={null} onClose={() => {}} label="New"><ItemButton>Row</ItemButton></AnchoredPopover>);
+  await act(() => new Promise((r) => setTimeout(r, 0)));
+  expect(document.activeElement).toBe(anchor);
+  anchor.remove();
 });
