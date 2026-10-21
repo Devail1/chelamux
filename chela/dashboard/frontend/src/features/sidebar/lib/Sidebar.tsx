@@ -1,7 +1,6 @@
 // CMX-276: the sidebar's session list (#sidebar-agents): Needs you, the groups in their
 // order (Dispatched last), the Archived group, and their menus (CMX-277). What an action
-// DOES is legacy's (nav.js, through `actions`): the layout, the archive and the collapsed
-// groups are its state until slice C.
+// DOES is controller.ts's (through `actions`, CMX-278).
 import { useRef, useState, type MouseEvent, type ReactNode } from 'react';
 import { icons } from '../../../shared/icons/index.ts';
 import {
@@ -52,6 +51,38 @@ function Unarchive({ itemKey, resume, actions }: { itemKey: string; resume: bool
   );
 }
 
+// CMX-278: a hover (style.css) or a long press shows the whole row: the title wraps instead
+// of truncating. The long press's own click does not also open the session.
+export const LONG_PRESS_MS = 500;
+function useLongPress() {
+  const [full, setFull] = useState(false);
+  const timer = useRef<ReturnType<typeof setTimeout>>(undefined);
+  const fired = useRef(false);
+  const cancel = () => clearTimeout(timer.current);
+  return {
+    full,
+    /** True once for the click that ends a long press: swallow it. */
+    consumed: () => {
+      const f = fired.current;
+      fired.current = false;
+      return f;
+    },
+    handlers: {
+      onTouchStart: () => {
+        cancel();
+        fired.current = false;
+        setFull(false);
+        timer.current = setTimeout(() => {
+          fired.current = true;
+          setFull(true);
+        }, LONG_PRESS_MS);
+      },
+      onTouchMove: cancel,
+      onTouchEnd: cancel,
+    },
+  };
+}
+
 interface RowProps {
   it: Item;
   s: SidebarState;
@@ -63,14 +94,15 @@ interface RowProps {
 
 function Row({ it, s, actions, archived = false, altNum, children }: RowProps) {
   const menu = useMenuOpen();
+  const press = useLongPress();
   const v = rowView(it, s);
   if (!v) return null;
   const name = v.agent.name ?? '';
   const cls = ['agent-row', 'rich', name === s.active && 'active', v.onWall && 'on-wall',
-    v.runId && 'run-row', archived && 'archived'].filter(Boolean).join(' ');
+    v.runId && 'run-row', archived && 'archived', press.full && 'show-full'].filter(Boolean).join(' ');
   return (
     <div className={cls} data-agent={name} data-run={v.runId ?? undefined} data-item={it.key} title={v.title}
-      onClick={() => actions.selectAgent(name)} onContextMenu={menu.onContext}>
+      onClick={() => { if (!press.consumed()) actions.selectAgent(name); }} onContextMenu={menu.onContext} {...press.handlers}>
       <span className={`term-status-dot ${v.dotCls}`} role="img" aria-label={v.dotLabel} title={v.dotLabel} />
       <span className="agent-row-name" data-key={v.windowKey || undefined}
         title={v.windowKey ? `window: ${v.windowKey}` : undefined}>{v.label}</span>

@@ -486,6 +486,8 @@ def api_agents():
             # The live session's own name — after a move to a background session, the
             # name peers must address (ListAgents/SendMessage), not the window's.
             "session_name": entry["name"] if entry else None,
+            # CMX-278: the session this window runs now, so Recent sessions never lists it
+            "session_id": entry.get("session_id") if entry else None,
             "session_moved": bool(entry and entry["moved"]),
             "has_schedules": name in scheduled_agents,
             "schedule_last_run": agent_schedule_summary.get(name, {}).get("last_run"),
@@ -2534,16 +2536,48 @@ def _terminal_run_claims() -> tuple[set[tuple[str, str | None]], set[str]]:
             wid_epochs.add((row["judge_window_id"], row.get("judge_window_epoch")))
         if row.get("worktree_path"):
             cwds.add(os.path.normpath(row["worktree_path"]))
-        wf_path, task_id = row.get("workflow_path"), row.get("task_id")
-        if wf_path and task_id:
-            if wf_path not in workflows:
-                try:
-                    workflows[wf_path] = load_workflow(wf_path)
-                except Exception:  # noqa: BLE001 — a gone/bad workflow file only loses this join
-                    workflows[wf_path] = None
-            if workflows[wf_path] is not None:
-                cwds.add(os.path.normpath(str(judge.judge_worktree_path(workflows[wf_path], task_id))))
+        judge_cwd = _judge_cwd(row, workflows)
+        if judge_cwd:
+            cwds.add(judge_cwd)
     return wid_epochs, cwds
+
+
+def _judge_cwd(row: dict, workflows: dict) -> str | None:
+    """The judge worktree a ``runs`` row's task gets (:func:`chela.judge.judge_worktree_path`),
+    normalized; None when the row names no workflow or it cannot be loaded. ``workflows``
+    caches each workflow file across rows."""
+    wf_path, task_id = row.get("workflow_path"), row.get("task_id")
+    if not (wf_path and task_id):
+        return None
+    if wf_path not in workflows:
+        try:
+            workflows[wf_path] = load_workflow(wf_path)
+        except Exception:  # noqa: BLE001 — a gone/bad workflow file only loses this join
+            workflows[wf_path] = None
+    if workflows[wf_path] is None:
+        return None
+    return os.path.normpath(str(judge.judge_worktree_path(workflows[wf_path], task_id)))
+
+
+def _judge_cwds(runs: list[dict]) -> set[str]:
+    """The judge worktree of EVERY run, finished or not (CMX-278): a judge session is
+    chela's, so it is never resumable, even when a reboot left its worktree on disk and
+    renumbered its window (Liav, 10-19: ``judge-…`` got a Resume button). A fact off the
+    ``runs`` table, never a name guess."""
+    workflows: dict[str, object] = {}
+    return {c for c in (_judge_cwd(r, workflows) for r in runs) if c}
+
+
+def _live_session_ids() -> set[str]:
+    """Every Claude session running anywhere on this host RIGHT NOW (``claude agents``'s
+    feed, the cached map: this never spawns it on the request path). CMX-278: a session
+    alive anywhere is not "recent", whatever window address a dead epoch stamped it with."""
+    try:
+        sids = agent_manager.session_status_map().get("session_by_pid") or {}
+    except Exception:  # noqa: BLE001 — an unreadable feed leaves the server-side filter off
+        log.debug("restore: live session ids unavailable", exc_info=True)
+        return set()
+    return {s for s in sids.values() if isinstance(s, str) and s}
 
 
 def _dismiss_key(v: restore.Verdict, *, resumable: bool) -> str:
@@ -2593,6 +2627,10 @@ def api_restore():
     alive under a different address, which is ``chela restore --apply``'s job (a
     re-stamp), not a resume — showing it here as "resumable" would be a lie.
 
+    CMX-278: a row whose session is running anywhere now (:func:`_live_session_ids`) is
+    left out, matched by session id, never by the dead epoch's window address. A row in a
+    run's judge worktree (:func:`_judge_cwds`) is never resumable.
+
     Dispatcher-owned rows (``_dispatcher_owned_wid_epochs``) and rows whose recorded
     cwd no longer exists (``_cwd_is_live`` — a reaped worktree, a deleted branch) are
     both split into ``dispatcher_rows`` instead of ``rows``: neither can be resumed
@@ -2622,9 +2660,11 @@ def api_restore():
     # CMX-75: a session the sidebar archived (closed) is offered by its Archived section's
     # Unarchive, never a second time here.
     dismissed = dismissed_sessions.ids() | sidebar_archive.archived_session_ids()
+    live = _live_session_ids()
+    judge_cwds = _judge_cwds(runs)
     candidates = [v for v in _restore_verdicts()
                   if v.verdict == "MANUAL" and v.manual_command()
-                  and v.session_id not in dismissed]
+                  and v.session_id not in dismissed and v.session_id not in live]
     rows, dispatcher_rows = [], []
     for v in candidates:
         cwd_live = _cwd_is_live(v.cwd)
@@ -2633,7 +2673,8 @@ def api_restore():
             continue
         # CMX-125: a worktree its run still owns gets that run's ONE window, never a 2nd.
         resumable = ((v.wid, v.stamped_epoch) not in owned and cwd_live
-                     and restore.live_worktree_owner(v.cwd, runs) is None)
+                     and restore.live_worktree_owner(v.cwd, runs) is None
+                     and os.path.normpath(v.cwd) not in judge_cwds)
         if _dismiss_key(v, resumable=resumable) in dismissed:
             continue
         shaped = _shape_restore_row(v, resumable=resumable)

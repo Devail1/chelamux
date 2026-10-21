@@ -55,6 +55,8 @@ export interface AgentRow {
     claude_running?: boolean;
     window_type?: string;
     session_moved?: boolean;
+    /** The Claude session this window runs now (CMX-278). */
+    session_id?: string | null;
     last_activity?: string | number | null;
     recap_ts?: string | number | null;
     created?: string | number | null;
@@ -754,4 +756,83 @@ export function sidebarModel(s: SidebarState): SidebarModel {
 export function sidebarOrder(s: SidebarState | null): string[] {
     if (!s) return [];
     return sidebarWids(groupSidebar(s.agents, { ...modelOptions(s), status: 'all', env: null, activityDays: null }));
+}
+
+// --- The width (CMX-278) ------------------------------------------------------
+// The desktop sidebar's width, dragged by its handle and kept in the server layout
+// (chela/sidebar_layout.py clamps to the same bounds). The phone drawer does not use it.
+export const SIDEBAR_WIDTH = { min: 264, max: 480, default: 288 } as const;
+
+/** A stored or dragged width as px within bounds; anything not a number is the default. */
+export function clampWidth(w: unknown): number {
+    if (typeof w !== 'number' || !Number.isFinite(w)) return SIDEBAR_WIDTH.default;
+    return Math.min(SIDEBAR_WIDTH.max, Math.max(SIDEBAR_WIDTH.min, Math.round(w)));
+}
+
+// --- The nav rows (CMX-278) ---------------------------------------------------
+/** A badge slot on a nav row (views.js); its text is work.js's, by id. */
+export interface NavBadge { id: string; cls?: string; title?: string; text?: string }
+/** One views.js view, as the nav row draws it. */
+export interface NavItem { id: string; label?: string; lucide?: string; badges?: NavBadge[] }
+export interface NavState {
+    items: NavItem[];
+    /** The view lit as current; null while drilled into an agent. */
+    active: string | null;
+    /** Badge text by badge id (work.js). */
+    badges: Record<string, string>;
+}
+
+// --- Recent sessions (CMX-208, CMX-278) ---------------------------------------
+/** One /api/restore row. A dispatcher row carries no session_id; `relaunch` names the run
+ * the dispatcher will relaunch itself (CMX-156). */
+export interface RecentRow {
+    store: string;
+    wid: string;
+    session_id?: string;
+    cwd?: string | null;
+    label?: string;
+    stamped_epoch?: string | null;
+    dismiss_key?: string;
+    relaunch?: string;
+}
+export interface RecentState {
+    rows: RecentRow[];
+    dispatcher_rows: RecentRow[];
+    /** The "Show N hidden dispatcher sessions" toggle is open. */
+    revealed: boolean;
+    /** The Undo toast after a dismiss: the keys it would bring back. */
+    undo: { sids: string[]; text: string } | null;
+}
+
+/** The identity a row is dismissed by (CMX-11): /api/restore's `dismiss_key`. */
+export function dismissKey(r: RecentRow): string {
+    return r.dismiss_key || r.session_id || '';
+}
+
+/** A judge's session (chela/judge.py `judge_window_name`): chela owns its lifecycle. */
+export function isJudgeRow(r: RecentRow): boolean {
+    return /^judge-/.test(r.label || '');
+}
+
+/** What the Recent section shows (Liav, 10-19). A row whose SESSION is live in a window of
+ * this epoch (`live`, the session ids /api/agents reports) is not recent, whatever window
+ * address it was stamped with. A judge's row is never offered for Resume: it joins the
+ * dispatcher rows, under the toggle. */
+export function recentView(st: RecentState, live: ReadonlySet<string>): {
+    resumable: RecentRow[]; relaunch: RecentRow[]; hidden: RecentRow[];
+} {
+    const notLive = (r: RecentRow) => !(r.session_id && live.has(r.session_id));
+    const rows = (st.rows || []).filter(notLive);
+    const owned = [...rows.filter(isJudgeRow), ...(st.dispatcher_rows || []).filter(notLive)];
+    return {
+        resumable: rows.filter(r => !isJudgeRow(r)),
+        relaunch: owned.filter(r => r.relaunch),
+        hidden: owned.filter(r => !r.relaunch),
+    };
+}
+
+/** The toggle's copy (CMX-437): closed it says what a click reveals, open what it does. */
+export function dispatcherToggleLabel(n: number, revealed: boolean): string {
+    if (revealed) return 'Hide dispatcher sessions';
+    return `Show ${n} hidden dispatcher session${n === 1 ? '' : 's'}`;
 }

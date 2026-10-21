@@ -26,6 +26,7 @@ import { RUN_TOAST_KINDS, runToastKind } from './runtoast';
 import { renderDispatcher } from './dispatcher';
 import { renderKanban } from './kanban';
 import { refreshSchedules } from './schedules';
+import { setNavBadges } from '../../frontend/src/features/sidebar/controller';
 
 const WORK_REFRESH_MS = 30000;
 
@@ -82,10 +83,8 @@ function _readAwaiting(data) {
 
 function _renderWorkBadges(data) {
     const { runs, prs } = workBadgeCounts(data);
-    const runsEl = document.getElementById('side-runs-count');
-    const prEl = document.getElementById('side-pr-count');
-    if (runsEl) runsEl.textContent = String(runs);
-    if (prEl) prEl.textContent = prs + ' PR';
+    // The nav rows are the sidebar island's (CMX-278): it draws the badges by id.
+    setNavBadges({ 'side-runs-count': String(runs), 'side-pr-count': prs + ' PR' });
 }
 
 // CMX-206: `chela dispatch --pause` stops new claims — genuinely operational, but until

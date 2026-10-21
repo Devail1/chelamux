@@ -252,7 +252,7 @@ import { JSDOM } from 'jsdom';   // needs `pnpm install` — tests/test_js_suite
 
 import { tileState } from '../chela/dashboard/static/js/wallmodel.ts';
 import { navViews } from '../chela/dashboard/static/js/viewreg.js';
-import { bootDashboardDom } from './js_helpers/dashboard_dom.mjs';
+import { bootDashboardDom, SIDEBAR } from './js_helpers/dashboard_dom.mjs';
 import { cssForViewport, resolveVars } from './js_helpers/css_viewport.mjs';
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..', 'chela', 'dashboard');
@@ -598,9 +598,9 @@ test('non-hue cue — sidebar .ar-state: idle/working/waiting each map to a real
 // moved the word off the row face into the dot's accessible name. Read the REAL rendered row.
 const SIDEBAR_BODY = '<aside class="sidebar"><div class="side-list" id="sidebar-agents"></div></aside>';
 async function sidebarRows(rows, ctx = []) {
-    const { modules: { nav } } = await bootDashboardDom({ body: SIDEBAR_BODY, canvasStub: true, extraModules: ['nav.js'] });
-    nav.updateCtxCache(ctx);
-    nav.renderSidebarAgents(rows);
+    const { modules: { nav, sidebar } } = await bootDashboardDom({ body: SIDEBAR_BODY, canvasStub: true, extraModules: ['nav.js', SIDEBAR] });
+    sidebar.updateCtxCache(ctx);
+    sidebar.renderSidebarAgents(rows);
     return name => document.querySelector(`#sidebar-agents .agent-row[data-agent="${name}"]`);
 }
 
@@ -758,7 +758,7 @@ test('nav inventory: the five deleted views leave no trace — no panel, no tier
 // reads the rendered rows back.
 test('WIRING: the REAL renderNav() renders exactly Wall and Work into #side-nav, in order', async () => {
     const BODY = '<div class="app"><aside class="sidebar"><section class="side-section">' +
-        '<div class="side-list" id="side-nav"></div></section></aside></div>';
+        '<div class="side-list" id="side-nav"></div></section><div id="sidebar-agents"></div></aside></div>';
     // Browser-faithful import order: main.js is the entry (nav <-> main is a
     // cycle — import anything else first and its `let`s are in their TDZ).
     const { modules: { nav } } = await bootDashboardDom({ body: BODY, extraModules: ['nav.js'] });

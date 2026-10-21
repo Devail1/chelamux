@@ -41,6 +41,9 @@ const MANIFEST = JSON.parse(readFileSync(join(DASHBOARD_ROOT, 'static', 'app', '
 export const ENTRY_URL = new URL(
     `../../chela/dashboard/frontend/${Object.keys(MANIFEST).find(k => MANIFEST[k].name === 'main')}`, import.meta.url).href;
 const DEFAULT_JS_ROOT = new URL('../../chela/dashboard/static/js/', import.meta.url).href;
+/** CMX-278: the sidebar's state and commands (they left nav.js), for `extraModules`; it is
+ * returned as `modules.sidebar`. */
+export const SIDEBAR = '../../frontend/src/features/sidebar/controller.ts';
 
 /** CMX-217: index.html's boot config block (frontend/src/shared/api readBoot), for a fixture
  * page. Fields left out take readBoot's defaults, as on a page without the block. */
@@ -144,7 +147,7 @@ export function flush() {
  *   time, not on demand.
  * @param {string[]} [extraModules] - dashboard module paths (relative to
  *   `chela/dashboard/static/js/`, e.g. `'kanban.js'`) to import AFTER
- *   the boot and return, keyed by their filename minus `.js`.
+ *   the boot and return, keyed by their filename minus `.js` (SIDEBAR as `sidebar`).
  * @param {string} [jsRoot] - a URL (ending in `/`) of the `static/js/` directory to
  *   import from. Defaults to the repo's. A suite that needs TWO independent pages (two
  *   devices — tests/sidebar_layout_shared.test.mjs) boots each from its own copy
@@ -201,7 +204,7 @@ export async function bootDashboardDom({
     }
     const modules = {};
     for (const path of extraModules) {
-        const name = path.replace(/\.js$/, '');
+        const name = path === SIDEBAR ? 'sidebar' : path.replace(/\.js$/, '');
         modules[name] = await import(new URL(path, jsRoot).href);
     }
     return { dom, chela: globalThis.window.chela, modules };

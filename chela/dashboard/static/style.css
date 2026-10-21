@@ -3307,7 +3307,9 @@ a.kanban-tracker-link:focus-visible { text-decoration: underline; }
 
 .app {
     display: grid;
-    grid-template-columns: 264px 1fr;
+    /* CMX-278: the desktop width is the user's, dragged by .sidebar-resize and kept in the
+       server layout (features/sidebar/lib/layout.ts sets the var); the phone drawer keeps 264px. */
+    grid-template-columns: var(--sidebar-w, 288px) 1fr;
     height: 100vh;
 }
 
@@ -3327,9 +3329,10 @@ a.kanban-tracker-link:focus-visible { text-decoration: underline; }
 /* --- Sidebar (CMX-377: the dashboard's only chrome — no top bar) ---
    A flex column so the head (toggle + brand) and foot (ambient readouts +
    Decisions/Menu) stay put while only the middle — nav + sessions + recent —
-   scrolls. Same 264px column, same off-canvas/rail behaviour as before; only
+   scrolls. Same column (now resizable, CMX-278), same off-canvas/rail behaviour; only
    what used to live in a separate <header class="topbar"> moved inside it. */
 .sidebar {
+    position: relative;   /* the width handle sits on its right edge */
     display: flex; flex-direction: column;
     border-right: 1px solid var(--border);
     background: var(--bg);
@@ -3432,6 +3435,18 @@ a.kanban-tracker-link:focus-visible { text-decoration: underline; }
 }
 
 .side-section { margin-bottom: 18px; }
+/* CMX-278: the island slots draw their section (or nothing); the slot itself takes no box. */
+.side-recent-slot, .sidebar-resize-slot { display: contents; }
+.sidebar-resize {
+    position: absolute; top: 0; right: -3px; bottom: 0; width: 6px; z-index: 5;
+    cursor: col-resize; touch-action: none;
+}
+.sidebar-resize:hover, .sidebar-resize:focus-visible, body.sidebar-resizing .sidebar-resize {
+    background: var(--accent); opacity: 0.5; outline: none;
+}
+/* While dragging, the pane iframes must not take the pointer or flash a text selection. */
+body.sidebar-resizing { cursor: col-resize; user-select: none; }
+body.sidebar-resizing iframe { pointer-events: none; }
 .side-section:first-child { margin-top: 2px; }
 /* CMX-377 round 2: sentence-case, no letter-spacing — the uppercase/tracked
    style (NAVIGATE, SESSIONS, RECENT SESSIONS) doesn't match the approved
@@ -3570,6 +3585,9 @@ a.kanban-tracker-link:focus-visible { text-decoration: underline; }
 .agent-row.rich.active::before { height: 16px; }
 /* longhands, so the shrink weights read the same in every engine (and in jsdom's cascade) */
 .agent-row.rich .agent-row-name { flex-grow: 1; flex-shrink: 1; flex-basis: auto; min-width: 0; font-size: 12.5px; }
+/* CMX-278: a hover or a long press (.show-full) shows the whole title, wrapped. */
+.agent-row.rich:hover .agent-row-name,
+.agent-row.rich.show-full .agent-row-name { white-space: normal; overflow-wrap: anywhere; }
 .agent-row.rich .ar-meta {
     flex-grow: 0; flex-shrink: 1000; flex-basis: auto; min-width: 0; overflow: hidden; display: inline-flex; align-items: center; gap: 6px;
     font-size: 10.5px; color: var(--text-dim); white-space: nowrap;
@@ -3814,10 +3832,13 @@ a.kanban-tracker-link:focus-visible { text-decoration: underline; }
     body.sidebar-collapsed .agent-row .row-unarchive,
     body.sidebar-collapsed .agent-row .recent-resume,
     body.sidebar-collapsed .agent-row .recent-dismiss,
+    body.sidebar-collapsed .recent-toggle-dispatcher,
     body.sidebar-collapsed .agent-row .row-more { display: none; }
 
     /* The section heads are gone, so a rule stands in for the section break. */
     body.sidebar-collapsed .side-section { margin-bottom: 10px; }
+    body.sidebar-collapsed .sidebar-resize { display: none; }
+    body.sidebar-collapsed .side-section + .side-recent-slot > .side-section,
     body.sidebar-collapsed .side-section + .side-section {
         margin-top: 10px; padding-top: 10px; border-top: 1px solid var(--border);
     }
@@ -4356,6 +4377,7 @@ a.kanban-tracker-link:focus-visible { text-decoration: underline; }
         padding-left: env(safe-area-inset-left);
     }
     .sidebar.open { transform: translateX(0); box-shadow: 0 10px 48px rgba(0,0,0,0.6); }
+    .sidebar-resize { display: none; }
     .sidebar-head { padding-top: max(12px, env(safe-area-inset-top)); }
     .sidebar-foot { padding-bottom: max(10px, env(safe-area-inset-bottom)); }
 

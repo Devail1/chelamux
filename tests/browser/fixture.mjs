@@ -105,7 +105,7 @@ export async function routeFixture(context, api = {}) {
     function sidebarLayout(req) {
         if (req.method() !== 'POST') return { layout };
         const body = req.postDataJSON() || {};
-        const fields = Object.fromEntries(['order', 'custom', 'view'].filter(f => f in body).map(f => [f, body[f]]));
+        const fields = Object.fromEntries(['order', 'custom', 'view', 'width'].filter(f => f in body).map(f => [f, body[f]]));
         const empty = { order: [], custom: { groups: [], assign: {} }, view: {} };
         if (body.import === true) {
             const imported = layout === null && Object.keys(fields).length > 0;

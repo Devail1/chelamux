@@ -17,7 +17,7 @@
 import { closeMenu, menu, menuItems, openMenu } from './js_helpers/side_menu.mjs';
 import { beforeAll, beforeEach, test } from 'vitest';
 import assert from 'node:assert/strict';
-import { bootDashboardDom, clickOnclick, flush, sliceTemplate } from './js_helpers/dashboard_dom.mjs';
+import { bootDashboardDom, clickOnclick, flush, sliceTemplate, SIDEBAR } from './js_helpers/dashboard_dom.mjs';
 
 const INBOX_BTN = sliceTemplate('<button class="icon-btn" id="btn-decisions"', '</button>');
 // the end marker is the NEXT block's comment opener — cut it off, or it swallows the rest
@@ -34,10 +34,10 @@ ${DECISIONS_MENU}
 <span id="hdr-agents"></span><span id="hdr-next"></span><span id="hdr-updated"></span>`;
 
 const ok = body => Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve(body) });
-let nav, util, orchestrator;
+let nav, util, orchestrator, sidebar;
 
 beforeAll(async () => {
-    ({ modules: { util, nav, orchestrator } } = await bootDashboardDom({
+    ({ modules: { util, nav, orchestrator, sidebar } } = await bootDashboardDom({
         body: BODY,
         canvasStub: true,
         // Off, so the jump lands on the agent-detail view — a real DOM node to read back.
@@ -55,7 +55,7 @@ beforeAll(async () => {
             if (u.includes('/api/sidebar/archive')) return ok({ hidden: [], sessions: [] });
             return ok(/\/api\/(agents|summary|log)/.test(u) && !u.includes('/api/log') ? [] : {});
         },
-        extraModules: ['util.js', 'nav.js', 'orchestrator.js'],
+        extraModules: ['util.js', 'nav.js', 'orchestrator.js', SIDEBAR],
     }));
 });
 
@@ -70,7 +70,7 @@ const ROWS = [
 
 function render(rows = ROWS) {
     util.setAgentsCache(rows);
-    nav.renderSidebarAgents(rows);
+    sidebar.renderSidebarAgents(rows);
 }
 
 async function setOrchestrator(wid) {
@@ -138,9 +138,9 @@ test('CMX-76: the REAL inbox icon\'s click selects the orchestrator\'s window �
 
 test('CMX-76: the jump expands the orchestrator\'s folder group when it is collapsed', async () => {
     await setOrchestrator('@1');
-    nav.toggleGroup('/home/u');
+    sidebar.toggleGroup('/home/u');
     assert.ok(rowFor('orch').closest('.side-group').classList.contains('collapsed'));
-    assert.equal(nav.jumpToOrchestrator(), true);
+    assert.equal(sidebar.jumpToOrchestrator(), true);
     assert.equal(rowFor('orch').closest('.side-group').classList.contains('collapsed'), false,
         'the jump left the orchestrator\'s row hidden in a collapsed group');
 });
@@ -151,7 +151,7 @@ test('CMX-76: with no orchestrator the inbox icon only opens the log, as before'
     clickOnclick(document.getElementById('btn-decisions'));
     assert.ok(menuOpen(), 'the inbox icon stopped opening the decisions log');
     assert.equal(document.querySelector('#agent-detail .detail-title').textContent, 'proj');
-    assert.equal(nav.jumpToOrchestrator(), false);
+    assert.equal(sidebar.jumpToOrchestrator(), false);
     assert.equal(document.getElementById('btn-decisions').getAttribute('aria-label'), 'Decisions inbox');
 });
 

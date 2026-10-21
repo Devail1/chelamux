@@ -15,7 +15,7 @@
 // tests/test_js_suites.py)
 import { beforeAll, beforeEach, test } from 'vitest';
 import assert from 'node:assert/strict';
-import { bootDashboardDom } from './js_helpers/dashboard_dom.mjs';
+import { bootDashboardDom, SIDEBAR } from './js_helpers/dashboard_dom.mjs';
 import { buildItems, DISPATCHED_KEY, runState } from '../chela/dashboard/frontend/src/features/sidebar/model.ts';
 
 const BODY = `
@@ -25,10 +25,10 @@ const BODY = `
 <div id="agent-detail"></div>
 <span id="hdr-agents"></span><span id="hdr-next"></span><span id="hdr-updated"></span>`;
 
-let nav, util, orchestrator;
+let nav, util, orchestrator, sidebar;
 
 beforeAll(async () => {
-    ({ modules: { util, nav, orchestrator } } = await bootDashboardDom({
+    ({ modules: { util, nav, orchestrator, sidebar } } = await bootDashboardDom({
         body: BODY,
         canvasStub: true,
         terminalsEnabled: false,
@@ -42,7 +42,7 @@ beforeAll(async () => {
             }
             return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve(body) });
         },
-        extraModules: ['util.js', 'nav.js', 'orchestrator.js'],
+        extraModules: ['util.js', 'nav.js', 'orchestrator.js', SIDEBAR],
     }));
 });
 
@@ -59,7 +59,7 @@ const runCard = (tid, title, role, over = {}) => ({ task_id: tid, title, status:
 
 function render(rows) {
     util.setAgentsCache(rows);
-    nav.renderSidebarAgents(rows);
+    sidebar.renderSidebarAgents(rows);
 }
 const host = () => document.getElementById('sidebar-agents');
 const runRow = tid => host().querySelector(`.agent-row[data-run="${tid}"]`);

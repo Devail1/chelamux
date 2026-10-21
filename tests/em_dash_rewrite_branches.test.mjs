@@ -59,7 +59,7 @@ function fakeGridStack() {
     return { init: () => grid };
 }
 
-let agents, nav, terminals, util;
+let agents, nav, terminals, util, sidebar;
 
 beforeAll(async () => {
     const dom = new JSDOM(`<!doctype html><html><body>${PAGE}</body></html>`,
@@ -81,6 +81,7 @@ beforeAll(async () => {
     await import('../chela/dashboard/frontend/src/boot.ts');
     util = await import('../chela/dashboard/static/js/util.js');
     nav = await import('../chela/dashboard/static/js/nav.js');
+    sidebar = await import('../chela/dashboard/frontend/src/features/sidebar/controller.ts');
     terminals = await import('../chela/dashboard/static/js/terminals.js');
     agents = await import('../chela/dashboard/static/js/agents.js');
     await import('../chela/dashboard/static/js/dispatcher.js');
@@ -154,12 +155,12 @@ for (const [fn, text] of [['archiveKeys', 'Archive failed. The dashboard did not
     ['unarchiveKeys', 'Unarchive failed. The dashboard did not answer.']]) {
     test(`${fn}: no answer from the dashboard alerts "${text}"`, async () => {
         ARCHIVE_DOWN = true;
-        assert.equal(await nav[fn](['s:abc']), null);
+        assert.equal(await sidebar[fn](['s:abc']), null);
         assert.deepEqual(ALERTS, [text]);
     });
 
     test(`${fn}: an answered request does not alert`, async () => {
-        const res = await nav[fn](['s:abc']);
+        const res = await sidebar[fn](['s:abc']);
         assert.ok(res, 'the fake dashboard answered, so the result is not null');
         assert.deepEqual(ALERTS, []);
     });
@@ -167,6 +168,6 @@ for (const [fn, text] of [['archiveKeys', 'Archive failed. The dashboard did not
     test(`${fn}: a page without alert() fails quietly instead of throwing`, async () => {
         ARCHIVE_DOWN = true;
         delete globalThis.alert;
-        assert.equal(await nav[fn](['s:abc']), null);
+        assert.equal(await sidebar[fn](['s:abc']), null);
     });
 }

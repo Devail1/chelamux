@@ -24,7 +24,7 @@ BUILT = ROOT / "chela" / "dashboard" / "static" / "app"
 # The committed bundle, by its full path: the judge's test selection runs a test file that
 # NAMES a mutated file, so a mutation of the bundle runs THIS file (seconds), not the whole
 # suite. Its name is a content hash, so a rebuild renames it: update this line with it.
-BUNDLE = "chela/dashboard/static/app/assets/main-BQ-rfPh5.js"
+BUNDLE = "chela/dashboard/static/app/assets/main-BWLA6AJW.js"
 
 
 def _need_vite():

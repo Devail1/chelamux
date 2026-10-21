@@ -1,7 +1,8 @@
 // --- Stage 0: ES-module imports ---
 import { $, TERMINALS_ON, _agentsCache, api, attrEsc, escHtml, setAgentsCache } from './util';
 import { _jsStr, focusPaneByWid } from './terminals';
-import { refreshSidebar, renderSidebarAgents, selectView } from './nav';
+import { selectView } from './nav';
+import { refreshSidebar, renderSidebarAgents } from '../../frontend/src/features/sidebar/controller';
 import { registerLane } from '../../frontend/src/shared/scheduler';
 
 // ---------------------------------------------------------------------------
