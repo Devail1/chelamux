@@ -87,6 +87,10 @@ FONT_SIZE="${CHELA_TERM_FONTSIZE:-14}"
 TERM_THEME='{"background":"#0d1117","foreground":"#c9d1d9","cursor":"#58a6ff","cursorAccent":"#0d1117","selectionBackground":"#264f78","black":"#484f58","red":"#ff7b72","green":"#3fb950","yellow":"#d29922","blue":"#58a6ff","magenta":"#bc8cff","cyan":"#39c5cf","white":"#b1bac4","brightBlack":"#6e7681","brightRed":"#ffa198","brightGreen":"#56d364","brightYellow":"#e3b341","brightBlue":"#79c0ff","brightMagenta":"#d2a8ff","brightCyan":"#56d4dd","brightWhite":"#f0f6fc"}'
 TERM_THEME="${CHELA_TERM_THEME:-$TERM_THEME}"
 
+# xterm renderer ttyd starts (CMX-302): `dom`, the only one with bidi, so Hebrew reads right
+# to left. CHELA_TERM_RENDERER=webgl trades that for speed on a wall that never shows RTL.
+TERM_RENDERER="${CHELA_TERM_RENDERER:-dom}"
+
 declare -A PORT_OF PID_OF              # wid -> port / ttyd pid
 LAST_MAP=""
 
@@ -146,6 +150,17 @@ free_port() {
 # "grows but won't shrink". Disabling the alert removes the modal AND lets the
 # teardown actually complete, resolving the size contention. disableResizeOverlay
 # suppresses ttyd's per-resize WxH overlay flash so layout changes don't strobe.
+#
+# rendererType=dom is LOAD-BEARING for Hebrew (CMX-302). ttyd defaults to xterm's WebGL
+# renderer, which paints every cell left to right in the order the bytes arrived, so
+# Hebrew (stored in logical order, like every terminal) reads letter-reversed. Only the
+# DOM renderer leaves a row's text to the browser, whose bidi algorithm lays a Hebrew run
+# out right to left. That works because the bundled Miriam Mono CLM has the same advance
+# as JetBrains Mono: xterm then keeps the whole row in one span and the browser reorders
+# inside it. Hebrew used to read correctly only by accident: ttyd falls back to the DOM
+# renderer when a page loses its WebGL context (iOS reclaims them from backgrounded
+# pages), and that page stayed on DOM until it was reloaded. A proportional Hebrew face
+# (Settings > Terminal) splits the run into per-letter spans and still reads reversed.
 spawn() {
     local wid="$1" port="$2" grp
     grp="${WEBTERM_PREFIX}$(sanitize "$wid")"
@@ -176,6 +191,7 @@ spawn() {
         --client-option "theme=${TERM_THEME}" \
         --client-option disableLeaveAlert=true \
         --client-option disableResizeOverlay=true \
+        --client-option "rendererType=${TERM_RENDERER}" \
         tmux -u new-session -A -s "${grp}" -t "${TMUX_SESSION}" ';' \
                  set-option destroy-unattached off ';' \
                  set-option status off ';' \
