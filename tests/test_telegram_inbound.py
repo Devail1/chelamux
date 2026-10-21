@@ -838,3 +838,53 @@ def test_a_failed_key_send_does_not_redraw():
 
     assert redrawn == []
     assert update.callback_query.answers == ["❌ send failed"]
+
+
+# --------------------------------------------------------------------------
+# CMX-117: nothing is typed onto a prompt still holding an unsubmitted delivery.
+# --------------------------------------------------------------------------
+
+
+def test_routers_default_to_the_no_merge_sender():
+    from chela import messenger
+    assert TopicRouter("777", "@3")._sender is messenger.deliver_prompt
+    assert RegistryRouter(_registry("777", ("@3", "42")))._sender is messenger.deliver_prompt
+
+
+def test_text_onto_a_pending_draft_is_refused_with_a_notice():
+    from chela import messenger
+    from chela.telegram import media
+
+    def pending(_wid, _text):
+        raise messenger.PendingDraft("[Image #2]caption")
+    on_message, bot = _text_handler_and_bot(pending)
+    bot["username"] = OUR_BOT
+
+    msg = _drive(on_message, "ok i refreshed and it came back")
+
+    assert msg.replies == [media.PENDING_DRAFT_TEXT]
+
+
+def test_photos_are_delivered_through_the_verifying_sender(monkeypatch):
+    import asyncio
+
+    from telegram.ext import MessageHandler
+
+    from chela import messenger
+    from chela.telegram import media
+    from chela.telegram.inbound import build_application
+
+    seen = {}
+
+    async def receive(msg, chat_id, thread_id, **kw):
+        seen.update(kw)
+    monkeypatch.setattr(media, "receive_photo", receive)
+    monkeypatch.setattr(media, "receive_document", receive)
+    app = build_application("123:fake-token", TopicRouter("777", "@3", "4"))
+    handlers = [h for g in app.handlers.values() for h in g if isinstance(h, MessageHandler)]
+    for h, want, attr in ((handlers[0], messenger.deliver_image, "photo"),
+                          (handlers[1], messenger.deliver_prompt, "document")):
+        update = _FakeUpdate("")
+        setattr(update.message, attr, ["x"])
+        asyncio.run(h.callback(update, None))
+        assert seen.pop("deliver") is want, attr

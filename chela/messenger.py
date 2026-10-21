@@ -365,6 +365,94 @@ def capture_pane(window_id: str, *, ansi: bool = False) -> str:
     return out.stdout if out.returncode == 0 else ""
 
 
+_RE_SGR = re.compile(r"\x1b\[([0-9;]*)m")
+# What may precede the first visible glyph after `❯`: spaces and SGR escapes.
+_RE_INPUT_LEAD = re.compile(r"(?:\x1b\[[0-9;]*m| )*")
+# Claude Code's placeholder while a turn runs with messages queued — the prompt is EMPTY.
+_QUEUED_PLACEHOLDER = "Press up to edit queued messages"
+# The chip Claude Code turns a pasted image path into on the input line.
+_RE_IMAGE_CHIP = re.compile(r"\[Image #\d+\]")
+# An image delivery re-reads its prompt this many times, this far apart, for the submit.
+_SUBMIT_POLLS = 6
+_SUBMIT_POLL_SECONDS = 0.5
+
+
+class PendingDraft(Exception):
+    """The prompt already holds unsubmitted text — typing more would merge into it."""
+
+
+def input_draft(pane: str) -> str | None:
+    """The text sitting unsubmitted on a captured pane's ``❯`` input line.
+
+    ``""`` when the line is empty, None when no input line is visible (capture failed, a
+    pane that isn't Claude Code). ``pane`` must be an ``-e`` capture: Claude Code renders
+    its ghost suggestion into an EMPTY prompt as faint (SGR 2) text right after ``❯``, and
+    only the escapes tell it apart from a typed draft. The input line is the bottom-most
+    ``❯`` line directly under the box's top rule — submitted turns echoed above it carry
+    the glyph too, and so does a permission menu's selected option (``❯ 1. Yes``).
+    """
+    lines = (pane or "").splitlines()
+    while lines and not _RE_SGR.sub("", lines[-1]).strip():
+        lines.pop()  # an inline TUI leaves the rest of a tall pane blank below its box
+    lines = lines[-_INPUT_SCAN_LINES:]
+    for i in range(len(lines) - 1, 0, -1):
+        line = lines[i]
+        plain = _RE_SGR.sub("", line).replace(_BOX_EDGE, "").strip()
+        above = _RE_SGR.sub("", lines[i - 1]).strip()
+        if not plain.startswith(_PROMPT_CHAR) or not above.startswith(("─", "╭")):
+            continue
+        lead = _RE_INPUT_LEAD.match(line.split(_PROMPT_CHAR, 1)[1]).group(0)
+        if any("2" in m.split(";") for m in _RE_SGR.findall(lead)):
+            return ""  # the ghost suggestion is a placeholder: the prompt is empty
+        draft = plain[len(_PROMPT_CHAR):].strip()
+        return "" if draft == _QUEUED_PLACEHOLDER else draft
+    return None
+
+
+def _read_draft(window_id: str) -> str | None:
+    try:
+        return input_draft(capture_pane(window_id, ansi=True))
+    except OSError:
+        return None
+
+
+def deliver_prompt(window_id: str, text: str) -> bool:
+    """:func:`send_tmux`, raising :class:`PendingDraft` if the prompt already holds a draft.
+
+    Text typed onto an unsubmitted prompt is appended to it and submitted as ONE turn
+    (CMX-117: a stranded photo delivery took the next Telegram message as its label). An
+    unreadable prompt fails OPEN, as :func:`refuses_paste` does — refusing on a tmux hiccup
+    would wedge every Telegram message.
+    """
+    draft = _read_draft(window_id)
+    if draft:
+        raise PendingDraft(draft)
+    return send_tmux(window_id, text)
+
+
+def deliver_image(window_id: str, text: str) -> str:
+    """Deliver an image path and VERIFY Claude Code submitted it.
+
+    ``"submitted"`` once the prompt reads empty; ``"unsubmitted"`` if it never did, or
+    could not be read (unknown is never success); ``"failed"`` if the send failed. Claude
+    Code converts the pasted path into an ``[Image #N]`` chip asynchronously and can
+    swallow an Enter that lands meanwhile, stranding the chip on the prompt — while the
+    chip is still there, Enter is pressed once more.
+    """
+    if not deliver_prompt(window_id, text):
+        return "failed"
+    resent = False
+    for _ in range(_SUBMIT_POLLS):
+        time.sleep(_SUBMIT_POLL_SECONDS)
+        draft = _read_draft(window_id)
+        if draft == "":
+            return "submitted"
+        if draft and not resent and _RE_IMAGE_CHIP.search(draft):
+            resent = True
+            resend_enter(window_id)
+    return "unsubmitted"
+
+
 def send_key(window_id: str, key: str) -> bool:
     """Send a single tmux key press (``Up``, ``C-c``, ``Space``…) to ``window_id``.
 
