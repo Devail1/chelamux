@@ -1,5 +1,5 @@
 // The delete action behind both confirm UIs: the runs table's row and the board card's ×
-// (kanban.js). Moved from work.js by CMX-231.
+// (features/work). Moved from work.js by CMX-231.
 import { BASE_PATH } from '../../../shared/api/index.ts';
 import { refreshWork } from '../../../shared/store/work.ts';
 

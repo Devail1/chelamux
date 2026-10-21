@@ -2,7 +2,7 @@
 // from static/js/newtask.js by CMX-231 (FRONTEND_PORT_PLAN.md P11).
 //
 // The form POSTs to the dashboard (/api/dispatcher/linear/issue); the DASHBOARD calls Linear,
-// so the API key never reaches this page. Workflows and blockers come off the payload work.js
+// so the API key never reaches this page. Workflows and blockers come off the payload features/work
 // already polls. ⛔ A failed submit KEEPS every field and shows why; only a success clears.
 import { useState } from 'react';
 import { BASE_PATH } from '../../../shared/api/index.ts';

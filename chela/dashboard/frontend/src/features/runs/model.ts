@@ -1,5 +1,5 @@
 // Run state → how it LOOKS (pure). Moved from static/js/runstate.js by CMX-231 (CMX-212
-// P10); kanban.js and taskmodal.js import it from here.
+// P10); the Work board and the task modal import it from here.
 //
 // A pure module, because this mapping is exactly the kind that rots silently: CMX-68 added
 // two run states to the dispatcher and the badge table was never updated, so `needs_human`
@@ -124,7 +124,7 @@ export function trackerHref(item: { tracker_url?: string | null } | null | undef
 const RISK_CLS: Record<string, string> = { high: 'risk-high', normal: 'risk-normal', low: 'risk-low' };
 export function riskChip(item: { risk?: unknown; risk_reason?: string | null } | null | undefined) {
   const level = item && typeof item.risk === 'string' ? item.risk.toLowerCase() : '';
-  const cls = RISK_CLS[level];
+  const cls = Object.hasOwn(RISK_CLS, level) ? RISK_CLS[level] : undefined;
   return cls ? { label: `risk: ${level}`, cls, reason: (item && item.risk_reason) || '' } : null;
 }
 

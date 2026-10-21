@@ -1,4 +1,4 @@
-// ➕📐 CMX-6: what the New-task form offers, off the /api/dispatcher payload work.js polls.
+// ➕📐 CMX-6: what the New-task form offers, off the /api/dispatcher payload features/work polls.
 import type { Workflow, WorkPayload } from '../../shared/store/work.ts';
 
 /** The workflows chela can create issues in: those whose tracker is linear. */
