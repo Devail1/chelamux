@@ -251,7 +251,7 @@ def test_the_semaphore_admits_k_and_queues_the_rest(slots_on, monkeypatch, capsy
 def test_slots_off_is_a_passthrough(slots_on, monkeypatch):
     monkeypatch.setenv("CHELA_SUITE_SLOTS", "0")
     monkeypatch.setattr(suite_guard, "_take", lambda *a: pytest.fail("took a slot"))
-    with suite_guard.slot("/wt"):
+    with suite_guard.slot("/wt", max_wait=5):
         pass
     assert not (slots_on / "suite-slots").exists()
 
@@ -260,7 +260,7 @@ def test_a_slot_is_written_with_its_holder_and_freed_on_exit(slots_on, monkeypat
     import fcntl
     monkeypatch.setenv("CHELA_SUITE_SLOTS", "1")
     lock = slots_on / "suite-slots" / "slot-0"
-    with suite_guard.slot("/some/wt"):
+    with suite_guard.slot("/some/wt", max_wait=5):
         rec = json.loads(lock.read_text())
         assert (rec["pid"], rec["cwd"]) == (os.getpid(), "/some/wt")
         fd = os.open(lock, os.O_RDWR)
@@ -272,6 +272,24 @@ def test_a_slot_is_written_with_its_holder_and_freed_on_exit(slots_on, monkeypat
     os.close(fd)
 
 
+def _bounded_wait(**kw):
+    """What one ``slot()`` call ends in — an exception, "admitted", or "hung" — in a daemon
+    thread, so a mutation that removes the bound fails the test instead of hanging it."""
+    import threading
+    out = []
+
+    def body():
+        try:
+            with suite_guard.slot("/wt", poll=0.01, **kw):
+                out.append("admitted")
+        except BaseException as e:   # noqa: BLE001 — reported by the test
+            out.append(e)
+    t = threading.Thread(target=body, daemon=True)
+    t.start()
+    t.join(5)
+    return out[0] if out else "hung"
+
+
 def test_a_wait_past_max_wait_raises_slot_timeout(slots_on, monkeypatch):
     import threading
     monkeypatch.setenv("CHELA_SUITE_SLOTS", "1")
@@ -280,9 +298,9 @@ def test_a_wait_past_max_wait_raises_slot_timeout(slots_on, monkeypatch):
     t.start()
     assert gate.wait(5)
     try:
-        with pytest.raises(suite_guard.SlotTimeout, match="no suite slot came free in 0s"):
-            with suite_guard.slot("/wt", max_wait=0.2, poll=0.01):
-                pytest.fail("admitted past a held slot")
+        got = _bounded_wait(max_wait=0.2)
+        assert isinstance(got, suite_guard.SlotTimeout), got
+        assert "no suite slot came free in 0s" in str(got)
         assert isinstance(suite_guard.SlotTimeout("x"), OSError)
     finally:
         release.set()
@@ -305,11 +323,10 @@ def test_a_waiter_goes_before_a_newcomer(slots_on, monkeypatch, tmp_path):
     older.write_text(json.dumps({"pid": os.getpid(), "start": start, "cwd": "/x",
                                  "waiting_since": None, "waited": 3}))
     assert suite_guard._must_queue(me, 20.0) is False            # it holds a slot now
-    with pytest.raises(suite_guard.SlotTimeout):
-        older.write_text(json.dumps({"pid": os.getpid(), "start": start, "cwd": "/x",
-                                     "waiting_since": 0.0, "waited": 0}))
-        with suite_guard.slot("/wt", max_wait=0.1, poll=0.01):  # a free slot, but queued
-            pytest.fail("overtook an older waiter")
+    older.write_text(json.dumps({"pid": os.getpid(), "start": start, "cwd": "/x",
+                                 "waiting_since": 0.0, "waited": 0}))
+    got = _bounded_wait(max_wait=0.1)                   # a free slot, but queued behind it
+    assert isinstance(got, suite_guard.SlotTimeout), got
 
 
 def test_a_stopped_waiter_does_not_hold_the_line(slots_on, monkeypatch):

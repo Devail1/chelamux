@@ -360,7 +360,7 @@ def slot(cwd: str | Path, on_wait=None, max_wait: float | None = None,
                       f"(CMX-119; CHELA_SUITE_SLOTS)", file=sys.stderr, flush=True)
                 if on_wait is not None:
                     on_wait(since)
-            elif max_wait is not None and time.monotonic() - started >= max_wait:
+            elif max_wait is not None and time.time() - since >= max_wait:
                 raise SlotTimeout(f"no suite slot came free in {max_wait:.0f}s "
                                   f"(all {k} busy: {_holders(d, k)})")
             time.sleep(poll)
