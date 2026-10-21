@@ -1,9 +1,9 @@
 // The task modal's pure model (static/js/taskmodalmodel.js until CMX-228; ported from
-// tests/taskmodal_model.test.mjs, taskmodal_review_tabs.test.mjs, risk_chip.test.mjs and
-// taskmodal_judge_badge.test.mjs). Each check goes red under one specific corruption of the
+// tests/taskmodal_model.test.mjs, taskmodal_review_tabs.test.mjs and taskmodal_judge_badge.test.mjs;
+// the key, tracker link and risk chip are the runs model's, tested with it). Each check goes red under one specific corruption of the
 // logic it names.
 import { expect, test } from 'vitest';
-import { CI_CHIP, JUDGE_BADGE, briefSource, ciKind, defaultTab, displayTitle, heldOutCount, judgeBadgeClass, prLabel, riskChip, runDisplayId, shortTime, statusLabel, timelineSteps, trackerHref, wfShort } from '../model.ts';
+import { CI_CHIP, JUDGE_BADGE, briefSource, ciKind, defaultTab, displayTitle, heldOutCount, judgeBadgeClass, statusLabel, timelineSteps, wfShort } from '../model.ts';
 
 // --- briefSource: brief > body > raw, never throws on a sparse item
 
@@ -84,31 +84,6 @@ test('defaultTab: no item is the Brief tab', () => {
   expect(defaultTab(null, 3)).toBe('brief');
 });
 
-// --- the header's key and links
-
-test('trackerHref: only an https string links, passed through unchanged', () => {
-  const url = 'https://linear.app/t/issue/CMX-1/x';
-  expect(trackerHref({ tracker_url: url })).toBe(url);
-  expect(trackerHref({ tracker_url: 'HTTPS://linear.app/t' })).toBe('HTTPS://linear.app/t');
-  for (const bad of ['http://linear.app/t', ' https://linear.app/t', 'xhttps://a', 'javascript:alert(1)', 42, null, '']) expect(trackerHref({ tracker_url: bad })).toBeNull();
-  expect(trackerHref(null)).toBeNull();
-});
-
-test('runDisplayId: PROJECT-N for a numbered run, else the task id, else nothing', () => {
-  expect(runDisplayId({ project_key: 'CMX', task_number: 7, task_id: 'abc' })).toBe('CMX-7');
-  expect(runDisplayId({ project_key: 'CMX', task_number: 0, task_id: 'abc' })).toBe('CMX-0');
-  expect(runDisplayId({ project_key: 'CMX', task_number: null, task_id: 'abc' })).toBe('abc');
-  expect(runDisplayId({ task_number: 7, task_id: 'abc' })).toBe('abc');
-  expect(runDisplayId({ id: 'open-task' })).toBe('');
-});
-
-test('prLabel: #N from a GitHub pull URL, PR for anything else', () => {
-  expect(prLabel('https://github.com/o/r/pull/816')).toBe('#816');
-  expect(prLabel('https://github.com/o/r/pull/816/files')).toBe('#816');
-  expect(prLabel('https://github.com/o/r/pull/816x')).toBe('PR');
-  expect(prLabel('https://gitlab.example/merge_requests/3')).toBe('PR');
-});
-
 test('wfShort: the workflow file\'s directory; statusLabel: underscores to spaces', () => {
   expect(wfShort('/x/chelamux/WORKFLOW.md')).toBe('chelamux');
   expect(wfShort('/x/chelamux/WORKFLOW.md/')).toBe('chelamux');
@@ -126,22 +101,7 @@ test('the CI chip: each known state its own word and class; anything else is "ci
   for (const other of ['unknown', 'weird', undefined, 'toString']) expect(ciKind(other)).toBe('unknown');
 });
 
-test('shortTime: "HH:MM Mon D", and an unparsable value is shown as is', () => {
-  const d = new Date('2026-10-12T14:05:00+00:00');
-  const hm = d.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', hour12: false });
-  const day = d.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
-  expect(shortTime('2026-10-12T14:05:00+00:00')).toBe(`${hm} ${day}`);
-  expect(shortTime('not a date')).toBe('not a date');
-});
-
-// --- risk (CMX-405) and the judge badge
-
-test('riskChip: each level is its own WORD; anything else renders nothing', () => {
-  expect(riskChip({ risk: 'high' })).toEqual({ label: 'risk: high', cls: 'risk-high', reason: '' });
-  expect(riskChip({ risk: 'NORMAL' })).toEqual({ label: 'risk: normal', cls: 'risk-normal', reason: '' });
-  expect(riskChip({ risk: 'low', risk_reason: 'marker' })).toEqual({ label: 'risk: low', cls: 'risk-low', reason: 'marker' });
-  for (const none of [{}, { risk: null }, { risk: 'extreme' }, { risk: 3 }, { risk: 'constructor' }, null]) expect(riskChip(none)).toBeNull();
-});
+// --- the judge badge
 
 // 🔴 GUARD (CMX-239 round 2): `blocked_race` is a CONFIRMED blocking finding the run row never
 // recorded: exactly as loud as `blocked`, never `cannot_verify`'s low-priority tier.

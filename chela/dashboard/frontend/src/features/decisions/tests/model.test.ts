@@ -73,9 +73,9 @@ test('a run_events payload (title/run_status keys) normalises to a task-modal it
   const item = itemFromDecisionPayload({
     seq: 5,
     type: 'run_review',
-    payload: { task_id: 'a1b2c3', title: '**Do the thing.**', run_status: 'awaiting_review', branch_name: 'cmx-9', pr_url: 'https://example.test/pr/9', pr_state: 'open', attempt: 1, rework_count: 2, last_error: 'boom', started_at: 1000, ended_at: '2026-10-01T00:00:00Z' },
+    payload: { task_id: 'a1b2c3', title: '**Do the thing.**', run_status: 'awaiting_review', branch_name: 'cmx-9', pr_url: 'https://example.test/pr/9', pr_state: 'open', attempt: 1, rework_count: 2, last_error: 'boom', started_at: '2026-09-30T00:00:00Z', ended_at: '2026-10-01T00:00:00Z' },
   });
-  expect(item).toEqual({ task_id: 'a1b2c3', title: '**Do the thing.**', status: 'awaiting_review', branch_name: 'cmx-9', pr_url: 'https://example.test/pr/9', pr_state: 'open', attempt: 1, rework_count: 2, last_error: 'boom', started_at: 1000, ended_at: '2026-10-01T00:00:00Z' });
+  expect(item).toEqual({ task_id: 'a1b2c3', title: '**Do the thing.**', status: 'awaiting_review', branch_name: 'cmx-9', pr_url: 'https://example.test/pr/9', pr_state: 'open', attempt: 1, rework_count: 2, last_error: 'boom', started_at: '2026-09-30T00:00:00Z', ended_at: '2026-10-01T00:00:00Z' });
 });
 
 test('a _window_payload event (task_title, no branch/PR) still normalises, fabricating nothing', () => {

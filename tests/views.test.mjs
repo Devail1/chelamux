@@ -189,11 +189,15 @@ test('the Decisions inbox reads /api/dispatcher on a click, never on a poll time
 });
 
 test('the Work renderers take a payload — they do not fetch one', () => {
-    for (const f of ['kanban.js', 'dispatcher.js']) {
-        assert.ok(!src(f).includes('setInterval'), `${f} must not own a poll timer`);
-    }
+    assert.ok(!src('kanban.js').includes('setInterval'), 'kanban.js must not own a poll timer');
     assert.ok(src('work.js').includes('renderKanban(data)'));
-    assert.ok(src('work.js').includes('renderDispatcher(data)'));
+    // CMX-231: the Runs tables and the New-task form are React, reading the payload work.js
+    // publishes (shared/store/work.ts); neither fetches /api/dispatcher or runs a timer.
+    assert.ok(src('work.js').includes('work.set(data)'));
+    for (const f of ['runs/lib/Runs.tsx', 'newtask/lib/NewTask.tsx']) {
+        const code = readFileSync(join(JS_DIR, '../../frontend/src/features', f), 'utf8');
+        assert.ok(!code.includes("api('/api/dispatcher')") && !code.includes('setInterval'), f);
+    }
 });
 
 test('the sidebar WORK badges are fed from that same payload, not a third fetch', () => {

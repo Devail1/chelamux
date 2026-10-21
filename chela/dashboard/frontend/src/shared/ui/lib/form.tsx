@@ -49,8 +49,11 @@ function withEnvTip(lockedBy: string | undefined, el: ReactElement) {
   return lockedBy ? <Tooltip content={envTip(lockedBy)}><span className="field-locked" tabIndex={0}>{el}</span></Tooltip> : el;
 }
 
-/** `plain` is for a typed confirmation or a search: no autocomplete, no spellcheck. */
-export function TextInput({ value, onChange, lockedBy, disabled, label, placeholder, plain }: InputProps<string> & { placeholder?: string; plain?: boolean }) {
+/**
+ * `plain` is for a typed confirmation or a search: no autocomplete, no spellcheck. `list` names a
+ * <datalist> of suggestions; `autoFocus` takes focus when a Dialog opens.
+ */
+export function TextInput({ value, onChange, lockedBy, disabled, label, placeholder, plain, list, autoFocus }: InputProps<string> & { placeholder?: string; plain?: boolean; list?: string; autoFocus?: boolean }) {
   const id = useContext(FieldId);
   return withEnvTip(
     lockedBy,
@@ -61,8 +64,11 @@ export function TextInput({ value, onChange, lockedBy, disabled, label, placehol
       aria-label={label}
       value={value}
       placeholder={placeholder}
+      list={list}
+      autoFocus={autoFocus}
       disabled={disabled || !!lockedBy}
-      {...(plain ? { autoComplete: 'off', spellCheck: false } : {})}
+      {...(plain || list ? { autoComplete: 'off' } : {})}
+      {...(plain ? { spellCheck: false } : {})}
       onChange={(e) => onChange(e.target.value)}
     />,
   );
@@ -111,6 +117,23 @@ export function RadioGroup({ value, onChange, options, label }: { value: string;
         </label>
       ))}
     </RRG.Root>
+  );
+}
+
+/** Multi-line text (a brief, a prompt): it takes the row's full width. */
+export function TextArea({ value, onChange, disabled, label, rows = 3 }: InputProps<string> & { rows?: number }) {
+  const id = useContext(FieldId);
+  return <textarea className="s-input s-textarea" id={id} aria-label={label} rows={rows} value={value} disabled={disabled} onChange={(e) => onChange(e.target.value)} />;
+}
+
+/** Pick any number of options (ctrl/⌘-click), as a list box. */
+export function MultiSelect({ value, onChange, options, disabled, label, size = 4 }: InputProps<string[]> & { options: { value: string; label: string }[]; size?: number }) {
+  const id = useContext(FieldId);
+  return (
+    <select className="s-select s-multi" id={id} aria-label={label} multiple size={size} value={value} disabled={disabled}
+      onChange={(e) => onChange([...e.target.selectedOptions].map((o) => o.value))}>
+      {options.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
+    </select>
   );
 }
 

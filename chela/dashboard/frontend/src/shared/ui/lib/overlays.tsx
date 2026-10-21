@@ -8,9 +8,29 @@ import * as RP from '@radix-ui/react-popover';
 import * as RToast from '@radix-ui/react-toast';
 import * as RT from '@radix-ui/react-tooltip';
 import { Check, ChevronRight, type LucideIcon } from 'lucide-react';
-import { useRef, type ReactElement, type ReactNode, type SyntheticEvent } from 'react';
+import { useLayoutEffect, useRef, type ReactElement, type ReactNode, type SyntheticEvent } from 'react';
 
 const cx = (...names: (string | false | undefined)[]) => names.filter(Boolean).join(' ');
+
+// The last element focused outside every dialog. By the time a dialog's onOpenAutoFocus runs, a
+// field with autoFocus inside it has already taken focus, and a dialog opened from another
+// dialog (a Decisions row opening its task) has focus inside the one closing: neither is the
+// control to return to.
+let lastOutside: Element | null = null;
+const inDialog = (el: Element | null) => !!el?.closest('[role="dialog"]');
+if (typeof document !== 'undefined') {
+  document.addEventListener(
+    'focus', // captured at the document: `focus` does not bubble, but every one passes through here
+    (e) => {
+      if (e.target instanceof Element && !inDialog(e.target)) lastOutside = e.target;
+    },
+    true,
+  );
+}
+function openerNow(): Element | null {
+  const active = document.activeElement;
+  return active && active !== document.body && !inDialog(active) ? active : lastOutside;
+}
 
 /** Gap and viewport margin, the legacy popover's (shared/popover). */
 const GAP = 6;
@@ -26,8 +46,6 @@ export type DialogProps = {
   className?: string;
   /** The title names the dialog for assistive tech only: the content draws its own heading. */
   hideTitle?: boolean;
-  /** A selector inside the dialog that takes focus when it opens (default: its first control). */
-  initialFocus?: string;
   children?: ReactNode;
 };
 
@@ -36,8 +54,13 @@ export type DialogProps = {
  * opened (Radix returns it only to its own Trigger, and a legacy opener is not one); Escape
  * and an outside click close it.
  */
-export function Dialog({ open, onOpenChange, title, description, className, hideTitle, initialFocus, children }: DialogProps) {
+export function Dialog({ open, onOpenChange, title, description, className, hideTitle, children }: DialogProps) {
   const opener = useRef<Element | null>(null);
+  // Remembered as it opens. Radix skips onOpenAutoFocus when an autoFocus field already holds
+  // focus, so the opener is read here, from the focus history, not there.
+  useLayoutEffect(() => {
+    if (open) opener.current = openerNow();
+  }, [open]);
   if (!title.trim()) throw new Error('<Dialog> needs a title: it is the dialog\'s accessible name');
   return (
     <RD.Root open={open} onOpenChange={onOpenChange}>
@@ -46,18 +69,11 @@ export function Dialog({ open, onOpenChange, title, description, className, hide
           <RD.Content
             className={cx('modal', className)}
             {...(description ? {} : { 'aria-describedby': undefined })}
-            onOpenAutoFocus={(e) => {
-              opener.current = document.activeElement;
-              const first = initialFocus ? (e.currentTarget as Element | null)?.querySelector<HTMLElement>(initialFocus) : null;
-              if (first) {
-                e.preventDefault();
-                first.focus();
-              }
-            }}
             onCloseAutoFocus={(e) => {
               // A dialog that hands over to another (a Decisions row opening its task) leaves
               // focus to the one now open, never pulls it back behind it.
-              const handedOver = document.querySelector('[role="dialog"]') !== null;
+              const self = e.currentTarget;
+              const handedOver = [...document.querySelectorAll('[role="dialog"]')].some((d) => d !== self);
               if (handedOver || opener.current instanceof HTMLElement) e.preventDefault();
               if (!handedOver && opener.current instanceof HTMLElement) opener.current.focus();
             }}

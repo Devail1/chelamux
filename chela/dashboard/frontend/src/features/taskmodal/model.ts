@@ -33,12 +33,11 @@ export interface TaskItem {
   judge_detail?: string;
   risk?: unknown;
   risk_reason?: string;
-  tracker_url?: unknown;
+  tracker_url?: string | null;
   review_history?: string | null;
   last_error?: string;
-  /** ISO text from the runs table; a decision payload may carry epoch seconds. */
-  started_at?: string | number;
-  ended_at?: string | number;
+  started_at?: string;
+  ended_at?: string;
 }
 
 /** One round of `review_history`, as the Review tab shows it. */
@@ -136,44 +135,6 @@ export function defaultTab(item: TaskItem | null | undefined, nRounds: number): 
   return _REVIEW_STATUSES.has(item.status ?? '') || _BLOCKING_JUDGE.has(item.judge_state ?? '') ? 'review' : 'brief';
 }
 
-// CMX-122: the modal header's tracker link — EXACTLY the URL the Linear adapter fetched
-// (`tracker_url`, the same source kanban.js's _kTrackerLink reads, CMX-5/CMX-94), never
-// built from a workspace slug. A markdown/TODO or gh_issues item has none → null (plain
-// key). Only https is linked: the value lands in an href, so `javascript:` renders nothing.
-export function trackerHref(item: TaskItem | null | undefined): string | null {
-  const url = item?.tracker_url;
-  return typeof url === 'string' && /^https:\/\//i.test(url) ? url : null;
-}
-
-// ⚖️🎚️ CMX-405 — a run's RISK level (chela.sources.RISK_LEVELS), as the word the Work
-// card and the task modal show plus a colour modifier. The WORD carries the meaning (Liav is
-// red-weak); the class only agrees with it. `null` for anything that is not a run carrying a
-// known level (an open/backlog item, a pre-CMX-405 row) — render nothing, never a guess.
-// `reason` is the run row's `risk_reason` (marker / label / inferred: … / default), the
-// chip's tooltip, so an inferred `high` says why.
-const _RISK_CLS: Record<string, string> = { high: 'risk-high', normal: 'risk-normal', low: 'risk-low' };
-
-export function riskChip(item: TaskItem | null | undefined): { label: string; cls: string; reason: string } | null {
-  const level = item && typeof item.risk === 'string' ? item.risk.toLowerCase() : '';
-  const cls = Object.hasOwn(_RISK_CLS, level) ? _RISK_CLS[level] : undefined;
-  if (!item || !cls) return null;
-  return { label: `risk: ${level}`, cls, reason: item.risk_reason || '' };
-}
-
-// The header's task key. PROJECT_KEY-N is the primary identity for runs with a task_number;
-// pre-migration rows fall back to the legacy short hash. (dispatcher.js's _runDisplayId,
-// which kanban.js still reads, until P10 ports it.)
-export function runDisplayId(item: TaskItem): string {
-  if (item.project_key && item.task_number != null) return `${item.project_key}-${item.task_number}`;
-  return item.task_id || '';
-}
-
-// A PR link's compact label: "#NNN" from a GitHub URL, "PR" for any other host.
-export function prLabel(prUrl: string): string {
-  const m = String(prUrl).match(/\/pull\/(\d+)(?:[/?#]|$)/);
-  return m ? `#${m[1]}` : 'PR';
-}
-
 // Short workflow label: the workflow file's directory (kanban.js's _wfName).
 export function wfShort(path: string | undefined): string {
   if (!path) return '';
@@ -218,9 +179,3 @@ export function judgeBadgeClass(state: string): string {
   return Object.hasOwn(JUDGE_BADGE, state) ? (JUDGE_BADGE[state] as string) : 'badge-priority-low';
 }
 
-// "14:05 Oct 21": util.js's shortTime, for the side rows and round summaries.
-export function shortTime(iso: string | number): string {
-  const d = new Date(iso);
-  if (Number.isNaN(d.getTime())) return String(iso);
-  return `${d.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', hour12: false })} ${d.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}`;
-}

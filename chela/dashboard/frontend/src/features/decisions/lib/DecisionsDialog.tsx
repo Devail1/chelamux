@@ -146,7 +146,7 @@ function List() {
   const query = useStore(inboxQuery);
   const gap = s.gap && (
     <div className="feed-gap">
-      <icons.warning aria-hidden size={12} /> {s.gap.reason || 'a gap in the decisions log'}
+      <icons.warn aria-hidden size={12} /> {s.gap.reason || 'a gap in the decisions log'}
     </div>
   );
   if (!s.events.length) {
@@ -191,7 +191,7 @@ export function DecisionsDialog() {
   const owner = useStore(orchestrator);
   const query = useStore(inboxQuery);
   return (
-    <Dialog open={open} onOpenChange={(o) => !o && closeDecisions()} title="Decisions" className="modal-decisions" initialFocus=".decisions-body > .s-input">
+    <Dialog open={open} onOpenChange={(o) => !o && closeDecisions()} title="Decisions" className="modal-decisions">
       <DialogClose asChild>
         <IconButton className="task-modal-close" label="Close">
           <icons.close aria-hidden size={18} />
@@ -199,7 +199,7 @@ export function DecisionsDialog() {
       </DialogClose>
       <div className="decisions-body">
         <OwnerChip s={owner} />
-        <TextInput label="Search decisions" placeholder="Search task, branch, PR…" plain value={query} onChange={(v) => inboxQuery.set(v)} />
+        <TextInput label="Search decisions" placeholder="Search task, branch, PR…" plain autoFocus value={query} onChange={(v) => inboxQuery.set(v)} />
         <div className="decisions-list">
           <List />
         </div>

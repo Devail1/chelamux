@@ -95,7 +95,6 @@ type Payload = Record<string, unknown>;
 /** A payload field that is a string, else undefined. */
 const str = (v: unknown) => (typeof v === 'string' ? v : undefined);
 const num = (v: unknown) => (typeof v === 'number' ? v : undefined);
-const when = (v: unknown) => (typeof v === 'string' || typeof v === 'number' ? v : undefined);
 
 export function itemFromDecisionPayload(event: LogEvent | null | undefined): TaskItem | null {
     const p: Payload = (event && event.payload) || {};
@@ -110,8 +109,8 @@ export function itemFromDecisionPayload(event: LogEvent | null | undefined): Tas
         attempt: num(p.attempt),
         rework_count: num(p.rework_count),
         last_error: str(p.last_error),
-        started_at: when(p.started_at),
-        ended_at: when(p.ended_at),
+        started_at: str(p.started_at),
+        ended_at: str(p.ended_at),
     };
     if (Array.isArray(p.reviews) && p.reviews.length) {
         // taskmodalmodel.timelineSteps expects `review_history` as the JSON

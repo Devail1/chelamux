@@ -3,7 +3,8 @@ import { $, $$, TERMINALS_ON, _agentProject, _agentsCache, ageStr, agentDotColor
 import { onOrchestratorChange, orchestratorState } from '../../frontend/src/shared/orchestrator';
 import { refreshSummary } from './header';
 import { checkContext } from './agents';
-import { showAddSchedule } from './schedules';
+import { showAddSchedule } from '../../frontend/src/features/schedules';
+import { openNewTask } from '../../frontend/src/features/newtask';
 import { _displayLabel, adoptSidebarDefault, _minimized, _orderedWids, _renderedWids, _sharedWids, _stopShare, focusPaneByWid, isWallVisible, minimizePane, setTermMode, shareBtnClick } from './terminals';
 import { _launcherData, launchProject, refreshLauncher } from './launcher';
 import { VIEWS } from './views';
@@ -2885,12 +2886,9 @@ function _paletteItems(skipWids) {
     }
 
     items.push({ icon: lucideIcon('terminal'), title: 'New shell window', sub: 'action', run: () => newShellWindow() });
-    // CMX-6: create a Linear issue (newtask.js) — reached through window.chela, not an
-    // import, so nav.js does not pull the Work module graph in.
-    items.push({ icon: lucideIcon('plus'), title: 'New task', sub: 'action · Linear issue',
-                 run: () => { if (window.chela && window.chela.openNewTask) window.chela.openNewTask(); } });
-    items.push({ icon: lucideIcon('clock'), title: 'Add scheduled task', sub: 'action',
-                 run: () => { if (typeof showAddSchedule === 'function') showAddSchedule(); } });
+    // CMX-6: create a Linear issue (the New-task dialog, frontend/src/features/newtask).
+    items.push({ icon: lucideIcon('plus'), title: 'New task', sub: 'action · Linear issue', run: () => openNewTask() });
+    items.push({ icon: lucideIcon('clock'), title: 'Add scheduled task', sub: 'action', run: () => showAddSchedule() });
     // CMX-121: the injected keybinds (Alt+1..9, ⌘K) have no other discovery path —
     // this is the ONLY entry point (palette-only, deliberately no dedicated global
     // keybind — see index.html's #shortcuts-overlay comment).

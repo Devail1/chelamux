@@ -49,12 +49,16 @@ const CONTROLS = 'input, textarea, select';
 // Controls built by JS outside the Settings drawer, in the markup shape the
 // modules emit (terminals.js renamePane / the Active shares mode control). The share
 // dialog and its copy rows are React since CMX-239, the Decisions inbox since CMX-228: their
-// inputs are the kit's .s-input, which the drawer's rows already cover.
+// inputs are the kit's .s-input, which the drawer's rows already cover. Also the UI kit's dialog
+// fields as the Work view's islands draw them (Init a repo, New task, Add schedule, CMX-231).
 const JS_BUILT = `
 <div class="term-stage"><div class="term-pane"><div class="pane-head">
   <input class="pane-title-edit" value="agent-1"></div></div></div>
 <div class="shares-sheet"><div class="ss-unsafe-confirm"><div class="tsp-row">
-  <input class="tsp-in ss-confirm-in"></div></div></div>`;
+  <input class="tsp-in ss-confirm-in"></div></div></div>
+<div class="modal"><div class="field-control"><input class="s-input" type="text" list="init-suggestions"></div>
+  <div class="field-control"><textarea class="s-input s-textarea"></textarea></div>
+  <div class="field-control"><select class="s-select s-multi" multiple><option>CMX-1</option></select></div></div>`;
 
 // Enough of each settings endpoint for renderSettings() to build its rows.
 const TIMING = { knobs: [{ key: 'poll_s', env: 'CHELA_POLL', label: 'Poll', unit: 's',
@@ -109,8 +113,8 @@ function describe(el) {
 function controls() {
     const all = [...doc.querySelectorAll(CONTROLS)];
     // Vacuity guard: the shell + drawer + JS-built set must actually be here.
-    for (const sel of ['#settings-search', '#palette-input', '#sidebar-jump-input', '#init-path',
-        '#sched-prompt', '#modal-msg-text', '#sched-type', '.s-input', '.s-select',
+    for (const sel of ['#settings-search', '#palette-input', '#sidebar-jump-input', '[list="init-suggestions"]',
+        '.s-textarea', '#modal-msg-text', '.s-multi', '.s-input', '.s-select',
         '.s-timing-input', '.s-dispatch-input', '.pane-title-edit', '.ss-confirm-in']) {
         assert.ok(doc.querySelector(sel), `fixture lost ${sel} — the guard would pass vacuously`);
     }
@@ -126,7 +130,7 @@ test('phone (coarse pointer): every dashboard input/textarea/select computes >= 
 
 test('desktop (fine pointer): the controls keep their smaller sizes', () => {
     sheet.textContent = cssForViewport(DASH_CSS, DESKTOP);
-    for (const sel of ['#settings-search', '#palette-input', '#sidebar-jump-input', '.s-select', '#sched-prompt']) {
+    for (const sel of ['#settings-search', '#palette-input', '#sidebar-jump-input', '.s-select', '.s-textarea']) {
         const px = fontPx(win, doc.querySelector(sel));
         assert.ok(px < MIN_PX, `${sel} is ${px}px on desktop — the 16px fix leaked out of @media (pointer: coarse)`);
     }

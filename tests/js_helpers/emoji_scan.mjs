@@ -66,7 +66,7 @@ function guardedFiles(root) {
     return [
         ...top('chela/dashboard/static/js', /\.[jt]s$/),   // CMX-236: .ts converted in place
         ...top('chela/dashboard/templates', /\.html$/),
-        ..._walk(join(root, 'frontend/src'), n => /\.[jt]sx?$/.test(n) && !/\.test\./.test(n)),
+        ..._walk(join(root, 'chela/dashboard/frontend/src'), n => /\.[jt]sx?$/.test(n) && !/\.test\./.test(n)),
     ].map(p => relative(root, p)).sort();
 }
 

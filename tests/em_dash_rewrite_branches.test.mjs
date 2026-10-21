@@ -3,8 +3,8 @@
 //   1. agents.js: a context reading that is a transcript ESTIMATE gets the
 //      `chela install-statusline` hint in its tooltip, and an exact reading does not.
 //   2. terminals.js: the same split on a wall tile's context bar tooltip.
-//   3. dispatcher.js: seeding a path that is NOT a git repo warns that the dispatcher
-//      needs one, and seeding a git repo does not.
+//   3. (seeding a repo moved to the Init-a-repo dialog's own suite, CMX-231:
+//      frontend/src/features/runs/tests/Runs.test.tsx)
 //   4. nav.js: an archive/unarchive the dashboard never answered alerts, an answered one
 //      does not, and a page without `alert` fails quietly instead of throwing.
 //
@@ -17,7 +17,6 @@ import assert from 'node:assert/strict';
 import { JSDOM } from 'jsdom';   // needs `pnpm install`; tests/test_js_suites.py enforces it
 
 let CONTEXT = [];
-let INIT = {};
 let ARCHIVE_DOWN = false;
 
 const AGENTS = [{ name: 'a1', window_id: '@3', online: true, cwd: '/p/a1' }];
@@ -26,8 +25,7 @@ function fakeFetch(url) {
     const path = String(url);
     if (ARCHIVE_DOWN && /\/api\/sidebar\/(un)?archive$/.test(path)) return Promise.reject(new TypeError('Failed to fetch'));
     const body = path.endsWith('/api/agents/context') ? CONTEXT
-        : path.endsWith('/api/dispatcher/init') ? INIT
-            : path.endsWith('/api/agents') ? AGENTS
+        : path.endsWith('/api/agents') ? AGENTS
                 : path.endsWith('/api/rooms') ? { rooms: {}, pending: [] }
                     : path.startsWith('/api/term/ready') ? { ready: true }
                         : path.endsWith('/api/orchestrator/status') ? { wid: null, name: null, state: 'unregistered', why: '', queued: 0 }
@@ -46,8 +44,7 @@ const PAGE = `
   <div id="term-min-dock"></div>
   <div id="term-bar" class="kb-collapsed"><button class="kb-toggle" id="kb-toggle"></button><div class="kb-body" id="kb-body"></div></div>
 </div>
-<div id="ctx-a1"><div class="context-bar-fill"></div><span class="context-label"></span></div>
-<input id="init-path" value="/srv/repo"><pre id="init-result"></pre>`;
+<div id="ctx-a1"><div class="context-bar-fill"></div><span class="context-label"></span></div>`;
 
 function fakeGridStack() {
     const grid = {
@@ -83,7 +80,6 @@ beforeAll(async () => {
     nav = await import('../chela/dashboard/static/js/nav.js');
     terminals = await import('../chela/dashboard/static/js/terminals.js');
     agents = await import('../chela/dashboard/static/js/agents.js');
-    await import('../chela/dashboard/static/js/dispatcher.js');
     util.setCurrentTab('terminals');
     util.setAgentsCache(AGENTS);
 });
@@ -126,23 +122,6 @@ test('a wall tile with an exact reading has no estimate hint', async () => {
     await terminals.termTick();     // the poll re-reads /api/agents/context into the bar
     await settle();
     assert.equal(tileBar().title, 'Context: 50k/200k (25%)');
-});
-
-// --- 3. seeding a repo -------------------------------------------------------------
-
-const result = () => document.getElementById('init-result').textContent;
-
-test('seeding a path that is not a git repo warns that the dispatcher needs one', async () => {
-    INIT = { ok: true, path: '/srv/repo', created: ['WORKFLOW.md'], skipped: [], is_git: false };
-    await window.chela.doInitRepo();
-    assert.match(result(), /^⚠ Not a git repo\. The dispatcher needs one to branch & open PRs\.$/m);
-});
-
-test('seeding a git repo shows no git warning', async () => {
-    INIT = { ok: true, path: '/srv/repo', created: ['WORKFLOW.md'], skipped: [], is_git: true };
-    await window.chela.doInitRepo();
-    assert.match(result(), /^✓ Created WORKFLOW\.md$/m);
-    assert.doesNotMatch(result(), /Not a git repo/);
 });
 
 // --- 4. archive / unarchive with no answer -----------------------------------------

@@ -16,7 +16,8 @@
 // field is optional (TaskItem), because an open task and a backlog item carry far fewer.
 // ---------------------------------------------------------------------------
 import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react';
-import { runStatusBadgeClass } from '../../../../../static/js/runstate.js';
+import { prLabel, riskChip, runDisplayId, runStatusBadgeClass, trackerHref } from '../../runs/model.ts';
+import { shortTime } from '../../../shared/format/index.ts';
 import { icons } from '../../../shared/icons/index.ts';
 import { Markdown } from '../../../shared/markdown/index.ts';
 import { createStore, useStore } from '../../../shared/store/index.ts';
@@ -28,13 +29,8 @@ import {
   defaultTab,
   displayTitle,
   judgeBadgeClass,
-  prLabel,
-  riskChip,
-  runDisplayId,
-  shortTime,
   statusLabel,
   timelineSteps,
-  trackerHref,
   wfShort,
   type Round,
   type TabName,

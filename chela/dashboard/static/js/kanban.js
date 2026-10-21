@@ -1,14 +1,15 @@
 // --- Stage 0: ES-module imports ---
-import { $, BASE_PATH, attrEsc, escHtml } from './util';
-import { _runDisplayId, _runPrCell, _taskProgressChip } from './dispatcher';
-import { pollWork, postWorkDelete } from './work';
+import { $, BASE_PATH, attrEsc, escHtml, lucideIcon } from './util';
+import { runPrCellHtml as _runPrCell, taskProgressChipHtml as _taskProgressChip } from '../../frontend/src/features/runs/legacy';
+import { postWorkDelete } from '../../frontend/src/features/runs';
+import { pollWork } from './work';
 import { openTaskModal } from '../../frontend/src/features/taskmodal';
-import { displayTitle, riskChip } from '../../frontend/src/features/taskmodal/model';
+import { displayTitle } from '../../frontend/src/features/taskmodal/model';
 import { inlineHtml as knInline } from '../../frontend/src/shared/markdown';
 import { KANBAN_LANES, KANBAN_LANE_LABELS, laneOf } from './kanbanlanemodel';
 import { columnKey, runStateBadges, sampledLabel, trackerBoard, trackerColumns } from './kanbanlinearmodel';
 import { hiddenSummary, loadColPrefs, saveColPrefs, splitColumns } from './kanbanhiddenmodel';
-import { runCardNote, runCloseAction, runHandoffNote, runStallNote } from './runstate';
+import { riskChip, runCardNote, runCloseAction, runDisplayId as _runDisplayId, runHandoffNote, runStallNote } from '../../frontend/src/features/runs/model';
 
 // ---------------------------------------------------------------------------
 // Render: the Board segment of WORK (the global cross-workflow kanban)
@@ -242,7 +243,7 @@ function _kCard(card) {
     // 🗂️🔁 CMX-68: a closed run holding a READY task — on the closed card AND the open one.
     const stallNote = runStallNote(card);
     const stall = stallNote
-        ? `<div class="kanban-card-stall" title="${attrEsc(stallNote)}">${escHtml(stallNote)}</div>`
+        ? `<div class="kanban-card-stall" title="${attrEsc(stallNote)}">${lucideIcon('triangle-alert', 12)} ${escHtml(stallNote)}</div>`
         : '';
     const closeAct = runCloseAction(card);
     const closeBtn = closeAct
@@ -281,7 +282,7 @@ function _kCard(card) {
             .map(b => `<span class="kanban-state-chip ${b.cls}">${escHtml(b.label)}</span>`).join('');
     // Progress inside the run's own task list (issue #462) — see _taskProgressChip;
     // renders nothing when card.tasks is null (no session to join, or no task dir).
-    const taskChip = _taskProgressChip(card.tasks);
+    const taskChip = _taskProgressChip(card.tasks, lucideIcon('square-check', 12));
     // ⚖️🎚️ CMX-405: the run's risk level — what sized its judge battery and rework cap.
     const riskMeta = riskChip(card);
     const risk = riskMeta
