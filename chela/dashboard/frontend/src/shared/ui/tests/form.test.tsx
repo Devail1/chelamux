@@ -4,7 +4,7 @@ import { act, fireEvent, render, screen } from '@testing-library/react';
 import STYLE_CSS from '../../../../../static/style.css?raw';
 import { useState } from 'react';
 import { afterAll, beforeAll, expect, test, vi } from 'vitest';
-import { BADGE_TONE, BUTTON_VARIANT, Badge, Button, FieldRow, NumberInput, SectionHeader, Select, Tabs, TextInput, Toggle, useMediaQuery } from '../index.ts';
+import { BADGE_TONE, BUTTON_VARIANT, Badge, Button, FieldRow, NumberInput, RadioGroup, SectionHeader, Select, Tabs, TextInput, Toggle, useMediaQuery } from '../index.ts';
 import { must } from './setup.ts';
 
 let sheet: HTMLStyleElement;
@@ -289,4 +289,43 @@ test('useMediaQuery answers the query and re-renders when the answer changes', (
   unmount();
   expect(listeners.size).toBe(0);
   vi.unstubAllGlobals();
+});
+
+test('RadioGroup: a labelled group; clicking an option (or its row) picks it, a disabled one never', () => {
+  const onChange = vi.fn();
+  render(
+    <RadioGroup
+      label="Access"
+      value="a"
+      onChange={onChange}
+      options={[
+        { value: 'a', label: 'Alpha', className: 'x-opt' },
+        { value: 'b', label: 'Beta', hint: <span className="why">because</span> },
+        { value: 'c', label: 'Gamma', disabled: true },
+      ]}
+    />,
+  );
+  expect(screen.getByRole('radiogroup', { name: 'Access' })).toBeTruthy();
+  const [a, b, c] = screen.getAllByRole('radio') as HTMLButtonElement[];
+  expect([a, b, c].map((r) => must(r).getAttribute('aria-checked'))).toEqual(['true', 'false', 'false']);
+  expect(must(a).closest('label')?.className).toBe('ui-radio-opt x-opt');
+  expect(must(c).closest('label')?.className).toBe('ui-radio-opt ui-radio-disabled');
+  expect(screen.getByRole('radio', { name: /Beta/ }).closest('label')?.querySelector('.why')?.textContent).toBe('because');
+  fireEvent.click(must(b));
+  fireEvent.click(must(c));
+  expect([c?.disabled, onChange.mock.calls]).toEqual([true, [['b']]]);
+  fireEvent.click(must(must(b).closest('label')?.querySelector('.ui-radio-text')));
+  expect(onChange.mock.calls).toEqual([['b'], ['b']]);
+});
+
+test('TextInput plain: no autocomplete, no spellcheck (a typed confirmation); default keeps both', () => {
+  render(
+    <>
+      <TextInput label="plain" plain value="" onChange={() => {}} />
+      <TextInput label="free" value="" onChange={() => {}} />
+    </>,
+  );
+  const [plain, free] = [screen.getByRole('textbox', { name: 'plain' }), screen.getByRole('textbox', { name: 'free' })];
+  expect([plain.getAttribute('autocomplete'), plain.getAttribute('spellcheck')]).toEqual(['off', 'false']);
+  expect([free.getAttribute('autocomplete'), free.getAttribute('spellcheck')]).toEqual([null, null]);
 });

@@ -10,6 +10,7 @@ import { actionBarKind, costView, ctxLevel, focusLayout, gridRowCollapsed, prChi
 import './diffpanel';
 import { windowIdQuery } from './windowid';
 import { onEvent } from '../../frontend/src/shared/events';
+import { SHARE_NOT_SANDBOXED_REASON, SHARE_TYPING_OFF_REASON, durLabel as _durLabel, openShareDialog, paneToast as _termShareToast, renderShareInfoRows, unsafeDurations as _unsafeDurations } from '../../frontend/src/features/share';
 
 // ---------------------------------------------------------------------------
 // Terminals (embedded ttyd via the gateway: /term/<wid>/)
@@ -604,7 +605,7 @@ function _seedSharedFromAgents(agents) {
 }
 
 // Re-key (or drop) owner presence when a share was stopped / re-created — possibly
-// from ANOTHER page, so this page never ran _stopShare/_mintShare (CMX-427). Only
+// from ANOTHER page, so this page never ran _stopShare/_onShareMinted (CMX-427). Only
 // wids that already have a presence session are touched; the module is a no-op for
 // an unchanged share_epoch, so this costs nothing per poll on a steady share.
 function _syncOwnerPresenceFromAgents(agents) {
@@ -712,20 +713,8 @@ const SHARE_MODE_UI = {
 // setting on (and it then asks for the typed window name). The server re-checks the
 // setting, the live sandbox verdict and the typed name; "only on a non-sandboxed window"
 // for the override is a UI rule, not a server gate (as in the share dialog).
-// The UNSANDBOXED duration picker (CMX-419), shared by the share dialog and the Active
-// shares upgrade: the server's choices (preselected to the configured default), and the
-// length past which the window name must be typed a SECOND time.
-function _unsafeDurations(o) {
-    const base = (o && o.unsandboxed_choices && o.unsandboxed_choices.length)
-        ? o.unsandboxed_choices : [30, 240, 1440, 10080, 20160];
-    const dflt = (o && o.unsandboxed_minutes) || 30;
-    const choices = [...new Set([...base, dflt])].sort((a, b) => a - b);
-    return { choices, longMins: (o && o.unsandboxed_long_minutes) || 240 };
-}
-function _durLabel(n) {
-    return n % 1440 === 0 ? (n / 1440) + (n === 1440 ? ' day' : ' days')
-        : n % 60 === 0 ? (n / 60) + ' h' : n + ' min';
-}
+// The UNSANDBOXED duration picker (CMX-419): its choices and labels come from the share
+// feature (unsafeDurations, durLabel), shared with the share dialog.
 function _durOptionsHTML(choices, sel) {
     return choices.map(n => `<option value="${attrEsc(String(n))}"${n === sel ? ' selected' : ''}>${escHtml(_durLabel(n))}</option>`).join('');
 }
@@ -877,7 +866,7 @@ async function _buildSharesSheet() {
             <button class="ss-stop" type="button" data-wid="${attrEsc(wid)}">Stop</button>
           </div>
           ${_shareModeControlHTML(wid, opts[i])}
-          <div class="ss-row-body">${_shareInfoRowsHTML(infos[i], 'Link unavailable. Reopen this sheet to retry.')}</div>
+          <div class="ss-row-body"></div>
         </div>`).join('');
     sheet.innerHTML =
         `<div class="ss-hd"><span class="ss-hd-ic">${lucideIcon('share-2', 15)}</span> Active shares
@@ -887,7 +876,7 @@ async function _buildSharesSheet() {
          ${wids.length ? `<button class="ss-stopall" type="button">Stop all sharing (${wids.length})</button>` : ''}`;
     backdrop.appendChild(sheet);
     document.body.appendChild(backdrop);
-    _wireShareCopyButtons(sheet);
+    sheet.querySelectorAll('.ss-row-body').forEach((el, i) => renderShareInfoRows(el, infos[i], 'Link unavailable. Reopen this sheet to retry.'));
     _wireShareModeControls(sheet);
     const fr = focus && sheet.querySelector('.ss-row-focus');
     if (fr && fr.scrollIntoView) { try { fr.scrollIntoView({ block: 'nearest' }); } catch (_) {} }
@@ -953,123 +942,12 @@ async function shareBtnClick(btn, wid) {
         openSharesSheet(wid);
         return;
     }
-    await openShareDialog(btn, wid);
+    await openShareDialog({ wid, title: _paneTitle(wid), dims: () => _paneTermDims(wid), onMinted: resp => _onShareMinted(wid, resp) });
 }
 
-// --- share dialog (CMX-403) -------------------------------------------------
-// Picks the share's ACCESS before minting it: "View only" (the default), "Allow typing"
-// (enabled only when the setting is on AND the window verifies LIVE as a sandboxed
-// session — else the reason is shown), and — only while the setting is on, on a window
-// that is NOT sandboxed — the trusted-peer "Full access — UNSANDBOXED" override, which
-// needs the window name TYPED to arm. The server re-checks every one of these, and the
-// host bridge re-checks per keystroke; this dialog only keeps the choice honest.
-const SHARE_TYPING_OFF_REASON = 'Typing is disabled in Settings';
-const SHARE_NOT_SANDBOXED_REASON = 'Not a sandboxed session. Start one from New session → Sandboxed';
-
-function closeShareDialog() {
-    const bd = document.getElementById('share-dialog-backdrop');
-    if (bd) bd.remove();
-}
-
-async function openShareDialog(btn, wid) {
-    let opts = null;
-    try { opts = await api('/api/term/' + encodeURIComponent(wid) + '/share-options'); } catch (_) {}
-    opts = opts || {};
-    closeShareDialog();
-    const typingOk = !!opts.typing_allowed;
-    const reason = typingOk ? '' : (opts.share_typing ? SHARE_NOT_SANDBOXED_REASON : SHARE_TYPING_OFF_REASON);
-    const offerUnsafe = !!(opts.share_typing && !opts.sandboxed && opts.unsandboxed_offered && opts.window_name);
-    const name = opts.window_name || '';
-    const mins = opts.unsandboxed_minutes || 30;
-    // Duration picker (CMX-419): preselected to the configured default; a pick longer
-    // than `longMins` (4 h) needs the window name typed a SECOND time.
-    const { choices, longMins } = _unsafeDurations(opts);
-    const backdrop = document.createElement('div');
-    backdrop.id = 'share-dialog-backdrop';
-    backdrop.className = 'shares-backdrop';
-    backdrop.onclick = (e) => { if (e.target === backdrop) closeShareDialog(); };
-    backdrop.innerHTML = `
-      <div class="shares-sheet share-dialog" role="dialog" aria-modal="true" aria-label="Share this session">
-        <div class="ss-hd"><span class="ss-hd-ic">${lucideIcon('share-2', 15)}</span> Share ${escHtml(_paneTitle(wid))}
-          <button class="ss-close" type="button" aria-label="Close">&times;</button></div>
-        <label class="sd-opt"><input type="radio" name="sd-mode" value="view" checked>
-          <span><strong>👁 View only</strong><span class="sd-desc">The guest watches. Nothing they type reaches this machine.</span></span></label>
-        <label class="sd-opt${typingOk ? '' : ' sd-disabled'}"><input type="radio" name="sd-mode" value="typing"${typingOk ? '' : ' disabled'}>
-          <span><strong>⌨ Allow typing</strong><span class="sd-desc">Into this sandboxed session only: a container that sees just the project, re-verified on every keystroke.</span>
-          ${reason ? `<span class="sd-reason">${escHtml(reason)}</span>` : ''}</span></label>
-        ${offerUnsafe ? `
-        <label class="sd-opt sd-unsafe"><input type="radio" name="sd-mode" value="unsandboxed">
-          <span><strong>⚠ Full access, UNSANDBOXED: the guest can type into a real shell on this machine</strong>
-          <span class="sd-desc">For a very trusted peer only. Bound to the first guest who joins, ends when the time you pick runs out, audited. Stop the share to revoke it at once.</span></span></label>
-        <div class="sd-confirm" hidden>
-          <label class="tsp-lbl" for="sd-dur">Lasts</label>
-          <select id="sd-dur" class="tsp-in">${_durOptionsHTML(choices, mins)}</select>
-          <label class="tsp-lbl" for="sd-confirm-in">Type <code>${escHtml(name)}</code> to confirm</label>
-          <input id="sd-confirm-in" class="tsp-in" autocomplete="off" spellcheck="false" placeholder="${attrEsc(name)}">
-          <div class="sd-confirm-long" hidden>
-            <label class="tsp-lbl" for="sd-confirm-long-in">Longer than 4 h: type <code>${escHtml(name)}</code> again</label>
-            <input id="sd-confirm-long-in" class="tsp-in" autocomplete="off" spellcheck="false" placeholder="${attrEsc(name)}">
-          </div>
-        </div>` : ''}
-        <div class="sd-actions">
-          <button class="sd-cancel" type="button">Cancel</button>
-          <button class="sd-share" type="button">Share</button>
-        </div>
-      </div>`;
-    document.body.appendChild(backdrop);
-    const sheet = backdrop.querySelector('.share-dialog');
-    const shareB = sheet.querySelector('.sd-share');
-    const confirmBox = sheet.querySelector('.sd-confirm');
-    const confirmIn = sheet.querySelector('#sd-confirm-in');
-    const durSel = sheet.querySelector('#sd-dur');
-    const longBox = sheet.querySelector('.sd-confirm-long');
-    const longIn = sheet.querySelector('#sd-confirm-long-in');
-    const chosen = () => (sheet.querySelector('input[name="sd-mode"]:checked') || {}).value || 'view';
-    const minutes = () => (durSel ? parseInt(durSel.value, 10) : mins) || mins;
-    const isLong = () => minutes() > longMins;
-    const confirmed = () => !!confirmIn && confirmIn.value.trim() === name
-        && (!isLong() || (!!longIn && longIn.value.trim() === name));
-    const sync = () => {
-        const m = chosen();
-        if (confirmBox) confirmBox.hidden = m !== 'unsandboxed';
-        if (longBox) longBox.hidden = !isLong();
-        // Without the typed window name (twice, past 4 h) the override is not requestable.
-        shareB.disabled = m === 'unsandboxed' && !confirmed();
-        shareB.classList.toggle('sd-danger', m === 'unsandboxed');
-    };
-    sheet.querySelectorAll('input[name="sd-mode"]').forEach(r => r.onchange = sync);
-    if (confirmIn) confirmIn.oninput = sync;
-    if (longIn) longIn.oninput = sync;
-    if (durSel) durSel.onchange = sync;
-    sheet.querySelector('.ss-close').onclick = closeShareDialog;
-    sheet.querySelector('.sd-cancel').onclick = closeShareDialog;
-    shareB.onclick = async () => {
-        const m = chosen();
-        const confirm = m === 'unsandboxed' && confirmIn ? confirmIn.value.trim() : '';
-        if (m === 'unsandboxed' && !confirmed()) return;
-        const extra = m === 'unsandboxed'
-            ? { minutes: minutes(), ...(isLong() ? { confirm_long: longIn.value.trim() } : {}) } : {};
-        shareB.disabled = true;
-        closeShareDialog();
-        await _mintShare(btn, wid, m, confirm, extra);
-    };
-    sync();
-    return sheet;
-}
-
-async function _mintShare(btn, wid, mode, confirm, extra) {
-    const body = { on: true, mode: mode || 'view', ...(extra || {}) };
-    if (confirm) body.confirm = confirm;
-    const d = _paneTermDims(wid);
-    if (d) { body.cols = d.cols; body.rows = d.rows; }
-    let resp;
-    try {
-        resp = await api('/api/term/' + encodeURIComponent(wid) + '/share', {
-            method: 'POST', headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(body),
-        });
-    } catch (e) { _termShareToast(btn, 'Share failed'); return; }
-    if (!resp || !resp.ok) { _termShareToast(btn, (resp && resp.error) || 'Share failed'); return; }
+// --- share dialog (CMX-403): React since CMX-239 (frontend/src/features/share) --------
+// A mint the server accepted: this page's share state, owner presence, the pane, the sheet.
+function _onShareMinted(wid, resp) {
     _sharedWids.add(wid);
     _shareModes.set(wid, resp.mode || 'view');
     _noteShareExpiry(wid, resp.expires_at);
@@ -1090,42 +968,6 @@ async function _stopShare(wid) {
     _sharedWids.delete(wid); _shareModes.delete(wid); _shareExpiry.delete(wid); _presenceByWid.delete(wid); _renderFacepile(wid);
     _ownerPresence().then(m => m && m.stopOwnerPresence(wid));
     _reloadPaneFrame(wid); _updateShareBtns(wid); _renderSharesIndicator();
-}
-
-// Join URL + pairing code, each as a labeled readonly input with a Copy button —
-// the markup for one share's info inside the "Active shares" sheet (.ss-row-body),
-// sourced from /api/term/<wid>/share-info since /api/term/shared deliberately
-// omits them — see api_term_shared.
-function _shareInfoRowsHTML(info, emptyMsg) {
-    const url = info && info.join_url ? info.join_url : '';
-    const code = info && info.pairing_code ? info.pairing_code : '';
-    const row = (label, val, extra) => `
-      <label class="tsp-lbl">${label}${extra || ''}</label>
-      <div class="tsp-row"><input class="tsp-in" readonly value="${attrEsc(val)}">
-        <button class="tsp-copy" data-copy="${attrEsc(val)}">Copy</button></div>`;
-    return (url ? row('Join link', url) : '') +
-        (code ? row('Pairing code', code, ' <span class="tsp-hint">(needed to decrypt)</span>') : '') +
-        (!url && !code ? `<div class="tsp-warn">${emptyMsg}</div>` : '');
-}
-function _wireShareCopyButtons(root) {
-    root.querySelectorAll('.tsp-copy').forEach(b => b.onclick = () => {
-        navigator.clipboard.writeText(b.dataset.copy)
-            .then(() => { b.textContent = 'Copied'; setTimeout(() => (b.textContent = 'Copy'), 1500); })
-            .catch(() => {});
-    });
-}
-
-// Throwaway toast bubble anchored to the pane header — same plain-DOM affordance
-// as kanban's _kanbanMergeToast.
-function _termShareToast(anchor, msg) {
-    const host = (anchor && anchor.closest('.gs-head')) || (anchor && anchor.parentElement);
-    if (!host) { console.log('[chela-share]', msg); return; }
-    host.querySelectorAll('.term-share-toast').forEach(t => t.remove());
-    const t = document.createElement('div');
-    t.className = 'term-share-toast';
-    t.textContent = msg;
-    host.appendChild(t);
-    setTimeout(() => t.remove(), 4000);
 }
 
 // Called by presence.js in the iframe (window.parent.chelaPresence) on every
@@ -4074,7 +3916,7 @@ onEvent('term-ready', d => {
 });
 
 // --- Stage 0: ES-module exports ---
-export { adoptSidebarDefault, stepAgentMobile, SHARE_NOT_SANDBOXED_REASON, _kbPin, _paneFitHeight, _refitPaneTerm, SHARE_TYPING_OFF_REASON, _absorbFreshTerminals, _applyTermFocus, _cssEsc, _displayLabel, _paneKeyLabel, _jsStr, _minimized, _orderedWids, _refreshPaneLabels, _renderedWids, _shareBtnHTML, _shareExpiry, _shareModes, _shareTimeLeft, _sharedWids, _stopReadyPoll, _updateShareBtns, _stopShare, closeShareDialog, closeSharesSheet, openShareDialog, _swapToFrame, _termReady, dropTerminalPane, focusPaneByWid, isWallVisible, minimizePane, renderTerminals, setTermMode, termTick, shareBtnClick, startTermTimer, stopTermTimer };
+export { adoptSidebarDefault, stepAgentMobile, _kbPin, _paneFitHeight, _refitPaneTerm, _absorbFreshTerminals, _applyTermFocus, _cssEsc, _displayLabel, _paneKeyLabel, _jsStr, _minimized, _orderedWids, _refreshPaneLabels, _renderedWids, _shareBtnHTML, _shareExpiry, _shareModes, _shareTimeLeft, _sharedWids, _stopReadyPoll, _updateShareBtns, _stopShare, closeSharesSheet, _swapToFrame, _termReady, dropTerminalPane, focusPaneByWid, isWallVisible, minimizePane, renderTerminals, setTermMode, termTick, shareBtnClick, startTermTimer, stopTermTimer };
 
 // --- Stage 0: window.chela — surface reachable from inline HTML handlers ---
 window.chela = window.chela || {};
