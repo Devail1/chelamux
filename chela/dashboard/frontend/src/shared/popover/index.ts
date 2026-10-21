@@ -78,3 +78,44 @@ if (typeof window !== 'undefined') {
     }
   });
 }
+
+let tapTipsOn = false;
+
+/**
+ * Touch tooltips (moved from nav.js by CMX-219). A native `title` only shows on hover, so on a
+ * phone the titled readouts (the CPU/RAM/Disk strip, the usage readouts) had no tooltip at all.
+ * Tapping a titled element pops a .tap-tip bubble; tapping elsewhere, scrolling or 4 s
+ * dismisses it. Desktop hover keeps the native title. Installed once per page.
+ */
+export function installTapTips(win: Window = window) {
+  if (tapTipsOn) return;
+  tapTipsOn = true;
+  const doc = win.document;
+  let tip: HTMLElement | null = null;
+  let timer: ReturnType<typeof setTimeout> | null = null;
+  const hide = () => {
+    if (timer) clearTimeout(timer);
+    timer = null;
+    tip?.remove();
+    tip = null;
+  };
+  // Touch only. NEVER an interactive control: preventDefault() on touchend suppresses the
+  // follow-up click, so hijacking a tap on a button, link or row would kill its action.
+  doc.addEventListener('touchend', (e) => {
+    const target = e.target as Element | null;
+    if (typeof target?.closest !== 'function' || target.closest('button, a, input, select, textarea, label, [onclick], [role="button"]')) return hide();
+    const el = target.closest<HTMLElement>('[title], [data-tip]');
+    const text = el?.getAttribute('data-tip') || el?.getAttribute('title');
+    if (!el || !text) return hide();
+    e.preventDefault();
+    hide();
+    tip = doc.createElement('div');
+    tip.className = 'tap-tip';
+    tip.textContent = text;
+    doc.body.appendChild(tip);
+    // centred under the target, or above it at the bottom of the screen (the sidebar foot)
+    placePopover(tip, el, { gap: 6, align: 'center' });
+    timer = setTimeout(hide, 4000);
+  }, { passive: false });
+  win.addEventListener('scroll', hide, true);
+}

@@ -22,6 +22,15 @@ export function relativeTime(iso: string | null | undefined, now = Date.now()): 
   return `${Math.round(diff / 86400)}d`;
 }
 
+/** How long ago, from seconds: `12s ago`, `5m ago`, `3h ago`, `2d ago`; 'never' with none. */
+export function ageStr(seconds: number | null | undefined): string {
+  if (seconds == null) return 'never';
+  if (seconds < 60) return `${Math.round(seconds)}s ago`;
+  if (seconds < 3600) return `${Math.round(seconds / 60)}m ago`;
+  if (seconds < 86400) return `${Math.round(seconds / 3600)}h ago`;
+  return `${Math.round(seconds / 86400)}d ago`;
+}
+
 const pad = (n: number | string) => String(n).padStart(2, '0');
 
 /** An evenly spaced list's step (`[0, 8, 16]` → 8), or null when the gaps differ. */

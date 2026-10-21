@@ -28,7 +28,6 @@
 // sidebar Sessions list, the Wall, or the palette), no nav item of its own.
 // See viewreg.js for the entry shape.
 // ---------------------------------------------------------------------------
-import { renderAgentDetail } from './nav';
 import { renderTerminals, startTermTimer, stopTermTimer } from './terminals';
 import { pollWork } from './work';
 
@@ -64,6 +63,6 @@ export const VIEWS = [
         id: 'agent-detail',
         label: 'Agent',
         virtual: true,          // a drill-in, not a destination: no nav item, no palette
-        tick: () => renderAgentDetail(),
+        // No tick: the agent-detail island (features/agentdetail) redraws from the stores.
     },
 ];

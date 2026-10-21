@@ -48,11 +48,13 @@ test('the Wall toolbar renders no "+ New shell" button (CMX-135)', () => {
 for (const [name, vp] of [['@390', PHONE], ['@1440', DESKTOP]]) {
     test(`${name} before any JS: neither in-row pill paints`, () => {
         const dom = toolbarDom(vp);
-        for (const id of ['term-shares', 'term-approvals']) {
-            const el = dom.window.document.getElementById(id);
-            assert.ok(el, `#${id} is missing from index.html`);
-            assert.equal(dom.window.getComputedStyle(el).display, 'none', `#${id} paints before JS at ${name}`);
-        }
+        const el = dom.window.document.getElementById('term-shares');
+        assert.ok(el, '#term-shares is missing from index.html');
+        assert.equal(dom.window.getComputedStyle(el).display, 'none', `#term-shares paints before JS at ${name}`);
+        // CMX-219: #term-approvals is the approvals island's: before JS its slot draws nothing
+        const slot = dom.window.document.getElementById('term-approvals-island');
+        assert.ok(slot, '#term-approvals-island is missing from index.html');
+        assert.equal(slot.childNodes.length, 0, `#term-approvals-island has content before JS at ${name}`);
     });
 }
 

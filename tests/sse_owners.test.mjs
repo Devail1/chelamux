@@ -1,7 +1,7 @@
 // CMX-217 (CMX-212 P03): sse.js is gone; each SSE event's handler lives with its owner and
 // subscribes through frontend/src/shared/events. This drives the handlers sse.js used to hold
-// that no other suite reaches: `runs`/`hello` (work.js, the run-state toasts and the board
-// redraw), `windows` (util.js invalidates the agent cache; terminals.js reconciles the Wall)
+// that no other suite reaches: `runs`/`hello` (the run-toast island, features/runtoast since
+// CMX-219, and work.js's board redraw), `windows` (util.js invalidates the agent cache; terminals.js reconciles the Wall)
 // and `term-ready` (terminals.js swaps a placeholder for its iframe). The real page, booted
 // through the real entry, a fake EventSource (jsdom has none). `log`, `orchestrator` and
 // `overrides` are driven by decisions_sse, orchestrator_ui and approvals_wiring.
@@ -22,7 +22,8 @@ const PANEL = `
   <div id="term-min-dock"></div>
   <div id="term-bar" class="kb-collapsed"><button class="kb-toggle" id="kb-toggle"></button><div class="kb-body" id="kb-body"></div></div>
 </div>
-<div class="panel" id="panel-work"></div>`;
+<div class="panel" id="panel-work"></div>
+<div id="overlays-island"></div>`;
 
 const agent = wid => ({ name: `agent-${wid}`, window_id: wid, online: true, session_status: 'idle' });
 let liveAgents = [agent('@1'), agent('@2')];
@@ -53,7 +54,7 @@ function frame(type, data) {
     handlers.forEach(cb => cb({ data: JSON.stringify(data) }));
 }
 async function settle() { for (let i = 0; i < 10; i++) await flush(); }
-const toasts = () => [...document.querySelectorAll('#run-toast-stack .run-toast')];
+const toasts = () => [...document.querySelectorAll('.run-toast-stack .run-toast')];
 const dispatcherReads = () => requests.filter(r => r.split('?')[0].endsWith('/api/dispatcher')).length;
 
 let util, terminals;
@@ -74,7 +75,8 @@ beforeEach(async () => {
     requests = [];
     localStorage.clear();
     util.setCurrentTab('terminals');
-    document.getElementById('run-toast-stack')?.remove();
+    toasts().forEach(t => t.click());   // a click dismisses one: start each test with none
+    await settle();
 });
 
 test('a run moving INTO review toasts once, with its label and PR link, and redraws the board', async () => {
@@ -90,6 +92,7 @@ test('a run moving INTO review toasts once, with its label and PR link, and redr
     assert.equal(t.querySelector('a').getAttribute('href'), 'https://example.test/pull/9');
     assert.equal(dispatcherReads(), 3, 'each runs frame refetches /api/dispatcher once');
     t.click();
+    await settle();
     assert.equal(toasts().length, 0, 'a click dismisses the toast');
 });
 
@@ -99,6 +102,7 @@ test('the hello baseline primes the last-seen status: a run already in review ne
     await settle();
     assert.equal(toasts().length, 0);
     frame('runs', { runs: [{ task_id: 'CMX-902', status: 'done' }] });
+    await settle();
     assert.equal(toasts().length, 1, 'a later transition still toasts');
     assert.equal(toasts()[0].querySelector('a'), null, 'no PR url, no link');
 });

@@ -9,7 +9,9 @@ import { Schedules } from './features/schedules/index.ts';
 import { mountSidebar } from './features/sidebar/index.ts';
 import { VersionBadge } from './features/version/index.ts';
 import { installBridge } from './shared/bridge/index.ts';
+import { mountChrome } from './chrome.tsx';
 import { mountIsland } from './shared/islands/index.tsx';
+import { installTapTips } from './shared/popover/index.ts';
 
 export function boot(win: Window = window) {
   const bridge = installBridge(win);
@@ -21,6 +23,8 @@ export function boot(win: Window = window) {
   mountIsland('work-runs', Runs, {}, win.document);
   mountIsland('work-schedules', Schedules, {}, win.document);
   mountIsland('newtask-island', NewTask, {}, win.document);
+  mountChrome(win.document);
+  installTapTips(win);
 }
 
 boot();

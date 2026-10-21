@@ -1095,7 +1095,7 @@ test('the REAL index.html wires the modal close button (✕) to hideDecisionsMen
 // actually-rendered row.
 function decisionsInlineHandlerNames() {
     const btn = REAL_HTML.match(/<button class="icon-btn" id="btn-decisions"[\s\S]*?<\/button>/);
-    const menu = REAL_HTML.match(/<div class="palette-overlay" id="decisions-menu"[\s\S]*?\n<!-- Launcher:/);
+    const menu = REAL_HTML.match(/<div class="palette-overlay" id="decisions-menu"[\s\S]*?\n<!-- New task \(CMX-6\)/);
     assert.ok(btn, '#btn-decisions button not found in index.html');
     assert.ok(menu, '#decisions-menu block not found in index.html');
     const scope = btn[0] + '\n' + menu[0];

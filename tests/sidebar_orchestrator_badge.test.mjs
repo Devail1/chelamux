@@ -21,8 +21,8 @@ import { bootDashboardDom, clickOnclick, flush, sliceTemplate } from './js_helpe
 
 const INBOX_BTN = sliceTemplate('<button class="icon-btn" id="btn-decisions"', '</button>');
 // the end marker is the NEXT block's comment opener — cut it off, or it swallows the rest
-const DECISIONS_MENU = sliceTemplate('<div class="palette-overlay" id="decisions-menu"', '\n<!-- Launcher:')
-    .replace(/<!-- Launcher:$/, '');
+const DECISIONS_MENU = sliceTemplate('<div class="palette-overlay" id="decisions-menu"', '\n<!-- New task (CMX-6)')
+    .replace(/<!-- New task \(CMX-6\)$/, '');
 
 const BODY = `
 <aside class="sidebar">

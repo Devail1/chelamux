@@ -50,9 +50,9 @@ const indexHtml = fs.readFileSync(
 // Same slice tests/decisions.test.mjs's decisionsInlineHandlerNames() uses to isolate the real
 // #decisions-menu block — from its opening tag to the next top-level comment.
 const REAL_DECISIONS_MENU_MATCH = indexHtml.match(
-    /<div class="palette-overlay" id="decisions-menu"[\s\S]*?\n<!-- Launcher:/);
+    /<div class="palette-overlay" id="decisions-menu"[\s\S]*?\n<!-- New task \(CMX-6\)/);
 assert.ok(REAL_DECISIONS_MENU_MATCH, '#decisions-menu block not found in index.html');
-const REAL_DECISIONS_MENU = REAL_DECISIONS_MENU_MATCH[0].replace(/\n<!-- Launcher:$/, '');
+const REAL_DECISIONS_MENU = REAL_DECISIONS_MENU_MATCH[0].replace(/\n<!-- New task \(CMX-6\)$/, '');
 
 // Mounts the REAL #decisions-menu markup (sliced from index.html, not hand-built) under the
 // REAL style.css. `open` toggles the `open` class the same way openDecisionsMenu() does, by

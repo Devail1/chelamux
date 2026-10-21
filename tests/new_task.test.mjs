@@ -62,10 +62,12 @@ const escape = async () => {
 };
 
 beforeAll(async () => {
-    ({ modules: { work, launcher } } = await bootDashboardDom({
+    ({ modules: { work } } = await bootDashboardDom({
         body: `<div id="panel-work"><div class="work-toolbar">${TOOLBAR_BTN}${INIT_BTN}</div>${BOARD}${ISLANDS}</div>\n${PALETTE}`,
-        fetchImpl, canvasStub: true, extraModules: ['work.js', 'kanban.js', 'launcher.js'],
+        fetchImpl, canvasStub: true, extraModules: ['work.js', 'kanban.js'],
     }));
+    // CMX-219: the launcher is the launch menu island's (frontend/src/features/launcher)
+    launcher = await import('../chela/dashboard/frontend/src/features/launcher/index.ts');
     ({ refreshWork, work: workStore } = await import('../chela/dashboard/frontend/src/shared/store/work.ts'));
     await flush();
 });

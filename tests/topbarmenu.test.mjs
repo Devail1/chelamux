@@ -1,42 +1,17 @@
-// TOPBAR PRIMARIES → ONE MENU, IN A REAL DOM (CMX-109 / CMX-108 Part A re-filed).
+// TOPBAR PRIMARIES → ONE MENU (CMX-109 / CMX-108 Part A re-filed), the page half.
 //
-// CMX-377 moved the container this menu's trigger lives in from a full-width
-// <header class="topbar"> into the sidebar's fixed foot (.sidebar-foot,
-// index.html) — the "calm desktop app" restyle drops the topbar entirely. The
-// three invariants below are unchanged; only the "REAL index.html" assertion
-// that reads the container's markup (originally anchored on
-// `.topbar-actions...</header>`) is re-anchored on `.sidebar-foot`, and
-// #btn-shares — which used to sit in that same row — moved OUT into the
-// always-on-top `.safety-float` (see index.html's own comment on why), so it
-// no longer appears in .sidebar-foot's button list at all.
+// Three topbar primaries (#btn-palette "Jump to…", #btn-new "New…", #btn-overflow "More")
+// fold into ONE control (#btn-primary-menu, the sidebar foot's gear since CMX-377/CMX-393)
+// opening ONE menu. Since CMX-219 that menu is the primary-menu island
+// (frontend/src/features/primarymenu): what its rows do, and that the safety kill switch is
+// never one of them, is its own RTL suite (features/primarymenu/tests/PrimaryMenu.test.tsx).
+// This file keeps what only the REAL page can show:
 //
-// cmx-108/PR #122 folded the WALL toolbar's grid-preset picker + lock button behind
-// one "Layout" menu (tests/wallnav.test.mjs) — a different, valid consolidation from
-// the one this task asks for. This is the MAIN topbar: three separate primaries
-// (#btn-palette "Jump to…", #btn-new "New…", #btn-overflow "More") fold into ONE
-// button (#btn-primary-menu) opening ONE popover (#primary-menu). "Jump to…" and the
-// old overflow's items (Share current / Notifications / Settings) are flat rows in
-// that popover; "New…" reopens the pre-existing #new-menu (openNewMenuFromPrimary)
-// rather than duplicating its Favorites/Recent host — #new-menu still serves the
-// sidebar's own "+" trigger from a different anchor, unchanged.
-//
-// Runs the REAL nav.js (via main.js, same module-graph-import approach as
-// tests/sidebar.test.mjs) in jsdom — real openPrimaryMenu/hidePrimaryMenu/
-// openNewMenuFromPrimary/openPalette against real DOM nodes, not a source grep.
-//
-// Three properties, each a regression that would ship silently:
-//
-//   1. 🔴 ONE TRIGGER, NOT THREE. #btn-primary-menu is the only primary-action
-//      button left in .sidebar-foot (CMX-377: was .topbar-actions); the old
-//      #btn-palette/#btn-new/#btn-overflow ids are gone from index.html.
-//   2. 🔴 THE MENU ACTUALLY EXPOSES JUMP / NEW / OVERFLOW. Opening #primary-menu
-//      renders rows wired to openPalette, openNewMenuFromPrimary, and the three old
-//      overflow actions (Share current session / Notifications / Settings) — drop
-//      any one of those wires and this goes red. ⌘K still opens the palette
-//      directly, independent of the menu (the global keydown listener).
-//   3. 🔴 #btn-shares STAYS OUTSIDE THE MENU. The safety kill-switch must never end
-//      up inside #primary-menu — it has to stay visible whenever a share is live,
-//      menu open or not.
+//   1. 🔴 ONE TRIGGER, NOT THREE, in the real template: the foot holds the menu's slot and
+//      no other button; the old ids are gone; #btn-shares stays in .safety-float.
+//   2. 🔴 ⌘K still opens the palette directly, independent of the menu.
+//   3. 🔴 CMX-377: the rendered DOM has no topbar, and the inbox, the wordmark, the
+//      CPU/RAM/Disk readouts and the gear all live inside .sidebar.
 //
 // Run: pnpm exec vitest run tests/topbarmenu.test.mjs (pytest runs it via tests/test_js_suites.py;
 // it needs `pnpm install` for jsdom — CHELA_REQUIRE_JS_TESTS makes a missing jsdom a FAILURE.)
@@ -45,104 +20,26 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
-import { JSDOM } from 'jsdom';   // needs `pnpm install` — tests/test_js_suites.py enforces it
+import { bootDashboardDom, flush, sliceTemplate } from './js_helpers/dashboard_dom.mjs';
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..', 'chela', 'dashboard');
 const HTML = readFileSync(join(ROOT, 'templates', 'index.html'), 'utf8');
 
-// The sidebar foot + the two popovers, as index.html emits them (only the ids
-// nav.js reaches for). #new-menu is unchanged from before this fold — still the
-// sidebar "+" trigger's popover too — so it stays minimal here.
-const BODY = `
-<div class="sidebar-foot">
-  <button class="icon-btn" id="btn-primary-menu" aria-haspopup="true" onclick="chela.openPrimaryMenu(event)"></button>
-</div>
-<div class="safety-float">
-  <button class="shares-indicator" id="btn-shares" hidden></button>
-</div>
-<div class="popover launch-menu" id="new-menu" style="display:none;">
-  <div id="new-menu-launch"></div>
-</div>
-<div class="popover overflow-menu" id="primary-menu" style="display:none;">
-  <div class="popover-item ov-item" id="pm-jump" onclick="chela.hidePrimaryMenu(); chela.openPalette()">
-    <span>Jump to…</span><span class="pt-kbd">⌘K</span>
-  </div>
-  <div class="popover-item ov-item" id="pm-new" onclick="chela.openNewMenuFromPrimary()">
-    <span>New…</span>
-  </div>
-  <div class="popover-item ov-item" id="pm-share" onclick="chela.hidePrimaryMenu(); chela.shareCurrentAgent()">
-    <span>Share current session</span>
-  </div>
-  <div class="popover-item ov-item" id="pm-notify" onclick="chela.hidePrimaryMenu(); chela.toggleSettings('notify')">
-    <span>Notifications</span>
-  </div>
-  <div class="popover-item ov-item" id="pm-settings" onclick="chela.hidePrimaryMenu(); chela.toggleSettings()">
-    <span>Settings</span>
-  </div>
-</div>
-<div class="palette-overlay" id="palette">
-  <div class="palette">
-    <input id="palette-input">
-    <div id="palette-list"></div>
-  </div>
-</div>`;
+// --- 1. 🔴 one trigger, not three, in the real template ------------------------------
 
-let nav;
-
-beforeAll(async () => {
-    const dom = new JSDOM(`<!doctype html><html><body>${BODY}</body></html>`,
-        { url: 'http://localhost:5005/', pretendToBeVisual: true });
-    for (const k of ['window', 'document', 'localStorage', 'navigator', 'HTMLElement',
-        'Element', 'Node', 'Event', 'MouseEvent', 'KeyboardEvent', 'CustomEvent',
-        'getComputedStyle', 'requestAnimationFrame', 'cancelAnimationFrame']) {
-        Object.defineProperty(globalThis, k, {
-            value: dom.window[k], writable: true, configurable: true,
-        });
-    }
-    dom.window.matchMedia = q => ({
-        media: q, matches: false,
-        addEventListener() {}, removeEventListener() {}, addListener() {}, removeListener() {},
-    });
-    globalThis.fetch = () => Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve({}) });
-    globalThis.window.chela = globalThis.window.chela || {};
-    globalThis.setInterval = () => 0;
-
-    await import('../chela/dashboard/frontend/src/boot.ts');
-    nav = await import('../chela/dashboard/static/js/nav.js');
+test('the old three primaries are gone; the gear is the primary-menu island', () => {
+    assert.ok(HTML.includes('id="primary-menu-island"'), 'the primary-menu island slot is missing from index.html');
+    assert.ok(!HTML.includes('id="btn-palette"'), '#btn-palette is still in index.html: not folded');
+    assert.ok(!HTML.includes('id="btn-new"'), '#btn-new is still in index.html: not folded');
+    assert.ok(!HTML.includes('id="btn-overflow"'), '#btn-overflow is still in index.html: not folded');
 });
 
-// --- 1. 🔴 one trigger, not three -------------------------------------------------
-
-test('the topbar has ONE primary button, not the old three', () => {
-    assert.ok(HTML.includes('id="btn-primary-menu"'), '#btn-primary-menu is missing from index.html');
-    assert.ok(!HTML.includes('id="btn-palette"'), '#btn-palette is still in index.html — not folded');
-    assert.ok(!HTML.includes('id="btn-new"'), '#btn-new is still in index.html — not folded');
-    assert.ok(!HTML.includes('id="btn-overflow"'), '#btn-overflow is still in index.html — not folded');
-});
-
-// The DOM fixtures below are hand-built (same approach as tests/wallnav.test.mjs /
-// tests/sidebar.test.mjs), so they cannot catch a structural regression in the REAL
-// index.html — e.g. #btn-shares physically moved inside #primary-menu there while
-// staying correctly-outside in this file's fixture. These two run against the real
-// source text instead.
-
-// CMX-171 added #btn-decisions (the Decisions inbox popover, moved out of the
-// sidebar) as a fourth, deliberate topbar button — a distinct standalone action,
-// not a leftover from the #btn-palette/#btn-new/#btn-overflow fold this test
-// guards against regressing. The set is now fixed at exactly these three.
-test('.sidebar-foot in the REAL index.html has exactly one primary button', () => {
-    // CMX-377: this container used to be `.topbar-actions` inside a full-width
-    // <header class="topbar">, holding btn-shares/btn-decisions/btn-primary-menu
-    // together. The topbar is gone; #btn-shares moved OUT into the always-on-top
-    // `.safety-float` (see index.html's own comment on why — an off-canvas
-    // sidebar traps a position:fixed descendant behind its own transform), so
-    // it is deliberately NOT one of the two buttons left here.
-    // CMX-393: #btn-decisions moved up into .sidebar-head (the mockup's order),
-    // leaving the foot ONE row — readouts + this single menu control.
+test('.sidebar-foot in the REAL index.html holds the readouts and the ONE menu, no other button', () => {
     const foot = HTML.match(/<div class="sidebar-foot">[\s\S]*?\n    <\/div>/)[0];
-    const buttonIds = [...foot.matchAll(/<button[^>]*\bid="([^"]+)"/g)].map(m => m[1]);
-    assert.deepEqual(buttonIds, ['btn-primary-menu'],
-        `.sidebar-foot has unexpected buttons: ${buttonIds.join(', ')}`);
+    assert.deepEqual([...foot.matchAll(/<button[^>]*\bid="([^"]+)"/g)].map(m => m[1]), [],
+        '.sidebar-foot has a button of its own besides the menu island');
+    assert.deepEqual([...foot.matchAll(/<span class="island-slot" id="([^"]+)"/g)].map(m => m[1]),
+        ['resources-island', 'primary-menu-island']);
 });
 
 test('#btn-decisions lives in .sidebar-head in the REAL index.html (CMX-393)', () => {
@@ -154,137 +51,39 @@ test('#btn-decisions lives in .sidebar-head in the REAL index.html (CMX-393)', (
 
 test('#btn-shares lives in .safety-float, not .sidebar-foot, in the REAL index.html', () => {
     const foot = HTML.match(/<div class="sidebar-foot">[\s\S]*?\n    <\/div>/)[0];
-    assert.ok(!foot.includes('btn-shares'), '#btn-shares is inside .sidebar-foot — it must stay in .safety-float');
+    assert.ok(!foot.includes('btn-shares'), '#btn-shares is inside .sidebar-foot: it must stay in .safety-float');
     const safetyFloat = HTML.match(/<div class="safety-float">[\s\S]*?\n<\/div>/);
     assert.ok(safetyFloat, '.safety-float block not found in index.html');
     assert.ok(safetyFloat[0].includes('id="btn-shares"'), '#btn-shares is missing from .safety-float');
 });
 
-test('#btn-shares is never nested inside #primary-menu in the REAL index.html', () => {
-    const m = HTML.match(/<div class="popover overflow-menu" id="primary-menu"[\s\S]*?\n<\/div>/);
-    assert.ok(m, '#primary-menu block not found in index.html');
-    assert.ok(!m[0].includes('btn-shares'), '#btn-shares is inside the #primary-menu markup block');
+// --- the real page ----------------------------------------------------------------------
+
+beforeAll(async () => {
+    const APP_HTML = sliceTemplate('<div class="app">', '</main>\n\n</div>');
+    const PALETTE = sliceTemplate('<div class="palette-overlay" id="palette"', '</div>\n\n<!-- Keyboard shortcuts')
+        .replace(/\n\n<!-- Keyboard shortcuts$/, '');
+    await bootDashboardDom({ body: APP_HTML + PALETTE });
+    for (let i = 0; i < 5; i++) await flush();
 });
 
-// The behavioural tests below (openPalette, openNewMenuFromPrimary, …) run against
-// this file's own hand-built fixture, so they cannot catch a row being DELETED from
-// the REAL #primary-menu markup while the fixture keeps it. This checks the actual
-// source text carries every wire the fold promised to keep reachable.
-test('the REAL #primary-menu block still wires every folded action', () => {
-    const m = HTML.match(/<div class="popover overflow-menu" id="primary-menu"[\s\S]*?\n<\/div>/);
-    assert.ok(m, '#primary-menu block not found in index.html');
-    const block = m[0];
-    [
-        [/chela\.openPalette\(\)/, 'Jump to… → chela.openPalette()'],
-        [/chela\.openNewMenuFromPrimary\(\)/, 'New… → chela.openNewMenuFromPrimary()'],
-        [/chela\.shareCurrentAgent\(\)/, 'Share current session → chela.shareCurrentAgent()'],
-        [/chela\.toggleSettings\('notify'\)/, "Notifications → chela.toggleSettings('notify')"],
-        [/chela\.toggleSettings\(\)/, 'Settings → chela.toggleSettings()'],
-    ].forEach(([re, label]) => assert.match(block, re, `#primary-menu dropped: ${label}`));
-    // The usage/updated readouts moved off the old #overflow-menu unchanged.
-    ['hdr-ratelimit-pill', 'hdr-weekly-rl-pill', 'hdr-schedules', 'hdr-next-pill', 'hdr-updated'].forEach(id =>
-        assert.ok(block.includes(`id="${id}"`), `#primary-menu dropped the ${id} readout`));
-});
-
-// --- 2. 🔴 the menu actually exposes jump / new / overflow, wired to the REAL fns -
-
-test('opening #primary-menu measures + positions off the real anchor', () => {
-    const m = document.getElementById('primary-menu');
-    const anchor = document.getElementById('btn-primary-menu');
-    anchor.getBoundingClientRect = () => ({ top: 8, bottom: 40, left: 969, right: 1001, width: 32, height: 32 });
-    Object.defineProperty(m, 'offsetWidth', { value: 210, configurable: true });
-
-    window.chela.openPrimaryMenu({ stopPropagation() {}, currentTarget: anchor });
-
-    assert.equal(m.style.display, 'block', 'openPrimaryMenu did not show #primary-menu');
-    assert.equal(parseFloat(m.style.left) + 210, 1001, 'the menu is not right-aligned to the button');
-    window.chela.hidePrimaryMenu();
-    assert.equal(m.style.display, 'none', 'hidePrimaryMenu did not hide #primary-menu');
-});
-
-// jsdom does not execute inline onclick="..." attributes without runScripts:
-// "dangerously" (unset here, matching wall.test.mjs/wallnav.test.mjs/sidebar.test.mjs
-// — none of them enable it either). So each row is checked two ways: its onclick
-// ATTRIBUTE textually names the real function (catches "the wire got deleted"), and
-// that real function is then called directly (catches "the wire is a no-op").
-
-test('the "Jump to…" row is wired to openPalette, and the real function opens the REAL palette', () => {
-    assert.match(document.getElementById('pm-jump').getAttribute('onclick'), /chela\.openPalette\(\)/,
-        '#pm-jump is not wired to chela.openPalette()');
-    window.chela.openPalette();
-    assert.ok(document.getElementById('palette').classList.contains('open'),
-        'openPalette() did not open #palette — the row would be decoration even though wired');
-    window.chela.closePalette();
-});
+// --- 2. 🔴 ⌘K, independent of the menu ------------------------------------------------
 
 test('⌘K opens the palette directly — independent of the primary menu', () => {
     assert.equal(document.getElementById('palette').classList.contains('open'), false);
     document.dispatchEvent(new KeyboardEvent('keydown', { key: 'k', metaKey: true, bubbles: true }));
     assert.ok(document.getElementById('palette').classList.contains('open'),
-        '⌘K no longer opens the palette — the direct shortcut regressed');
+        '⌘K no longer opens the palette: the direct shortcut regressed');
     window.chela.closePalette();
 });
 
-test('the "New…" row is wired to openNewMenuFromPrimary, and it reopens the REAL #new-menu', () => {
-    assert.match(document.getElementById('pm-new').getAttribute('onclick'), /chela\.openNewMenuFromPrimary\(\)/,
-        '#pm-new is not wired to chela.openNewMenuFromPrimary()');
-    const newMenu = document.getElementById('new-menu');
-    const anchor = document.getElementById('btn-primary-menu');
-    anchor.getBoundingClientRect = () => ({ top: 8, bottom: 40, left: 969, right: 1001, width: 32, height: 32 });
-    Object.defineProperty(newMenu, 'offsetWidth', { value: 232, configurable: true });
-
-    window.chela.openNewMenuFromPrimary();
-
-    assert.equal(newMenu.style.display, 'block',
-        'openNewMenuFromPrimary() did not reopen #new-menu — the Favorites/Recent surface is unreachable from the topbar');
-    assert.equal(document.getElementById('primary-menu').style.display, 'none',
-        'openNewMenuFromPrimary() left #primary-menu open on top of #new-menu');
-    window.chela.hideNewMenu();
-});
-
-test('the overflow rows (Share current / Notifications / Settings) are real, wired rows', () => {
-    const pm = document.getElementById('primary-menu');
-    const rowText = [...pm.querySelectorAll('.ov-item')].map(el => el.textContent.trim());
-    assert.ok(rowText.some(t => t.includes('Share current session')), 'Share current session row is missing');
-    assert.ok(rowText.some(t => t.includes('Notifications')), 'Notifications row is missing');
-    assert.ok(rowText.some(t => t.includes('Settings')), 'Settings row is missing');
-    assert.match(document.getElementById('pm-share').getAttribute('onclick'), /chela\.shareCurrentAgent\(\)/,
-        '#pm-share is not wired to chela.shareCurrentAgent()');
-    assert.match(document.getElementById('pm-notify').getAttribute('onclick'), /chela\.toggleSettings\('notify'\)/,
-        "#pm-notify is not wired to chela.toggleSettings('notify')");
-    assert.match(document.getElementById('pm-settings').getAttribute('onclick'), /chela\.toggleSettings\(\)/,
-        '#pm-settings is not wired to chela.toggleSettings()');
-    // Wired to the real functions nav.js exports, not just present as text.
-    assert.equal(typeof nav, 'object');
-    ['hidePrimaryMenu', 'openPrimaryMenu', 'openNewMenuFromPrimary', 'openPalette'].forEach(fn =>
-        assert.equal(typeof window.chela[fn], 'function', `window.chela.${fn} is missing`));
-});
-
-// --- 3. 🔴 the safety kill-switch stays OUTSIDE the menu --------------------------
-
-test('#btn-shares is never a descendant of #primary-menu', () => {
-    const shares = document.getElementById('btn-shares');
-    const pm = document.getElementById('primary-menu');
-    assert.equal(pm.contains(shares), false, '#btn-shares moved INSIDE the primary menu — the kill-switch must always be visible');
-    assert.equal(document.getElementById('primary-menu').contains(document.getElementById('btn-shares')), false);
-});
-
-// --- 4. 🔴 CMX-377's own required GUARD — rendered-DOM (jsdom) wiring, against the
-// REAL index.html, not a source-grep: the top bar is GONE, and each of the four
-// controls it used to hold (inbox/decisions, the "chela" wordmark, the CPU/RAM/
-// Disk readouts, and the settings entry point) is present SOMEWHERE inside the
-// real `<aside class="sidebar">` — not merely still in the file, which a
-// source-grep could satisfy even if a control got orphaned outside the sidebar
-// by a future edit. Mounts the REAL `.app` block straight out of index.html
-// (sliceTemplate — the same technique tests/dashboard_default_view.test.mjs
-// uses), not a hand-typed mirror, so a judge mutation that re-adds
-// `<header class="topbar">` or moves one of the four controls back out of
-// `.sidebar` fails here directly.
-test('CMX-377: the REAL rendered DOM has no <header class="topbar">, and inbox/wordmark/CPU-RAM-Disk/settings all live inside .sidebar', async () => {
-    const { bootDashboardDom, sliceTemplate } = await import('./js_helpers/dashboard_dom.mjs');
-    const APP_HTML = sliceTemplate('<div class="app">', '</main>\n\n</div>');
-    await bootDashboardDom({ body: APP_HTML });
-
+// --- 3. 🔴 CMX-377's own required GUARD: the REAL rendered DOM ----------------------------
+//
+// The top bar is GONE, and each of the four controls it used to hold (inbox, the "chela"
+// wordmark, the CPU/RAM/Disk readouts, the settings entry point) is present inside the real
+// `<aside class="sidebar">` as the page renders it (the islands included), not merely in the
+// file.
+test('CMX-377: the REAL rendered DOM has no <header class="topbar">, and inbox/wordmark/CPU-RAM-Disk/settings all live inside .sidebar', () => {
     assert.equal(document.querySelector('header.topbar'), null,
         'a <header class="topbar"> element still exists in the real rendered DOM — CMX-377 must remove it entirely');
     assert.equal(document.querySelector('.topbar'), null,
@@ -300,6 +99,8 @@ test('CMX-377: the REAL rendered DOM has no <header class="topbar">, and inbox/w
         'the "chela" wordmark (.brand) is not inside .sidebar, or lost its text');
     assert.ok(sidebar.querySelector('#res-cpu') && sidebar.querySelector('#res-mem') && sidebar.querySelector('#res-disk'),
         'the CPU/RAM/Disk readouts (#res-cpu/#res-mem/#res-disk) are not all inside .sidebar');
-    assert.ok(sidebar.querySelector('#btn-primary-menu'),
-        'the menu button that reaches Settings (#btn-primary-menu) is not inside .sidebar');
+    assert.ok(sidebar.querySelector('.sidebar-foot #btn-primary-menu'),
+        'the menu button that reaches Settings (#btn-primary-menu) is not inside the sidebar foot');
+    assert.ok(sidebar.querySelector('.sidebar-quick .sidebar-new-btn'),
+        'the New session button is not inside .sidebar-quick');
 });

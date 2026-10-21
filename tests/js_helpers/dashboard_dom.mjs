@@ -57,6 +57,8 @@ export function copyDashboard(dir) {
         cpSync(join(DASHBOARD_ROOT, d), join(dir, d), { recursive: true });
     }
     symlinkSync(join(DASHBOARD_ROOT, 'frontend', 'node_modules'), join(dir, 'frontend', 'node_modules'), 'dir');
+    // its .tsx compile with the frontend's JSX settings (the automatic runtime), as in the repo
+    cpSync(join(DASHBOARD_ROOT, 'frontend', 'tsconfig.json'), join(dir, 'frontend', 'tsconfig.json'));
     return pathToFileURL(join(dir, 'static', 'js') + '/').href;
 }
 
@@ -115,12 +117,21 @@ export function exposeDomConstructors(win) {
 
 /** CMX-276: what the page's React islands do before the legacy graph boots (index.html loads
  * them first): a bridge on `win`, the sidebar island drawing its #sidebar-agents, the diff
- * modal and keybar islands (CMX-237), and the Work view's islands (CMX-231). From
+ * modal and keybar islands (CMX-237), the Work view's islands (CMX-231) and the chrome
+ * (CMX-219: src/chrome.tsx). From
  * src/, so a mutation of the TypeScript reaches every suite that boots the page. Each page
  * (window) gets its own bridge and root. A suite that hand-rolls its jsdom boot calls this
- * before it imports boot.ts / nav.js. */
-export async function mountIslands(win) {
+ * before it imports boot.ts / nav.js. `srcRoot` (a URL ending in `/`) is the frontend/src the
+ * chrome is mounted from: a copied page's own (copyDashboard), so the lanes its features
+ * register (resources, approvals, ...) run on that page's scheduler. */
+export async function mountIslands(win, srcRoot = new URL('../../chela/dashboard/frontend/src/', import.meta.url).href) {
     const doc = win.document;
+    // The page's bridge first: the chrome's stores attach to it (shared/store/agents).
+    const sidebar = !!doc.getElementById('sidebar-agents');
+    if (sidebar) {
+        const { createBridge } = await import('../../chela/dashboard/frontend/src/shared/bridge/index.ts');
+        win.chelaBridge = createBridge();
+    }
     // CMX-237: the diff modal and keybar islands, where the page has their slots.
     if (doc.getElementById('diff-modal-island')) {
         const { DiffModal } = await import('../../chela/dashboard/frontend/src/features/diffmodal/index.ts');
@@ -135,16 +146,18 @@ export async function mountIslands(win) {
         const { mountIsland } = await import('../../chela/dashboard/frontend/src/shared/islands/index.tsx');
         mountIsland(id, mod[name], {}, doc);
     }
+    // CMX-219: the chrome islands (safety pills, gear menu, launcher, agent detail, overlays),
+    // into whichever of their slots the page has.
+    const { mountChrome } = await import(new URL('chrome.tsx', srcRoot).href);
+    mountChrome(doc);
     if (doc.getElementById('keybar-island')) {
         const { mountKeybar } = await import('../../chela/dashboard/frontend/src/features/keybar/index.ts');
         mountKeybar(win);
         await flush();   // React commits the bars (and the keybar binds its pin) on its next turn
     }
     // A page with no sidebar has no sidebar island to mount.
-    if (!doc.getElementById('sidebar-agents')) return;
-    const { createBridge } = await import('../../chela/dashboard/frontend/src/shared/bridge/index.ts');
+    if (!sidebar) return;
     const { mountSidebar } = await import('../../chela/dashboard/frontend/src/features/sidebar/index.ts');
-    win.chelaBridge = createBridge();
     mountSidebar(win, win.chelaBridge);
 }
 
@@ -233,7 +246,7 @@ export async function bootDashboardDom({
         // page only, so this page mounts its own (CMX-276).
         if (!dom.window.chelaBridge) await mountIslands(dom.window);
     } else {
-        await mountIslands(dom.window);
+        await mountIslands(dom.window, new URL('../../frontend/src/', jsRoot).href);
         await import(new URL('../../frontend/src/boot.ts', jsRoot).href);
     }
     const modules = {};

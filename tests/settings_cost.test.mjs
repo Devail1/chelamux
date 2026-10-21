@@ -132,7 +132,7 @@ const CSS = readFileSync(join(ROOT, 'static', 'style.css'), 'utf8');
 // shape the judge found: `id="settings-tabs"` -> `id="settings-tabs-reverted"`)
 // shows up here instead of only in a fixture that happens to still agree.
 const SETTINGS_START = HTML.indexOf('<div class="drawer-scrim" id="drawer-scrim"');
-const SETTINGS_END = HTML.indexOf('<!-- "+ new" popover');
+const SETTINGS_END = HTML.indexOf('<!-- Overlays island');
 if (SETTINGS_START < 0 || SETTINGS_END < 0) throw new Error('index.html markers for the settings modal moved — update this test');
 const BODY = HTML.slice(SETTINGS_START, SETTINGS_END);
 
