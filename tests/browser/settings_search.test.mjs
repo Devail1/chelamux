@@ -63,9 +63,9 @@ for (const [width, height] of [[1440, 900], [390, 844]]) {
 
         test('"remote" puts the Remote Control row on screen and hides unrelated rows', async () => {
             ready();
-            await page.evaluate(() => window.chela.selectSettingsTab('appearance'));
+            await page.locator('.settings-tab[data-tab="appearance"]').click();
             await page.locator('#settings-search').fill('remote');
-            const row = page.locator('#remote-control-toggle').locator('xpath=ancestor::div[contains(@class,"s-row")][1]');
+            const row = page.locator('#remote-control-toggle').locator('xpath=ancestor::div[contains(@class,"field-row")][1]');
             const rb = await row.boundingBox();
             assert.ok(rb, 'the Remote Control row has no layout box while searching "remote"');
             inside(rb, view, 'Remote Control row');

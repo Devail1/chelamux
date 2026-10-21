@@ -7,10 +7,12 @@ import { act, cleanup, fireEvent, render, screen } from '@testing-library/react'
 import { afterEach, beforeEach, expect, test, vi } from 'vitest';
 import { context, loadContext, type ContextRow } from '../../../shared/store/context.ts';
 import { LaunchMenu, closeLaunchMenu } from '../../launcher/index.ts';
+import { closePalette, palette } from '../../palette/index.ts';
+import { closeSettings, selectSettingsTab, settings } from '../../settings/index.ts';
 import { PrimaryMenu, SessionsCount, refreshSummary, summary } from '../index.ts';
 import { RL_STALE_MS, agentsCount, readingAge, rlReading, rlResetTooltip, soonest } from '../model.ts';
 
-const legacy = { openPalette: vi.fn(), shareCurrentAgent: vi.fn(), toggleSettings: vi.fn() };
+const legacy = { shareCurrentAgent: vi.fn() };
 const NOW = Date.parse('2026-10-21T12:00:00Z');
 
 beforeEach(() => {
@@ -22,7 +24,7 @@ beforeEach(() => {
   render(<><PrimaryMenu /><LaunchMenu /><button id="btn-shares" type="button">0 sharing</button></>);
 });
 afterEach(() => {
-  act(() => closeLaunchMenu());
+  act(() => { closeLaunchMenu(); closePalette(); closeSettings(); });
   cleanup();
   vi.unstubAllGlobals();
   vi.useRealTimers();
@@ -56,22 +58,35 @@ test('the safety kill switch is never inside the menu', () => {
   expect(menu()?.textContent).not.toMatch(/sharing/);
 });
 
+test('Share current session calls the legacy shareCurrentAgent and closes the menu', () => {
+  open();
+  pick('Share current session');
+  expect(legacy.shareCurrentAgent.mock.calls).toEqual([[]]);
+  expect(menu()).toBeNull();
+});
+
+test('Jump to… opens the palette, empty, and closes the menu', () => {
+  open();
+  pick('Jump to…');
+  expect(palette.get()).toMatchObject({ open: true, query: '', fromSidebar: false });
+  expect(menu()).toBeNull();
+});
+
 test.each([
-  ['Jump to…', 'openPalette', []],
-  ['Share current session', 'shareCurrentAgent', []],
-  ['Notifications', 'toggleSettings', ['notify']],
-  ['Settings', 'toggleSettings', []],
-] as const)('%s calls the legacy %s and closes the menu', (label, fn, args) => {
+  ['Notifications', 'notifications'],
+  ['Settings', 'timing'],
+] as const)('%s opens Settings on the %s tab and closes the menu', (label, tab) => {
+  act(() => selectSettingsTab('timing'));
   open();
   pick(label);
-  expect(legacy[fn].mock.calls).toEqual([args]);
+  expect(settings.get()).toMatchObject({ open: true, tab });
   expect(menu()).toBeNull();
 });
 
 test('a legacy surface not loaded yet makes a pick a no-op, not a throw', () => {
   (window as unknown as { chela?: object }).chela = undefined;
   open();
-  expect(() => pick('Settings')).not.toThrow();
+  expect(() => pick('Share current session')).not.toThrow();
 });
 
 test('New… closes the menu and opens the launch menu at the gear', async () => {

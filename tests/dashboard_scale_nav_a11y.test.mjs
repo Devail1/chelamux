@@ -260,7 +260,6 @@ const src = p => readFileSync(join(ROOT, p), 'utf8');
 
 const CSS = src('static/style.css');
 const TERMINALS = src('static/js/terminals.js');
-const NAV = src('static/js/nav.js');
 const VIEWS_SRC = src('static/js/views.js');
 
 // --- jsdom fixtures: mount the REAL style.css and a concrete, hand-written
@@ -580,16 +579,13 @@ test('non-hue cue — wall .gs-state pill: both the initial paint AND every live
         '_applyWallTileFrame no longer repaints the word text node — a live state change would go hue-only');
 });
 
-// 3b. The sidebar's .ar-state line: idle/working/waiting, each a real word
-// (nav.js's _AGENT_STATUS_WORD), rendered as the span's TEXT content, not just
-// its class.
-test('non-hue cue — sidebar .ar-state: idle/working/waiting each map to a real word, not blank', () => {
-    const m = NAV.match(/_AGENT_STATUS_WORD\s*=\s*\{([^}]*)\}/);
-    assert.ok(m, '_AGENT_STATUS_WORD not found in nav.js');
-    const map = Object.fromEntries(
-        [...m[1].matchAll(/(\w+):\s*'([^']*)'/g)].map(mm => [mm[1], mm[2]]));
+// 3b. The palette's status words: idle/working/waiting, each a real word on the row's sub-line
+// (features/palette, CMX-221; nav.js's _AGENT_STATUS_WORD before). The sidebar's own row is read
+// rendered below.
+test('non-hue cue — the palette\'s status words: idle/working/waiting each map to a real word, not blank', async () => {
+    const { STATUS_WORD } = await import('../chela/dashboard/frontend/src/features/palette/model.ts');
     for (const [color, want] of [['green', 'working'], ['yellow', 'waiting'], ['grey', 'idle']]) {
-        assert.equal(map[color], want, `_AGENT_STATUS_WORD.${color} must be the word "${want}"`);
+        assert.equal(STATUS_WORD[color], want, `STATUS_WORD.${color} must be the word "${want}"`);
     }
 });
 

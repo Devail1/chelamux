@@ -75,8 +75,9 @@ describe('CMX-291 desktop 1440×900: the build string is in Settings, not the si
     const ready = setup(async () => {
         ({ page, context, errors } = await openDashboard(browser, { width: 1440, height: 900, api: FULL }));
         await waitForReadouts(page);
-        // Booted: the island has mounted and fetched /api/version by now.
-        await page.locator('#version-island .version-badge').waitFor({ state: 'attached', timeout: 15000 });
+        // Booted: the islands have mounted (CMX-221: the badge is drawn with the Settings modal,
+        // so its own test opens it).
+        await page.locator('#btn-primary-menu').waitFor({ state: 'attached', timeout: 15000 });
     });
     after(() => context && context.close());
 

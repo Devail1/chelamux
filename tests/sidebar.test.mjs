@@ -818,12 +818,7 @@ test('CMX-377: the REAL sidebar renders a "New session" button and a jump-to-ses
     const QUICK_HTML = sliceTemplate('<div class="sidebar-quick">', '\n      </div>\n\n      <!-- Primary navigation.')
         .replace(/\n\n      <!-- Primary navigation\.$/, '');
     document.querySelector('.sidebar').insertAdjacentHTML('afterbegin', QUICK_HTML);
-    // This file's own BODY fixture (top of file) has no #palette overlay —
-    // graft the real one on too, so the WIRING check below can drive it for real.
-    if (!document.getElementById('palette')) {
-        const PALETTE_HTML = sliceTemplate('<div class="palette-overlay" id="palette"', '</div>\n\n<!-- Keyboard shortcuts');
-        document.body.insertAdjacentHTML('beforeend', PALETTE_HTML.replace(/\n\n<!-- Keyboard shortcuts$/, ''));
-    }
+    // CMX-221: the palette is the overlays island's React dialog (this file's fixture has the slot).
     const chela = window.chela;
 
     // CMX-219: the button is the launcher island's, in the slot the real markup carries.
@@ -875,9 +870,8 @@ test('CMX-377: the REAL sidebar renders a "New session" button and a jump-to-ses
     // tests/wallnav.test.mjs's "typing a query drops the panes-first section"
     // test already proves for the palette's own input.
     assert.equal(typeof chela.sidebarJumpInput, 'function', 'window.chela.sidebarJumpInput is missing');
-    const overlay = document.getElementById('palette');
-    assert.ok(overlay, 'no #palette overlay in the real document');
-    assert.ok(!overlay.classList.contains('open'), 'sanity: the palette starts closed');
+    const { closePalette, paletteOpen } = await import('./js_helpers/dashboard_dom.mjs');
+    assert.ok(!(await paletteOpen()), 'sanity: the palette starts closed');
 
     assert.ok(jumpInput.getAttribute('oninput'),
         '#sidebar-jump-input has no oninput attribute — typing would never reach chela.sidebarJumpInput at all');
@@ -901,17 +895,21 @@ test('CMX-377: the REAL sidebar renders a "New session" button and a jump-to-ses
     // the oninput leg below proves its own wiring from the same closed start.
     jumpInput.value = '';
     fireInlineHandler(jumpInput, 'onfocus');
-    assert.ok(overlay.classList.contains('open'),
-        'running #sidebar-jump-input\'s REAL onfocus attribute did not open the #palette overlay — focusing the ' +
+    await flush();
+    assert.ok(await paletteOpen(),
+        'running #sidebar-jump-input\'s REAL onfocus attribute did not open the palette — focusing the ' +
         'sidebar search while the palette is closed would do nothing');
-    chela.closePalette();
-    assert.ok(!overlay.classList.contains('open'), 'sanity: closePalette() closed the overlay again');
+    await closePalette();
+    assert.ok(!(await paletteOpen()), 'sanity: closePalette() closed the palette again');
 
+    // Typing stays in the sidebar box (CMX-377): the palette opens without taking focus.
+    jumpInput.focus();
     jumpInput.value = 'wall';   // "Wall" is a real registered view label (same query wallnav.test.mjs's own palette test uses)
     fireInlineHandler(jumpInput, 'oninput');
+    await flush();
 
-    assert.ok(overlay.classList.contains('open'),
-        'typing into the sidebar search did not open the real #palette overlay');
+    assert.ok(await paletteOpen(), 'typing into the sidebar search did not open the real palette');
+    assert.equal(document.activeElement, jumpInput, 'opening the palette from the sidebar box took focus out of it');
     const rows = Array.from(document.getElementById('palette-list').children);
     assert.ok(rows.every(r => !r.classList.contains('palette-divider')),
         'a non-empty query must not render the panes-first divider — _renderPalette is not seeing the typed value ' +
@@ -924,4 +922,5 @@ test('CMX-377: the REAL sidebar renders a "New session" button and a jump-to-ses
         'the one rendered result is not the "Wall" view — the typed query never reached _renderPalette');
     assert.equal(rows[0].querySelector('.pi-sub')?.textContent, 'view',
         'the one rendered result is not tagged as a "view" — the typed query never reached _renderPalette');
+    await closePalette();
 });

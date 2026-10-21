@@ -22,7 +22,7 @@ test('the bundle is the only module the page loads, and both legacy and the isla
     const { context, page, misses, errors } = await openDashboard(browser, { width: 1440, height: 900 });
     try {
         await page.waitForFunction(n => document.querySelectorAll('.agent-row').length >= n, AGENTS.length, { timeout: 15000 });
-        await page.locator('#version-island .version-badge').waitFor({ timeout: 15000 });
+        await page.locator('#btn-primary-menu').waitFor({ timeout: 15000 });   // an island (the gear menu)
         const scripts = await page.evaluate(() => performance.getEntriesByType('resource')
             .map(e => new URL(e.name).pathname).filter(p => p.endsWith('.js')));
         // collab/ is not the legacy graph: terminals.js imports it at runtime by URL (staticUrl),

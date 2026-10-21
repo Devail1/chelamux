@@ -68,12 +68,14 @@ test('the version island renders the real version in the Settings modal beside t
     page.on('pageerror', e => errors.push(String(e)));
     await page.goto(`${base}/`);
     const badge = page.locator('#version-island .version-badge');
-    await badge.waitFor({ timeout: 15_000 });
-    assert.equal(await badge.textContent(), `build ${version}`);
-    // CMX-291: the island lives in the Settings modal's foot, on screen once the modal is open.
+    // CMX-291: the badge lives in the Settings modal's foot, on screen once the modal is open
+    // (CMX-221: the modal is a React dialog, drawn only while open).
+    await page.waitForFunction(() => typeof window.chela?.toggleSettings === 'function', null, { timeout: 15_000 });
     await page.evaluate(() => window.chela.toggleSettings());
     await page.waitForFunction(() => getComputedStyle(document.getElementById('settings-drawer')).opacity === '1',
         null, { timeout: 5_000 });
+    await badge.waitFor({ timeout: 15_000 });
+    assert.equal(await badge.textContent(), `build ${version}`);
     assert.ok(await badge.isVisible(), 'the badge is not on screen in the open Settings modal');
     await page.evaluate(() => window.chela.toggleSettings());
     // Legacy ran: nav.js loaded the sidebar layout and published it through the bridge, and

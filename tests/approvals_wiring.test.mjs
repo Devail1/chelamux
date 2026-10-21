@@ -8,7 +8,7 @@
 //      from the template, not retyped.
 //   3. 🔴 an SSE `overrides` frame re-fetches /api/overrides, and updates the count, between
 //      refresh ticks.
-//   4. 🔴 Settings → Notifications' "Approval requests" select (legacy nav.js) reaches
+//   4. 🔴 Settings → Notifications' "Approval requests" select (features/settings) reaches
 //      setApprovalNotify: choosing "Browser notification" stores the opt-in, and the drawer
 //      re-renders it selected; choosing "Off" clears it.
 //
@@ -20,7 +20,7 @@ import { beforeAll, test } from 'vitest';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { JSDOM } from 'jsdom';   // needs `pnpm install` — tests/test_js_suites.py enforces it
-import { exposeDomConstructors, mountIslands } from './js_helpers/dashboard_dom.mjs';
+import { exposeDomConstructors, mountIslands, pickOption } from './js_helpers/dashboard_dom.mjs';
 
 const TEMPLATE = readFileSync(new URL('../chela/dashboard/templates/index.html', import.meta.url), 'utf8');
 const PILL = TEMPLATE.match(/<span class="island-slot" id="approvals-island"><\/span>/)[0];
@@ -161,23 +161,21 @@ test('the Settings select opts in and out of approval notifications', async () =
 
     window.chela.toggleSettings();
     await flush();
-    let sel = document.getElementById('approval-notify-select');
-    assert.ok(sel, 'Settings has no "Approval requests" select');
-    assert.equal(sel.value, 'off', 'approval notifications must be OFF by default');
+    const sel = () => document.getElementById('approval-notify-select');
+    assert.ok(sel(), 'Settings has no "Approval requests" select');
+    assert.equal(sel().textContent, 'Off', 'approval notifications must be OFF by default');
 
-    sel.value = 'on';
-    sel.dispatchEvent(new window.Event('change'));
+    await pickOption(sel(), 'Browser notification');
     await flush();
     assert.equal(localStorage.getItem(KEY), '1', 'choosing "Browser notification" did not opt in');
 
     window.chela.toggleSettings();     // close
-    window.chela.toggleSettings();     // re-open → re-render from storage
     await flush();
-    sel = document.getElementById('approval-notify-select');
-    assert.equal(sel.value, 'on', 'the drawer does not show the stored opt-in');
+    window.chela.toggleSettings();     // re-open: re-render from storage
+    await flush();
+    assert.equal(sel().textContent, 'Browser notification', 'the drawer does not show the stored opt-in');
 
-    sel.value = 'off';
-    sel.dispatchEvent(new window.Event('change'));
+    await pickOption(sel(), 'Off');
     await flush();
     assert.equal(localStorage.getItem(KEY), null, 'choosing "Off" did not clear the opt-in');
     window.chela.toggleSettings();

@@ -22,15 +22,13 @@ import { beforeAll, test } from 'vitest';
 import assert from 'node:assert/strict';
 import { JSDOM } from 'jsdom';
 import { resolveWindowId, windowIdQuery } from '../chela/dashboard/static/js/windowid.ts';
-import { mountIslands } from './js_helpers/dashboard_dom.mjs';
+import { closePalette, mountIslands, searchPalette } from './js_helpers/dashboard_dom.mjs';
 
 const LONG = 'a-very-long-session-name-that-goes-on-and-on-well-past-any-pane-width-' + 'x'.repeat(80);
 
 const PANEL = `
 <div id="sidebar-agents"></div>
-<div class="palette-overlay" id="palette">
-  <div class="palette"><input id="palette-input"><div id="palette-list"></div></div>
-</div>
+<div id="overlays-island"></div>
 <div class="panel" id="panel-terminals">
   <button id="term-mode-single"></button>
   <button id="term-mode-wall"></button>
@@ -119,11 +117,9 @@ const footerId = wid => {
 };
 const sidebarRow = name => [...document.querySelectorAll('#sidebar-agents .agent-row')]
     .find(r => r.dataset.agent === name);
-const paletteRows = () => [...document.querySelectorAll('#palette-list .palette-item')].map(r => ({
-    i: Number(r.dataset.i),
-    title: r.querySelector('.pi-title').textContent,
-    sub: r.querySelector('.pi-sub').textContent,
-}));
+// CMX-221: the palette is the React dialog; a row runs on a real click.
+const paletteRows = searchPalette;
+const runRow = row => row.el.dispatchEvent(new window.MouseEvent('click', { bubbles: true }));
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 
 // --- the harness itself is not a mock -------------------------------------------
@@ -185,39 +181,31 @@ test('a row WITHOUT extras: the tooltip is exactly "<label> · @N" and its state
 
 // --- 3. the palette resolves "@N" exactly ---------------------------------------
 
-test('"@3" in the palette puts @3 first — exact, not its prefix-sibling @32', () => {
-    window.chela.openPalette();
-    window.chela._renderPalette('@3');
-    const rows = paletteRows();
+test('"@3" in the palette puts @3 first — exact, not its prefix-sibling @32', async () => {
+    const rows = await paletteRows('@3');
     assert.ok(rows.length, 'no palette rows for "@3"');
     assert.equal(rows[0].title, 'alpha', `first row is ${JSON.stringify(rows[0])}`);
     assert.match(rows[0].sub, /@3$/);
-    window.chela.closePalette();
+    await closePalette();
 });
 
-test('"@3" still lists its prefix-sibling @32 below — even with a very long name — and @3 only once', () => {
-    window.chela.openPalette();
-    window.chela._renderPalette('@3');
-    const rows = paletteRows();
+test('"@3" still lists its prefix-sibling @32 below — even with a very long name — and @3 only once', async () => {
+    const rows = await paletteRows('@3');
     assert.ok(rows.slice(1).some(r => r.sub.endsWith('· @32')), `no @32 row in ${JSON.stringify(rows)}`);
     assert.equal(rows.filter(r => / @3$/.test(r.sub)).length, 1, `@3 listed twice: ${JSON.stringify(rows)}`);
-    window.chela.closePalette();
+    await closePalette();
 });
 
-test('"@32" in the palette resolves to the long-named @32', () => {
-    window.chela.openPalette();
-    window.chela._renderPalette('@32');
-    const rows = paletteRows();
+test('"@32" in the palette resolves to the long-named @32', async () => {
+    const rows = await paletteRows('@32');
     assert.equal(rows[0].sub, 'window · @32');
     assert.match(rows[0].title, /^a-very-long-session-name/);
-    window.chela.closePalette();
+    await closePalette();
 });
 
 test('running the "@3" row focuses @3\'s pane (and only it) — a jump, not a toggle', async () => {
-    window.chela.openPalette();
-    window.chela._renderPalette('@3');
-    const row = paletteRows()[0];
-    window.chela._palRun(row.i);
+    const row = (await paletteRows('@3'))[0];
+    runRow(row);
     await sleep(120);   // focusPaneByWid defers 60ms for the view switch to settle
     const flashed = [...document.querySelectorAll('#term-stage .grid-stack-item')]
         .filter(it => it.querySelector('.pane-flash, .grid-stack-item-content.pane-flash'))
@@ -226,11 +214,9 @@ test('running the "@3" row focuses @3\'s pane (and only it) — a jump, not a to
     assert.ok(!terminals._minimized.has('@3'), 'the jump minimized the pane it should focus');
 });
 
-test('a query that is not an open window id gets no window row', () => {
-    window.chela.openPalette();
-    window.chela._renderPalette('@99');
-    assert.ok(!paletteRows().some(r => r.sub.startsWith('window ·')));
-    window.chela.closePalette();
+test('a query that is not an open window id gets no window row', async () => {
+    assert.ok(!(await paletteRows('@99')).some(r => r.sub.startsWith('window ·')));
+    await closePalette();
 });
 
 // --- 4. click copies ------------------------------------------------------------
@@ -315,12 +301,10 @@ test('a legacy copy that fails says so — never a false "Copied"', async () => 
 test('"@N" for an open plain-shell pane (no agent row) still resolves to that window', async () => {
     terminals._renderedWids.push('@40');
     try {
-        window.chela.openPalette();
-        window.chela._renderPalette('@40');
-        const rows = paletteRows();
+        const rows = await paletteRows('@40');
         assert.ok(rows.length, 'no palette row for the shell\'s "@40"');
         assert.deepEqual({ title: rows[0].title, sub: rows[0].sub }, { title: '@40', sub: 'window · @40' });
-        window.chela.closePalette();
+        await closePalette();
     } finally {
         terminals._renderedWids.splice(terminals._renderedWids.indexOf('@40'), 1);
     }
@@ -329,9 +313,7 @@ test('"@N" for an open plain-shell pane (no agent row) still resolves to that wi
 test('jumping to "@32" from the single-pane view switches to the Wall and focuses @32', async () => {
     window.chela.setTermMode('single');
     await sleep(0);
-    window.chela.openPalette();
-    window.chela._renderPalette('@32');
-    window.chela._palRun(paletteRows()[0].i);
+    runRow((await paletteRows('@32'))[0]);
     await sleep(120);
     assert.ok(terminals.isWallVisible(), 'the jump left the single-pane view up');
     const flashed = [...document.querySelectorAll('#term-stage .grid-stack-item')]
