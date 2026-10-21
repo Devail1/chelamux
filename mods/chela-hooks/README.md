@@ -69,6 +69,37 @@ The orchestrator is found as the status line finds it: `$CHELA_ORCHESTRATOR_WID`
 `inbox.json`'s `orchestrator`. The fixture both sides test against is
 `hooks/needsyou-cases.ts` (`tests/test_mods_needsyou.py` runs it through the real route).
 
+## Classifier denials (CMX-184)
+
+When Claude Code's permission classifier refuses a tool call (`classic.PermissionDenied`),
+the Mod POSTs the denial straight to the daemon's inbox, so the orchestrator hears about a
+dispatched agent stopped on it without the inbox tailing the event log (CMX-155's path):
+
+```
+POST http://127.0.0.1:$CHELA_DASHBOARD_PORT/api/inbox/denial
+{"wid": "@41", "session_id": "…", "tool_name": "Bash", "tool_input": {…},
+ "tool_use_id": "toolu_…", "reason": "<one line, at most 200 characters>"}
+```
+
+The daemon files it under CMX-155's rules: only a `claimed`/`running` run's window, never the
+orchestrator's own, one notice per run per 10 min.
+
+**One denial, one notice.** `plugin/`'s shell hook still logs the same denial, and the inbox
+still reads that copy. Both copies carry the denial's `tool_use_id`, and the daemon files a
+given id once (remembered for an hour), even when the second copy arrives after the per-run
+cooldown has run out. A post with no `tool_use_id` or no window is refused (400): without the
+key it could not be told from the shell copy, which still arrives.
+
+| Case | What happens |
+|---|---|
+| a chela window (`$CHELA_WID` set) | one POST per denial, not awaited |
+| not a chela window | nothing is posted |
+| the daemon is down or answers an error | the post is dropped; the tool call and the denial are unaffected, and the shell copy still reaches the inbox |
+| `--permission-mode dontAsk` | Claude Code fires no PermissionDenied, in either layer, so neither reports it |
+
+The fixture both sides test against is `hooks/denial-cases.ts` (`tests/test_mods_denial.py`
+files it through the real route).
+
 ## Hook spike (CMX-157)
 
 The merge gate and event posting, measured side by side with `plugin/` in
@@ -83,7 +114,7 @@ event, and a default URL would file each one twice.
 | `CHELA_MOD_HOOKS_URL` | unset ⇒ nothing is posted | where `POST /hooks/<Event>` goes, e.g. `http://127.0.0.1:5001` |
 | `CHELA_MOD_MERGEGATE` | `<mod>/../../plugin/hooks/mergegate.py` | the gate script it runs |
 | `CHELA_MOD_STATUSLINE` | `<mod>/../../scripts/cache-statusline.sh` | the cache writer the status line pipes to |
-| `CHELA_DASHBOARD_PORT` | `5001` | the port the needs-you band asks the daemon on |
+| `CHELA_DASHBOARD_PORT` | `5001` | the port the needs-you band asks the daemon on, and the denial post goes to |
 
 Tests: `claude plugin validate mods/chela-hooks && claude plugin test mods/chela-hooks`
 (also run by `tests/test_mods_spike.py` when a Mods-capable `claude` is on `PATH`).
