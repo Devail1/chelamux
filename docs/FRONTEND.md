@@ -92,7 +92,8 @@ dependency, and it renders a consistent value even during concurrent rendering. 
 (zustand) would add selectors and middleware nobody needs for two values; Redux is ruled out.
 
 Since CMX-217 the page's state is `src/shared/store/`, one file per slice (`view.ts`, the
-active view; `agents.ts`, the bridge's `agents` store). Legacy imports those objects through
+active view; `agents.ts`, the bridge's `agents` store; `orchestrator.ts`, who holds the
+decisions inbox, read and written through `src/shared/orchestrator`, CMX-228). Legacy imports those objects through
 `util.js`, whose `currentTab` and `_agentsCache` are a facade over them: the store is the
 truth, the live bindings mirror it. `sidebarLayout` still goes through `window.chelaBridge`:
 
@@ -124,6 +125,13 @@ model, `src/features/sidebar/model.ts`, as source. `tests/js_helpers/dashboard_d
 `src/`) for every suite that boots the page; a suite with its own jsdom boot calls
 `mountIslands(window)` before it imports `src/boot.ts`. Icons come from `src/shared/icons`, a map
 from a meaning to a Lucide icon.
+
+### Markdown
+
+`src/shared/markdown` renders the task briefs and judge reports (`markdownHtml`, `inlineHtml`).
+It escapes every character of its source and links only http(s), mailto and relative URLs: a
+`javascript:`/`data:` link renders as its text (CMX-228). React renders its output only through
+`<Markdown>`, the app's one `dangerouslySetInnerHTML`; legacy `kanban.js` reads `inlineHtml`.
 
 ## Polls, pushes and the boot config
 

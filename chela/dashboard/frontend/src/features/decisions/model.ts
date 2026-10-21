@@ -1,11 +1,10 @@
 // ---------------------------------------------------------------------------
-// DECISIONS BADGE MODEL — pure unread-count/urgency math for the header
-// #btn-decisions button's #decisions-unread badge. No DOM, no fetch, no
-// localStorage — decisions.js owns persistence (the `chela.decisions.lastSeen`
-// key) and wires this into the DOM; this file only ever answers "given the
-// held events and a last-seen seq, what does the badge say", so the arithmetic
-// is directly unit-testable (tests/decisions_badge.test.mjs) without a jsdom
-// fixture — the same split feedmodel.js draws for the Feed's lane grouping.
+// DECISIONS BADGE MODEL: pure unread-count/urgency math for the inbox button's
+// unread badge. No DOM, no fetch, no localStorage: lib/inbox.ts owns persistence
+// (the `chela.decisions.lastSeen` key) and the components render it; this file
+// only ever answers "given the held events and a last-seen seq, what does the
+// badge say", so the arithmetic is directly unit-testable without a DOM.
+// (static/js/decisionsmodel.js until CMX-228, CMX-212 P07.)
 //
 // Unread = held decision events with a seq beyond what the popover has already
 // shown you (`seq > lastSeenSeq`, strictly — `>=` would re-badge the event you
@@ -19,7 +18,12 @@
 // inbox_self_healed, …) is informational — neutral count colour only. Colour
 // is never the sole signal here either: the number itself is what carries the
 // "you have unread decisions" fact; urgency is decoration on top of it.
-export const DECISION_URGENCY = {
+import type { TaskItem } from '../taskmodal/model.ts';
+import type { LogEvent } from './feed.ts';
+
+export type Urgency = 'bad' | 'warn' | 'neutral';
+
+export const DECISION_URGENCY: Record<string, Exclude<Urgency, 'neutral'>> = {
     run_failed: 'bad',
     died: 'bad',
     gone_unknown: 'bad',
@@ -31,33 +35,35 @@ export const DECISION_URGENCY = {
     blocked: 'warn',
 };
 
-export function unseenEvents(events, lastSeenSeq) {
+type Events = readonly (LogEvent | null | undefined)[] | null | undefined;
+
+export function unseenEvents(events: Events, lastSeenSeq: number | null | undefined): LogEvent[] {
     const since = lastSeenSeq || 0;
-    return (events || []).filter(e => ((e && e.seq) || 0) > since);
+    return (events || []).filter((e): e is LogEvent => ((e && e.seq) || 0) > since);
 }
 
-export function unreadCount(events, lastSeenSeq) {
+export function unreadCount(events: Events, lastSeenSeq: number | null | undefined): number {
     return unseenEvents(events, lastSeenSeq).length;
 }
 
 // Display cap — a fleet backlog is not a number worth reading past two digits.
-export function formatUnreadCount(count) {
+export function formatUnreadCount(count: number): string {
     if (!count) return '';
     return count > 99 ? '99+' : String(count);
 }
 
-export function maxSeq(events) {
+export function maxSeq(events: Events): number {
     return (events || []).reduce((m, e) => Math.max(m, (e && e.seq) || 0), 0);
 }
 
 // First-ever load (no stored lastSeen): seed to the CURRENT max held seq,
 // never to 0 — 0 would badge the entire historical backlog as unread the
 // moment the popover first ships to a browser that has never opened it.
-export function seedLastSeen(events) {
+export function seedLastSeen(events: Events): number {
     return maxSeq(events);
 }
 
-export function unreadUrgency(events, lastSeenSeq) {
+export function unreadUrgency(events: Events, lastSeenSeq: number | null | undefined): Urgency {
     const unseen = unseenEvents(events, lastSeenSeq);
     if (unseen.some(e => DECISION_URGENCY[e.type] === 'bad')) return 'bad';
     if (unseen.some(e => DECISION_URGENCY[e.type] === 'warn')) return 'warn';
@@ -65,8 +71,8 @@ export function unreadUrgency(events, lastSeenSeq) {
 }
 
 // ---------------------------------------------------------------------------
-// TICKET CLICK-THROUGH — normalising a decision's payload into the shape
-// taskmodal.js's openTaskModal() already renders (CMX-178). chela/inbox.py
+// TICKET CLICK-THROUGH: normalising a decision's payload into the shape
+// the task modal's openTaskModal() already renders (CMX-178). chela/inbox.py
 // writes the same underlying run facts under TWO different payload shapes:
 //
 //   * run_events (run_review/run_needs_human/run_changes_requested/run_failed)
@@ -77,7 +83,7 @@ export function unreadUrgency(events, lastSeenSeq) {
 //     keys the SAME brief `task_title` instead, and has no branch_name/PR
 //     detail at all (a window event, not a run one).
 //
-// Both normalise to one shape here so decisions.js never has to know which
+// Both normalise to one shape here so the inbox never has to know which
 // kind it is looking at.
 // ---------------------------------------------------------------------------
 
@@ -85,28 +91,34 @@ export function unreadUrgency(events, lastSeenSeq) {
 // (a bare window/inbox-plumbing event: watch_epoch_lost, inbox_undeliverable,
 // inbox_self_healed, or a gone/died/finished event for an ad-hoc window with
 // no run row at all).
-export function itemFromDecisionPayload(event) {
-    const p = (event && event.payload) || {};
+type Payload = Record<string, unknown>;
+/** A payload field that is a string, else undefined. */
+const str = (v: unknown) => (typeof v === 'string' ? v : undefined);
+const num = (v: unknown) => (typeof v === 'number' ? v : undefined);
+const when = (v: unknown) => (typeof v === 'string' || typeof v === 'number' ? v : undefined);
+
+export function itemFromDecisionPayload(event: LogEvent | null | undefined): TaskItem | null {
+    const p: Payload = (event && event.payload) || {};
     if (!p.task_id) return null;
-    const item = {
-        task_id: p.task_id,
-        title: p.title || p.task_title || '',
-        status: p.run_status,
-        branch_name: p.branch_name,
-        pr_url: p.pr_url,
-        pr_state: p.pr_state,
-        attempt: p.attempt,
-        rework_count: p.rework_count,
-        last_error: p.last_error,
-        started_at: p.started_at,
-        ended_at: p.ended_at,
+    const item: TaskItem = {
+        task_id: String(p.task_id),
+        title: str(p.title) || str(p.task_title) || '',
+        status: str(p.run_status),
+        branch_name: str(p.branch_name),
+        pr_url: str(p.pr_url),
+        pr_state: str(p.pr_state),
+        attempt: num(p.attempt),
+        rework_count: num(p.rework_count),
+        last_error: str(p.last_error),
+        started_at: when(p.started_at),
+        ended_at: when(p.ended_at),
     };
     if (Array.isArray(p.reviews) && p.reviews.length) {
         // taskmodalmodel.timelineSteps expects `review_history` as the JSON
         // TEXT column the dispatcher actually stores, and JSON.parses it back
         // — the payload already carries it parsed (inbox.py's `_reviews`), so
         // round-trip through stringify rather than growing a second parser.
-        try { item.review_history = JSON.stringify(p.reviews); } catch (e) { /* ignore */ }
+        try { item.review_history = JSON.stringify(p.reviews); } catch { /* ignore */ }
     }
     return item;
 }
@@ -119,12 +131,12 @@ export function itemFromDecisionPayload(event) {
 // shapes above.
 // ---------------------------------------------------------------------------
 
-function _norm(s) { return String(s == null ? '' : s).toLowerCase(); }
+function _norm(s: unknown): string { return String(s == null ? '' : s).toLowerCase(); }
 
-export function matchesDecisionQuery(event, query) {
+export function matchesDecisionQuery(event: LogEvent | null | undefined, query: string): boolean {
     const q = _norm(query).trim();
     if (!q) return true;             // a blank query matches everything
-    const p = (event && event.payload) || {};
+    const p: Payload = (event && event.payload) || {};
     const fields = [
         event && event.summary, event && event.type, event && event.wid,
         p.task_id, p.title, p.task_title, p.branch_name, p.pr_url, p.window_name,
@@ -132,9 +144,9 @@ export function matchesDecisionQuery(event, query) {
     return _norm(fields.join(' \0 ')).includes(q);
 }
 
-export function filterDecisionEvents(events, query) {
+export function filterDecisionEvents(events: readonly LogEvent[] | null | undefined, query: string): LogEvent[] {
     const q = _norm(query).trim();
-    if (!q) return events || [];
+    if (!q) return [...(events || [])];
     return (events || []).filter(e => matchesDecisionQuery(e, q));
 }
 
@@ -158,7 +170,7 @@ export function filterDecisionEvents(events, query) {
 // run yet); every run bucket keys it as `task_id` (the runs-table column) —
 // two different field names for the same identity, so the search below
 // checks both rather than assuming one.
-const _RUN_BUCKETS = ['active_runs', 'awaiting_review_runs', 'recent_runs'];
+const _RUN_BUCKETS = ['active_runs', 'awaiting_review_runs', 'recent_runs'] as const;
 
 // Searches every workflow /api/dispatcher returned for the run/task behind a
 // decision's task_id. Returns the exact object found (never a copy) so
@@ -166,9 +178,11 @@ const _RUN_BUCKETS = ['active_runs', 'awaiting_review_runs', 'recent_runs'];
 // `null` when nothing matches (aged out of the bounded recent-runs window,
 // or a malformed/empty response) — callers fall back to the payload-derived
 // item in that case, never throw.
-export function findDispatcherRun(dispatcherData, taskId) {
+type Workflow = Partial<Record<'open_tasks' | (typeof _RUN_BUCKETS)[number], (TaskItem | null)[]>>;
+
+export function findDispatcherRun(dispatcherData: unknown, taskId: string | null | undefined): TaskItem | null {
     if (!taskId) return null;
-    const workflows = (dispatcherData && dispatcherData.workflows) || [];
+    const workflows = ((dispatcherData as { workflows?: (Workflow | null)[] } | null)?.workflows) || [];
     for (const wf of workflows) {
         for (const t of (wf && wf.open_tasks) || []) {
             if (t && t.id === taskId) return t;
@@ -183,20 +197,20 @@ export function findDispatcherRun(dispatcherData, taskId) {
 }
 
 // The honest note stamped onto a fallback ticket — shown in place of "No
-// brief recorded for this task." (taskmodal.js's _briefPane), which reads as
+// brief recorded for this task." (the task modal's Brief tab), which reads as
 // a lie when the truth is "not loaded here", not "this task never had one".
 export const DISPATCHER_AGED_OUT_NOTE =
-    "⚠ This run has aged out of the dispatcher's recent window (or it could " +
+    "This run has aged out of the dispatcher's recent window (or it could " +
     "not be reached). Showing only what this decision event recorded; " +
     'brief, judge state, and CI are unavailable here.';
 
 // The fallback ticket built purely from the decision's own payload, same
 // shape as itemFromDecisionPayload but visibly marked partial. briefSource()
-// (taskmodalmodel.js) prefers `brief` > `body` > `raw`, and
+// (taskmodal/model.ts) prefers `brief` > `body` > `raw`, and
 // itemFromDecisionPayload never sets any of the three — so stamping `body`
 // here is exactly what the brief pane already renders, with no change to
-// taskmodal.js needed.
-export function partialItemFromDecisionPayload(event) {
+// the task modal needed.
+export function partialItemFromDecisionPayload(event: LogEvent | null | undefined): TaskItem | null {
     const item = itemFromDecisionPayload(event);
     if (!item) return null;
     item.body = DISPATCHER_AGED_OUT_NOTE;

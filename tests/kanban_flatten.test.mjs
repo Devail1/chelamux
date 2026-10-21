@@ -165,7 +165,7 @@ test('renderKanban: the Archived and Done lane heads render their labels as text
 
 // --- 4. 🔴 GUARD (round 3, PR #350) — a card title actually goes through knInline --------
 //
-// kanban.js's header comment claims knowledge.js's knInline is "reused verbatim ... by
+// kanban.js's header comment claims the markdown module's knInline is "reused verbatim ... by
 // kanban.js for inline card text", and _kCard's own comment says the same — but every
 // existing card fixture in this file uses a plain title ('a task'), for which knInline is
 // the identity function, so the call at kanban.js:152 could be dead-coded (bypassed

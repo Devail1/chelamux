@@ -10,7 +10,7 @@
 //
 //   1. 🔴 PHONE: every input/textarea/select in the REAL dashboard — the whole
 //      index.html shell, plus the Settings drawer as nav.js actually renders it,
-//      plus the JS-built controls (pane rename, share dialog, decisions chip) —
+//      plus the JS-built controls (pane rename, share dialog) —
 //      computes to >= 16px. A control with no font-size at all FAILS (the UA
 //      default is ~13.3px, which zooms).
 //   2. 🔴 PHONE: the xterm helper textarea computes >= 16px in every page that
@@ -47,16 +47,14 @@ const MIN_PX = 16;
 const CONTROLS = 'input, textarea, select';
 
 // Controls built by JS outside the Settings drawer, in the markup shape the
-// modules emit (terminals.js renamePane / the Active shares mode control, decisions.js
-// chip). The share dialog and its copy rows are React since CMX-239: their inputs are
-// the kit's .s-input, which the drawer's rows already cover.
+// modules emit (terminals.js renamePane / the Active shares mode control). The share
+// dialog and its copy rows are React since CMX-239, the Decisions inbox since CMX-228: their
+// inputs are the kit's .s-input, which the drawer's rows already cover.
 const JS_BUILT = `
 <div class="term-stage"><div class="term-pane"><div class="pane-head">
   <input class="pane-title-edit" value="agent-1"></div></div></div>
 <div class="shares-sheet"><div class="ss-unsafe-confirm"><div class="tsp-row">
-  <input class="tsp-in ss-confirm-in"></div></div></div>
-<div class="decisions-chip"><select class="decisions-chip-rereg-select" id="decisions-reregister-wid">
-  <option>@1</option></select></div>`;
+  <input class="tsp-in ss-confirm-in"></div></div></div>`;
 
 // Enough of each settings endpoint for renderSettings() to build its rows.
 const TIMING = { knobs: [{ key: 'poll_s', env: 'CHELA_POLL', label: 'Poll', unit: 's',
@@ -113,8 +111,7 @@ function controls() {
     // Vacuity guard: the shell + drawer + JS-built set must actually be here.
     for (const sel of ['#settings-search', '#palette-input', '#sidebar-jump-input', '#init-path',
         '#sched-prompt', '#modal-msg-text', '#sched-type', '.s-input', '.s-select',
-        '.s-timing-input', '.s-dispatch-input', '.pane-title-edit', '.ss-confirm-in',
-        '.decisions-chip-rereg-select']) {
+        '.s-timing-input', '.s-dispatch-input', '.pane-title-edit', '.ss-confirm-in']) {
         assert.ok(doc.querySelector(sel), `fixture lost ${sel} — the guard would pass vacuously`);
     }
     assert.ok(all.length >= 25, `only ${all.length} controls mounted — the settings drawer did not render`);

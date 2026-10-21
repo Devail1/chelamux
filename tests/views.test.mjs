@@ -16,7 +16,7 @@
 //      is provable without a DOM);
 //   2. ONE POLLER for /api/dispatcher — Dispatch, Kanban and the sidebar badges
 //      each used to fetch it on their own timer. Structural, over the sources.
-//      (CMX-178's decisions.js also calls `api('/api/dispatcher')`, but on a
+//      (CMX-178's Decisions inbox also calls `api('/api/dispatcher')`, but on a
 //      single click, not a timer — no `setInterval` owns it there — so it is
 //      allowed alongside work.js's poll without reopening the one-poller
 //      property this test protects.)
@@ -170,28 +170,22 @@ test('entering a view tells every OTHER view to let go — no if/else chain to e
 // --- one dataset, one poller -------------------------------------------------
 
 test('exactly ONE module POLLS /api/dispatcher — work.js', () => {
-    // decisions.js (CMX-178) is deliberately excluded here: it fetches
-    // /api/dispatcher once per click-through, resolving a decision's task_id
-    // to the dispatcher's own run object (decisionsmodel.js's
-    // findDispatcherRun) — never on a timer. The property this test protects
-    // is "no second POLLER", not "no other module may ever call the
-    // endpoint" — see the next test for the on-demand-not-a-poll half of
-    // that distinction.
+    // The Decisions inbox (frontend/src/features/decisions, CMX-178) also reads
+    // /api/dispatcher, once per click-through, never on a timer: the next test.
+    // The property this test protects is "no second POLLER", not "no other module
+    // may ever call the endpoint".
     const owners = readdirSync(JS_DIR)
         .filter(f => f.endsWith('.js'))
-        .filter(f => f !== 'decisions.js')
         .filter(f => src(f).includes("api('/api/dispatcher')"));
     assert.deepEqual(owners, ['work.js']);
 });
 
-test('decisions.js reads /api/dispatcher on a click, never on a poll timer', () => {
-    const decisions = src('decisions.js');
-    assert.ok(decisions.includes("api('/api/dispatcher')"),
-        'decisions.js must resolve a click-through against the dispatcher (CMX-178 rework)');
-    // `setInterval(` — the actual call, not the word (decisions.js's own doc
-    // comment mentions main.js's `setInterval` refresh loop by name).
-    assert.ok(!decisions.includes('setInterval('),
-        'decisions.js must not grow its own poll loop — one fetch per click only');
+test('the Decisions inbox reads /api/dispatcher on a click, never on a poll timer', () => {
+    const inbox = readFileSync(new URL('../chela/dashboard/frontend/src/features/decisions/lib/inbox.ts', import.meta.url), 'utf8');
+    assert.ok(inbox.includes("api('/api/dispatcher')"),
+        'the inbox must resolve a click-through against the dispatcher (CMX-178 rework)');
+    assert.ok(!inbox.includes('setInterval('),
+        'the inbox must not grow its own poll loop: one fetch per click only');
 });
 
 test('the Work renderers take a payload — they do not fetch one', () => {

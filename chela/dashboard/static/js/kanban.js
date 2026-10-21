@@ -2,9 +2,9 @@
 import { $, BASE_PATH, attrEsc, escHtml } from './util';
 import { _runDisplayId, _runPrCell, _taskProgressChip } from './dispatcher';
 import { pollWork, postWorkDelete } from './work';
-import { openTaskModal } from './taskmodal';
-import { displayTitle, riskChip } from './taskmodalmodel';
-import { knInline } from './knowledge';
+import { openTaskModal } from '../../frontend/src/features/taskmodal';
+import { displayTitle, riskChip } from '../../frontend/src/features/taskmodal/model';
+import { inlineHtml as knInline } from '../../frontend/src/shared/markdown';
 import { KANBAN_LANES, KANBAN_LANE_LABELS, laneOf } from './kanbanlanemodel';
 import { columnKey, runStateBadges, sampledLabel, trackerBoard, trackerColumns } from './kanbanlinearmodel';
 import { hiddenSummary, loadColPrefs, saveColPrefs, splitColumns } from './kanbanhiddenmodel';

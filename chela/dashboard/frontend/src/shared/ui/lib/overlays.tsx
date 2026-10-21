@@ -24,6 +24,10 @@ export type DialogProps = {
   description?: ReactNode;
   /** Extra class on the .modal box (e.g. `modal-newtask` for its width). */
   className?: string;
+  /** The title names the dialog for assistive tech only: the content draws its own heading. */
+  hideTitle?: boolean;
+  /** A selector inside the dialog that takes focus when it opens (default: its first control). */
+  initialFocus?: string;
   children?: ReactNode;
 };
 
@@ -32,7 +36,7 @@ export type DialogProps = {
  * opened (Radix returns it only to its own Trigger, and a legacy opener is not one); Escape
  * and an outside click close it.
  */
-export function Dialog({ open, onOpenChange, title, description, className, children }: DialogProps) {
+export function Dialog({ open, onOpenChange, title, description, className, hideTitle, initialFocus, children }: DialogProps) {
   const opener = useRef<Element | null>(null);
   if (!title.trim()) throw new Error('<Dialog> needs a title: it is the dialog\'s accessible name');
   return (
@@ -42,18 +46,24 @@ export function Dialog({ open, onOpenChange, title, description, className, chil
           <RD.Content
             className={cx('modal', className)}
             {...(description ? {} : { 'aria-describedby': undefined })}
-            onOpenAutoFocus={() => {
+            onOpenAutoFocus={(e) => {
               opener.current = document.activeElement;
+              const first = initialFocus ? (e.currentTarget as Element | null)?.querySelector<HTMLElement>(initialFocus) : null;
+              if (first) {
+                e.preventDefault();
+                first.focus();
+              }
             }}
             onCloseAutoFocus={(e) => {
-              if (opener.current instanceof HTMLElement) {
-                e.preventDefault();
-                opener.current.focus();
-              }
+              // A dialog that hands over to another (a Decisions row opening its task) leaves
+              // focus to the one now open, never pulls it back behind it.
+              const handedOver = document.querySelector('[role="dialog"]') !== null;
+              if (handedOver || opener.current instanceof HTMLElement) e.preventDefault();
+              if (!handedOver && opener.current instanceof HTMLElement) opener.current.focus();
             }}
           >
             <RD.Title asChild>
-              <h3>{title}</h3>
+              <h3 className={hideTitle ? 'sr-only' : undefined}>{title}</h3>
             </RD.Title>
             {description && <RD.Description className="modal-desc">{description}</RD.Description>}
             {children}

@@ -2,7 +2,7 @@
 import { $, api, attrEsc, escHtml, shortTime, showModal } from './util';
 import { _launcherData } from './launcher';
 import { runCardNote, runStatusBadgeClass } from './runstate';
-import { riskChip, trackerHref } from './taskmodalmodel';
+import { riskChip, trackerHref } from '../../frontend/src/features/taskmodal/model';
 import { pollWork, postWorkDelete } from './work';
 
 // ---------------------------------------------------------------------------

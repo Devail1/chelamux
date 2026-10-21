@@ -49,7 +49,7 @@ function withEnvTip(lockedBy: string | undefined, el: ReactElement) {
   return lockedBy ? <Tooltip content={envTip(lockedBy)}><span className="field-locked" tabIndex={0}>{el}</span></Tooltip> : el;
 }
 
-/** `plain` is for a typed confirmation: no autocomplete, no spellcheck. */
+/** `plain` is for a typed confirmation or a search: no autocomplete, no spellcheck. */
 export function TextInput({ value, onChange, lockedBy, disabled, label, placeholder, plain }: InputProps<string> & { placeholder?: string; plain?: boolean }) {
   const id = useContext(FieldId);
   return withEnvTip(

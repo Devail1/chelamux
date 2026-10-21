@@ -924,7 +924,9 @@ body {
 
 /* Decisions inbox button — the sidebar head's #btn-decisions (icon-btn) plus
    its state dot, colour-only decoration on top of a title tooltip (never the
-   sole signal — Liav is red-weak, same rule as .decisions-chip below). */
+   sole signal — Liav is red-weak, same rule as .decisions-chip below). Its
+   island slot (#decisions-island, CMX-228) takes no box of its own. */
+.decisions-island { display: contents; }
 #btn-decisions { position: relative; }
 .decisions-dot {
     position: absolute; top: 6px; right: 6px; width: 8px; height: 8px;
@@ -935,7 +937,7 @@ body {
 .decisions-dot.dot-bad { background: var(--ok-vermillion); }
 .decisions-dot.dot-warn { background: var(--ok-orange); }
 
-/* The unread-count badge (decisionsmodel.js) — a SEPARATE signal from the dot
+/* The unread-count badge (features/decisions/model.ts) — a SEPARATE signal from the dot
    above (state vs. "how many you haven't looked at"), so it sits at the
    opposite corner and reads as a number, never colour-only (same red-weak
    rule as the dot/chip: the digits carry the fact, urgency colour is on top). */
@@ -2136,7 +2138,7 @@ input[type="text"]:focus, textarea:focus, select:focus {
 }
 .task-modal-close:hover { color: var(--text); background: var(--bg); }
 
-/* The wrapper taskmodal.js fills. It must be a flex column that FILLS
+/* The wrapper the task modal (features/taskmodal) fills. It must be a flex column that FILLS
    .modal-task and passes the height constraint down (min-height:0), or the
    modal's 86vh cap clips a long brief/timeline instead of letting
    .task-modal-body scroll — the wrapper was display:block, so it grew to
@@ -2711,7 +2713,7 @@ a.kanban-tracker-link:focus-visible { text-decoration: underline; }
 .kanban-state-chip.st-blocked-race { color: var(--red); border-color: rgba(248, 81, 73, 0.5); background: rgba(248, 81, 73, 0.10); }
 .kanban-state-chip.st-closed-unmerged { color: var(--orange, #d18616); border-color: rgba(209, 134, 22, 0.45); background: rgba(209, 134, 22, 0.10); }
 
-/* ⚖️🎚️ CMX-405 — the run's RISK level (kanban.js / taskmodal.js via riskChip). The WORD
+/* ⚖️🎚️ CMX-405 — the run's RISK level (kanban.js / the task modal via riskChip). The WORD
    ("risk: high") carries it; the colour only agrees. */
 .kanban-risk-chip {
     background: var(--surface);
@@ -3927,31 +3929,6 @@ a.kanban-tracker-link:focus-visible { text-decoration: underline; }
     color: var(--text-dim); font-size: 11px;
 }
 
-/* --- Generic centered-modal "sheet" (CMX-288) ---
-   .palette-overlay is already the shared backdrop for two modals (#palette,
-   #shortcuts-overlay) — dim+blur, fixed, flex-centered, no per-modal copy
-   needed. Neither of those two fit the Decisions inbox: .palette is shaped
-   for a fuzzy-search input+list+footer, .shortcuts-sheet for a static
-   multi-column cheatsheet. .modal-sheet is the third shape — a plain
-   header (title + close button) over a scrollable body — for any content
-   that's neither of those. Reuse THIS (backdrop + .modal-sheet), not a new
-   bespoke overlay, for the next centered modal (e.g. a tabbed settings
-   modal folding in #settings-drawer). */
-.modal-sheet {
-    width: 480px; max-width: 92vw; max-height: 80vh;
-    display: flex; flex-direction: column; overflow: hidden;
-    background: var(--surface); border: 1px solid var(--border); border-radius: 12px;
-    box-shadow: 0 20px 60px -10px rgba(0, 0, 0, 0.7);
-    animation: palette-in 0.13s ease-out;
-}
-.modal-sheet-head {
-    display: flex; align-items: center; gap: 10px; padding: 14px 16px;
-    border-bottom: 1px solid var(--border); flex: 0 0 auto;
-}
-.modal-sheet-head .popover-title { font-weight: 700; font-size: 14px; color: var(--text); flex: 1 1 auto; }
-.modal-sheet-head .icon-btn { flex: 0 0 auto; }
-.modal-sheet-body { flex: 1 1 auto; overflow-y: auto; padding: 14px 16px; }
-
 /* --- Canvas ---
    CMX-377 round 2: explicit column+row, not auto-placement — the leftover
    `grid-row: 2` from the removed topbar row shoved the canvas below the
@@ -4689,18 +4666,23 @@ a.kanban-tracker-link:focus-visible { text-decoration: underline; }
 .persona-doc { font-size: 10.5px; color: var(--text-dim); background: var(--bg);
     border: 1px solid var(--border); border-radius: 4px; padding: 2px 6px; }
 
-/* Decisions — the durable, owner-independent log (decisions.js), now a
-   centered modal (index.html #decisions-menu, a `.palette-overlay` +
-   `.modal-sheet`, opened off #btn-decisions; cmx-106 first shipped this
+/* Decisions — the durable, owner-independent log (frontend/src/features/
+   decisions), a centered dialog (the kit's Dialog, .modal.modal-decisions,
+   opened off #btn-decisions; cmx-106 first shipped this
    inside the Personas panel, cmx-107 relocated it into an always-visible
    sidebar section, CMX-171 moved it into a topbar popover so the sidebar
    stops permanently spending a section on it, CMX-288 moved it again off
    that anchored popover — measured spanning the dashboard's full width and
    occluding the whole Wall — into this modal). Rows reuse the Feed's
-   .feed-row/.feed-cls-*/.feed-glyph classes verbatim (feed.js), so a decision
-   reads identically whether you meet it here or in the Feed — but the modal
-   is far narrower than the Feed's canvas, so the row grid is overridden
-   below into a stacked, wrapping layout. */
+   .feed-row, .feed-cls-<class> and .feed-glyph classes verbatim, so a decision reads in
+   the Feed's visual language — but the modal is far narrower than the Feed's
+   canvas was, so the row grid is overridden below into a stacked, wrapping
+   layout. The dialog is width-capped and its body is the one scroll area. */
+.modal.modal-decisions {
+    position: relative; width: 480px; max-width: 92vw; max-height: 80vh;
+    display: flex; flex-direction: column; overflow: hidden;
+}
+.modal-decisions .decisions-body { flex: 1 1 auto; min-height: 0; overflow-y: auto; }
 .decisions-chip { display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
     padding: 6px 10px; border-radius: 8px; border: 1px solid var(--border);
     background: var(--surface); font-size: 11.5px; margin-bottom: 10px; }
@@ -4714,24 +4696,18 @@ a.kanban-tracker-link:focus-visible { text-decoration: underline; }
 .decisions-chip-who { color: var(--text); font-weight: 600; }
 .decisions-chip-queued { color: var(--text-dim); }
 .decisions-chip-why { color: var(--text-dim); width: 100%; }
-/* The dangling/gone re-register control (decisions.js's _reregisterHtml) —
+/* The dangling/gone re-register control (the chip's Reregister) —
    the fix for an address self-heal cannot reach (a reboot, not a renumbering:
    chela/inbox.py's resolve_heal only covers the latter). Deliberately NOT a
    dismiss: it stays on screen until the address is actually fixed, one click
    away, rather than offering to hide a real undeliverable-queue condition. */
 .decisions-chip-reregister { display: flex; align-items: center; gap: 6px; width: 100%; }
-.decisions-chip-rereg-select { flex: 1 1 auto; min-width: 0; font-size: 11px; }
-.decisions-chip-rereg-btn { flex: 0 0 auto; font-size: 11px; padding: 3px 8px;
-    border-radius: 6px; border: 1px solid var(--ok-vermillion); background: transparent;
-    color: var(--ok-vermillion); cursor: pointer; }
-.decisions-chip-rereg-btn:hover { background: var(--ok-vermillion); color: var(--bg); }
-.decisions-chip-rereg-btn:disabled { opacity: 0.5; cursor: default; background: transparent;
-    color: var(--ok-vermillion); }
+.decisions-chip-reregister .ui-select { flex: 1 1 auto; min-width: 0; font-size: 11px; }
+.decisions-chip-reregister .btn { flex: 0 0 auto; }
 .decisions-chip-rereg-empty { color: var(--text-dim); font-style: italic; width: 100%; }
-/* CMX-178: the search box that filters the list below (decisions.js's
-   setDecisionsQuery). Full-width, same input styling as everywhere else in
-   the app (input[type="text"] above) — just spaced to sit under the chip. */
-.decisions-search { width: 100%; box-sizing: border-box; margin-bottom: 8px; }
+/* CMX-178: the search box that filters the list below. Full-width, the kit's
+   input styling — just spaced to sit under the chip. */
+.decisions-body > .s-input { width: 100%; box-sizing: border-box; margin-bottom: 8px; }
 /* Scope line under an ACTIVE decisions search: "3 of 120 loaded". Dim and small —
    it qualifies the result set (the popover filters a bounded buffer, not all
    history), it is not itself a result. Hidden when the box is empty. */
@@ -4748,7 +4724,7 @@ a.kanban-tracker-link:focus-visible { text-decoration: underline; }
 }
 .decisions-list .feed-seq { display: none; }
 .decisions-list .feed-summary { flex: 1 1 100%; font-size: 12px; }
-/* CMX-178: a row whose payload names a task_id (decisions.js's
+/* CMX-178: a row whose payload names a task_id (model.ts's
    itemFromDecisionPayload) click-throughs to the task-detail modal — cursor
    + hover are the only affordance needed, the row's content is unchanged. */
 .decisions-list .feed-row-clickable { cursor: pointer; }
