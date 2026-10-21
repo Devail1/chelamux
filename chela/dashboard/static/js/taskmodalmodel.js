@@ -102,25 +102,6 @@ export function defaultTab(item, nRounds) {
     return _REVIEW_STATUSES.has(item.status) || _BLOCKING_JUDGE.has(item.judge_state) ? 'review' : 'brief';
 }
 
-// CMX-122: the modal header's tracker link — EXACTLY the URL the Linear adapter fetched
-// (`tracker_url`, the same source kanban.js's _kTrackerLink reads, CMX-5/CMX-94), never
-// built from a workspace slug. A markdown/TODO or gh_issues item has none → null (plain
-// key). Only https is linked: the value lands in an href, so `javascript:` renders nothing.
-export function trackerHref(item) {
-    const url = item && item.tracker_url;
-    return typeof url === 'string' && /^https:\/\//i.test(url) ? url : null;
-}
-
-// ⚖️🎚️ CMX-405 — a run's RISK level (chela.sources.RISK_LEVELS), as the word the Work
-// card and the task modal show plus a colour modifier. The WORD carries the meaning (Liav is
-// red-weak); the class only agrees with it. `null` for anything that is not a run carrying a
-// known level (an open/backlog item, a pre-CMX-405 row) — render nothing, never a guess.
-// `reason` is the run row's `risk_reason` (marker / label / inferred: … / default), the
-// chip's tooltip, so an inferred `high` says why.
-const _RISK_CLS = { high: 'risk-high', normal: 'risk-normal', low: 'risk-low' };
-
-export function riskChip(item) {
-    const level = item && typeof item.risk === 'string' ? item.risk.toLowerCase() : '';
-    if (!_RISK_CLS[level]) return null;
-    return { label: `risk: ${level}`, cls: _RISK_CLS[level], reason: item.risk_reason || '' };
-}
+// CMX-122 / CMX-405: the tracker link and the risk chip live with the runs model (CMX-231),
+// which the Runs tables share with this modal and the board.
+export { riskChip, trackerHref } from '../../frontend/src/features/runs/model';

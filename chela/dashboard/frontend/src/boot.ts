@@ -8,7 +8,6 @@ import '../../static/js/agents';
 import { renderNav, selectView } from '../../static/js/nav';
 import '../../static/js/launcher';
 import { startWorkPoll } from '../../static/js/work';
-import '../../static/js/newtask';
 import { VIEWS } from '../../static/js/views';
 import { findView } from '../../static/js/viewreg';
 import '../../static/js/decisions';
