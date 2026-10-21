@@ -4,17 +4,18 @@
 // line was cut in half and every extra line of a multi-line prompt grew into the band
 // behind the bar until you scrolled the page. The pane's CSS calc() subtracts the
 // keyboard (--kb-occluded) and a fixed list of chrome constants, and misses whatever is
-// not on that list. CMX-102 measures instead: while the keyboard is up, terminals.js
-// `_kbPin` → `_kbFitPane` sizes the pane so its box ends exactly at the keybar's top.
+// not on that list. CMX-102 measures instead: while the keyboard is up, the keybar island's
+// `pinKeybar` (frontend/src/features/keybar, CMX-237) sizes the pane so its box ends exactly at
+// the keybar's top.
 //
 // Guards (each corrupt→RED):
 //   - ⭐ the height math subtracts BOTH the keyboard (via the visual viewport) AND the
 //     keybar's own height, from the pane's measured top; desktop and keyboard-closed
 //     return null (nothing overridden);
-//   - `_kbPin` publishes it: html.kb-fit + --kb-pane-fit-h on a phone with the keyboard
+//   - `pinKeybar` publishes it: html.kb-fit + --kb-pane-fit-h on a phone with the keyboard
 //     up, and clears both when the keyboard closes / on desktop;
 //   - ⭐ EVERY re-fit trigger is driven through its real event, with the state moved
-//     BEFORE the event and `_kbPin` never called by hand: visualViewport resize AND
+//     BEFORE the event and `pinKeybar` never called by hand: visualViewport resize AND
 //     scroll, window resize (rotation), a scroll of the phone scroller (.canvas — moves
 //     the pane's top), a keybar HEIGHT change alone (ResizeObserver), and a freshly
 //     rebuilt pane (renderTerminals). Unwiring any one of them leaves the stale fit
@@ -29,6 +30,7 @@ import { beforeAll, beforeEach, test } from 'vitest';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { JSDOM } from 'jsdom';
+import { mountIslands } from './js_helpers/dashboard_dom.mjs';
 
 const PANEL = `
 <main class="canvas" id="canvas">
@@ -40,8 +42,7 @@ const PANEL = `
   <button id="term-new-shell"></button>
   <div id="term-stage"></div>
   <div id="term-min-dock"></div>
-  <div id="term-bar" class="kb-collapsed"><button class="kb-toggle" id="kb-toggle"></button><div class="kb-body" id="kb-body"></div></div>
-  <div id="term-keybar"><button class="kb2-key">Esc</button></div>
+  <div id="keybar-island"></div>
 </div>
 </main>`;
 
@@ -58,6 +59,8 @@ let vv;            // the fake VisualViewport
 let roCallbacks = [];
 let terminals;
 let util;
+let keybar;
+let model;
 
 function fakeFetch(url) {
     const path = String(url);
@@ -94,8 +97,8 @@ beforeAll(async () => {
         media: q, get matches() { return /max-width:\s*768px/.test(q) ? mobile : false; },
         addEventListener() {}, removeEventListener() {}, addListener() {}, removeListener() {},
     });
-    // jsdom has no VisualViewport and no ResizeObserver: both are installed BEFORE
-    // terminals.js loads, because it binds to them at module evaluation.
+    // jsdom has no VisualViewport and no ResizeObserver: both are installed BEFORE the
+    // keybar island mounts, because it binds to them when it mounts.
     vv = new dom.window.EventTarget();
     Object.assign(vv, { offsetTop: 0, height: SCREEN_H });
     Object.defineProperty(dom.window, 'visualViewport', { value: vv, configurable: true });
@@ -114,6 +117,9 @@ beforeAll(async () => {
     };
     globalThis.window.chela = globalThis.window.chela || {};
     globalThis.setInterval = () => 0;
+    await mountIslands(dom.window);
+    keybar = await import('../chela/dashboard/frontend/src/features/keybar/index.ts');
+    model = await import('../chela/dashboard/frontend/src/features/keybar/model.ts');
     await import('../chela/dashboard/frontend/src/boot.ts');
     util = await import('../chela/dashboard/static/js/util.js');
     terminals = await import('../chela/dashboard/static/js/terminals.js');
@@ -140,11 +146,11 @@ beforeEach(() => {
     if (![...sel.options].some(o => o.value === '@1')) sel.add(new window.Option('shell', '@1'));
     sel.value = '@1';
     stubGeometry();
-    terminals._kbPin();
+    keybar.pinKeybar();
 });
 
 test('⭐ the fit subtracts the keyboard AND the keybar from the pane\'s measured top', () => {
-    const h = terminals._paneFitHeight({
+    const h = model.paneFitHeight({
         mobile: true, occluded: KB_H, vvTop: 0, vvHeight: SCREEN_H - KB_H, barHeight: 47, paneTop: PANE_TOP,
     });
     // 844 − 336 (keyboard) − 47 (keybar) − 98 (pane top) = 363. Dropping the keybar
@@ -152,19 +158,19 @@ test('⭐ the fit subtracts the keyboard AND the keybar from the pane\'s measure
     assert.equal(h, SCREEN_H - KB_H - 47 - PANE_TOP);
     assert.equal(h, 363);
     // A panned visual viewport: the keybar's top moves with it, so the pane's bottom does too.
-    assert.equal(terminals._paneFitHeight({
+    assert.equal(model.paneFitHeight({
         mobile: true, occluded: KB_H - 40, vvTop: 40, vvHeight: SCREEN_H - KB_H, barHeight: 47, paneTop: PANE_TOP,
     }), 40 + SCREEN_H - KB_H - 47 - PANE_TOP);
 });
 
 test('desktop and keyboard-closed override nothing (null — the CSS calc stays in charge)', () => {
     const base = { occluded: KB_H, vvTop: 0, vvHeight: SCREEN_H - KB_H, barHeight: 47, paneTop: PANE_TOP };
-    assert.equal(terminals._paneFitHeight({ ...base, mobile: false }), null, 'desktop subtracts nothing');
-    assert.equal(terminals._paneFitHeight({ ...base, mobile: true, occluded: 0, vvHeight: SCREEN_H }), null,
+    assert.equal(model.paneFitHeight({ ...base, mobile: false }), null, 'desktop subtracts nothing');
+    assert.equal(model.paneFitHeight({ ...base, mobile: true, occluded: 0, vvHeight: SCREEN_H }), null,
         'keyboard closed: unchanged from today');
 });
 
-test('⭐ _kbPin publishes the fit on a phone with the keyboard up, and clears it when it closes', () => {
+test('⭐ pinKeybar publishes the fit on a phone with the keyboard up, and clears it when it closes', () => {
     assert.ok(!root().classList.contains('kb-fit'), 'keyboard closed: no override');
     keyboard(true);
     vv.dispatchEvent(new window.Event('resize'));
@@ -203,16 +209,16 @@ test('style.css applies the fit to the phone pane, after the fullscreen rule', (
 
 test('the fit floors a fractional box (never 1px into the keybar) and never goes negative', () => {
     // 844 − 336 − 47.4 − 98 = 362.6 → 362: rounding (to 363) would push the last row under the bar.
-    assert.equal(terminals._paneFitHeight({
+    assert.equal(model.paneFitHeight({
         mobile: true, occluded: KB_H, vvTop: 0, vvHeight: SCREEN_H - KB_H, barHeight: 47.4, paneTop: 98,
     }), 362);
-    assert.equal(terminals._paneFitHeight({
+    assert.equal(model.paneFitHeight({
         mobile: true, occluded: KB_H, vvTop: 0, vvHeight: 100, barHeight: 47, paneTop: PANE_TOP,
     }), 0, 'a pane whose top is already below the keybar gets 0, not a negative height');
 });
 
 // ── Every re-fit trigger, driven by its REAL event. Each test moves the state first,
-// never calls _kbPin itself, and asserts the fit the NEW state implies — so a trigger
+// never calls pinKeybar itself, and asserts the fit the NEW state implies — so a trigger
 // that is unwired leaves the old fit (or none) in place and goes RED. ──
 
 const openFit = (bar = 47, top = PANE_TOP) => `${SCREEN_H - KB_H - bar - top}px`;
@@ -259,7 +265,7 @@ test('⭐ a keybar HEIGHT change alone re-fits (ResizeObserver on the bar)', () 
     vv.dispatchEvent(new window.Event('resize'));
     assert.equal(fitVar(), openFit());
     const obs = roCallbacks.find(o => o.el === document.getElementById('term-keybar'));
-    assert.ok(obs, 'terminals.js must observe #term-keybar with a ResizeObserver');
+    assert.ok(obs, 'the keybar island must observe #term-keybar with a ResizeObserver');
     barH = 60;
     obs.cb([]);
     assert.equal(fitVar(), openFit(60));
@@ -282,8 +288,8 @@ test('⭐ a freshly rebuilt pane re-fits if the keyboard is already up (renderTe
 
 // ---- CMX-154: the pane's TERMINAL re-fits, not just the pane box ----------------
 // iPhone Safari resized the pane (and so its ttyd iframe) but xterm kept its old row
-// count, so its bottom rows sat clipped below the tile footer. _kbFitPane therefore
-// calls ttyd's own `window.term.fit()` after every fit. Real-layout half:
+// count, so its bottom rows sat clipped below the tile footer. The fit therefore
+// calls ttyd's own `window.term.fit()` after every fit (keybar's pin.ts). Real-layout half:
 // tests/browser/first_view_fit.test.mjs.
 function paneTerm() {
     const ifr = document.querySelector('#term-stage.term-single .term-pane iframe.term-frame');
@@ -326,12 +332,12 @@ test('a terminal that is not booted yet (no term / no fit) or an unreadable ifra
     const { ifr } = paneTerm();
     ifr.contentWindow.term = {};
     keyboard(true);
-    assert.doesNotThrow(() => terminals._kbPin());   // direct: dispatchEvent would swallow a throw
+    assert.doesNotThrow(() => keybar.pinKeybar());   // direct: dispatchEvent would swallow a throw
     delete ifr.contentWindow.term;
-    assert.doesNotThrow(() => terminals._kbPin());
+    assert.doesNotThrow(() => keybar.pinKeybar());
     Object.defineProperty(ifr, 'contentWindow', { configurable: true, get() { throw new Error('SecurityError: cross-origin frame'); } });
     keyboard(false);
-    assert.doesNotThrow(() => terminals._kbPin());
+    assert.doesNotThrow(() => keybar.pinKeybar());
     assert.ok(!root().classList.contains('kb-fit'), 'the box fit is still applied before the terminal is touched');
     delete ifr.contentWindow;
 });
