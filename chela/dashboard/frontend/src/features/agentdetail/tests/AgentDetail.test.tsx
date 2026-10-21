@@ -168,7 +168,8 @@ test('a button that stays (Restart on a running agent) comes back clickable, als
   fireEvent.click(screen.getByRole('button', { name: 'Restart' }));
   await settle();
   expect(screen.getByRole('button', { name: 'Restart' }).hasAttribute('disabled')).toBe(false);
-  vi.stubGlobal('fetch', () => Promise.reject(new Error('down')));
+  // only the action fails: the refresh that follows reads as usual
+  vi.stubGlobal('fetch', (url: string) => (url === '/api/agents/restart' ? Promise.reject(new Error('down')) : Promise.resolve({ json: () => Promise.resolve([]) })));
   fireEvent.click(screen.getByRole('button', { name: 'Restart' }));
   await settle();
   expect(screen.getByRole('button', { name: 'Restart' }).hasAttribute('disabled')).toBe(false);
