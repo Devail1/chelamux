@@ -737,22 +737,21 @@ body {
     font-size: 11px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
 }
 
-/* tsp-lbl/tsp-row/tsp-in/tsp-copy/tsp-warn are the join-link/pairing-code row
-   markup (_shareInfoRowsHTML), rendered inside the "Active shares" sheet
-   (.ss-row-body) — the sole place a share's link + code are shown. */
+/* A share's join link + pairing code (ShareInfoRows, CMX-239), inside the "Active shares"
+   sheet (.ss-row-body): the sole place they are shown. The sheet is narrow, so its field
+   rows stack the label above the control. The tsp-lbl/tsp-row/tsp-in rules are the sheet's
+   own mode controls (terminals.js) until P25 ports them. */
+.ss-row-body .field-row { grid-template-columns: minmax(0, 1fr); margin: 6px 0 0; }
+.ss-row-body .field-row > * { grid-column: 1; }
+.ss-row-body .field-label { font-size: 10.5px; color: var(--muted, #7d8590); }
+.ss-row-body .ui-copy-in { font: 600 12px/1 ui-monospace, Menlo, Consolas, monospace; }
 .shares-sheet .tsp-lbl { display: block; margin: 8px 0 4px; font-size: 10.5px; color: var(--muted, #7d8590); }
-.shares-sheet .tsp-hint { opacity: 0.8; }
 .shares-sheet .tsp-row { display: flex; gap: 6px; }
 .shares-sheet .tsp-in {
     flex: 1; min-width: 0; padding: 6px 8px; border-radius: 6px;
     background: var(--bg, #0a0c11); color: var(--text); border: 1px solid var(--border);
     font: 600 12px/1 ui-monospace, Menlo, Consolas, monospace;
 }
-.shares-sheet .tsp-copy {
-    cursor: pointer; border-radius: 6px; border: 1px solid var(--border);
-    background: var(--surface); color: var(--text); font-size: 11.5px; padding: 6px 10px;
-}
-.shares-sheet .tsp-copy:hover { border-color: var(--accent); }
 .shares-sheet .tsp-warn { color: var(--warn, #d29922); font-size: 11.5px; margin: 4px 0; }
 
 /* Host resources strip (#resources-strip, CMX-172) — three compact CPU/RAM/Disk
@@ -905,27 +904,17 @@ body {
 }
 .gs-net-badge[hidden] { display: none; }
 
-/* Share dialog (CMX-403) — reuses the Active-shares sheet chrome. */
-.share-dialog .sd-opt {
-    display: flex; gap: 10px; align-items: flex-start; cursor: pointer;
-    padding: 10px; margin: 8px 0; border: 1px solid var(--border); border-radius: 8px;
-}
-.share-dialog .sd-opt input { margin-top: 2px; }
-.share-dialog .sd-opt > span { display: flex; flex-direction: column; gap: 3px; font-size: 12.5px; }
+/* Share dialog (CMX-403; React since CMX-239): the kit's Dialog and RadioGroup, on the
+   modal layer (above the Wall and the safety float, under its own Select's list). */
+.modal.share-dialog { width: 460px; }
+.share-dialog .sd-opt { margin: 8px 0; }
+.share-dialog .sd-opt strong { display: flex; align-items: flex-start; gap: 6px; }
+.share-dialog .sd-opt strong svg { flex: 0 0 auto; margin-top: 2px; }
 .share-dialog .sd-desc { color: var(--text-dim); font-size: 11.5px; }
 .share-dialog .sd-reason { color: var(--warn, #d29922); font-size: 11.5px; }
-.share-dialog .sd-disabled { cursor: not-allowed; opacity: 0.7; }
 .share-dialog .sd-unsafe { border-color: var(--ok-vermillion, #d55e00); }
 .share-dialog .sd-confirm { margin: 4px 0 8px; }
-.share-dialog .sd-confirm .tsp-in { width: 100%; box-sizing: border-box; }
-.share-dialog .sd-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 10px; }
-.share-dialog .sd-actions button {
-    cursor: pointer; border-radius: 6px; border: 1px solid var(--border);
-    background: var(--surface); color: var(--text); font-size: 12.5px; padding: 7px 14px;
-}
-.share-dialog .sd-share { border-color: var(--accent); }
-.share-dialog .sd-share.sd-danger { background: var(--ok-vermillion, #d55e00); border-color: var(--ok-vermillion, #d55e00); color: #fff; }
-.share-dialog .sd-share:disabled { opacity: 0.5; cursor: not-allowed; }
+.share-dialog .sd-error { color: var(--warn, #d29922); font-size: 12px; margin: 6px 0 0; }
 .shares-sheet .ss-mode { font-size: 12px; }
 .shares-sheet .ss-mode-unsafe {
     background: var(--ok-vermillion, #d55e00); color: #fff; border-radius: 4px;
@@ -4893,3 +4882,20 @@ a.kanban-tracker-link:focus-visible { text-decoration: underline; }
     transform: translateX(2px); transition: transform 0.12s;
 }
 .ui-toggle[data-state="checked"] .ui-toggle-thumb { background: var(--on-accent); transform: translateX(16px); }
+/* RadioGroup: each option a bordered row, the radio then its label and hint. */
+.ui-radio-opt {
+    display: flex; gap: 10px; align-items: flex-start; cursor: pointer;
+    padding: 10px; border: 1px solid var(--border); border-radius: 8px;
+}
+.ui-radio-opt.ui-radio-disabled { cursor: not-allowed; opacity: 0.7; }
+.ui-radio {
+    flex: 0 0 auto; width: 16px; height: 16px; margin-top: 1px; padding: 0; border-radius: 50%;
+    border: 1.5px solid var(--text-dim); background: none; display: grid; place-items: center;
+}
+.ui-radio[data-state="checked"] { border-color: var(--accent); }
+.ui-radio:disabled { cursor: not-allowed; }
+.ui-radio-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--accent); }
+.ui-radio-text { display: flex; flex-direction: column; gap: 3px; font-size: 12.5px; }
+/* CopyField: a readonly value with its Copy button. */
+.ui-copy { display: flex; gap: 6px; flex: 1 1 auto; min-width: 0; }
+.ui-copy .ui-copy-in { flex: 1 1 auto; min-width: 0; }

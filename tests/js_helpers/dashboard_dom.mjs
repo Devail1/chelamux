@@ -101,6 +101,17 @@ export function activateDom(dom) {
     }
 }
 
+/** CMX-239: a suite that hand-rolls its globals and opens React UI on Radix (the share
+ * dialog) also needs the DOM constructors Radix and React reach for as globals
+ * (HTMLFormElement, MutationObserver, NodeFilter, ...). Defines each of `win`'s capitalised
+ * names that node lacks; never replaces one node has (Event, URL, ...). */
+export function exposeDomConstructors(win) {
+    for (const k of Object.getOwnPropertyNames(win)) {
+        if (!/^[A-Z]/.test(k) || k in globalThis) continue;
+        Object.defineProperty(globalThis, k, { value: win[k], writable: true, configurable: true });
+    }
+}
+
 /** CMX-276: what the page's React islands do before the legacy graph boots (index.html loads
  * them first): a bridge on `win`, the sidebar island drawing its #sidebar-agents, and the diff
  * modal and keybar islands (CMX-237). From

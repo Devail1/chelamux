@@ -17,6 +17,7 @@
 import { beforeAll, beforeEach, test } from 'vitest';
 import assert from 'node:assert/strict';
 import { JSDOM } from 'jsdom';
+import { exposeDomConstructors } from './js_helpers/dashboard_dom.mjs';
 
 const PANEL = `
 <button class="shares-indicator" id="btn-shares" hidden><span class="si-dot"></span><span class="si-text">0 sharing</span></button>
@@ -79,7 +80,7 @@ function fakeGridStack() {
     return { init: () => grid };
 }
 
-let terminals, util;
+let terminals, util, share;
 const flush = () => new Promise(r => setTimeout(r, 0));
 const settle = async () => { for (let i = 0; i < 4; i++) await flush(); };
 
@@ -91,6 +92,7 @@ beforeAll(async () => {
         'getComputedStyle', 'requestAnimationFrame', 'cancelAnimationFrame']) {
         Object.defineProperty(globalThis, k, { value: dom.window[k], writable: true, configurable: true });
     }
+    exposeDomConstructors(dom.window);   // CMX-239: the share dialog is React on Radix
     globalThis.GridStack = fakeGridStack();
     globalThis.fetch = fakeFetch;
     dom.window.document.elementFromPoint = () => null;
@@ -101,6 +103,7 @@ beforeAll(async () => {
     await import('../chela/dashboard/frontend/src/boot.ts');
     util = await import('../chela/dashboard/static/js/util.js');
     terminals = await import('../chela/dashboard/static/js/terminals.js');
+    share = await import('../chela/dashboard/frontend/src/features/share/index.ts');
     util.setCurrentTab('terminals');
     util.setAgentsCache(AGENTS);
     await terminals.renderTerminals();
@@ -108,7 +111,7 @@ beforeAll(async () => {
 
 beforeEach(() => {
     terminals.closeSharesSheet();
-    terminals.closeShareDialog();
+    share.closeShareDialog();
     modePosts = []; mintPosts = []; REFUSE = null; SERVER_MODE = null;
     terminals._sharedWids.clear();
     terminals._sharedWids.add('@1');
@@ -172,7 +175,7 @@ test('⭐ view → typing where allowed POSTs /share-mode and the pills follow',
     assert.deepEqual(pressed(freshRow()), ['typing']);
     assert.match(document.querySelector('#btn-shares .si-text').textContent, /⌨/);
     assert.equal(document.querySelector('.gs-share-btn[data-wid="@1"] .gs-share-mode').textContent, '⌨');
-    assert.ok([...freshRow().querySelectorAll('.tsp-in')].some(i => i.value === 'PAIR1'), 'same code shown');
+    assert.ok([...freshRow().querySelectorAll('.ss-row-body input')].some(i => i.value === 'PAIR1'), 'same code shown');
 });
 
 test('down to View only applies at once, with no confirmation', async () => {
@@ -296,7 +299,7 @@ test('Share on an already-shared pane mints nothing and points the sheet at that
     OPTIONS = { share_typing: true, sandboxed: true, typing_allowed: true, window_name: 'shell-1' };
     await terminals.shareBtnClick(null, '@1');
     await settle();
-    assert.equal(document.getElementById('share-dialog-backdrop'), null, 'adopt-first: no new-share dialog');
+    assert.equal(document.querySelector('.share-dialog'), null, 'adopt-first: no new-share dialog');
     assert.deepEqual(mintPosts, [], 'adopt-first: never re-mint');
     const row = freshRow();
     assert.ok(row.classList.contains('ss-row-focus'), 'the existing share must be the highlighted row');
