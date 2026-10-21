@@ -93,9 +93,12 @@ def test_spawn_judge_stamps_the_tier_and_hands_it_to_the_prompt(tmp_path, files,
              patch.object(dispatcher, "_judge_vars",
                           side_effect=lambda *a: (seen.append(a[-1]), {})[1]), \
              patch.object(dispatcher, "_launch_agent"):
-            assert dispatcher._spawn_judge(wf, row, "cafe1234", conn) is True
-    assert dispatcher.resolve_run("abc123")["risk_tier"] == tier
-    assert seen == [tier, tier]
+            # CMX-296: a STANDARD head gets no judge round — stamped, never launched.
+            assert dispatcher._spawn_judge(wf, row, "cafe1234", conn) is (tier != "standard")
+    run = dispatcher.resolve_run("abc123")
+    assert run["risk_tier"] == tier
+    assert seen == ([] if tier == "standard" else [tier, tier])
+    assert (run["judge_state"] == "standard_no_judge") is (tier == "standard")
 
 
 @pytest.mark.parametrize("tier, pct", [("standard", 0), ("core", 30), ("", 30)])

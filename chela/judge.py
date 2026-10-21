@@ -139,8 +139,12 @@ J_PROSE_ONLY = "prose_only"
 # ⏹️⚖️ CMX-286: the daemon STOPPED this round's live judge — its run was sent back, or its PR
 # head moved, so no verdict it could reach would be usable. Not a verdict: no inbox notice.
 J_CANCELLED = "cancelled"
-MERGE_READY = (J_CLEAN, J_PROSE_ONLY)
+# ⚖️🪜 CMX-296: a STANDARD-tier PR (`chela.risktier`: product/UI, nothing core) gets no judge
+# round either — merge-ready on green CI + MERGEABLE, like `prose_only`.
+J_STANDARD_NO_JUDGE = "standard_no_judge"
+MERGE_READY = (J_CLEAN, J_PROSE_ONLY, J_STANDARD_NO_JUDGE)
 PROSE_ONLY_DETAIL = "prose-only: every changed file is docs/changelog/media — no judge round"
+STANDARD_NO_JUDGE_DETAIL = "standard tier: product/UI, no core path — no judge round"
 
 # A judge that proposes forty mutations is not being thorough, it is re-running the suite
 # forty times. The cap is enforced OUT LOUD (the report says what was dropped) — a silent

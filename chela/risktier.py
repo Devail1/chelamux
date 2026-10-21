@@ -2,8 +2,8 @@
 
 PROSE (every file is docs, changelog or media) skips the judge round; HUMAN (any ALWAYS-HUMAN
 path) needs ``chela merge --override`` even when judge-clean; CORE (any core path — the gate's
-own machinery) gets today's full judge; STANDARD (CMX-288, everything else: product and UI work)
-gets a judge round with no held-out experiments. ⛔ An unknown or empty file list is never prose
+own machinery, or an agent-instruction file) gets today's full judge; STANDARD (CMX-288,
+everything else: product and UI work) gets no judge round at all (CMX-296). ⛔ An unknown or empty file list is never prose
 and never standard: it takes the CORE path.
 """
 from __future__ import annotations
@@ -22,7 +22,13 @@ DEFAULT_ALWAYS_HUMAN = ("WORKFLOW.md", ".github/workflows/**", "plugin/**", "che
                         "chela/contract.py", "chela/risktier.py", "chela/release.py",
                         "scripts/release*")
 DEFAULT_CORE = ("chela/dispatcher.py", "chela/judge*.py", "chela/workflow*.py", "chela/sources/**",
-                "chela/context.py")
+                "chela/context.py",
+                # CMX-296: a STANDARD PR gets no judge round, so the rest of the merge and
+                # containment machinery is core too — loosening it must meet the judge.
+                "chela/automerge.py", "chela/overrides.py", "chela/gateanswer.py",
+                "chela/reviewgate.py", "chela/sizegate.py", "chela/basesync.py",
+                "chela/sweep*.py", "chela/toolconfig.py", "chela/sandbox*.py",
+                "chela/procguard.py")
 
 
 def is_prose(path: str) -> bool:
@@ -71,6 +77,8 @@ def classify(files: list[str] | None, patterns: tuple[str, ...],
         return HUMAN, hit
     if all(is_prose(f) for f in files):
         return PROSE, None
-    if any(_matches(f, p) for f in files for p in core_patterns):
+    # CMX-296: agent instructions are never STANDARD — they steer every later run.
+    if any(_matches(f, p) for f in files for p in core_patterns) \
+            or any(PurePosixPath(f).name in _INSTRUCTION_PROSE for f in files):
         return CORE, None
     return STANDARD, None

@@ -102,6 +102,9 @@ agent:
 # per PR is the rule; risk:high core briefs may still ask for small slices.
 hand_in:
   max_pr_lines: 1000000
+  # ⚖️🪜 CMX-296: a STANDARD-tier hand-in (no core path, docs/ESCALATION_CONTRACT.md) runs this,
+  # then `judge.test_cmd` once — no experiment battery, no sweep, no judge round. Unset = skipped.
+  lint_cmd: uv run ruff check chela tests
 
 judge:
   test_cmd: CHELA_REQUIRE_JS_TESTS=1 uv run pytest -q
@@ -252,6 +255,10 @@ A classifier or hook denial is final; never relaunch the same action in another 
 3. **⚖️ SELF-VERIFY YOUR GUARDS — this is a CHECK, not a habit, so run it as one.**
    Do these three in order: (a) write the category tests, (b) run the mechanical sweep and
    fix its survivors, (c) self-check your experiments.
+   ⚖️🪜 **CMX-296: a STANDARD-tier diff** (it touches no core path — the dispatcher, the
+   judge, the workflow loader, the sources, the merge/containment machinery, a `CLAUDE.md`
+   or `AGENTS.md`, or an always-human file; `chela/risktier.py`) gets no judge round: (b) and (c) are optional, and
+   `task-finished` runs `hand_in.lint_cmd` plus ONE full suite instead of the battery. Do (a).
 
    **(a) 🧭 GUARD-CATEGORY CHECKLIST — walk your OWN diff before hand-in.** Cover each whole
    CATEGORY up front, not one survivor per judge round (CMX-87 took 13 rounds that way;
