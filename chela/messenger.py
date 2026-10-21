@@ -366,8 +366,9 @@ def capture_pane(window_id: str, *, ansi: bool = False) -> str:
 
 
 _RE_SGR = re.compile(r"\x1b\[([0-9;]*)m")
-# What may precede the first visible glyph after `❯`: spaces and SGR escapes.
-_RE_INPUT_LEAD = re.compile(r"(?:\x1b\[[0-9;]*m| )*")
+# What may precede the first visible glyph after `❯`: spaces (Claude Code renders a NO-BREAK
+# SPACE, U+00A0, there) and SGR escapes.
+_RE_INPUT_LEAD = re.compile(r"(?:\x1b\[[0-9;]*m|[ \xa0])*")
 # Claude Code's placeholder while a turn runs with messages queued — the prompt is EMPTY.
 _QUEUED_PLACEHOLDER = "Press up to edit queued messages"
 # The chip Claude Code turns a pasted image path into on the input line.

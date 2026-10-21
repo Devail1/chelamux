@@ -377,88 +377,9 @@
         </div>
         <div id="term-stage"></div>
         <div id="term-min-dock" style="display:none;"></div>
-        <div id="term-bar" class="kb-collapsed" style="display:none;">
-            <button class="kb-toggle" id="kb-toggle" onclick="chela.kbToggle()"
-                    aria-expanded="false" aria-controls="kb-body" title="Show/hide on-screen keys">
-                <span>&#9000; Keys</span>
-                <span class="kb-chevron" aria-hidden="true">&#9650;</span>
-            </button>
-            <div class="kb-body" id="kb-body">
-                <div class="kb-row">
-                    <div class="kb-group" aria-label="Special keys">
-                        <button onclick="chela.termKey('Escape')" title="Escape">Esc</button>
-                        <button onclick="chela.termKey('Tab')" title="Tab">Tab</button>
-                        <button onclick="chela.termKey('Enter')" title="Enter" aria-label="Enter">&#9166;</button>
-                    </div>
-                    <div class="kb-group" aria-label="Control keys">
-                        <button onclick="chela.termKey('C-c')" title="Ctrl-C (interrupt)">^C</button>
-                        <button onclick="chela.termKey('C-d')" title="Ctrl-D (EOF)">^D</button>
-                        <button onclick="chela.termKey('C-l')" title="Ctrl-L (clear)">^L</button>
-                        <button onclick="chela.termKey('C-b')" title="Ctrl-B (tmux prefix)">^B</button>
-                    </div>
-                    <div class="kb-group" aria-label="Scrollback">
-                        <button id="term-scroll-btn" onclick="chela.termScrollToggle()">&#10514; Scroll</button>
-                    </div>
-                </div>
-                <div class="kb-row">
-                    <div class="kb-dpad" aria-label="Arrow keys">
-                        <button class="kb-up" onclick="chela.termKey('Up')" title="Up" aria-label="Up">&#8593;</button>
-                        <button class="kb-left" onclick="chela.termKey('Left')" title="Left" aria-label="Left">&#8592;</button>
-                        <button class="kb-down" onclick="chela.termKey('Down')" title="Down" aria-label="Down">&#8595;</button>
-                        <button class="kb-right" onclick="chela.termKey('Right')" title="Right" aria-label="Right">&#8594;</button>
-                    </div>
-                    <div class="kb-nav" aria-label="Navigation keys">
-                        <button onclick="chela.termKey('Home')" title="Home">Home</button>
-                        <button onclick="chela.termKey('PageUp')" title="Page Up">PgUp</button>
-                        <button onclick="chela.termKey('End')" title="End">End</button>
-                        <button onclick="chela.termKey('PageDown')" title="Page Down">PgDn</button>
-                    </div>
-                </div>
-            </div>
-        </div>
-        <!-- Mobile keybar v2: a persistent, horizontally-scrollable accessory
-             row (phone-only) modeled on Moshi's terminal keyboard — special
-             chars one tap away, Ctrl as a sticky/lock modifier that reveals a
-             Ctrl-letter layer. Keys go through termKey()/api/term/key. -->
-        <div id="term-keybar" class="term-keybar" data-ctrl="off">
-          <button class="kb2-key" onclick="chela.termKey('Escape')">Esc</button>
-          <button class="kb2-key" onclick="chela.termKey('Tab')">Tab</button>
-          <button class="kb2-key" onclick="chela.termKey('BTab')" title="Shift-Tab (back-tab · toggle agent mode)" aria-label="Shift Tab">&#8679;Tab</button>
-          <button class="kb2-key kb2-go" onclick="chela.termKey('Enter')" aria-label="Enter">&#9166;</button>
-          <button class="kb2-key" onclick="chela.termPaste(this)" title="Paste from clipboard">Paste</button>
-          <span class="kb2-sep" aria-hidden="true"></span>
-          <button class="kb2-key kb2-strong" onclick="chela.termKey('C-c')" title="Ctrl-C (interrupt)">^C</button>
-          <button id="kb2-ctrl" class="kb2-key kb2-mod" onclick="chela.kbCtrlTap()"
-                  title="Ctrl (tap: arm for next key · tap again: lock · again: off)">Ctrl</button>
-          <span class="kb2-ctrl-letters" id="kb2-ctrl-letters">
-            <button class="kb2-key kb2-cl" onclick="chela.kbCtrlKey('a')" title="Ctrl-A">A</button>
-            <button class="kb2-key kb2-cl" onclick="chela.kbCtrlKey('d')" title="Ctrl-D (EOF)">D</button>
-            <button class="kb2-key kb2-cl" onclick="chela.kbCtrlKey('e')" title="Ctrl-E">E</button>
-            <button class="kb2-key kb2-cl" onclick="chela.kbCtrlKey('k')" title="Ctrl-K">K</button>
-            <button class="kb2-key kb2-cl" onclick="chela.kbCtrlKey('l')" title="Ctrl-L (clear)">L</button>
-            <button class="kb2-key kb2-cl" onclick="chela.kbCtrlKey('r')" title="Ctrl-R (search)">R</button>
-            <button class="kb2-key kb2-cl" onclick="chela.kbCtrlKey('u')" title="Ctrl-U">U</button>
-            <button class="kb2-key kb2-cl" onclick="chela.kbCtrlKey('w')" title="Ctrl-W">W</button>
-            <button class="kb2-key kb2-cl" onclick="chela.kbCtrlKey('z')" title="Ctrl-Z (suspend)">Z</button>
-          </span>
-          <span class="kb2-sep" aria-hidden="true"></span>
-          <button class="kb2-key" onclick="chela.termKey('Left')" aria-label="Left">&#8592;</button>
-          <button class="kb2-key" onclick="chela.termKey('Up')" aria-label="Up">&#8593;</button>
-          <button class="kb2-key" onclick="chela.termKey('Down')" aria-label="Down">&#8595;</button>
-          <button class="kb2-key" onclick="chela.termKey('Right')" aria-label="Right">&#8594;</button>
-          <span class="kb2-sep" aria-hidden="true"></span>
-          <button class="kb2-key" onclick="chela.termKey('|')">|</button>
-          <button class="kb2-key" onclick="chela.termKey('/')">/</button>
-          <button class="kb2-key" onclick="chela.termKey('\\')">\</button>
-          <button class="kb2-key" onclick="chela.termKey('~')">~</button>
-          <button class="kb2-key" onclick="chela.termKey('-')">-</button>
-          <button class="kb2-key" onclick="chela.termKey('_')">_</button>
-          <span class="kb2-sep" aria-hidden="true"></span>
-          <button class="kb2-key" onclick="chela.termKey('Home')">Home</button>
-          <button class="kb2-key" onclick="chela.termKey('End')">End</button>
-          <button class="kb2-key" onclick="chela.termKey('PageUp')">PgUp</button>
-          <button class="kb2-key" onclick="chela.termKey('PageDown')">PgDn</button>
-        </div>
+        <!-- The on-screen keys (CMX-237): the desktop #term-bar and the phone #term-keybar,
+             drawn by the keybar island (frontend/src/features/keybar). -->
+        <div id="keybar-island" class="keybar-island"></div>
     </div>
     {% endif %}
 
@@ -824,17 +745,9 @@
   </div>
 </div><!-- /modal-task -->
 
-<!-- Per-session changed-files / diff modal (CMX-299): a wall tile's "Files"
-     chip (terminals.js's _ctxBarHTML) opens this. diffpanel.js fills
-     #diff-modal-content and shows it (openDiffModal); close button, Escape
-     and a backdrop click all route through chela.closeDiffModal(). -->
-<div class="modal-overlay" id="modal-diff">
-  <div class="modal modal-diff">
-    <button class="task-modal-close" type="button" onclick="chela.closeDiffModal()"
-            aria-label="Close">&times;</button>
-    <div id="diff-modal-content"></div>
-  </div>
-</div><!-- /modal-diff -->
+<!-- Per-session changed-files / diff modal (CMX-299): a wall tile's "Files" chip opens it.
+     The diff modal island (frontend/src/features/diffmodal) portals its dialog to <body>. -->
+<div id="diff-modal-island"></div>
 
 <!-- Init a repo for the dispatcher -->
 <div class="modal-overlay" id="modal-init">

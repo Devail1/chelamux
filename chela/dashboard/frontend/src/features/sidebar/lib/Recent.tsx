@@ -17,7 +17,7 @@ function Dismiss({ r, label, actions }: { r: RecentRow; label: string; actions: 
     <button className="recent-dismiss" title="Dismiss: hide this session from Recent (the transcript is kept)"
       aria-label={`Dismiss ${label}`} data-dismiss={dismissKey(r)}
       onClick={e => { e.stopPropagation(); void actions.dismissRecentSession(dismissKey(r)); }}>
-      <icons.dismiss size={14} aria-hidden="true" />
+      <icons.close size={14} aria-hidden="true" />
     </button>
   );
 }
