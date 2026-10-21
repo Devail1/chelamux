@@ -11,6 +11,7 @@
 import { beforeAll, beforeEach, test } from 'vitest';
 import assert from 'node:assert/strict';
 import { bootDashboardDom, flush } from './js_helpers/dashboard_dom.mjs';
+import { clickMenu, closeMenu, menu, menuItems, openMenu, rightClick } from './js_helpers/side_menu.mjs';
 import { fakeArchiveServer } from './js_helpers/fake_archive.mjs';
 import {
     DISPATCHED_KEY, OTHER_KEY, VIEW_DEFAULTS, activityTs, createdTs, dateBucket, groupSidebar, isLive, itemKinds, itemState, buildItems,
@@ -20,7 +21,7 @@ import {
 const BODY = `
 <aside class="sidebar">
   <div class="side-head"><span class="side-title">Sessions</span>
-    <button class="side-view-btn" id="btn-sidebar-view" onclick="chela.openViewMenu(event)"></button></div>
+    <span id="sidebar-view-menu"></span></div>
   <div class="side-list" id="sidebar-agents"></div>
 </aside>
 <div id="agent-detail"></div>
@@ -61,7 +62,7 @@ beforeEach(async () => {
     // server, which answers "no layout yet", so every test starts from the defaults
     await nav.refreshLayout();
     spawns.length = 0;
-    window.chela.hideSideMenus();
+    if (menu()) closeMenu();
 });
 
 const wants = a => !!a && (a.needs_human === true || a.session_status === 'waiting');
@@ -106,46 +107,35 @@ function fire(el, attr = 'onclick') {
     const ev = { target: el, currentTarget: el, stopPropagation() {}, preventDefault() {} };
     return new Function('chela', 'event', code).call(el, window.chela, ev);
 }
-const menu = id => document.getElementById(id);
-const menuRows = id => [...menu(id).querySelectorAll('.popover-item')].map(i => ({
-    label: (i.querySelector('.vm-label') || i).textContent.trim(),
-    value: (i.querySelector('.vm-val') || { textContent: '' }).textContent.trim(),
-    chevron: !!i.querySelector('.vm-chev:not(.back)'),
-    checked: !!i.querySelector('.vm-check'),
-}));
-// A TAP on a menu row: the popover's own click handler, as a real click delivers it.
-function tap(id, label) {
-    const el = [...menu(id).querySelectorAll('[data-act]')]
-        .find(i => ((i.querySelector('.vm-label') || i).textContent.trim()) === label);
-    assert.ok(el, `no "${label}" in #${id}: ${JSON.stringify(menuRows(id).map(r => r.label))}`);
-    menu(id).onclick({ target: el, stopPropagation() {} });
-}
+// CMX-277: the menus are the kit's (side_menu.mjs drives the open one)
+const menuRows = () => menuItems().map(i => ({ label: i.text, value: i.value, chevron: i.submenu, checked: i.checked }));
+const viewBtn = () => document.getElementById('btn-sidebar-view');
 
 // --- the menu itself ---------------------------------------------------------------
 
 test('the view menu opens from the header button, shows each submenu\'s value + chevron, and submenus open by TAP', () => {
     render([win('a')]);
-    fire(document.getElementById('btn-sidebar-view'));
-    assert.equal(menu('view-menu').style.display, 'block');
-    const top = Object.fromEntries(menuRows('view-menu').map(r => [r.label, r]));
+    openMenu(viewBtn());
+    assert.ok(menu());
+    const top = Object.fromEntries(menuRows().map(r => [r.label, r]));
     assert.deepEqual(['Status', 'Environment', 'Last activity', 'Group by', 'Sort by'].map(l => [top[l].value, top[l].chevron]),
-        [['Active', true], ['3 selected', true], ['7d', true], ['Folder', true], ['Last activity', true]]);
+        [['All', true], ['3 selected', true], ['7d', true], ['Folder', true], ['Last activity', true]]);
     assert.equal(top['Show PR status'].checked, true, 'Show PR status defaults ON');
     assert.equal(top['Show empty groups'].checked, false);
     // a tap drills into the submenu (no hover flyout), the current choice ✓
-    tap('view-menu', 'Group by');
-    assert.deepEqual(menuRows('view-menu').filter(r => r.checked).map(r => r.label), ['Folder']);
-    assert.deepEqual(menuRows('view-menu').map(r => r.label), ['Group by', 'Date', 'Folder', 'State', 'Custom groups', 'None']);
-    tap('view-menu', 'State');
-    assert.equal(menu('view-menu').style.display, 'block', 'a choice keeps the menu open');
-    assert.equal(menuRows('view-menu').find(r => r.label === 'Group by').value, 'State', 'back on top, the new value shows');
+    clickMenu('Group by');
+    assert.deepEqual(menuRows().filter(r => r.checked).map(r => r.label), ['Folder']);
+    assert.deepEqual(menuRows().map(r => r.label), ['Group by', 'Date', 'Folder', 'State', 'Custom groups', 'None']);
+    clickMenu('State');
+    assert.ok(menu(), 'a choice keeps the menu open');
+    assert.equal(menuRows().find(r => r.label === 'Group by').value, 'State', 'back on top, the new value shows');
     assert.ok(groupLabels().includes('Idle'), 'the sidebar regrouped by State');
     // the multi-select stays on its page; its header counts the selection
-    tap('view-menu', 'Environment');
-    tap('view-menu', 'Judges');
-    assert.ok(menuRows('view-menu').find(r => r.label === 'Judges').checked);
-    tap('view-menu', 'Environment');   // the ‹ back row
-    assert.equal(menuRows('view-menu').find(r => r.label === 'Environment').value, '4 selected');
+    clickMenu('Environment');
+    clickMenu('Judges');
+    assert.ok(menuRows().find(r => r.label === 'Judges').checked);
+    clickMenu('Environment');   // the ‹ back row
+    assert.equal(menuRows().find(r => r.label === 'Environment').value, '4 selected');
 });
 
 // --- Status ---------------------------------------------------------------------------
@@ -156,14 +146,14 @@ const archNames = () => [...(archSection() ? archSection().querySelectorAll('.ag
 const inGroups = () => [...host().querySelectorAll('.side-group:not(.side-archived) .agent-row')]
     .map(r => (r.querySelector('.agent-row-name') || {}).textContent);
 
-test('Status: Active hides archived rows, All adds the Archived section at the BOTTOM, Archived shows only it', async () => {
+// CMX-277 (Liav, 10-18): ONE archived control. The default Status is All: the live rows and,
+// when anything is archived, the collapsed Archived group at the bottom. No foot link.
+test('Status: All (the default) adds the collapsed Archived group at the BOTTOM, Active hides it entirely, Archived shows only it', async () => {
     const rows = [win('live', { session_status: 'busy' }), win('finished', { done: true })];
     render(rows);
     await nav.groupMenuAction('/srv/code/alpha', 'archive');
-    assert.deepEqual(shown(), ['live']);
-    assert.equal(archSection(), null, 'Active keeps hiding the archive');
-    view('status:all');
     assert.deepEqual(inGroups(), ['live'], 'an archived row is never rendered inside a folder group');
+    assert.equal(host().querySelector('.side-archived-toggle'), null, 'no foot link: the group is the one control');
     const sections = [...host().querySelectorAll('.side-group')];
     assert.equal(sections[sections.length - 1], archSection(), 'the Archived section is the LAST group');
     assert.ok(archSection().classList.contains('collapsed'), 'collapsed by default, like the desktop');
@@ -178,6 +168,10 @@ test('Status: Active hides archived rows, All adds the Archived section at the B
     assert.ok(!archSection().classList.contains('collapsed'), 'Status Archived shows the section open');
     view('status:active');
     assert.deepEqual(shown(), ['live']);
+    assert.equal(archSection(), null, 'Status Active hides the group entirely');
+    assert.equal(host().querySelector('.side-archived-toggle'), null);
+    view('status:all');
+    assert.ok(!archSection().classList.contains('collapsed'), 'back on All, the group keeps the open state this device saved');
 });
 
 test('the Archived section holds EVERY archived row — closed sessions and hidden runs, from every folder — and counts them', async () => {
@@ -189,7 +183,6 @@ test('the Archived section holds EVERY archived row — closed sessions and hidd
     await nav.groupMenuAction('/srv/code/gone', 'archive');
     await nav.groupMenuAction('/srv/code/alpha', 'archive');
     await nav.groupMenuAction(DISPATCHED_KEY, 'archive');
-    view('status:all');
     assert.equal(group('/srv/code/gone'), null, 'a folder whose rows are all archived has no group of its own');
     assert.equal(group(DISPATCHED_KEY), null);
     const n = host().querySelectorAll('.side-archived .agent-row').length;
@@ -197,7 +190,6 @@ test('the Archived section holds EVERY archived row — closed sessions and hidd
     assert.equal(archSection().querySelector('.archived-count').textContent, String(n),
         'the section count equals the number of archived rows');
     assert.equal(host().querySelectorAll('.side-archived .row-unarchive').length, n, 'each row has Unarchive');
-    assert.equal(host().querySelector('.side-archived-toggle').textContent, 'Hide archived');
     // Unarchive on the hidden RUN shows it again (no resume — its windows were never closed)
     fire(archSection().querySelector('.row-unarchive[data-item="run:CMX-8"]'));
     await new Promise(r => setTimeout(r, 0));
@@ -205,26 +197,34 @@ test('the Archived section holds EVERY archived row — closed sessions and hidd
     assert.deepEqual(server.st.hidden, []);
 });
 
-test('Status Archived: the foot link reads "Hide archived" and leads back to Active', async () => {
-    render([win('live', { session_status: 'busy' }), win('finished', { done: true })]);
-    await nav.groupMenuAction('/srv/code/alpha', 'archive');
-    const foot = () => host().querySelector('.side-archived-toggle');
-    assert.equal(foot().textContent, 'Show archived (1)');
-    view('status:archived');
-    assert.equal(foot().textContent, 'Hide archived', 'Status Archived is a showing-archived state');
-    fire(foot());
-    assert.deepEqual(shown(), ['live']);
-    assert.equal(foot().textContent, 'Show archived (1)');
-});
-
 test('archive state is read from the SERVER: what another device archived shows here', async () => {
     render([win('live')]);
+    assert.equal(archSection(), null, 'nothing archived: no Archived group');
     server.st.sessions.push({ key: 's:sid-x', session_id: 'sid-x', name: 'elsewhere', cwd: '/srv/code/beta', archived_at: 1 });
     await nav.refreshArchive();
     nav.renderSidebarAgents(util._agentsCache);
-    assert.equal(host().querySelector('.side-archived-toggle').textContent, 'Show archived (1)');
+    assert.equal(archSection().querySelector('.archived-count').textContent, '1');
+    assert.ok(archSection().classList.contains('collapsed'));
     view('status:archived');
     assert.deepEqual(archNames(), ['elsewhere']);
+});
+
+// The View menu's Status page is the way to hide the group, end to end through the menu.
+test('View > Status > Active, picked in the menu, hides the Archived group; All brings it back', async () => {
+    render([win('live', { session_status: 'busy' }), win('finished', { done: true })]);
+    await nav.groupMenuAction('/srv/code/alpha', 'archive');
+    assert.ok(archSection());
+    openMenu(viewBtn());
+    clickMenu('Status');
+    assert.deepEqual(menuRows().filter(r => r.checked).map(r => r.label), ['All']);
+    clickMenu('Active');
+    assert.equal(archSection(), null);
+    assert.equal(menuRows().find(r => r.label === 'Status').value, 'Active');
+    clickMenu('Status');
+    clickMenu('All');
+    assert.ok(archSection());
+    await flush();
+    assert.equal(server.st.layout.view.status, 'all', 'the choice is written to the server layout');
 });
 
 test('model: part 1\'s `showArchived` still means Status All; Show empty keeps a folder only the saved order knows', () => {
@@ -429,9 +429,9 @@ test('Group by Custom groups: create, assign via the row menu, unassigned → Un
     assert.deepEqual(groupLabels(), ['Ungrouped']);
     const g = nav.newCustomGroup('Infra');
     // assign through the row menu: ⋯ → Move to group… → Infra
-    fire(host().querySelector('.agent-row[data-agent="a1"] .row-more'));
-    tap('row-menu', 'Move to group…');
-    tap('row-menu', 'Infra');
+    openMenu(host().querySelector('.agent-row[data-agent="a1"] .row-more'));
+    clickMenu('Move to group…');
+    clickMenu('Infra');
     assert.deepEqual(groupLabels(), ['Infra', 'Ungrouped']);
     assert.deepEqual(rowsUnder('Infra'), ['a1']);
     assert.deepEqual(rowsUnder('Ungrouped'), ['b1']);
@@ -455,16 +455,16 @@ test('CMX-74: outside Custom groups no row offers "Move to group…" — a plain
         view(`group:${mode}`);
         render(rows);
         const plain = host().querySelector('.agent-row[data-agent="plain"]');
-        fire(plain.querySelector('.row-more'));
-        assert.deepEqual(menuRows('row-menu').map(r => r.label), ['Archive'],
+        openMenu(plain.querySelector('.row-more'));
+        assert.deepEqual(menuRows().map(r => r.label), ['Archive'],
             `${mode}: the plain row's menu offers a move that would be invisible`);
-        window.chela.hideSideMenus();
+        closeMenu();
         const run = host().querySelector('.agent-row[data-run="CMX-37"]');
-        fire(run.querySelector('.row-more'));
-        assert.equal(menu('row-menu').style.display, 'block');
-        assert.deepEqual(menuRows('row-menu').map(r => r.label), ['Open agent pane', 'Open judge pane', 'Archive'],
+        openMenu(run.querySelector('.row-more'));
+        assert.ok(menu());
+        assert.deepEqual(menuRows().map(r => r.label), ['Open agent pane', 'Open judge pane', 'Archive'],
             `${mode}: the run menu offers a move that would be invisible`);
-        window.chela.hideSideMenus();
+        closeMenu();
     }
 });
 
@@ -473,16 +473,16 @@ test('CMX-74: under Custom groups, tapping "Move to group…" SHOWS its page and
     view('group:custom');
     nav.newCustomGroup('Infra');
     const plain = host().querySelector('.agent-row[data-agent="a1"]');
-    fire(plain, 'oncontextmenu');
-    assert.equal(menu('row-menu').style.display, 'block', 'a plain row has no right-click menu under Custom groups');
-    window.chela.hideSideMenus();
-    fire(plain.querySelector('.row-more'));
-    assert.deepEqual(menuRows('row-menu').map(r => r.label), ['Move to group…', 'Archive']);
-    tap('row-menu', 'Move to group…');
+    rightClick(plain);
+    assert.ok(menu(), 'a plain row has no right-click menu under Custom groups');
+    closeMenu();
+    openMenu(plain.querySelector('.row-more'));
+    assert.deepEqual(menuRows().map(r => r.label), ['Move to group…', 'Archive']);
+    clickMenu('Move to group…');
     // the tap's own handler hides every side menu first — the move page must come back
-    assert.equal(menu('row-menu').style.display, 'block', 'the move page was drawn into a hidden popover');
-    assert.deepEqual(menuRows('row-menu').map(r => r.label), ['Move to group', 'Infra', 'Ungrouped', 'New group…']);
-    tap('row-menu', 'Infra');
+    assert.ok(menu(), 'the move page was drawn into a hidden popover');
+    assert.deepEqual(menuRows().map(r => r.label), ['Move to group', 'Infra', 'Ungrouped', 'New group…']);
+    clickMenu('Infra');
     assert.deepEqual(rowsUnder('Infra'), ['a1']);
     assert.deepEqual(rowsUnder('Ungrouped'), ['b1']);
 });
@@ -517,14 +517,14 @@ test('the custom-groups page in the view menu creates, renames and deletes (prom
     const answers = ['Ops', 'Ops 2'];
     window.prompt = () => answers.shift();
     try {
-        fire(document.getElementById('btn-sidebar-view'));
-        tap('view-menu', 'Custom groups');
-        tap('view-menu', 'New group…');
-        assert.ok(menuRows('view-menu').some(r => r.label.startsWith('Ops')));
-        menu('view-menu').onclick({ target: menu('view-menu').querySelector('[data-act^="rename:"]'), stopPropagation() {} });
-        assert.ok(menu('view-menu').textContent.includes('Ops 2'));
-        menu('view-menu').onclick({ target: menu('view-menu').querySelector('[data-act^="delete:"]'), stopPropagation() {} });
-        assert.equal(menu('view-menu').querySelector('[data-act^="delete:"]'), null);
+        openMenu(viewBtn());
+        clickMenu('Custom groups');
+        clickMenu('New group…');
+        assert.deepEqual(menuRows().map(r => r.label), ['Custom groups', 'Rename Ops', 'Delete Ops', 'New group…']);
+        clickMenu('Rename Ops');
+        assert.deepEqual(menuRows().map(r => r.label), ['Custom groups', 'Rename Ops 2', 'Delete Ops 2', 'New group…']);
+        clickMenu('Delete Ops 2');
+        assert.deepEqual(menuRows().map(r => r.label), ['Custom groups', 'No custom groups yet', 'New group…']);
     } finally { window.prompt = realPrompt; }
 });
 
@@ -616,8 +616,8 @@ test('a THROWING localStorage still renders, and the view menu still works for t
         render([win('a1')]);
         assert.equal(host().querySelectorAll('.group-head').length, 0, 'the in-memory copy must carry the choice');
         view('group:folder');
-        fire(document.getElementById('btn-sidebar-view'));
-        assert.equal(menu('view-menu').style.display, 'block');
+        openMenu(viewBtn());
+        assert.ok(menu());
     } finally {
         Object.defineProperty(globalThis, 'localStorage', { value: real, writable: true, configurable: true });
     }

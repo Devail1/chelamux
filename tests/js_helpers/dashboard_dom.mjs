@@ -80,7 +80,9 @@ export function sliceTemplate(startMarker, endMarker, ctx) {
 
 const GLOBAL_WINDOW_PROPS = ['window', 'document', 'localStorage', 'navigator', 'HTMLElement',
     'Element', 'Node', 'Event', 'MouseEvent', 'KeyboardEvent', 'CustomEvent',
-    'getComputedStyle', 'requestAnimationFrame', 'cancelAnimationFrame'];
+    'getComputedStyle', 'requestAnimationFrame', 'cancelAnimationFrame',
+    // CMX-277: the sidebar's kit menus (Radix) read these as globals
+    'MutationObserver', 'ResizeObserver', 'HTMLButtonElement'];
 
 /** Point the page globals (`window`, `document`, `localStorage`, …) at `dom`'s window —
  * what bootDashboardDom does before it loads the modules, and what a two-page suite calls
@@ -166,6 +168,8 @@ export async function bootDashboardDom({
     const dom = new JSDOM(
         `<!doctype html><html><body>${bootBlock({ terminalsEnabled, ...boot })}${body}</body></html>`,
         { url: 'http://localhost:5005/', pretendToBeVisual: true });
+    // jsdom has no ResizeObserver; Radix's popper only needs it to exist
+    dom.window.ResizeObserver ??= class { observe() {} unobserve() {} disconnect() {} };
     activateDom(dom);
     const phoneMatches = typeof phone === 'function' ? phone : () => phone;
     dom.window.matchMedia = q => ({

@@ -87,11 +87,11 @@ async function boot({ hidden = [], sessions = [], hold = [], seedLocalStorage, o
 async function settle() { for (let i = 0; i < 8; i++) await flush(); }
 
 const host = () => document.getElementById('sidebar-agents');
-// What the sidebar SAYS is archived: "Show archived (N)", or nothing when N is 0.
+// What the sidebar SAYS is archived: the Archived group's count (CMX-277: the one archived
+// control), or nothing when N is 0 (no group at all).
 function archivedCount() {
-    const t = host().querySelector('.side-archived-toggle');
-    const m = t && /Show archived \((\d+)\)/.exec(t.textContent);
-    return m ? Number(m[1]) : 0;
+    const t = host().querySelector('.side-archived .archived-count');
+    return t ? Number(t.textContent) : 0;
 }
 const record = sid => ({ key: `s:${sid}`, session_id: sid, name: sid, cwd: '/srv/code/alpha', wid: '@77', archived_at: 1 });
 

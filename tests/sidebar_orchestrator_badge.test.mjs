@@ -14,6 +14,7 @@
 // inbox icon is the REAL index.html markup, clicked through its own onclick attribute.
 //
 // Run: pnpm exec vitest run tests/sidebar_orchestrator_badge.test.mjs  (pytest runs it via tests/test_js_suites.py)
+import { closeMenu, menu, menuItems, openMenu } from './js_helpers/side_menu.mjs';
 import { beforeAll, beforeEach, test } from 'vitest';
 import assert from 'node:assert/strict';
 import { bootDashboardDom, clickOnclick, flush, sliceTemplate } from './js_helpers/dashboard_dom.mjs';
@@ -158,18 +159,16 @@ test('CMX-76: with no orchestrator the inbox icon only opens the log, as before'
 test('CMX-81: the idle orchestrator is NOT archivable — its row Archive is disabled and Archive all skips it', async () => {
     await setOrchestrator('@1');
     render();
-    const items = id => [...document.getElementById(id).querySelectorAll('.popover-item')]
-        .map(i => ({ text: i.textContent.trim(), disabled: i.classList.contains('disabled') }));
     const archiveOf = name => {
-        window.chela.hideSideMenus();
-        nav.openRowMenu(null, rowFor(name).dataset.item);
-        return items('row-menu').find(i => i.text === 'Archive');
+        if (menu()) closeMenu();
+        openMenu(rowFor(name).querySelector('.row-more'));
+        return menuItems().find(i => i.text === 'Archive');
     };
     assert.equal(archiveOf('orch').disabled, true, 'the orchestrator\'s row offers an enabled Archive');
     assert.equal(archiveOf('home-2').disabled, false, 'control: its idle neighbour is archivable');
-    window.chela.hideSideMenus();
-    nav.openGroupMenu(null, '/home/u');
-    assert.ok(items('group-menu').some(i => i.text === 'Archive all (1)'),
-        `expected "Archive all (1)", got ${JSON.stringify(items('group-menu').map(i => i.text))}`);
-    window.chela.hideSideMenus();
+    closeMenu();
+    openMenu(document.querySelector('.side-group[data-g="/home/u"] .group-more'));
+    assert.ok(menuItems().some(i => i.text === 'Archive all (1)'),
+        `expected "Archive all (1)", got ${JSON.stringify(menuItems().map(i => i.text))}`);
+    closeMenu();
 });
