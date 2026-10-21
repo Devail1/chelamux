@@ -354,9 +354,10 @@ def parse_entries(
                 continue
             if INBOUND_IMAGE_MARKER in combined:
                 # A photo that ARRIVED from Telegram: it is already in the topic,
-                # so it must not echo back into it — and no source-path fallback
-                # may re-attach it either.
-                out.append(Message("user", "text", combined, timestamp=ts))
+                # so it must not echo back into it — not as a photo, not via the
+                # source-path fallback, and not as 👤 text. The marker ANYWHERE
+                # counts: a stranded delivery merges the next message in after it
+                # ("[Image #2]caption\n\n📎 image:next message", CMX-117).
                 last_user, last_user_had_blocks = None, True
                 continue
             msg = Message(
