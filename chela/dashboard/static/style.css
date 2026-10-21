@@ -3433,7 +3433,7 @@ a.kanban-tracker-link:focus-visible { text-decoration: underline; }
 /* CMX-278: the island slots draw their section (or nothing); the slot itself takes no box. */
 .side-recent-slot, .sidebar-resize-slot { display: contents; }
 .sidebar-resize {
-    position: absolute; top: 0; right: -3px; bottom: 0; width: 6px; z-index: 5;
+    position: absolute; top: 0; right: 0; bottom: 0; width: 6px; z-index: 5;
     cursor: col-resize; touch-action: none;
 }
 .sidebar-resize:hover, .sidebar-resize:focus-visible, body.sidebar-resizing .sidebar-resize {

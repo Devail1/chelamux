@@ -71,6 +71,23 @@ test('the width: kept locally before the layout loads, then read from it, clampe
   expect(cssWidth()).toBe('264px');
 });
 
+test('a poll never snaps the column back mid-drag, and an unchanged layout is not republished', async () => {
+  answers['GET /api/sidebar/layout'] = () => ({ layout: { order: [], width: 300 } });
+  await refreshLayout();
+  const published = bridge.sidebarLayout.get();
+  await refreshLayout();
+  expect(bridge.sidebarLayout.get()).toBe(published);
+  document.body.classList.add('sidebar-resizing');
+  document.documentElement.style.setProperty('--sidebar-w', '400px'); // the drag, live
+  answers['GET /api/sidebar/layout'] = () => ({ layout: { order: [], width: 320 } });
+  await refreshLayout();
+  expect(cssWidth()).toBe('400px');
+  document.body.classList.remove('sidebar-resizing');
+  answers['GET /api/sidebar/layout'] = () => ({ layout: { order: [], width: 330 } });
+  await refreshLayout();
+  expect(cssWidth()).toBe('330px');
+});
+
 // --- Recent sessions ---------------------------------------------------------------------
 
 test('the /api/restore object and a bare array both render; a non-list part is empty', async () => {

@@ -36,6 +36,10 @@ function useSwipe(onSwipe: () => void) {
       const d = Math.min(0, t.clientX - s.x);
       if (Math.abs(d) > Math.abs(t.clientY - s.y)) setDx(d);
     },
+    onTouchCancel: () => {
+      start.current = null;
+      setDx(0);
+    },
     onTouchEnd: (e: TouchEvent) => {
       const t = e.changedTouches[0], s = start.current;
       start.current = null;
@@ -55,7 +59,7 @@ function Resume({ r, actions }: { r: RecentRow; actions: SidebarActions }) {
     inFlight.current = true;
     setBusy(true);
     void Promise.resolve(actions.resumeSession(r)).then(ok => {
-      if (ok !== false) return;
+      if (ok === true) return; // resumed: the row leaves with the next read
       inFlight.current = false;
       setBusy(false);
     });

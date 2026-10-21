@@ -1,7 +1,7 @@
 // CMX-276: the sidebar's session list (#sidebar-agents): Needs you, the groups in their
 // order (Dispatched last), the Archived group, and their menus (CMX-277). What an action
 // DOES is controller.ts's (through `actions`, CMX-278).
-import { useRef, useState, type MouseEvent, type ReactNode } from 'react';
+import { useEffect, useRef, useState, type MouseEvent, type ReactNode } from 'react';
 import { icons } from '../../../shared/icons/index.ts';
 import {
   ARCHIVED_SECTION_KEY, DISPATCHED_KEY, type Group, type Item, type SidebarState, sidebarModel,
@@ -59,6 +59,7 @@ function useLongPress() {
   const timer = useRef<ReturnType<typeof setTimeout>>(undefined);
   const fired = useRef(false);
   const cancel = () => clearTimeout(timer.current);
+  useEffect(() => cancel, []);
   return {
     full,
     /** True once for the click that ends a long press: swallow it. */

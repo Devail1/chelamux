@@ -78,9 +78,16 @@ test('with no bridge on window, the layout publish is a no-op and the agents cac
 });
 
 test('a layout read from the server is published whole, loaded, without the private gen counter', async () => {
+    // The page already holds the server's layout (boot read it), so another device's change
+    // is what a refresh publishes. CMX-278: an unchanged layout is not re-published.
+    await sidebar.refreshSidebar();
+    for (let i = 0; i < 8; i++) await flush();
+    assert.deepEqual(sets.sidebarLayout, [], 'an unchanged layout was re-published');
+    await fetchImpl('/api/sidebar/layout', { method: 'POST', body: JSON.stringify({ order: ['/srv/elsewhere'] }) });
     await sidebar.refreshSidebar();
     for (let i = 0; i < 8; i++) await flush();
     const last = sets.sidebarLayout.at(-1);
+    assert.deepEqual(last.order, ['/srv/elsewhere']);
     assert.deepEqual(Object.keys(last).sort(), ['custom', 'loaded', 'order', 'view', 'width']);
     assert.equal(last.loaded, true);
 });

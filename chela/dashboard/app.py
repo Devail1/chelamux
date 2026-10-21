@@ -2509,7 +2509,7 @@ def _dispatcher_owned_wid_epochs() -> set[tuple[str, str | None]]:
     return owned
 
 
-def _terminal_run_claims() -> tuple[set[tuple[str, str | None]], set[str]]:
+def _terminal_run_claims(workflows: dict | None = None) -> tuple[set[tuple[str, str | None]], set[str]]:
     """What the dispatcher's FINISHED runs (:func:`chela.dispatcher.run_is_terminal` —
     merged, ``done``/``closed``, or failed past every retry) still claim, as two facts off
     the ``runs`` table: the ``(wid, epoch)`` pairs of their agent and judge windows, and
@@ -2526,7 +2526,7 @@ def _terminal_run_claims() -> tuple[set[tuple[str, str | None]], set[str]]:
     """
     wid_epochs: set[tuple[str, str | None]] = set()
     cwds: set[str] = set()
-    workflows: dict[str, object] = {}
+    workflows = {} if workflows is None else workflows
     for row in dispatcher.list_runs():
         if not dispatcher.run_is_terminal(row):
             continue
@@ -2559,12 +2559,11 @@ def _judge_cwd(row: dict, workflows: dict) -> str | None:
     return os.path.normpath(str(judge.judge_worktree_path(workflows[wf_path], task_id)))
 
 
-def _judge_cwds(runs: list[dict]) -> set[str]:
+def _judge_cwds(runs: list[dict], workflows: dict) -> set[str]:
     """The judge worktree of EVERY run, finished or not (CMX-278): a judge session is
     chela's, so it is never resumable, even when a reboot left its worktree on disk and
     renumbered its window (Liav, 10-19: ``judge-…`` got a Resume button). A fact off the
-    ``runs`` table, never a name guess."""
-    workflows: dict[str, object] = {}
+    ``runs`` table, never a name guess. ``workflows`` is the request's workflow cache."""
     return {c for c in (_judge_cwd(r, workflows) for r in runs) if c}
 
 
@@ -2656,12 +2655,13 @@ def api_restore():
     _require_terminals()
     owned = _dispatcher_owned_wid_epochs()
     runs = dispatcher.list_runs()
-    terminal_wid_epochs, terminal_cwds = _terminal_run_claims()
+    workflows: dict[str, object] = {}   # each WORKFLOW.md parsed once per request
+    terminal_wid_epochs, terminal_cwds = _terminal_run_claims(workflows)
     # CMX-75: a session the sidebar archived (closed) is offered by its Archived section's
     # Unarchive, never a second time here.
     dismissed = dismissed_sessions.ids() | sidebar_archive.archived_session_ids()
     live = _live_session_ids()
-    judge_cwds = _judge_cwds(runs)
+    judge_cwds = _judge_cwds(runs, workflows)
     candidates = [v for v in _restore_verdicts()
                   if v.verdict == "MANUAL" and v.manual_command()
                   and v.session_id not in dismissed and v.session_id not in live]

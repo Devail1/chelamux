@@ -159,6 +159,27 @@ test('a failed resume brings the button back', async () => {
   expect(acts.resumeSession).toHaveBeenCalledTimes(2);
 });
 
+test('a resume that did not report success (no handler, an unknown answer) brings the button back too', async () => {
+  const acts = actions();
+  acts.resumeSession.mockResolvedValue(undefined);
+  const { el } = draw(recent({ rows: [ROW] }), [], acts);
+  const btn = resumeBtns(el)[0] as HTMLButtonElement;
+  await act(async () => { fireEvent.click(btn); await Promise.resolve(); });
+  expect(btn.disabled).toBe(false);
+});
+
+test('a cancelled swipe puts the row back and does not dismiss', () => {
+  const { el, acts } = draw(recent({ rows: [ROW] }));
+  const row = el.querySelector('.recent-row') as HTMLElement;
+  fireEvent.touchStart(row, { touches: [{ clientX: 200, clientY: 100 }] });
+  fireEvent.touchMove(row, { touches: [{ clientX: 120, clientY: 102 }] });
+  expect(row.style.transform).toBe('translateX(-80px)');
+  fireEvent.touchCancel(row);
+  expect(row.style.transform).toBe('');
+  fireEvent.touchEnd(row, { changedTouches: [{ clientX: 100, clientY: 100 }] });
+  expect(acts.dismissRecentSession).not.toHaveBeenCalled();
+});
+
 test('× dismisses by the row key, a dispatcher row by its address key; nothing else is called', () => {
   const { el, acts } = draw(recent({ rows: [ROW], dispatcher_rows: [DISP], revealed: true }));
   const xs = [...el.querySelectorAll<HTMLElement>('.recent-dismiss')];

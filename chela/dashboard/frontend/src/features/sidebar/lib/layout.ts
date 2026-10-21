@@ -17,8 +17,10 @@ let layout: SidebarLayout & { gen: number } = { order: [], custom: null, view: n
 
 export const getLayout = (): Readonly<SidebarLayout> => layout;
 
-/** The desktop column's width (style.css `--sidebar-w`). */
+/** The desktop column's width (style.css `--sidebar-w`). Not while the handle is being
+ * dragged: the drag owns the column until it lets go (a poll must not snap it back). */
 export function applyWidth(w: unknown): void {
+  if (document.body.classList.contains('sidebar-resizing')) return;
   document.documentElement.style.setProperty('--sidebar-w', `${clampWidth(w)}px`);
 }
 
@@ -30,6 +32,7 @@ function publishLayout() {
 
 function setLayout(l: unknown) {
   const o = isObj(l) ? l : {};
+  const before = layout;
   layout = {
     ...layout,
     order: Array.isArray(o.order) ? o.order.filter((k): k is string => typeof k === 'string') : [],
@@ -38,6 +41,12 @@ function setLayout(l: unknown) {
     width: typeof o.width === 'number' ? o.width : null,
     loaded: true,
   };
+  // Every tick re-reads the layout: publish (and repaint) only what changed.
+  const same = (k: 'order' | 'custom' | 'view' | 'width') => JSON.stringify(before[k]) === JSON.stringify(layout[k]);
+  if (before.loaded && same('order') && same('custom') && same('view') && same('width')) {
+    layout = before;
+    return;
+  }
   publishLayout();
 }
 
