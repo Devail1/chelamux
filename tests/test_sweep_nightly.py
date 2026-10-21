@@ -789,3 +789,12 @@ def test_same_shape_sites_are_exact_text_lines_of_mutatable_source(tmp_path):
         "NOTES.md": "    if x > 100:\n",
     }, "PR (#1)", None)])
     assert sweep_nightly.same_shape_sites(repo, "if x > 100:") == ["size.py:2"]
+
+
+def test_no_survivor_never_reads_the_key_store(tmp_path, notices):
+    """A clean battery is clean even when the key store is torn: it only matters to filing."""
+    prs = [({"other.py": COVERED, "tests/test_other.py": COVERED_TEST}, "PR 2 (#2)", None)]
+    repo, chela = _repo(tmp_path, prs=prs), tmp_path / "chela"
+    sweep_nightly.state_dir(chela).mkdir(parents=True)
+    (sweep_nightly.state_dir(chela) / "filed.json").write_text("{torn")
+    assert _run(repo, chela, Filer())["status"] == "clean"
