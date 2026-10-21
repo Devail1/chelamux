@@ -2435,8 +2435,15 @@ def cmd_task_finished(args) -> None:
         print(f"task-finished: 🔎 {review['error']}")
         sys.exit(1)
 
+    # ⚖️🪜 CMX-296: what the hand-in checks follows the diff's risk tier.
+    tier = dispatcher.hand_in_tier(args.task_id)
+    checks = dispatcher.hand_in_checks(tier, experiments=bool(experiments))
     partial = None
-    if experiments:
+    accepted: list[dict] = []
+    if "lint" in checks:
+        _task_finished_standard(args.task_id, experiments,
+                                getattr(args, "sweep_equivalent", None) or [])
+    elif "self_check" in checks:
         check = dispatcher.verify_self_check(args.task_id, experiments)
         if not check.get("ok"):
             print(f"task-finished: self-check could not run — {check.get('error', 'unknown error')}")
@@ -2479,7 +2486,9 @@ def cmd_task_finished(args) -> None:
               "--self-check-experiments <path> (or --no-new-guards if this PR truly adds "
               "no guards) next time.")
 
-    accepted = _task_finished_sweep(args.task_id, getattr(args, "sweep_equivalent", None) or [])
+    if "sweep" in checks:
+        accepted = _task_finished_sweep(args.task_id,
+                                        getattr(args, "sweep_equivalent", None) or [])
     kwargs = {"handoff": getattr(args, "handoff", None)}
     if accepted:
         kwargs["sweep_equivalents"] = accepted
@@ -2504,6 +2513,30 @@ def cmd_task_finished(args) -> None:
         sys.exit(1)
     print(f"Task {result['task_id']}: completion requested — chela will transition it to "
           "awaiting review and close this window on its next pass.")
+
+
+def _task_finished_standard(task_id: str, experiments: str | None, notes: list[str]) -> None:
+    """⚖️🪜 CMX-296: a STANDARD-tier hand-in — lint and ONE full-suite run, no experiment
+    battery and no sweep (the PR gets no judge round). Exits 1 on a red or unrunnable step."""
+    print("⚖️🪜 task-finished: standard tier (no core path) — lint + one full-suite run; no "
+          "experiment battery, no sweep, no judge round.", flush=True)
+    if experiments:
+        print(f"   --self-check-experiments {experiments} is not run on a standard-tier PR.")
+    if notes:
+        print("   --sweep-equivalent is ignored: no sweep runs on a standard-tier PR.")
+    result = dispatcher.verify_standard_hand_in(task_id)
+    if result.get("error"):
+        print(f"task-finished: the standard checks could not run — {result['error']}")
+        sys.exit(1)
+    for step in result.get("steps") or []:
+        mark = {True: "PASSED", False: "FAILED", None: "SKIPPED"}[step["passed"]]
+        print(f"  [{mark:8}] {step['name']}: {step['cmd'] or step['detail']}")
+        if step["passed"] is False and step["detail"]:
+            print(step["detail"])
+    if not result.get("ok"):
+        print("task-finished: a standard-tier check is red — fix it, then call task-finished "
+              "again.")
+        sys.exit(1)
 
 
 def _self_check_partial(check: dict) -> dict | None:

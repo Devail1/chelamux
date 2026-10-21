@@ -324,10 +324,12 @@ def _run_row(tmp_path: Path, root: Path, task_id: str = "cmx-88") -> None:
 
 
 def _task_finished(*extra: str) -> int | None:
+    """⚖️🪜 CMX-296: pinned to the CORE tier — a standard-tier hand-in runs no sweep."""
     from chela import main
 
     with patch.object(sys, "argv", ["chela", "task-finished", "cmx-88", "--no-new-guards",
-                                     *extra]):
+                                     *extra]), \
+         patch.object(dispatcher, "hand_in_tier", return_value="core"):
         try:
             main.main()
         except SystemExit as e:

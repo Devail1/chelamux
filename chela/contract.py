@@ -54,7 +54,7 @@ from pathlib import Path
 
 from chela import config, dispatcher, event_log, notify, risktier
 from chela.dispatcher import CI_PASSING
-from chela.judge import J_CLEAN, J_PROSE_ONLY, MERGE_READY
+from chela.judge import J_CLEAN, J_PROSE_ONLY, J_STANDARD_NO_JUDGE, MERGE_READY
 from chela.personas import lease
 from chela.workflow import load_workflow_cached
 from chela.worktree import reap_run_worktree
@@ -326,7 +326,8 @@ def merge(ident: str, *, reason: str = "", actor: str | None = None,
     5. CI is green per GitHub;
     6. GitHub reports the PR open and ``MERGEABLE``;
     7. (CMX-208) the PR's live file list is readable and touches no ALWAYS-HUMAN path, and a
-       ``prose_only`` verdict (accepted like ``clean`` in 4) still matches a prose-only diff.
+       ``prose_only`` verdict (accepted like ``clean`` in 4) still matches a prose-only diff,
+       and (CMX-296) a ``standard_no_judge`` verdict still matches a standard-tier one.
 
     There is deliberately **no ``--force``**: overriding a gate is an escalation, not an
     autonomous act. ``override=True`` (``chela merge --override --reason``) does NOT merge:
@@ -626,8 +627,9 @@ def _gate(run: dict, *, override: bool, actor: str | None,
     # 7. ⚖️🪜 CMX-208 — the risk tier of the LIVE file list (unreadable ⇒ refused). The
     #    override IS the human, so it only carries the always-human trigger into its question.
     files, wf = _read_pr_files(pr_url, repo_dir), load_workflow_cached(wf_path)
+    workflow = wf.workflow if wf.ok else None
     tier, trigger = (None, None) if files is None else risktier.classify(
-        files, risktier.always_human(wf.workflow if wf.ok else None))
+        files, risktier.always_human(workflow), risktier.core(workflow))
     if not override:
         problem = None
         if tier is None:
@@ -636,6 +638,12 @@ def _gate(run: dict, *, override: bool, actor: str | None,
             problem = f"this PR touches {trigger!r}, an ALWAYS-HUMAN path"
         elif judge_state == J_PROSE_ONLY and tier != risktier.PROSE:
             problem = "the PR was stamped prose-only, but its live diff is not prose-only"
+        elif judge_state == J_STANDARD_NO_JUDGE and tier not in (risktier.STANDARD,
+                                                                  risktier.PROSE):
+            # CMX-296: no judge ran, so the live diff must still be standard (or the lighter
+            # prose) — never core.
+            problem = (f"the PR was stamped standard-tier (no judge), but its live diff is "
+                       f"{tier!r}")
         if problem:
             return _refuse(
                 task_id, "escalate", risk_tier=tier, always_human_path=trigger,
