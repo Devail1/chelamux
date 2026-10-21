@@ -171,7 +171,7 @@ class Session {
 }
 
 // Update the share-button peer-count badge without reaching into terminals.js
-// internals (same DOM contract as _updateShareBtns).
+// internals (the pane header's Share row draws the .gs-share-count it fills).
 function setBadge(wid, count) {
   document.querySelectorAll('.gs-share-btn[data-wid="' + cssEsc(wid) + '"] .gs-share-count').forEach((badge) => {
     if (count > 0) { badge.textContent = String(count); badge.hidden = false; }

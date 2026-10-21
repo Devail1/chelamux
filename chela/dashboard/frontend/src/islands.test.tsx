@@ -5,8 +5,10 @@ import { boot } from './islands.tsx';
 // Each test resets document.body. A dialog left open keeps its portal there; the reset
 // orphans it and a later commit that removes it throws (NotFoundError). So none stays open.
 const escape = () => act(async () => document.activeElement?.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true })));
-afterEach(() => {
-  expect(document.querySelector('[role="dialog"]')).toBeNull();
+// A close commits through Radix's Presence, which can land a turn later on a loaded machine
+// (the full pytest run): wait for it, so the next test's reset never orphans a live portal.
+afterEach(async () => {
+  await vi.waitFor(() => expect(document.querySelector('[role="dialog"]')).toBeNull());
 });
 
 test('boot installs the bridge and mounts the version island into #version-island', async () => {

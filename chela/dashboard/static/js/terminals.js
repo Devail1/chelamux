@@ -1,17 +1,17 @@
 // --- Stage 0: ES-module imports ---
-import { $, BASE_PATH, TERMINALS_ON, WALL_TILE_DISPATCHED, _agentsCache, api, attrEsc, currentTab, escHtml, icon, lucideIcon, setAgentsCache, updateTabSignal, wantsHuman } from './util';
+import { $, BASE_PATH, TERMINALS_ON, WALL_TILE_DISPATCHED, _agentsCache, api, attrEsc, currentTab, escHtml, lucideIcon, setAgentsCache, updateTabSignal, wantsHuman } from './util';
 import { openPalette, selectView } from './nav';
 import { altSwitchKeydown, renderSidebarAgents, setAltHeld, sidebarOrder, updateCtxCache } from '../../frontend/src/features/sidebar/controller';
 import { orderByList, windowRunDot } from '../../frontend/src/features/sidebar/model';
 import { applyRoomAccents, bezierPath, resolveDrop } from './wire';
-import { onOrchestratorChange, orchestratorRelease, orchestratorState, orchestratorSubscribe } from '../../frontend/src/shared/orchestrator';
 import { actionBarKind, costView, ctxLevel, focusLayout, gridRowCollapsed, prChip, rankOrder, recapView, stateTitle, tileState } from './wallmodel';
 import { openDiffModal } from '../../frontend/src/features/diffmodal';
 import { pinKeybar } from '../../frontend/src/features/keybar';
-import { termMode } from '../../frontend/src/shared/store/wall';
+import { pinnedPanes, termMode } from '../../frontend/src/shared/store/wall';
 import { windowIdQuery } from './windowid';
 import { onEvent } from '../../frontend/src/shared/events';
-import { SHARE_MODE_UI, configureShareHost, followAgents, paneToast as _termShareToast, shareMode, shareSession, shares, stopOwnerPresence, unsafeBannerText } from '../../frontend/src/features/share';
+import { configureShareHost, followAgents, paneToast as _termShareToast, shareSession, stopOwnerPresence } from '../../frontend/src/features/share';
+import { configurePaneHeads, displayLabel, dotState, mountPaneHeads, refreshPaneHeads } from '../../frontend/src/features/panehead';
 
 // ---------------------------------------------------------------------------
 // Terminals (embedded ttyd via the gateway: /term/<wid>/)
@@ -358,131 +358,22 @@ function termScrollFor(btn, wid) {
     btn.title = on ? 'Exit scroll (tmux copy-mode)' : 'Scroll (tmux copy-mode)';
 }
 
-// Shared pane header: agent label + quick keys. draggable=true for wall
-// tiles (label is the Gridstack drag handle); false for the single view.
+// A wid quoted for an inline `onclick="chela.x('…')"` handler.
 function _jsStr(s) { return String(s).replace(/\\/g, '\\\\').replace(/'/g, "\\'"); }
-// chela has no managed-agent roster — every pane is a peer session, so the ×
-// kill control is available on all of them (matches the dashboard kill route,
-// which has no managed guard). Kept as a function so the call sites read the
-// same and a future deployment could pin specific windows here.
-function _isManaged(wid) {
-    return false;
-}
 
 // ---- Display labels. THE TMUX WINDOW NAME IS THE SOURCE OF TRUTH: a rename goes
-// to the server (renamePane -> POST /api/agents/<wid>/rename -> tmux rename-window)
-// and comes back to every client through /api/agents. There is deliberately NO
-// local label store. The old one (localStorage `pc_pane_titles`) was per-browser:
-// a rename on the laptop was invisible on the phone, never reached tmux or the
-// bound Telegram topic, and died with the browser's data. Drop any leftovers so
-// the two layers can't disagree.
+// to the server (the pane header, features/panehead -> POST /api/agents/<wid>/rename ->
+// tmux rename-window) and comes back to every client through /api/agents. There is
+// deliberately NO local label store. The old one (localStorage `pc_pane_titles`) was
+// per-browser: a rename on the laptop was invisible on the phone, never reached tmux or the
+// bound Telegram topic, and died with the browser's data. Drop any leftovers so the two
+// layers can't disagree.
 try { localStorage.removeItem('pc_pane_titles'); } catch (e) { /* private mode */ }
 
-// Claude's session title for a window — its auto-generated `ai_title` (CMX-146),
-// else the live session's name. '' until the first exchange has produced one.
-function _claudeTitle(a) {
-    return (a && (a.ai_title || a.session_name)) || '';
-}
-
-// Display label for a window, shared by the sidebar row + the pane header so the
-// two stay aligned (CMX-62, Liav's order): a MANUAL name (renamed by a human —
-// the server's `manual_name` flag, never guessed from the string) > Claude's
-// session title > the window name. The window name itself is a short stable KEY
-// that never changes to follow the title; it rides along as the secondary label
-// (_paneKeyLabel) whenever the title leads.
-//
-// NB: this only changes what a label RESOLVES to. It must never leak into the
-// wall's `_termSig`, which is keyed on window ids alone — else buildWall reloads
-// every live iframe on a relabel (CMX-67/71).
-function _displayLabel(wid) {
-    const a = (_agentsCache || []).find(x => x.window_id === wid);
-    if (!a) return wid;
-    if (a.manual_name) return a.name;
-    return _claudeTitle(a) || a.name || 'claude window';
-}
-
-// The window name, when the label is NOT already showing it (i.e. the title leads)
-// — '' otherwise, so the secondary slot never repeats the primary.
-function _paneKeyLabel(wid) {
-    const a = _agentByWid(wid);
-    if (!a || !a.name) return '';
-    return _displayLabel(wid) === a.name ? '' : a.name;
-}
-
-function _paneTitle(wid) {
-    return _displayLabel(wid);
-}
-
-// The dim subtitle under the pane title. Whatever the title did NOT take: the
-// window name when Claude's title leads (CMX-62), else Claude's own `ai_title`
-// (CMX-146) riding alongside a manual/window name. '' (not shown) when there is
-// nothing distinct to add.
-function _paneAiTitle(wid) {
-    const key = _paneKeyLabel(wid);
-    if (key) return key;
-    const a = _agentByWid(wid);
-    const t = (a && a.ai_title) || '';
-    return t && t !== _displayLabel(wid) ? t : '';
-}
-
-// Rename the WINDOW (not a local label): POST the new name, which renames the tmux
-// window, so it shows up on every client, in tmux, and on the bound Telegram topic.
-// Refetches /api/agents so the wall, cards and nav all relabel from the real name.
-async function _commitRename(wid, name) {
-    const res = await api(`/api/agents/${encodeURIComponent(wid)}/rename`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ name }),
-    });
-    if (!res || !res.ok) throw new Error((res && res.error) || 'rename failed');
-    const agents = await api('/api/agents');
-    setAgentsCache(agents);
-    _refreshPaneLabels();
-}
-
-// Swap a pane title span for an inline input. Enter saves, Esc cancels. The name is
-// the window's real name, so an unchanged (or empty) value is simply not submitted.
-function renamePane(ev, span, wid) {
-    ev.stopPropagation();
-    const input = document.createElement('input');
-    input.className = 'pane-title-edit';
-    input.value = _nameOfWid(wid);   // edit the REAL name, not the prettified label
-    input.title = 'Enter to save · Esc to cancel';
-    span.replaceWith(input);
-    input.focus();
-    input.select();
-    let done = false;
-    const restore = () => {
-        const fresh = document.createElement('span');
-        fresh.className = 'pane-title';
-        fresh.title = 'double-click to rename';
-        fresh.textContent = _paneTitle(wid);
-        fresh.addEventListener('dblclick', e2 => renamePane(e2, fresh, wid));
-        input.replaceWith(fresh);
-        return fresh;
-    };
-    const commit = async (save) => {
-        if (done) return;
-        done = true;
-        const name = input.value.trim();
-        const unchanged = !name || name === _nameOfWid(wid);
-        restore();
-        if (!save || unchanged) return;
-        try {
-            await _commitRename(wid, name);
-        } catch (e) {
-            console.error('renamePane', e);
-            alert('Rename failed: ' + e.message);
-        }
-    };
-    input.addEventListener('keydown', e2 => {
-        e2.stopPropagation();
-        if (e2.key === 'Enter') { e2.preventDefault(); commit(true); }
-        else if (e2.key === 'Escape') { e2.preventDefault(); commit(false); }
-    });
-    input.addEventListener('blur', () => commit(true));
-    input.addEventListener('mousedown', e2 => e2.stopPropagation());  // don't start a grid drag
-}
+// A window's label for what legacy still draws (dock chips, the dropdown, the iframe title):
+// the model the pane header and the sidebar share (CMX-62, features/panehead).
+function _displayLabel(wid) { return displayLabel(_agentByWid(wid), wid); }
+function _paneTitle(wid) { return _displayLabel(wid); }
 
 // --- collab sharing (presence-only) ----------------------------------------
 // The shared "link" is just the clean /term/<wid>/ URL — NO ?collab magic;
@@ -504,378 +395,27 @@ function _newCid() {
 }
 function _termFrameSrc(wid) { return _termSrc(wid) + '?cid=' + _newCid(); }
 
-// Share state lives in the share feature since CMX-240 (frontend/src/features/share: the
-// store, the active-shares pill, the Active shares sheet and owner presence). The pane header
-// below still reads it: the share pill, the red UNSANDBOXED banner and the web chip.
-// Per-wid sandbox network mode (CMX-418), from /api/agents .share_net: 'web' shows the
-// "🌐 web" chip on the pane header. Display only — the host's live check is the gate.
-const _netModes = new Map();
-function _updateNetBadges(wid) {
-    const web = _netModes.get(wid) === 'web';
-    document.querySelectorAll('.gs-net-badge[data-net-for="' + _cssEsc(wid) + '"]').forEach(b => { b.hidden = !web; });
-}
-function _unsafeBannerText(wid) {
-    return '⚠ ' + unsafeBannerText(shares.get().get(wid)?.expiresAt, Date.now());
-}
-
-// The agents poll: the share feature follows each row's share flag (and owner presence with
-// it); the web chip is the header's own.
-function _seedSharedFromAgents(agents) {
-    followAgents(agents || []);
-    (agents || []).forEach(a => {
-        if (!a.window_id) return;
-        if (a.share_net) _netModes.set(a.window_id, a.share_net); else _netModes.delete(a.window_id);
-        _updateNetBadges(a.window_id);
-    });
-}
-
 // The pane's own frames, for the share feature's reload and mint-time size (CMX-240).
 function _paneFrames(wid) {
     return Array.from(document.querySelectorAll('#term-stage iframe.term-frame')).filter(ifr => _widOfFrame(ifr) === wid);
 }
 configureShareHost({ paneTitle: wid => _paneTitle(wid), paneFrames: _paneFrames });
-// Every change to a share repaints the pane pills and banners that show it.
-shares.subscribe(() => _renderedWids.forEach(_updateShareBtns));
 
-// Share button: adopt the live share, or open the share dialog to mint one (CMX-152/403).
-function shareBtnClick(_btn, wid) { return shareSession(wid); }
-
-function _updateShareBtns(wid) {
-    const mode = shareMode(wid);
-    // The red UNSANDBOXED banner on the pane itself (CMX-403) — shown exactly while a
-    // trusted-peer override is armed on this window.
-    const unsafe = mode === 'unsandboxed';
-    document.querySelectorAll('.gs-unsafe-banner[data-banner-for="' + _cssEsc(wid) + '"]').forEach(b => {
-        b.hidden = !unsafe;
-        if (unsafe) b.textContent = _unsafeBannerText(wid);
-    });
-    document.querySelectorAll('.gs-share-btn[data-wid="' + _cssEsc(wid) + '"]').forEach(btn => {
-        btn.classList.toggle('on', !!mode);
-        btn.setAttribute('aria-pressed', mode ? 'true' : 'false');
-        // The pane's share pill carries the share's mode (CMX-421), like the dialog.
-        btn.dataset.mode = mode || '';
-        const glyph = btn.querySelector('.gs-share-mode');
-        if (glyph) {
-            glyph.textContent = mode ? SHARE_MODE_GLYPH[mode] : '';
-            glyph.hidden = !mode;
-            glyph.title = mode ? _shareModeTitle(mode) : '';
-        }
-        // The peer-count badge is owned by the owner-presence client (setBadge in
-        // presence-owner.js), which alone knows the live joiner count; clearing the
-        // share flag hides it there on stopOwnerPresence.
-    });
-}
-
-const SHARE_MODE_GLYPH = { view: '👁', typing: '⌨', unsandboxed: '⚠' };
-const _shareModeTitle = mode => SHARE_MODE_GLYPH[mode] + ' ' + SHARE_MODE_UI[mode].label;
-
-function _shareBtnHTML(wid) {
-    const mode = shareMode(wid);
-    const on = !!mode;
-    return `<button class="gs-share-btn popover-item ov-item${on ? ' on' : ''}" data-wid="${attrEsc(wid)}"
-      onclick="chela.shareBtnClick(this,'${_jsStr(wid)}')" aria-pressed="${on ? 'true' : 'false'}" data-mode="${mode || ''}"
-      title="Share this session"><span class="ov-ic">${lucideIcon('share-2', 14)}</span><span>Share current session</span><span class="gs-share-mode"${mode ? ` title="${attrEsc(_shareModeTitle(mode))}"` : ' hidden'}>${mode ? SHARE_MODE_GLYPH[mode] : ''}</span><span class="gs-share-count" hidden></span></button>`;
-}
-
-// The pane-title toggle: "⊙ Orchestrator" — one click registers THIS pane's
-// session as the decisions-inbox recipient (an atomic take-over of the single
-// slot, chela/inbox.py::register via /api/orchestrator/subscribe), one click
-// releases it (falls back to the decisions panel — chela/dashboard/static/js/
-// decisions.js). `.on` reflects the LIVE owner, kept current across every pane
-// via onOrchestratorChange (fired on our own clicks, other panes' clicks, and
-// the SSE `orchestrator` delta, orchestrator.js).
-function _orchBtnHTML(wid) {
-    const on = orchestratorState().wid === wid;
-    const title = on
-        ? 'This pane receives the decisions inbox, click to release'
-        : 'Click to receive the decisions inbox in this pane';
-    return `<button class="gs-orch-btn popover-item ov-item${on ? ' on' : ''}" data-wid="${attrEsc(wid)}"
-      onclick="chela.orchestratorBtnClick(this,'${_jsStr(wid)}')" aria-pressed="${on ? 'true' : 'false'}"
-      title="${attrEsc(title)}"><span class="ov-ic">${lucideIcon('circle-dot', 14)}</span><span>Orchestrator</span></button>`;
-}
-
-function _updateOrchBtns() {
-    const owner = orchestratorState().wid;
-    document.querySelectorAll('.gs-orch-btn').forEach(btn => {
-        const wid = btn.getAttribute('data-wid');
-        const on = owner === wid;
-        btn.classList.toggle('on', on);
-        btn.setAttribute('aria-pressed', on ? 'true' : 'false');
-        btn.title = on
-            ? 'This pane receives the decisions inbox, click to release'
-            : 'Click to receive the decisions inbox in this pane';
-    });
-    // CMX-119: the pane's status dot (paneHead) carries a non-hue ring while
-    // it owns the decisions inbox — driven off this SAME signal as the menu
-    // row above, so the ring and the row's `.on` state can never disagree.
-    // CMX-32: the ring goes on the dot's unclipped WRAPPER (.gs-dot-ring), not
-    // the dot — the dot's done/waiting shapes are clip-paths that clip it away.
-    document.querySelectorAll('.gs-dot-ring[data-wid]').forEach(ring => {
-        ring.classList.toggle('gs-dot-orch', ring.getAttribute('data-wid') === owner);
-    });
-}
-
-// Fires on our own clicks, every other pane's clicks (subscribe is a global
-// take-over) and the SSE `orchestrator` delta — one state, every button in sync.
-onOrchestratorChange(_updateOrchBtns);
-
-async function orchestratorBtnClick(btn, wid) {
-    const on = orchestratorState().wid === wid;
-    btn.disabled = true;
-    try {
-        const result = on ? await orchestratorRelease(wid) : await orchestratorSubscribe(wid);
-        if (!result || !result.ok) {
-            console.error('orchestrator toggle failed', result && result.error);
-        }
-    } finally {
-        btn.disabled = false;
-    }
-}
-
-function paneHead(wid, draggable) {
-    const j = _jsStr(wid);
-    const title = `<span class="pane-title" title="double-click to rename" ondblclick="chela.renamePane(event, this, '${j}')">${escHtml(_paneTitle(wid))}</span>`;
-    // CMX-146: Claude's own auto-generated session title, dim under the name —
-    // hidden entirely until a first `ai-title` record exists for the session.
-    const aiTitle = _paneAiTitle(wid);
-    const subtitle = aiTitle ? `<span class="pane-subtitle" title="${attrEsc(aiTitle)}">${escHtml(aiTitle)}</span>` : '';
-    // The NAME is the drag handle (CMX-117 drops the old "☰" glyph) — `.gs-grip`
-    // stays the class GridStack's `handle`/`draggable.handle` option targets
-    // (buildWall), so dragging still works; only the glyph is gone.
-    const label = draggable
-        ? `<span class="gs-grip" title="drag to move">${title}${subtitle}</span>`
-        : `<span class="gs-label">${title}${subtitle}</span>`;
-    // × kill: rendered ONLY for non-managed agents (spawned shells / ad-hoc
-    // sessions). Managed personas (anything in agents.yaml) get no × so they
-    // can't be torn down from the wall by accident; the backend also refuses.
-    const kill = _isManaged(wid) ? '' :
-        `<button class="gs-kill-btn" onclick="chela.termKillClick(this,'${j}')" title="Kill this session">&#10005;</button>`;
-    // Minimize-to-dock is a wall-only concept (single view shows one pane, with
-    // nothing to dock it beside) — only render it for draggable wall tiles.
-    const min = draggable
-        ? `<button class="gs-min-btn" onclick="chela.termMinFor(this)" title="Minimize to dock">${lucideIcon('minus', 14)}</button>` : '';
-    // Mobile single-pane fullscreen toggle (2026-07-25, Liav's call): the ONE
-    // mobile equivalent of desktop's min/max window controls, neither of
-    // which apply to a forced single pane (no dock, no other tiles to
-    // overlay). !draggable already means single mode, which in practice only
-    // happens on mobile — desktop's Single/Wall toggle buttons are
-    // permanently hidden (index.html) so wall never renders draggable=false —
-    // but _isMobileTerm() is still checked explicitly so a stale render can
-    // never leak this into a desktop header.
-    const mobileFull = (!draggable && _isMobileTerm())
-        ? `<button class="gs-mobile-full-btn" onclick="chela.termMobileFull(this)" title="Fill screen">${lucideIcon('maximize-2', 14)}</button>` : '';
-    // Pin is also wall-only: it exempts this tile from applyGridLayout's
-    // auto-reflow (grid presets), so single mode (no reflow to opt out of) gets
-    // no button either.
-    const pin = draggable ? _pinBtnHTML(wid) : '';
-    // No PgUp/PgDn/scroll/Esc/^C here: with focus in the pane those keys reach the
-    // terminal natively (wheel/keys scroll, Esc and Ctrl-C pass through), so the
-    // header carries only the window controls (minimize / maximize / kill).
-    // The wire's port + the room badge are WALL chrome: single-pane mode has a
-    // header but no gs-id (nothing to wire to, nothing to resolve a drop against),
-    // so it simply gets neither — degrade, don't crash.
-    const port = draggable
-        ? `<button class="gs-port popover-item ov-item" onmousedown="chela.wireDragStart(event, this, '${j}')"
-             title="Wire this agent to another: drag onto a peer"
-             aria-label="Wire this agent to another"><span class="ov-ic">${lucideIcon('link-2', 14)}</span><span>Wire to…</span></button>` : '';
-    const roomBadge = draggable
-        ? `<button class="gs-room" onclick="chela.wireRoomClick(this, '${j}')" hidden>${icon('wired', 11)}<span class="gs-room-name"></span></button>` : '';
-    // CMX-119: pane header v2 — split the CMX-117 combined badge back apart
-    // now that every pane has a bottom bar to hold its numbers. `.gs-dot` is a
-    // plain status-by-SHAPE indicator (filled = working, hollow = idle, filled
-    // + glow ring = waiting/wants-human — Liav is red-weak, so shape carries
-    // the signal, not hue alone) — `_colorTermDots` (this file) targets
-    // `.term-status-dot`, which this dot also wears, so the same
-    // working/waiting/idle classes paint it same as everywhere else (see the
-    // .gs-dot rules in style.css). The orchestrator ring (_updateOrchBtns,
-    // below) is a SEPARATE non-hue outline on the dot's `.gs-dot-ring` wrapper
-    // — never the dot itself, whose done/waiting clip-paths would clip it away
-    // (CMX-32). The "⋯" trigger
-    // (lucide `more-vertical`) opens the same Wire/Share/Orchestrator/Pin menu
-    // the old combined badge used to — same togglePaneOverflow, same `menu =
-    // btn.nextElementSibling` contract, so the menu's rows and all their live
-    // state wiring (_updateShareBtns/_updateOrchBtns/the pin toggle) are
-    // untouched, just anchored at a plain button instead of the pill. The
-    // pane № moved OUT of the header (CMX-119), and is gone since CMX-85 —
-    // the sidebar rows carry the Alt+N numbers.
-    // CMX-139: born with the ring when this pane ALREADY owns the slot — a pane
-    // (re)built after the status landed must not wait for the next change to show it.
-    const orchRing = orchestratorState().wid === wid ? ' gs-dot-orch' : '';
-    const dot = `<span class="gs-dot-ring${orchRing}" data-wid="${attrEsc(wid)}"><span class="gs-dot term-status-dot" data-status-for="${attrEsc(wid)}" data-wid="${attrEsc(wid)}" title="…"></span></span>`;
-    // Wall redesign slice 1 (docs/wall-redesign.md): the header's state pill.
-    // CMX-393: the WORD only — the SHAPE is `.gs-dot` at the head's far left,
-    // and a glyph in here drew every state twice (`● ● working`). Shape + word
-    // still carry the state together (Liav is red-weak; colour is decoration
-    // on top, see .gs-state-* in style.css). Wall-only, like the
-    // min/pin buttons above — single mode renders nothing here at all, so
-    // mobile's forced single mode (< 768px) is untouched by construction.
-    // Rendered idle/neutral here (mirrors .gs-dot's own "starts neutral" build
-    // pattern); _applyWallTileFrame (called synchronously right after the
-    // wall is built — see renderTerminals) fills the real state before the
-    // browser ever paints it.
-    const state = draggable
-        ? `<span class="gs-state gs-state-idle" data-state-for="${attrEsc(wid)}" title="idle"><span class="gs-state-word">idle</span></span>` : '';
-    const menu = `<span class="gs-menu-wrap">
-        <button class="gs-menu-btn" onclick="chela.togglePaneOverflow(event, this)"
-                aria-haspopup="true" aria-expanded="false" title="Session actions">${lucideIcon('more-vertical', 14)}</button>
-        <div class="popover pane-overflow-menu overflow-menu" hidden>
-          ${port}
-          ${_shareBtnHTML(wid)}
-          ${_orchBtnHTML(wid)}
-          ${pin}
-        </div>
-      </span>`;
-    // CMX-393: the approved mockup's order — shape · title · dim subtitle ·
-    // soft word pill · icon buttons. The label flex-grows, so the pill and
-    // everything after it sit at the right.
-    return `<div class="gs-head">
-      ${dot}
-      ${label}
-      ${roomBadge}
-      <span class="gs-presence" data-presence-for="${attrEsc(wid)}"></span>
-      <span class="gs-net-badge" data-net-for="${attrEsc(wid)}" title="Sandboxed session with web access: public hosts only, rate-limited, every request logged"${_netModes.get(wid) === 'web' ? '' : ' hidden'}>🌐 web</span>
-      <span class="gs-unsafe-banner" data-banner-for="${attrEsc(wid)}" role="status"${shareMode(wid) === 'unsandboxed' ? '' : ' hidden'}>${escHtml(_unsafeBannerText(wid))}</span>
-      ${state}
-      ${menu}
-      <span class="gs-keys">
-        <span class="gs-win-ctl">
-          ${min}
-          <button class="gs-max-btn" onclick="chela.termMaxFor(this)" aria-pressed="false" title="Maximize pane">${lucideIcon('maximize-2', 14)}</button>
-          ${mobileFull}
-          ${kill}
-        </span>
-      </span>
-    </div>`;
-}
-
-// Toggle this pane's "⋯" overflow menu (Wire/Share/Orchestrator/Pin). Only one
-// open at a time — opening a second closes the first — and light-dismisses on
-// the next outside click.
-function togglePaneOverflow(ev, btn) {
-    if (ev) ev.stopPropagation();
-    const menu = btn.nextElementSibling;
-    if (!menu) return;
-    const opening = menu.hidden;
-    _closeAllPaneOverflows();
-    if (!opening) return;
-    menu.hidden = false;
-    btn.setAttribute('aria-expanded', 'true');
-    const r = btn.getBoundingClientRect();
-    menu.style.top = (r.bottom + 6) + 'px';
-    // CMX-119: LEFT-anchored to the trigger (not right-anchored off it) — the
-    // trigger sits near the pane's left edge, between the dot and the name, so
-    // anchoring the menu's right edge to the trigger's right edge (the old
-    // math) could park it far from the pane on a wide wall. Opening rightward
-    // from the trigger's own left edge keeps it over the pane it belongs to.
-    menu.style.left = Math.max(8, Math.min(r.left, window.innerWidth - menu.offsetWidth - 8)) + 'px';
-    setTimeout(() => document.addEventListener('click', _closeAllPaneOverflows, { once: true }), 0);
-}
-
-function _closeAllPaneOverflows() {
-    document.querySelectorAll('.pane-overflow-menu:not([hidden])').forEach(m => {
-        m.hidden = true;
-        const btn = m.previousElementSibling;
-        if (btn) btn.setAttribute('aria-expanded', 'false');
-    });
-}
-
-// Inline kill-confirm — same plain-DOM affordance as the kanban delete button
-// (kanbanDeleteClick), NOT window.confirm. The confirm bar overlays the top of
-// the pane; Kill calls POST /api/agents/kill and, on success, drops the tile
-// immediately (see dropTerminalPane) rather than waiting for the next poll.
-function termKillClick(btn, wid) {
-    const pane = btn.closest('.term-pane, .grid-stack-item-content');
-    if (!pane || pane.querySelector('.pane-kill-confirm')) return;
-    const confirmEl = document.createElement('div');
-    confirmEl.className = 'kanban-confirm pane-kill-confirm';
-    confirmEl.dataset.agent = wid;
-    confirmEl.innerHTML = `
-        <span class="kanban-confirm-msg">Kill ${escHtml(_paneTitle(wid))}?</span>
-        <button class="btn-confirm" type="button" onclick="chela.termKillConfirm(this, true)">Kill</button>
-        <button type="button" onclick="chela.termKillConfirm(this, false)">Cancel</button>`;
-    pane.appendChild(confirmEl);
-    btn.style.visibility = 'hidden';
-}
-
-async function termKillConfirm(actionBtn, ok) {
-    const confirmEl = actionBtn.closest('.pane-kill-confirm');
-    if (!confirmEl) return;
-    const pane = confirmEl.closest('.term-pane, .grid-stack-item-content');
-    const killBtn = pane ? pane.querySelector('.gs-kill-btn') : null;
-    const wid = confirmEl.dataset.agent;
-    if (!ok) {
-        confirmEl.remove();
-        if (killBtn) killBtn.style.visibility = '';
-        return;
-    }
-    confirmEl.innerHTML = '<span class="kanban-confirm-msg">Killing…</span>';
-    let resp, data = {};
-    try {
-        resp = await fetch(BASE_PATH + '/api/agents/kill', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ agent: wid }),
-        });
-        try { data = await resp.json(); } catch (_) { data = {}; }
-    } catch (e) {
-        _termKillShowError(confirmEl, killBtn, String(e));
-        return;
-    }
-    if (!resp.ok || !data.ok) {
-        _termKillShowError(confirmEl, killBtn, data.error || `HTTP ${resp.status}`);
-        return;
-    }
-    // Reactivity: drop the tile now so the wall reflects the kill instantly.
-    // The next termTick would catch it too, but waiting leaves a dead iframe.
-    dropTerminalPane(wid);
-}
-
-function _termKillShowError(confirmEl, killBtn, msg) {
-    confirmEl.innerHTML = `
-        <span class="kanban-confirm-msg" style="color:var(--red);">${escHtml(msg)}</span>
-        <button type="button" onclick="chela.termKillConfirm(this, false)">Close</button>`;
-    if (killBtn) killBtn.style.visibility = '';
-}
-
-// Maximize/restore toggle for the shared pane header. The pane is lifted to a
-// full-viewport overlay (fixed inset:0 over the header AND sidebar — see the CSS
-// at .pane-maximized) and a body class hides the other Gridstack tiles. We
-// deliberately do NOT touch Gridstack's saved layout, so restore is a true
-// inverse — the tile snaps back to its exact prior x/y/w/h with no recompute.
-// There is no separate banner or ESC binding (ESC is the agent's interrupt key):
-// the way out is the same button, which goes accent-filled while maximized so
-// it reads as the obvious exit. Icon flips between maximize-2 and minimize-2
-// (CMX-154: SVG, not emoji — the old 🗖/🗗 glyphs were tofu on macOS) to match state.
-function termMaxFor(btn) {
-    if (!btn) return;
-    const pane = btn.closest('.term-pane, .grid-stack-item-content');
-    if (!pane) return;
-    const isMax = pane.classList.toggle('pane-maximized');
-    document.body.classList.toggle('pane-is-maximized', isMax);
-    btn.innerHTML = isMax ? lucideIcon('minimize-2', 14) : lucideIcon('maximize-2', 14);
-    btn.title = isMax ? 'Restore pane' : 'Maximize pane';
-    btn.setAttribute('aria-pressed', isMax ? 'true' : 'false');
-}
-
-// ---- Mobile single-pane fullscreen toggle (2026-07-25) ---------------------
-//
-// Desktop's min/max window controls don't apply to a forced single pane (no
-// dock, no other tiles to overlay) — this is the ONE mobile equivalent: grow
-// the pane to the full 100dvh and hide the surrounding chrome (keybar,
-// context bar) so the terminal gets the whole screen. A
-// transient body class, not persisted (pc_wall_* is layout state; this is a
-// per-visit view toggle, and it's cheap to rebuild the same way every time) —
-// style.css (.term-mobile-full) does the actual hiding/resizing, scoped
-// inside the same @media (max-width: 768px) block as everything else mobile,
-// so desktop is untouched by construction. The compact .gs-head — and its ×
-// kill button — stays visible in both states: this same toggle button is the
-// only way out, and it never disappears (it's part of .gs-head).
-function termMobileFull(btn) {
-    if (!btn) return;
-    const on = document.body.classList.toggle('term-mobile-full');
-    btn.innerHTML = on ? lucideIcon('minimize-2', 14) : lucideIcon('maximize-2', 14);
-    btn.title = on ? 'Exit fullscreen' : 'Fill screen';
-    btn.setAttribute('aria-pressed', on ? 'true' : 'false');
+// The pane header is React since CMX-241 (features/panehead): one root, portaled into each
+// tile's `[data-head-for]` slot, which _wallTileHTML and the single pane draw and
+// mountPaneHeads fills. It reads the agents, share, orchestrator and pin stores itself; what
+// it asks of the Wall comes through here.
+configurePaneHeads({
+    minimize: wid => minimizePane(wid),
+    dropPane: wid => dropTerminalPane(wid),
+    wireDragStart: (e, from, wid) => wireDragStart(e, from, wid),
+    leaveRoom: (badge, wid) => wireRoomClick(badge, wid),
+    labelsChanged: () => _refreshPaneLabels(),
+});
+// The slot a header portals into: `display: contents`, so the head and its kill confirm lay
+// out as the pane's own children.
+function _paneHeadSlot(wid, wall) {
+    return `<div class="island-slot pane-head-slot" data-head-for="${attrEsc(wid)}"${wall ? ' data-head-wall="1"' : ''}></div>`;
 }
 
 // ---- Minimize-to-dock (wall mode) -----------------------------------------
@@ -899,40 +439,15 @@ function _saveMinimized() {
 // ---- Per-pane layout pin ----------------------------------------------------
 // A pinned pane sits out of applyGridLayout's auto-reflow (grid presets): its
 // x/y/w/h are left exactly as the user placed them while every other pane
-// rearranges around it. Persisted by wid so a pin survives a wall rebuild.
-let _pinned = _loadPinned();
-
-function _loadPinned() {
-    try { return new Set(JSON.parse(localStorage.getItem('pc_wall_pinned') || '[]')); }
-    catch (e) { return new Set(); }
-}
-function _savePinned() {
-    localStorage.setItem('pc_wall_pinned', JSON.stringify([..._pinned]));
-}
-
-function _pinBtnHTML(wid) {
-    const on = _pinned.has(wid);
-    const title = on
-        ? "Pinned: this pane keeps its spot when a grid layout is applied. Click to unpin"
-        : "Pin: keep this pane's position when a grid layout is applied";
-    return `<button class="gs-pin-btn popover-item ov-item${on ? ' on' : ''}" onclick="chela.termPinToggle(this,'${_jsStr(wid)}')"
-      aria-pressed="${on ? 'true' : 'false'}" title="${attrEsc(title)}"><span class="ov-ic">${lucideIcon('pin', 14)}</span><span>Pin</span></button>`;
-}
-
-// Toggle a pane's pin state. applyGridLayout reads _pinned directly (no
-// rebuild needed here) — this only flips the button + tile visuals and persists.
-function termPinToggle(btn, wid) {
-    if (_pinned.has(wid)) _pinned.delete(wid); else _pinned.add(wid);
-    _savePinned();
-    const on = _pinned.has(wid);
-    btn.classList.toggle('on', on);
-    btn.setAttribute('aria-pressed', on ? 'true' : 'false');
-    btn.title = on
-        ? "Pinned: this pane keeps its spot when a grid layout is applied. Click to unpin"
-        : "Pin: keep this pane's position when a grid layout is applied";
-    const item = btn.closest('.grid-stack-item');
-    if (item) item.classList.toggle('pane-pinned', on);
-}
+// rearranges around it. The set is shared/store/wall.ts `pinnedPanes` (persisted
+// by wid, so a pin survives a wall rebuild); the header's Pin row writes it, and
+// the tile's dashed outline follows it here.
+const _isPinned = wid => pinnedPanes.get().has(wid);
+pinnedPanes.subscribe(() => {
+    document.querySelectorAll('#term-stage .grid-stack-item[gs-id]').forEach(item => {
+        item.classList.toggle('pane-pinned', _isPinned(item.getAttribute('gs-id')));
+    });
+});
 
 // Hide a tile element + pull it out of the grid engine. Idempotent.
 function _minimizeItem(item) {
@@ -955,11 +470,6 @@ function minimizePane(wid) {
     renderMinDock();
     _refitWallForDock();        // wall re-packs above the (taller) dock
     _reportWatchForWid(wid);    // docked tile stops dictating the shared window's size (CMX-175)
-}
-
-function termMinFor(btn) {
-    const item = btn && btn.closest('.grid-stack-item');
-    if (item) minimizePane(item.getAttribute('gs-id'));
 }
 
 // Dock chip click: the dock holds only minimized panes now, so a click always
@@ -1114,41 +624,29 @@ function _statusDot(wid) {
     return `<span class="term-status-dot" data-status-for="${attrEsc(wid)}" title="…"></span>`;
 }
 
-// CMX-377: the dot's class vocabulary is working/waiting/idle/done — tileState()'s
-// own cls names ('needs-you'/'pr-open'/'unknown') are remapped onto it so the pane header's
-// dot and the taskbar dock chips share the EXACT
-// same shape/colour rules as the sidebar row (style.css's `.term-status-dot.*`) —
-// 'unknown' (claude_running but no resolved session_status) reads as the idle
-// shape rather than inventing a fifth silhouette the brief never asked for.
-// CMX-40: a running judge battery is work (working); a battery that died without
-// a verdict wants a human (waiting).
-const _TILE_CLS_TO_DOT = { 'needs-you': 'waiting', working: 'working', 'pr-open': 'done', unknown: 'idle', idle: 'idle',
-                           testing: 'working', died: 'waiting' };
-
-// Colour the live status marks (pane headers + taskbar chips) from /api/agents.
-// Reuses tileState() (wallmodel.ts) — the SAME source _applyWallTileFrame's
-// `.gs-state` word pill draws from — so a pane's dot and its state pill can
-// never disagree about which of the four states it's in.
+// Colour the taskbar chips' status dots from /api/agents, and flag each surface (pane or
+// chip) that waits on a human. The pane header's own dot is React's (features/panehead
+// dotState, the SAME tileState the chip reads), so the two never disagree.
 function _colorTermDots(agents) {
     if (!agents) return;
     const by = {};
     agents.forEach(a => { if (a.window_id) by[a.window_id] = a; });
-    document.querySelectorAll('#panel-terminals .term-status-dot').forEach(dot => {
+    document.querySelectorAll('#panel-terminals .min-chip .term-status-dot, #panel-terminals .gs-dot').forEach(dot => {
         const a = by[dot.dataset.statusFor];
         const wants = wantsHuman(a);
-        const s = tileState(a, wants);
-        // CMX-137: in the minimized bar a dispatched run's window wears the run's own
-        // progress icon (the sidebar row's runDot), never a human session's dot. A chip
-        // is rebuilt on every dock render, so it never carries a stale run mark.
-        const run = dot.closest('.min-chip') ? windowRunDot(a, wants) : null;
-        dot.classList.remove('working', 'waiting', 'idle', 'done');
-        dot.classList.add(...(run ? run.cls.split(' ') : [_TILE_CLS_TO_DOT[s.cls] || 'idle']));
-        dot.title = run ? run.label : stateTitle(a, s);
-        if (run) { dot.setAttribute('role', 'img'); dot.setAttribute('aria-label', run.label); }
         // Flag the host surface (live pane OR taskbar chip) so a "waiting for
         // input" pane gets a yellow border even when minimized to the dock.
         const host = dot.closest('.grid-stack-item-content, .term-pane, .min-chip');
         if (host) host.classList.toggle('term-waiting', wants);
+        if (!dot.closest('.min-chip')) return;
+        // CMX-137: in the minimized bar a dispatched run's window wears the run's own
+        // progress icon (the sidebar row's runDot), never a human session's dot. A chip
+        // is rebuilt on every dock render, so it never carries a stale run mark.
+        const run = windowRunDot(a, wants);
+        dot.classList.remove('working', 'waiting', 'idle', 'done');
+        dot.classList.add(...(run ? run.cls.split(' ') : [dotState(a)]));
+        dot.title = run ? run.label : stateTitle(a, tileState(a, wants));
+        if (run) { dot.setAttribute('role', 'img'); dot.setAttribute('aria-label', run.label); }
     });
 }
 
@@ -1156,8 +654,8 @@ function _colorTermDots(agents) {
 // and — if the new activity changed the chip order — re-render the taskbar.
 function _applyTermStatus(agents) {
     if (!agents) return;
-    _seedSharedFromAgents(agents);            // keep share-button state authoritative
-    _renderedWids.forEach(_updateShareBtns);  // refresh accent/badge after each poll
+    followAgents(agents);                     // each row's share flag (and owner presence with it)
+    refreshPaneHeads();                       // headers repaint even when the rows are the same array
     const now = Date.now();
     agents.forEach(a => {
         if (!a.window_id) return;
@@ -1452,7 +950,8 @@ async function renderTerminals(ctxRead) {   // ctxRead: refresh()'s context read
         stage.className = 'term-single';
         const sw = sel.value || wids[0];
         _rememberPane(sw, agents);   // every single-mode switch lands here: sidebar tap, swipe, dropdown, focus
-        stage.innerHTML = `<div class="term-pane">${paneHead(sw, false)}${frame(sw)}${_ctxBarHTML(sw, false)}</div>`;
+        stage.innerHTML = `<div class="term-pane">${_paneHeadSlot(sw, false)}${frame(sw)}${_ctxBarHTML(sw, false)}</div>`;
+        mountPaneHeads(stage);
         _renderedWids = [sw];
     }
     // Seed readiness pollers for whatever placeholders we just rendered.
@@ -1776,47 +1275,17 @@ async function termTick() {
     renderSidebarAgents(agents);
 }
 
-// Update the visible label + ai-title subtitle of every on-screen pane + chip
-// from current state, WITHOUT touching the iframe. A window rename only
-// changes display text, so this keeps the header/chip/dropdown in sync with
-// zero reload. `wrap` is the `.gs-grip`/`.gs-label` header cell (name +
-// subtitle together, not just the name span) so both can be refreshed as one.
-// During an inline rename the `.pane-title` span is swapped for an input of a
-// different class, so the title-text query below never clobbers an
-// in-progress edit; the subtitle (a sibling, untouched by rename) still
-// refreshes normally.
-function _setSpanLabel(wrap, wid) {
-    if (!wrap || !wid) return;
-    const titleSpan = wrap.querySelector('.pane-title');
-    if (titleSpan) {
-        const lbl = _paneTitle(wid);
-        if (titleSpan.textContent !== lbl) titleSpan.textContent = lbl;
-    }
-    const aiTitle = _paneAiTitle(wid);
-    let subSpan = wrap.querySelector('.pane-subtitle');
-    if (aiTitle) {
-        if (!subSpan) {
-            subSpan = document.createElement('span');
-            subSpan.className = 'pane-subtitle';
-            wrap.appendChild(subSpan);
-        }
-        if (subSpan.textContent !== aiTitle) subSpan.textContent = aiTitle;
-        if (subSpan.title !== aiTitle) subSpan.title = aiTitle;
-    } else if (subSpan) {
-        subSpan.remove();
-    }
-}
+// Relabel everything that shows a window's label, WITHOUT touching an iframe: a rename
+// only changes display text. The headers repaint from the agents store (an inline rename
+// in progress is the header's own state, never clobbered); legacy redraws the chips and
+// the single-mode dropdown.
 function _refreshPaneLabels() {
     if (!TERMINALS_ON) return;
+    refreshPaneHeads();
     if (_termMode === 'wall') {
-        $('#term-stage').querySelectorAll('.grid-stack-item').forEach(item => {
-            _setSpanLabel(item.querySelector('.gs-grip, .gs-label'), item.getAttribute('gs-id'));
-        });
         renderMinDock();   // chips carry labels too
     } else {
         const sel = $('#term-agent');
-        const pane = $('#term-stage') && $('#term-stage').querySelector('.term-pane');
-        if (sel && pane) _setSpanLabel(pane.querySelector('.gs-grip, .gs-label'), sel.value);
         if (sel) Array.from(sel.options).forEach(o => {
             const lbl = _paneTitle(o.value);
             if (o.textContent !== lbl) o.textContent = lbl;
@@ -1963,10 +1432,10 @@ function _wallTileHTML(wid, x, y, w, h) {
     const body = _termReady.has(wid)
         ? `<iframe class="term-frame" allow="clipboard-read; clipboard-write" src="${_termFrameSrc(wid)}" title="${escHtml(_paneTitle(wid))}"></iframe>`
         : _termPlaceholder(wid);
-    const pinnedCls = _pinned.has(wid) ? ' pane-pinned' : '';
+    const pinnedCls = _isPinned(wid) ? ' pane-pinned' : '';
     return `<div class="grid-stack-item${pinnedCls}" gs-id="${escHtml(wid)}" gs-x="${x}" gs-y="${y}" gs-w="${w}" gs-h="${h}">
   <div class="grid-stack-item-content">
-    ${paneHead(wid, true)}
+    ${_paneHeadSlot(wid, true)}
     ${_recapLineHTML(wid)}
     ${body}
     ${_ctxBarHTML(wid, true)}
@@ -2023,8 +1492,8 @@ async function termActionClick(btn, wid) {
     }
 }
 
-// Wall redesign slice 1: repaint every wall tile's new frame elements (state
-// pill, recap line, PR chip, action bar) from a fresh /api/agents poll — the
+// Wall redesign slice 1: repaint every wall tile's frame elements (recap line, PR
+// chip, action bar; the state pill is the React header's since CMX-241) from a fresh /api/agents poll — the
 // SAME agents array _applyTermStatus already has, so this runs as one more
 // step of that existing 4s tick rather than a second poll. Model/cost/branch
 // (ctx-poll-driven) are repainted separately by _applyTermContext, which
@@ -2033,16 +1502,6 @@ function _applyWallTileFrame(agents) {
     if (!agents) return;
     const by = {};
     agents.forEach(a => { if (a.window_id) by[a.window_id] = a; });
-
-    document.querySelectorAll('#panel-terminals .gs-state[data-state-for]').forEach(el => {
-        const a = by[el.dataset.stateFor];
-        const s = tileState(a, wantsHuman(a));
-        el.className = 'gs-state gs-state-' + s.cls;
-        el.title = stateTitle(a, s);
-        // CMX-393: no glyph in the pill — `.gs-dot` carries the shape.
-        const w = el.querySelector('.gs-state-word');
-        if (w) w.textContent = s.word;
-    });
 
     document.querySelectorAll('#panel-terminals .pane-recap[data-recap-for]').forEach(el => {
         const r = recapView(by[el.dataset.recapFor]);
@@ -2195,6 +1654,7 @@ function buildWall(wids) {
         const w = s.w || 6, h = s.h || 5;
         return _wallTileHTML(wid, x, y, w, h);
     }).join('');
+    mountPaneHeads(gsEl);   // before GridStack.init: each tile's `.gs-grip` handle must exist
 
     _grid = GridStack.init({
         column: 12,
@@ -2291,6 +1751,7 @@ async function addWallTiles(wids) {
         tmp.innerHTML = _wallTileHTML(wid, x, y, w, h);
         const el = tmp.firstElementChild;
         gsEl.appendChild(el);
+        mountPaneHeads(el);     // its header (and `.gs-grip` handle) before Gridstack adopts it
         _grid.makeWidget(el);   // v10: adopt an already-appended element as a widget
         if (!_renderedWids.includes(wid)) _renderedWids.push(wid);
     });
@@ -2727,7 +2188,7 @@ function _doSwap(el) {
 //      `.term-frame`, so mousemove/elementFromPoint see the TILES. (NOT
 //      `.term-dragging`, which HIDES the terminals — watching them is the point.)
 //   2. THE PORT MUST STEAL THE MOUSEDOWN, or gridstack starts a tile drag under
-//      us (`renamePane` does exactly this).
+//      us (the header's rename field does exactly this).
 //   3. EVERY OTHER TILE SPROUTS A SOCKET while a wire is in flight (`.wire-live`
 //      on the stage). Without that nobody discovers the gesture exists.
 //
@@ -2769,11 +2230,8 @@ function wireDragStart(e, btn, wid) {
     const gsEl = stage && stage.querySelector('.grid-stack');
     if (!stage || !gsEl) return;
     _wireCleanup();               // never two wires at once
-    // CMX-117: Wire now lives inside the badge-anchored popover — close it the
-    // instant the drag starts so a `position:fixed` menu never sits open (and
-    // floating on top of the wall) for the whole gesture; it would otherwise
-    // outlive the drag until the next document click.
-    _closeAllPaneOverflows();
+    // CMX-117: the header's ⋯ menu closes itself as the press starts the drag
+    // (features/panehead), so it never floats over the wall for the whole gesture.
 
     gsEl.classList.add('gs-dragging');   // iframes stop swallowing the mouse
     stage.classList.add('wire-live');    // every tile sprouts a drop socket
@@ -2917,7 +2375,7 @@ function _fillNodesByOrder(keyFn, cols, rows) {
     // around them, leaving a pinned tile's x/y/w/h exactly where the user put
     // it (per-pane layout pin, CMX-108).
     const nodes = _grid.engine.nodes.slice()
-        .filter(n => !_pinned.has(n.id))
+        .filter(n => !_isPinned(n.id))
         .sort((a, b) => (keyFn(a.id) - keyFn(b.id)) || (a.x - b.x) || (a.y - b.y));
     const N = nodes.length;
     if (!N) return false;
@@ -3039,7 +2497,7 @@ function _restoreManualLayout() {
     let saved = {};
     try { saved = JSON.parse(localStorage.getItem('pc_wall_layout') || '{}'); } catch (e) { /* noop */ }
     const valid = s => s && Number.isInteger(s.x) && Number.isInteger(s.y) && s.w > 0 && s.h > 0;
-    const nodes = _grid.engine.nodes.filter(n => !_pinned.has(n.id) && valid(saved[n.id]));
+    const nodes = _grid.engine.nodes.filter(n => !_isPinned(n.id) && valid(saved[n.id]));
     if (!nodes.length) return;
     _grid.batchUpdate();
     try {
@@ -3075,7 +2533,7 @@ function _pickFocusWid() {
     if (!_grid) return;
     const tiled = _grid.engine.nodes
         .map(n => n.id)
-        .filter(id => id != null && !_pinned.has(id));
+        .filter(id => id != null && !_isPinned(id));
     if (!tiled.length) return;
     const tiledSet = new Set(tiled);
     if (_focusedPane) {
@@ -3110,7 +2568,7 @@ function _applyWallFocus(agents) {
     if (!_wallFocus || _termMode !== 'wall' || !_grid) return;
     const tiled = _grid.engine.nodes
         .map(n => n.id)
-        .filter(id => id != null && !_pinned.has(id));
+        .filter(id => id != null && !_isPinned(id));
     if (!tiled.length) return;
     const tiledSet = new Set(tiled);
     // The current target fell off the wall (killed/minimized/pinned since it
@@ -3181,13 +2639,13 @@ function _mobileWids() {
 
 // Share the CURRENT terminal session (the active agent, #term-agent's value — the
 // same handle termKey uses). Invoked from the topbar overflow menu; reuses the
-// full share flow (shareBtnClick), so on mobile it opens the bottom-sheet and the
+// full share flow (shareSession), so on mobile it opens the bottom-sheet and the
 // global "N sharing" indicator lights. No current session (e.g. a non-terminals
 // view) → fall back to the command palette's per-session Share list.
 function shareCurrentAgent() {
     const sel = document.getElementById('term-agent');
     const wid = sel && sel.value;
-    if (wid) { shareBtnClick(null, wid); return; }
+    if (wid) { shareSession(wid); return; }
     if (typeof openPalette === 'function') openPalette();
 }
 
@@ -3238,9 +2696,8 @@ function _bindHeaderSwipe() {
 // innerHTML rebuilds, bound once). Only the header promotes: the iframe stays
 // fully interactive (click-to-focus-and-type is untouched), and only while
 // Focus mode is actually on. Buttons/links inside the header (kill/min/max/
-// menu/pin/wire) keep doing their own thing rather than ALSO promoting — the
-// menu button already stopPropagation()s its click (togglePaneOverflow), and
-// this skips any other button/link/popover explicitly.
+// menu) keep doing their own thing rather than ALSO promoting: this skips any
+// button/link/popover explicitly (the ⋯ menu itself is portaled to <body>).
 let _focusPromoteBound = false;
 function _bindFocusPromote() {
     if (_focusPromoteBound) return;
@@ -3253,7 +2710,7 @@ function _bindFocusPromote() {
         if (!head) return;
         const item = head.closest('.grid-stack-item');
         const wid = item && item.getAttribute('gs-id');
-        if (!wid || wid === _focusWid || _pinned.has(wid)) return;
+        if (!wid || wid === _focusWid || _isPinned(wid)) return;
         _focusWid = wid;
         _focusOrderSig = '';   // target changed — force a re-apply
         _applyWallFocus(_agentsCache);
@@ -3296,8 +2753,8 @@ onEvent('term-ready', d => {
 });
 
 // --- Stage 0: ES-module exports ---
-export { adoptSidebarDefault, stepAgentMobile, _absorbFreshTerminals, _applyTermFocus, _cssEsc, _displayLabel, _paneKeyLabel, _jsStr, _minimized, paneHead, _orderedWids, _refreshPaneLabels, _renderedWids, _shareBtnHTML, _stopReadyPoll, _updateShareBtns, _swapToFrame, _termReady, dropTerminalPane, focusPaneByWid, isWallVisible, minimizePane, renderTerminals, setTermMode, termTick, shareBtnClick, startTermTimer, stopTermTimer };
+export { adoptSidebarDefault, stepAgentMobile, _absorbFreshTerminals, _applyTermFocus, _cssEsc, _displayLabel, _jsStr, _minimized, _orderedWids, _refreshPaneLabels, _renderedWids, _stopReadyPoll, _swapToFrame, _termReady, dropTerminalPane, focusPaneByWid, isWallVisible, minimizePane, renderTerminals, setTermMode, termTick, startTermTimer, stopTermTimer };
 
 // --- Stage 0: window.chela — surface reachable from inline HTML handlers ---
 window.chela = window.chela || {};
-Object.assign(window.chela, { applyGridLayout, copyWindowId, openDiffModal, orchestratorBtnClick, renamePane, renderTerminals, retryReady, setTermMode, shareBtnClick, shareCurrentAgent, termActionClick, termKey, termKillClick, termKillConfirm, termMaxFor, termMinFor, termMobileFull, termPaste, termPinToggle, toggleDockChip, toggleGridRow, togglePaneOverflow, toggleRecap, toggleWallAuto, toggleWallFocus, toggleWallLock, wireDragStart, wireRoomClick });
+Object.assign(window.chela, { applyGridLayout, copyWindowId, openDiffModal, renderTerminals, retryReady, setTermMode, shareCurrentAgent, termActionClick, termKey, termPaste, toggleDockChip, toggleGridRow, toggleRecap, toggleWallAuto, toggleWallFocus, toggleWallLock });

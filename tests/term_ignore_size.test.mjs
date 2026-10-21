@@ -158,7 +158,7 @@ test('foregrounding the tab again reports watching:true', async () => {
 test('minimizing a tile to the dock reports watching:false for THAT wid only', async () => {
     const btn = document.querySelector(
         '#term-stage .grid-stack-item[gs-id="@1"] .gs-min-btn');
-    window.chela.termMinFor(btn);
+    btn.click();
     await Promise.resolve();
 
     const calls = watchCalls.filter(c => c.wid === '@1');
@@ -170,7 +170,7 @@ test('minimizing a tile to the dock reports watching:false for THAT wid only', a
 test('restoring a docked tile reports watching:true again', async () => {
     const btn = document.querySelector(
         '#term-stage .grid-stack-item[gs-id="@1"] .gs-min-btn');
-    window.chela.termMinFor(btn);
+    btn.click();
     await Promise.resolve();
     watchCalls = [];
 

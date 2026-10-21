@@ -1,8 +1,10 @@
-// THE PANE-TITLE TOGGLE, WIRED END TO END — the two properties orchestrator.test.mjs
+// THE PANE'S ORCHESTRATOR MARK, WIRED END TO END — the two properties orchestrator.test.mjs
 // (client-side state only) and test_api_orchestrator.py (server routes only) cannot
-// prove between them: that the "⊙ Orchestrator" button actually RENDERS in the wall's
-// real paneHead markup, and that the SSE `orchestrator` delta actually drives a live
-// repaint of that button without waiting on a poll.
+// prove between them: that the orchestrator ring actually RENDERS in the wall's real
+// pane headers, and that the SSE `orchestrator` delta actually drives a live repaint of
+// it without waiting on a poll. CMX-241: the header is React (features/panehead); its ⋯
+// menu's Orchestrator row is portaled only while the menu is open, so the row itself is
+// tested there (PaneHead.test.tsx). The ring and the row render from the SAME store.
 //
 // A prior round of this PR passed CI with both call-sites silently dead: paneHead's
 // `${_orchBtnHTML(wid)}` swapped for `${''}` (no button, ever) and sse.js's listener
@@ -115,22 +117,22 @@ beforeAll(async () => {
     await terminals.renderTerminals();   // ONE wall, built once — as in a live session
 });
 
-const orchBtn = wid => document.querySelector(
-    `#term-stage .grid-stack-item[gs-id="${wid}"] .gs-orch-btn`);
+const ring = wid => document.querySelector(
+    `#term-stage .grid-stack-item[gs-id="${wid}"] .gs-dot-ring`);
 
-// --- 1. WIRING: the button is actually part of paneHead's real markup -----------
+// --- 1. WIRING: the mark is actually part of each pane's real header ------------
 
-test('the "⊙ Orchestrator" toggle renders in every pane\'s real head, not just in theory', () => {
+test('the orchestrator ring\'s wrapper renders in every pane\'s real head, not just in theory', () => {
     for (const wid of ['@1', '@2']) {
-        const btn = orchBtn(wid);
-        assert.ok(btn, `pane ${wid} has no .gs-orch-btn — the pane-title toggle never rendered`);
-        assert.equal(btn.getAttribute('data-wid'), wid);
+        const el = ring(wid);
+        assert.ok(el, `pane ${wid} has no .gs-dot-ring — the header never rendered`);
+        assert.equal(el.getAttribute('data-wid'), wid);
     }
 });
 
 // --- 2. WIRING: the SSE `orchestrator` delta actually reaches the listener ------
 
-test('an SSE "orchestrator" frame repaints the pane buttons live, with no poll', async () => {
+test('an SSE "orchestrator" frame repaints the panes\' rings live, with no poll', async () => {
     const source = FakeEventSource.last;
     assert.ok(source, 'no EventSource was ever constructed — initSSE() bailed out');
     const handlers = source.listeners['orchestrator'];
@@ -138,7 +140,7 @@ test('an SSE "orchestrator" frame repaints the pane buttons live, with no poll',
         'nothing is listening for the "orchestrator" SSE event — the live-update claim is dead');
 
     assert.equal(orchestrator.orchestratorState().wid, null, 'sanity: nobody owns the slot yet');
-    assert.equal(orchBtn('@2').classList.contains('on'), false, 'sanity: @2 is not painted as owner yet');
+    assert.equal(ring('@2').classList.contains('gs-dot-orch'), false, 'sanity: @2 is not painted as owner yet');
 
     // A takeover happened server-side; the frame that announces it carries no
     // payload (sse.js refetches /api/orchestrator/status), exactly like the real one.
@@ -149,9 +151,9 @@ test('an SSE "orchestrator" frame repaints the pane buttons live, with no poll',
 
     assert.equal(orchestrator.orchestratorState().wid, '@2',
         'the SSE frame fired but the shared orchestrator state never updated');
-    assert.equal(orchBtn('@2').classList.contains('on'), true,
-        'the SSE frame fired but pane @2\'s button was never repainted "on"');
-    assert.equal(orchBtn('@1').classList.contains('on'), false,
+    assert.equal(ring('@2').classList.contains('gs-dot-orch'), true,
+        'the SSE frame fired but pane @2\'s ring was never repainted');
+    assert.equal(ring('@1').classList.contains('gs-dot-orch'), false,
         'pane @1 must not also show as owner');
 });
 
@@ -163,9 +165,6 @@ test('an SSE "orchestrator" frame repaints the pane buttons live, with no poll',
 // `orchestrator` delta. The `hello` that opens every connection is the only signal.
 // 🔴 GUARD: drop `refreshOrchestratorStatus()` from sse.js's `hello` handler and the
 // ring stays on @2 — the stale-ring-until-reload bug.
-
-const ring = wid => document.querySelector(
-    `#term-stage .grid-stack-item[gs-id="${wid}"] .gs-dot-ring`);
 
 test('an SSE reconnect ("hello") re-fetches the status and the ring moves to the new pane', async () => {
     const source = FakeEventSource.last;
@@ -186,7 +185,7 @@ test('an SSE reconnect ("hello") re-fetches the status and the ring moves to the
 
 // --- 4. CMX-139: a pane built AFTER the status landed is born with the ring -----
 //
-// 🔴 GUARD: render `.gs-dot-ring` without its owner check (paneHead) and a pane that
+// 🔴 GUARD: render `.gs-dot-ring` without its owner check (PaneHead) and a pane that
 // appears after the last status change shows no ring until the NEXT change.
 
 test('a pane added after the owner is known renders with the ring already on', async () => {
