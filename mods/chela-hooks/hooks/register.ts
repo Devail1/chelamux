@@ -11,6 +11,7 @@
 //   shell hook it fails OPEN when the gate cannot decide.
 import type { Register } from 'claude-code'
 import { refresh } from './status'
+import { band as needsBand, start as needsStart } from './needsyou'
 
 const RESERVED = new Set(['tool', 'tool_use_id', 'consent', 'agentId', 'requestMeta'])
 
@@ -60,13 +61,15 @@ async function gate($: any, payload: Body): Promise<string> {
 export const register: Register = (on, options) => {
   transcript = ''
   // the status line (status.ts): drawn at start, after every turn and after a compaction
-  on('session.start', ($, e, next) => { void refresh($, options); return next(e) })
+  on('session.start', ($, e, next) => { void refresh($, options); void needsStart($); return next(e) })
   on('turn.complete', ($, e, next) => { void refresh($, options); return next(e) })
   on('session.compact', async ($, e, next) => {
     const done = await next(e)
     void refresh($, options)
     return done
   })
+  // the "needs you" band (needsyou.tsx), orchestrator session only, polled from the daemon
+  on('ui.render', { component: 'AbovePrompt' }, ($, e, next) => needsBand($, e, next))
   on('classic.SessionStart', ($, e, next) => { void relay($, e); return next(e) })
   on('classic.SessionEnd', ($, e, next) => { void relay($, e); return next(e) })
   on('classic.Stop', ($, e, next) => { void relay($, e); return next(e) })

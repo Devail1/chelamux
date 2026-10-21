@@ -486,6 +486,23 @@ def approved_domains(sid: str, now: float | None = None) -> list[str]:
 
 # --- the operator's view ----------------------------------------------------------------
 
+def pending() -> list[dict]:
+    """Every PENDING request, oldest first, each with its ``description``, with no cap
+    (CMX-183: the orchestrator's "needs you" band counts them). Unlike :func:`_load`, a
+    store that exists but cannot be read RAISES: a caller counting what waits must never
+    read an unreadable store as "none waiting". No store yet is none."""
+    path = store_path()
+    if not path.exists():
+        return []
+    data = json.loads(path.read_text(encoding="utf-8"))
+    reqs = data.get("requests") if isinstance(data, dict) else None
+    if not isinstance(reqs, dict):
+        raise ValueError(f"{path}: no requests table")
+    out = [{**r, "description": describe(r)} for r in reqs.values()
+           if isinstance(r, dict) and r.get("status") == PENDING]
+    return sorted(out, key=lambda r: r.get("filed_at") or 0)
+
+
 def listing(now: float | None = None, limit: int = 50) -> list[dict]:
     """Pending requests (oldest first), then approvals in force, then the most recent
     decided ones — each with ``refusal`` (why Approve is disabled) and ``seconds_left``."""
