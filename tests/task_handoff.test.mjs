@@ -1,6 +1,6 @@
 // 📝 CMX-52 — the agent's own `chela task-finished --handoff` note on the Dispatch board.
 //
-// `runHandoffNote` (runstate.js) is the pure half: NULL and "" both render nothing, and an
+// `runHandoffNote` (frontend/src/features/runs/model.ts) is the pure half: NULL and "" both render nothing, and an
 // agent-authored multi-line note is flattened to one line. The kanban card (kanban.js) is
 // the wiring half: the note must reach the card, HTML-escaped — it is agent-authored text
 // spliced into innerHTML, so a `<img onerror>` in it must arrive as text, never as a node.
@@ -10,7 +10,7 @@
 import { beforeAll, test } from 'vitest';
 import assert from 'node:assert/strict';
 import { bootDashboardDom } from './js_helpers/dashboard_dom.mjs';
-import { runHandoffNote } from '../chela/dashboard/static/js/runstate.js';
+import { runHandoffNote } from '../chela/dashboard/frontend/src/features/runs/model.ts';
 
 const KANBAN_BODY = `
 <div class="work-pane active" id="work-board" data-seg="board">
