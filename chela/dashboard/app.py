@@ -3879,6 +3879,28 @@ def api_needs_you():
         return jsonify({"items": [], "error": f"{exc.__class__.__name__}: {exc}"}), 503
 
 
+# 🔒 CMX-184: the Mod (mods/chela-hooks) files a classifier denial straight into the inbox,
+# no event-log tail. One denial the shell hook also logs is still ONE notice: both go through
+# inbox.denied_events, keyed on the tool_use_id. A body that cannot be filed is a 400 and the
+# shell path still carries the denial; the agent never waits on this (the Mod does not await).
+@app.route("/api/inbox/denial", methods=["POST"])
+@require_auth
+def api_inbox_denial():
+    if (request.content_length or 0) > hooks.MAX_BODY:
+        return jsonify({"ok": False, "error": "body too large"}), 413
+    body = request.get_json(force=True, silent=True)
+    if not isinstance(body, dict):
+        return jsonify({"ok": False, "error": "a JSON object is required"}), 400
+    try:
+        events = inbox.file_denial(body)
+    except ValueError as exc:
+        return jsonify({"ok": False, "error": str(exc)}), 400
+    except Exception as exc:  # noqa: BLE001 - report it, do not 500 into silence
+        log.exception("inbox: a direct denial could not be filed")
+        return jsonify({"ok": False, "error": f"{exc.__class__.__name__}: {exc}"}), 503
+    return jsonify({"ok": True, "queued": len(events)})
+
+
 @app.route("/api/override/<request_id>/<action>", methods=["POST"])
 @require_auth
 def api_override_decide(request_id, action):

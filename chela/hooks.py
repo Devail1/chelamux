@@ -965,6 +965,8 @@ def clip_payload(body: dict) -> dict:
         return {
             "hook_event_name": body.get("hook_event_name"),
             "tool_name": body.get("tool_name"),
+            # CMX-184: the denial dedupe key (chela.inbox.denial_key) survives the stub
+            "tool_use_id": body.get("tool_use_id"),
             "session_id": body.get("session_id"),
             "cwd": body.get("cwd"),
             "clipped": True,
