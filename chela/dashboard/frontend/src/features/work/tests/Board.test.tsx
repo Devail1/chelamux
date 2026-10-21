@@ -699,3 +699,14 @@ test('a parked card and its reason chip are on screen under style.css, a long re
     sheet.remove();
   }
 });
+
+test('a poll that adds a card above keeps the cards below theirs: an open delete confirm survives', () => {
+  show(payload({ active_runs: [run({ task_id: 'B', started_at: '2026-10-01' })], backlog_items: [{ text: 'idea', file: '/x/BACKLOG.md' }] }));
+  fireEvent.click(must(cardOf('B').querySelector('.kanban-delete-btn')));
+  fireEvent.click(must(document.querySelector('.kanban-card-backlog .kanban-delete-btn')));
+  show(payload({ active_runs: [run({ task_id: 'A', started_at: '2026-10-02' }), run({ task_id: 'B', started_at: '2026-10-01' })], backlog_items: [{ text: 'idea', file: '/x/BACKLOG.md' }] }));
+  expect([...col('In Progress').querySelectorAll<HTMLElement>('.kanban-card')].map((c) => c.dataset.taskId)).toEqual(['A', 'B']);
+  expect(cardOf('B').querySelector('.kanban-confirm-msg')?.textContent).toBe('Delete this?');
+  expect(cardOf('A').querySelector('.kanban-confirm')).toBeNull();
+  expect(document.querySelector('.kanban-card-backlog .kanban-confirm-msg')?.textContent).toBe('Delete this?');
+});

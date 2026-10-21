@@ -65,7 +65,8 @@ function runToasts(d: RunFrame) {
 }
 
 setWorkPoll(pollWork);
-registerLane('work', () => pollWork());
+// Detached: a slow /api/dispatcher (it reads PR states) never holds up the tick's settled lanes.
+registerLane('work', () => pollWork(), 'detached');
 onEvent('hello', (d) => prime(d as RunFrame));
 onEvent('runs', (d) => {
   runToasts(d as RunFrame);

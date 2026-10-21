@@ -61,6 +61,10 @@ const onEnter = (fn: () => void) => (e: KeyboardEvent) => {
   }
 };
 
+// A run (or task) keeps its key when a poll adds a card above it, so an open delete confirm or a
+// failure note survives the repaint; only an id-less backlog bullet falls back to its position.
+const cardKey = (c: CardData, i: number) => (c.task_id ? `${c.status}:${c.task_id}:${c.attempt ?? ''}` : `${c.status}:${i}:${c.title ?? ''}`);
+
 type ColumnProps = {
   col: Column;
   collapsed: boolean;
@@ -85,7 +89,7 @@ function BoardColumn({ col, collapsed, pinned, onToggle, onHide, onDragStart, on
       </div>
       <div className="kanban-cards">
         {col.cards.length ? (
-          col.cards.map((c, i) => <Card key={`${c.task_id || c.title || ''}:${i}`} card={c} onDragStart={onDragStart} onDragEnd={onDragEnd} />)
+          col.cards.map((c, i) => <Card key={cardKey(c, i)} card={c} onDragStart={onDragStart} onDragEnd={onDragEnd} />)
         ) : (
           <div className="kanban-empty-col">Nothing here</div>
         )}

@@ -11,7 +11,7 @@ export function WorkToasts() {
       {items.map((t) => (
         <Toast key={t.id} open title={t.title} duration={15000} dismissOnClick onOpenChange={(o) => !o && dismissToast(t.id)}>
           {t.href && (
-            <a href={t.href} target="_blank" rel="noopener noreferrer">
+            <a href={t.href} target="_blank" rel="noopener noreferrer" onClick={(e) => e.stopPropagation()}>
               PR
             </a>
           )}

@@ -202,7 +202,15 @@ test('the poll publishes the payload and fills the sidebar badges; a failed read
 
 test('it is a scheduler lane, and refreshWork runs it', async () => {
   registerLane('test-pane-list', (t) => t.paneListKnown()); // the sidebar's job on the page
+  // Detached: a hung /api/dispatcher read never holds the tick (its settled lanes) up.
+  let release: (v: { body: unknown }) => void = () => {};
+  const hung = stubFetch((url) => (url === '/api/dispatcher' ? (new Promise((r) => (release = r)) as never) : { body: {} }));
   await refresh();
+  expect(hung.filter((c) => c.url === '/api/dispatcher')).toHaveLength(1);
+  await act(async () => release({ body: { configured: true, workflows: [] } }));
+  calls = stubFetch((url) => (url === '/api/dispatcher' ? { body: dispatcher } : {}));
+  await refresh();
+  await act(async () => {});
   expect(reads('/api/dispatcher')).toBe(1);
   await refreshWork();
   expect(reads('/api/dispatcher')).toBe(2);
@@ -223,6 +231,9 @@ test('a run moving INTO review toasts once, with its label and PR link; each run
   const shown = [...document.querySelectorAll('.run-toast-stack .run-toast')];
   expect(shown.map((t) => t.textContent)).toEqual(['CMX-901 · port → awaiting reviewPR']);
   expect(shown[0]?.querySelector('a')?.getAttribute('href')).toBe('https://example.test/pull/9');
+  // The PR link opens without dismissing the toast; a click elsewhere dismisses it.
+  await act(async () => fireEvent.click(must(shown[0]?.querySelector('a'))));
+  expect(document.querySelectorAll('.run-toast')).toHaveLength(1);
   await act(async () => fireEvent.click(must(shown[0])));
   expect(document.querySelectorAll('.run-toast')).toHaveLength(0);
   expect(toasts.get()).toEqual([]);

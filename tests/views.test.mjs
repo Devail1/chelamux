@@ -185,7 +185,7 @@ test('exactly ONE module POLLS /api/dispatcher: features/work, as a scheduler la
     const owners = srcFiles('.').filter(f => tsSrc(f).includes("api('/api/dispatcher')")).sort();
     assert.deepEqual(owners, ['features/decisions/lib/inbox.ts', 'features/work/lib/poll.ts']);
     const poll = tsSrc('features/work/lib/poll.ts');
-    assert.match(poll, /registerLane\('work', \(\) => pollWork\(\)\)/);
+    assert.match(poll, /registerLane\('work', \(\) => pollWork\(\), 'detached'\)/);
     assert.ok(!poll.includes('setInterval'), 'the lane is the timer: no second one');
 });
 
