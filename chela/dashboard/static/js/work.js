@@ -13,19 +13,22 @@
 //
 //     /api/dispatcher ──> workBadgeCounts()  (sidebar badges — always, every view)
 //                    ├──> renderKanban(data) (the Board segment, when Work is up)
-//                    └──> renderDispatcher(data) (the Runs segment, when Work is up)
+//                    └──> work.set(data)     (the Runs island and the New-task form)
 //
 // The timer is APP-level, not view-level: the badges are visible from every view,
 // so the poll has to run everywhere — which is exactly why it must be one poll
 // and not three. Schedules keeps its own endpoint (/api/schedules — a different
 // dataset), fetched only while its segment is showing.
 // ---------------------------------------------------------------------------
-import { $, $$, BASE_PATH, api, attrEsc, currentTab, escHtml } from './util';
+import { $, $$, api, attrEsc, currentTab, escHtml } from './util';
 import { onEvent } from '../../frontend/src/shared/events';
 import { RUN_TOAST_KINDS, runToastKind } from './runtoast';
-import { renderDispatcher } from './dispatcher';
+import { _launcherData } from './launcher';
 import { renderKanban } from './kanban';
-import { refreshSchedules } from './schedules';
+import { openNewTask } from '../../frontend/src/features/newtask';
+import { openInitRepo } from '../../frontend/src/features/runs';
+import { refreshSchedules } from '../../frontend/src/features/schedules';
+import { setWorkPoll, work } from '../../frontend/src/shared/store/work';
 import { setNavBadges } from '../../frontend/src/features/sidebar/controller';
 
 const WORK_REFRESH_MS = 30000;
@@ -45,9 +48,6 @@ function _loadSegment() {
 let _segment = _loadSegment();
 let _workTimer = null;
 let _lastData = null;   // the last /api/dispatcher payload — a segment switch redraws from it
-
-// The payload the New-task form (newtask.js) reads its workflows and blockers from.
-export function lastWorkData() { return _lastData; }
 
 // Counts for the sidebar WORK badges, off the payload the board already fetched.
 // Pure: the same numbers the Kanban's Running / Awaiting Review columns show.
@@ -164,9 +164,10 @@ function setWorkSegment(seg) {
     if (_segment === 'schedules') refreshSchedules();
 }
 
+// The Runs segment is a React island reading the `work` store (pollWork publishes every
+// payload there), so only the board is drawn from here.
 function _renderWorkPanes(data) {
     if (_segment === 'board') renderKanban(data);
-    else if (_segment === 'runs') renderDispatcher(data);
 }
 
 // THE fetch. One call, every consumer. Never throws out: a transient failure keeps
@@ -180,6 +181,7 @@ async function pollWork() {
         return;
     }
     _lastData = data;
+    work.set(data);                     // the Runs tables and the New-task form read it
     _readAwaiting(data);                // the Feed reads this — see awaitingReviewIds()
     _renderWorkBadges(data);            // sidebar — visible from every view
     _renderDispatchHold(data);          // Pause/Resume button — lives in the Work toolbar,
@@ -199,29 +201,6 @@ function startWorkPoll() {
     pollWork();                          // fill the badges now, not in 30s
     _workTimer = setInterval(pollWork, WORK_REFRESH_MS);
 }
-
-// The delete action was duplicated in dispatcher.js and kanban.js (same endpoint,
-// same payload, two copies). One POST, both callers; the confirm UI stays where it
-// belongs (a table row vs. a card). Resolves to an error string, or null on success.
-async function postWorkDelete(payload) {
-    let resp, data = {};
-    try {
-        resp = await fetch(BASE_PATH + '/api/dispatcher/delete', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(payload),
-        });
-        try { data = await resp.json(); } catch (_) { data = {}; }
-    } catch (e) {
-        return String(e);
-    }
-    if (!resp.ok || !data.ok) return data.error || `HTTP ${resp.status}`;
-    // Idempotent on the server: "already gone" and "just deleted" are the same
-    // answer, so let the redraw be the confirmation.
-    pollWork();
-    return null;
-}
-
 
 // --- Run-state toasts, off the SSE `runs` frame -----------------------------
 // A dispatcher run's status / PR state changed: fire any run-state toasts (whatever the
@@ -285,12 +264,16 @@ function _runReviewToast(r, kind) {
     setTimeout(() => { toast.remove(); }, 15000);
 }
 
+setWorkPoll(pollWork);
 onEvent('hello', d => _primeRunStatus(d));
 onEvent('runs', d => { _runStateToasts(d); pollWork(); });
 
 // --- Stage 0: ES-module exports ---
-export { pollWork, postWorkDelete, startWorkPoll, toggleDispatchHold, workBadgeCounts };
+export { pollWork, startWorkPoll, toggleDispatchHold, workBadgeCounts };
 
 // --- Stage 0: window.chela — surface reachable from inline HTML handlers ---
 window.chela = window.chela || {};
-Object.assign(window.chela, { setWorkSegment, toggleDispatchHold });
+// The toolbar's "+ New task" and "+ Init a repo" open React dialogs (CMX-231).
+Object.assign(window.chela, {
+    openInitRepo: () => openInitRepo(_launcherData), openNewTask, setWorkSegment, toggleDispatchHold,
+});

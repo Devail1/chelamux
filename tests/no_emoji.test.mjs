@@ -69,7 +69,7 @@ function tree(files) {
 }
 const JS = 'chela/dashboard/static/js/a.js';
 const HTML = 'chela/dashboard/templates/index.html';
-const TSX = 'frontend/src/App.tsx';
+const TSX = 'chela/dashboard/frontend/src/App.tsx';
 
 test('negative control: an emoji added to a rendered string or a template goes RED', () => {
     assert.deepEqual(checkTree(tree({ [JS]: "x = 'ok';\n" }), {}), []);
@@ -79,7 +79,7 @@ test('negative control: an emoji added to a rendered string or a template goes R
 });
 
 test('frontend/src is guarded once it exists; its own tests are not', () => {
-    const root = tree({ [TSX]: 'export const A = () => <i>🛑</i>;\n', 'frontend/src/A.test.tsx': "t('⚖');\n" });
+    const root = tree({ [TSX]: 'export const A = () => <i>🛑</i>;\n', 'chela/dashboard/frontend/src/A.test.tsx': "t('⚖');\n" });
     assert.deepEqual(guardedFiles(root), [TSX]);
     assert.equal(checkTree(root, {}).length, 1);
 });

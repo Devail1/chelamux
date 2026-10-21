@@ -94,7 +94,9 @@ dependency, and it renders a consistent value even during concurrent rendering. 
 (zustand) would add selectors and middleware nobody needs for two values; Redux is ruled out.
 
 Since CMX-217 the page's state is `src/shared/store/`, one file per slice (`view.ts`, the
-active view; `agents.ts`, the bridge's `agents` store). Legacy imports those objects through
+active view; `agents.ts`, the bridge's `agents` store; `work.ts`, the last `/api/dispatcher`
+payload, which `work.js`'s one poll publishes and the Runs and New-task islands read; they ask
+for a fresh poll with `refreshWork()`, CMX-231). Legacy imports those objects through
 `util.js`, whose `currentTab` and `_agentsCache` are a facade over them: the store is the
 truth, the live bindings mirror it. `sidebarLayout` still goes through `window.chelaBridge`:
 
