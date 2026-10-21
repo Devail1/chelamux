@@ -1,8 +1,8 @@
 ### Added
 
 - **A nightly mutation sweep over what the standard tier merged unjudged.** Once a day
-  (WORKFLOW.md `sweep.nightly_at`, default `02:00` local; `off` or `sweep.enabled: false`
-  turns it off) the daemon spawns `chela judge nightly-sweep`: one battery, one at a time,
+  (WORKFLOW.md `sweep.nightly_at`, default `02:00` local; `off`, `never`, `false` or
+  `sweep.enabled: false` turns it off) the daemon spawns `chela judge nightly-sweep`: one battery, one at a time,
   outside the dispatch slots and in the judge's shared memory slice. It sweeps the lines on
   `origin/<base>` that still blame to a STANDARD-tier commit from the last 24 h (a core-tier
   PR was judged already) and files ONE tracker issue per surviving guard, labelled

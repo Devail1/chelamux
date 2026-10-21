@@ -5,8 +5,8 @@ CMX-296 (gate redesign 1b-i) lets a standard-tier PR — no core path, see
 once a day nothing merged that way goes un-mutated for long.
 
 * **When.** ``sweep.nightly_at`` in WORKFLOW.md (``"HH:MM"`` local; default ``02:00``;
-  ``off`` or ``sweep.enabled: false`` turns it off). The daemon (:func:`daemon_tick`) spawns
-  ``chela judge nightly-sweep`` DETACHED, one at a time (concurrency 1, and a lock file for a
+  ``off``, ``never``, ``false`` or ``sweep.enabled: false`` turns it off). The daemon
+  (:func:`daemon_tick`) spawns ``chela judge nightly-sweep`` DETACHED, one at a time (concurrency 1, and a lock file for a
   hand-run one), outside the dispatch slots, inside the shared memory slice the judge and the
   agents launch into (:func:`chela.memcap.wrap_launch_cmd`). A day is marked BEFORE the spawn,
   so a restart never sweeps the same day twice.

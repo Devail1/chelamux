@@ -137,6 +137,22 @@ def test_a_second_run_with_no_change_files_nothing(tmp_path, notices):
     assert "1 already filed" in notices[-1][1] and "filed CMX" not in notices[-1][1]
 
 
+def test_a_new_survivor_category_on_an_already_filed_guard_is_filed(tmp_path, notices):
+    """Dedupe is per surviving MUTATION: a guard line filed for one category whose other
+    category is new is filed again — only a group whose EVERY key is filed is skipped."""
+    repo, chela = _repo(tmp_path), tmp_path / "chela"
+    _run(repo, chela, Filer())
+    path = sweep_nightly.state_dir(chela) / "filed.json"
+    store = json.loads(path.read_text())
+    assert len(store["keys"]) == 2              # if-false + compare-flip on size.py:2
+    store["keys"].pop(sorted(store["keys"])[0])
+    path.write_text(json.dumps(store))
+    again = Filer()
+    res = _run(repo, chela, again)
+    assert (res["filed"], res["already_filed"], len(again.calls)) == (["CMX-901"], 0, 1)
+    assert len(json.loads(path.read_text())["keys"]) == 2
+
+
 def test_negative_control_without_the_key_store_the_same_survivor_is_filed_again(
         tmp_path, notices):
     """RED control for the dedupe: it is the store, nothing else, that stops a re-file."""
@@ -424,6 +440,8 @@ def _wf(tmp_path: Path, sweep_yaml: str = ""):
     ("sweep:\n  nightly_at: '23:59'\n", (23, 59)),
     ("sweep:\n  nightly_at: 'off'\n", None),
     ("sweep:\n  nightly_at: false\n", None),
+    ("sweep:\n  nightly_at: 'never'\n", None),
+    ("sweep:\n  nightly_at: ' Off '\n", None),
     ("sweep:\n  enabled: false\n  nightly_at: '03:00'\n", None),
     ("sweep:\n  nightly_at: '24:00'\n", (2, 0)),
     ("sweep:\n  nightly_at: 'soon'\n", (2, 0)),
@@ -488,6 +506,32 @@ def test_daemon_tick_spawns_one_due_workflow_at_a_time(tmp_path, monkeypatch):
     assert before is None and len(spawned) == 2
 
 
+def test_daemon_tick_marks_the_day_before_it_spawns(tmp_path, monkeypatch):
+    """A spawn that blows up has still used today: never a retry storm, never a second."""
+    chela, p = tmp_path / "chela", tmp_path / "WORKFLOW.md"
+    p.write_text(_workflow_text(tmp_path))
+    seen = []
+
+    def boom(path, d=None):
+        seen.append(json.loads((sweep_nightly.state_dir(d) / "last.json").read_text()))
+        raise OSError("no fork")
+    monkeypatch.setattr(sweep_nightly, "spawn", boom)
+    at = datetime(2026, 10, 21, 2, 30)
+    with pytest.raises(OSError):
+        sweep_nightly.daemon_tick([p], None, at, chela)
+    assert seen == [{str(p): "2026-10-21"}]
+    assert sweep_nightly.daemon_tick([p], None, at, chela) is None and len(seen) == 1
+
+
+def test_summary_names_unrun_and_unsupported():
+    res = {"workflow": "/r/repo/WORKFLOW.md", "status": "clean", "survivors": 0, "prs": ["a"],
+           "mutations": 4, "unrun": 2, "unsupported": ["x.go", "y.rs"], "filed": [],
+           "already_filed": 0, "failed": []}
+    assert sweep_nightly.summary(res) == (
+        "🧹🌙 nightly sweep (repo): clean — no survivors, nothing filed — 1 standard-tier "
+        "PR(s), 4 mutation(s), 2 UNRUN (budget), 2 file(s) UNKNOWN (not mutatable)")
+
+
 def test_daemon_tick_skips_a_workflow_that_does_not_parse(tmp_path, monkeypatch):
     bad = tmp_path / "WORKFLOW.md"
     bad.write_text("---\nproject_key: [\n---\n")
@@ -513,10 +557,20 @@ def test_spawn_runs_the_cli_detached_inside_the_memory_slice(tmp_path, monkeypat
     assert seen["stdout"].name == str(tmp_path / "chela" / "sweep-nightly" / "nightly.log")
 
 
-def test_the_daemon_loop_calls_daemon_tick():
-    src = Path(main_mod.__file__).read_text()
-    assert ("nightly_child = sweep_nightly.daemon_tick(DISPATCH_WORKFLOWS, nightly_child)"
-            in src)
+def test_the_daemon_loop_calls_daemon_tick(monkeypatch):
+    """🔴 WIRING — drives ONE real pass of ``cmd_run``'s loop. A source-substring check could
+    not fail: dead-coding the call (``if False: nightly_child = ...``) keeps the text
+    (defeat shape 01)."""
+    from tests.test_context import _run_one_daemon_tick
+
+    _run_one_daemon_tick(monkeypatch)
+    monkeypatch.setattr(main_mod.ops, "spawn", lambda child: child)
+    calls = []
+    monkeypatch.setattr(main_mod.sweep_nightly, "daemon_tick",
+                        lambda workflows, prev: calls.append((workflows, prev)) or prev)
+    main_mod.cmd_run(argparse.Namespace())
+    assert len(calls) == 1, "the daemon loop never called sweep_nightly.daemon_tick"
+    assert calls[0][0] is main_mod.DISPATCH_WORKFLOWS and calls[0][1] is None
 
 
 @pytest.mark.parametrize("status, code", [("filed", 1), ("cannot_verify", 2), ("clean", 0),
@@ -577,8 +631,9 @@ def test_tracker_filer_files_with_the_documented_labels(monkeypatch):
 
 
 class LabelTeam:
-    def __init__(self, labels, *, create_ok=True, fail_read=False):
+    def __init__(self, labels, *, create_ok=True, fail_read=False, node_on_fail=False):
         self.labels, self.create_ok, self.fail_read = labels, create_ok, fail_read
+        self.node_on_fail = node_on_fail
         self.calls: list[tuple[str, dict]] = []
 
     def __call__(self, query, variables):
@@ -596,7 +651,7 @@ class LabelTeam:
         if name == "new_label":
             return {"issueLabelCreate": {"success": self.create_ok, "issueLabel": (
                 {"id": f"new-{variables['input']['name']}", "name": variables["input"]["name"]}
-                if self.create_ok else None)}}
+                if self.create_ok or self.node_on_fail else None)}}
         return {"issueCreate": {"success": True, "issue": {
             "id": "i1", "identifier": "CMX-50", "title": variables["input"]["title"],
             "url": "u"}}}
@@ -627,6 +682,13 @@ def test_a_label_that_cannot_be_made_is_a_warning_not_a_lost_issue(tmp_path):
     t = LabelTeam([], create_ok=False)
     out = _source(tmp_path, t).create_issue("T", "B", labels=("sweep",))
     assert out["identifier"] == "CMX-50"
+    assert out["warnings"] == ["label 'sweep' could not be created"]
+    assert next(v for n, v in t.calls if n == "create")["input"]["labelIds"] == []
+
+
+def test_a_label_create_that_says_no_is_not_used_even_with_a_node(tmp_path):
+    t = LabelTeam([], create_ok=False, node_on_fail=True)
+    out = _source(tmp_path, t).create_issue("T", "B", labels=("sweep",))
     assert out["warnings"] == ["label 'sweep' could not be created"]
     assert next(v for n, v in t.calls if n == "create")["input"]["labelIds"] == []
 
@@ -696,18 +758,30 @@ def _covered_record(chela: Path) -> dict:
 @pytest.mark.parametrize("case, recorded", [
     ("filed", True), ("no_standard", True), ("clean", True),
     ("failed", False), ("paused", False), ("cannot_verify", False),
+    # CANNOT VERIFY *after* the commits were read: `covered` is set, so only the status
+    # check keeps these nights from moving the window (a red baseline, a torn key store).
+    ("red_baseline", False), ("torn_key_store", False),
 ])
 def test_only_a_run_that_looked_moves_the_window(tmp_path, notices, case, recorded):
     prs = {"no_standard": [], "clean": [({"other.py": COVERED,
-                                          "tests/test_other.py": COVERED_TEST}, "PR 2", None)]}
+                                          "tests/test_other.py": COVERED_TEST}, "PR 2", None)],
+           "red_baseline": [({"size.py": WEAK,
+                              "tests/test_red.py": "def test_red():\n    assert False\n"},
+                             "PR red (#4)", None)]}
     repo, chela = _repo(tmp_path, prs=prs.get(case)), tmp_path / "chela"
     chela.mkdir()
     if case == "paused":
         (chela / "fleet-pause.json").write_text("{}")
     if case == "cannot_verify":
         _git(repo, "remote", "set-url", "origin", str(tmp_path / "gone.git"))
+    if case == "torn_key_store":
+        sweep_nightly.state_dir(chela).mkdir(parents=True)
+        (sweep_nightly.state_dir(chela) / "filed.json").write_text("{torn")
     now = datetime.now().timestamp() + 1
-    _run(repo, chela, Filer(fail=RuntimeError("no")) if case == "failed" else Filer(), now=now)
+    res = _run(repo, chela, Filer(fail=RuntimeError("no")) if case == "failed" else Filer(),
+               now=now)
+    if case in ("red_baseline", "torn_key_store"):
+        assert (res["status"], res["covered"], res["failed"]) == ("cannot_verify", True, [])
     assert (_covered_record(chela) == {str((repo / "WORKFLOW.md").resolve()): now}) is recorded
 
 
