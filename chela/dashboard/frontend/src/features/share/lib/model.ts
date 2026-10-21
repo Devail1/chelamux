@@ -75,3 +75,62 @@ export function mintBody(offer: ShareOffer, d: ShareDraft): Record<string, unkno
   if (long && d.confirmLong.trim() !== offer.name) return null;
   return { on: true, mode: 'unsandboxed', minutes: d.minutes, confirm: offer.name, ...(long ? { confirm_long: offer.name } : {}) };
 }
+
+// --- a LIVE share (CMX-240, P25): the Active shares sheet, its pill, the pane's banner ------
+
+/** Each mode in the dialog's own words (CMX-421): what the sheet says about THAT share. */
+export const SHARE_MODE_UI: Record<ShareMode, { label: string; desc: string }> = {
+  view: { label: 'View only', desc: 'Anyone with the link + code can watch. Nothing they type reaches this machine.' },
+  typing: { label: 'Allow typing', desc: 'Anyone with the link + code can watch and type into this sandboxed session.' },
+  unsandboxed: { label: 'Full access: UNSANDBOXED', desc: 'UNSANDBOXED: the first guest to type gets a real shell on this machine.' },
+};
+
+/** "12d 4h left" · "3h 5m left" · "25m left" · "<1m left", or '' with no expiry (epoch s). */
+export function shareTimeLeft(expiresAt: number | null | undefined, nowMs: number): string {
+  if (!expiresAt) return '';
+  const mins = Math.floor((expiresAt * 1000 - nowMs) / 60000);
+  if (mins < 1) return '<1m left';
+  const d = Math.floor(mins / 1440);
+  const h = Math.floor((mins % 1440) / 60);
+  const m = mins % 60;
+  if (d) return `${d}d ${h}h left`;
+  if (h) return `${h}h ${m}m left`;
+  return `${m}m left`;
+}
+
+/** The red banner's words, on the pill and on the pane: the override can outlast the day. */
+export function unsafeBannerText(expiresAt: number | null | undefined, nowMs: number): string {
+  const left = shareTimeLeft(expiresAt, nowMs);
+  return `UNSANDBOXED: guest can type${left ? ` · ${left}` : ''}`;
+}
+
+/** "at 14:05" today, else "Oct 15, 14:05". */
+export function fmtShareEnd(expiresAt: number, nowMs: number): string {
+  const d = new Date(expiresAt * 1000);
+  const t = d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+  return d.toDateString() === new Date(nowMs).toDateString() ? `at ${t}` : `${d.toLocaleDateString([], { month: 'short', day: 'numeric' })}, ${t}`;
+}
+
+/** What the active-shares pill says. The most permissive live mode wins it (CMX-403). */
+export type PillView = { count: number; mode: ShareMode; text: string; label: string };
+
+export function pillView(entries: readonly { mode: ShareMode; expiresAt: number | null }[], nowMs: number): PillView {
+  const n = entries.length;
+  const unsafe = entries.find((e) => e.mode === 'unsandboxed');
+  const mode: ShareMode = unsafe ? 'unsandboxed' : entries.some((e) => e.mode === 'typing') ? 'typing' : 'view';
+  const label =
+    (unsafe ? 'UNSANDBOXED: a guest can type into a real shell. ' : '') +
+    `${n} active share${n === 1 ? '' : 's'}${mode === 'view' ? ' (view only)' : ' (typing allowed)'}, tap to manage or stop`;
+  return { count: n, mode, text: unsafe ? unsafeBannerText(unsafe.expiresAt, nowMs) : `${n} sharing`, label };
+}
+
+/**
+ * The POST /share-mode body that upgrades a live share to UNSANDBOXED, or null while it may not
+ * be sent: the same typed-name rule (twice past 4 h) as minting one, without `on`.
+ */
+export function upgradeBody(offer: ShareOffer, d: Omit<ShareDraft, 'mode'>): Record<string, unknown> | null {
+  const body = mintBody(offer, { ...d, mode: 'unsandboxed' });
+  if (!body) return null;
+  delete body.on;
+  return body;
+}

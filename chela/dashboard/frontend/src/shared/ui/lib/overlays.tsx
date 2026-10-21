@@ -7,7 +7,7 @@ import * as RM from '@radix-ui/react-dropdown-menu';
 import * as RP from '@radix-ui/react-popover';
 import * as RToast from '@radix-ui/react-toast';
 import * as RT from '@radix-ui/react-tooltip';
-import { Check, ChevronRight, type LucideIcon } from 'lucide-react';
+import { Check, ChevronRight, X, type LucideIcon } from 'lucide-react';
 import { useRef, type ReactElement, type ReactNode, type SyntheticEvent } from 'react';
 
 const cx = (...names: (string | false | undefined)[]) => names.filter(Boolean).join(' ');
@@ -24,23 +24,38 @@ export type DialogProps = {
   description?: ReactNode;
   /** Extra class on the .modal box (e.g. `modal-newtask` for its width). */
   className?: string;
+  /** `sheet`: the safety sheets' look (anchored top right, a bottom sheet on a phone), with
+   * the title in a header row beside its icon and a close button (CMX-240). */
+  variant?: 'modal' | 'sheet';
+  icon?: LucideIcon;
   children?: ReactNode;
 };
+
+const SURFACE = {
+  modal: { overlay: 'modal-overlay active', box: 'modal', desc: 'modal-desc' },
+  sheet: { overlay: 'shares-backdrop ui-sheet', box: 'shares-sheet', desc: 'ss-sub' },
+} as const;
 
 /**
  * A modal dialog: focus moves in, is trapped, and returns to whatever had it when the dialog
  * opened (Radix returns it only to its own Trigger, and a legacy opener is not one); Escape
  * and an outside click close it.
  */
-export function Dialog({ open, onOpenChange, title, description, className, children }: DialogProps) {
+export function Dialog({ open, onOpenChange, title, description, className, variant = 'modal', icon: Icon, children }: DialogProps) {
   const opener = useRef<Element | null>(null);
   if (!title.trim()) throw new Error('<Dialog> needs a title: it is the dialog\'s accessible name');
+  const surface = SURFACE[variant];
+  const heading = (
+    <RD.Title asChild>
+      <h3>{title}</h3>
+    </RD.Title>
+  );
   return (
     <RD.Root open={open} onOpenChange={onOpenChange}>
       <RD.Portal>
-        <RD.Overlay className="modal-overlay active">
+        <RD.Overlay className={surface.overlay}>
           <RD.Content
-            className={cx('modal', className)}
+            className={cx(surface.box, className)}
             {...(description ? {} : { 'aria-describedby': undefined })}
             onOpenAutoFocus={() => {
               opener.current = document.activeElement;
@@ -52,10 +67,22 @@ export function Dialog({ open, onOpenChange, title, description, className, chil
               }
             }}
           >
-            <RD.Title asChild>
-              <h3>{title}</h3>
-            </RD.Title>
-            {description && <RD.Description className="modal-desc">{description}</RD.Description>}
+            {variant === 'sheet' ? (
+              <div className="ss-hd">
+                {Icon && (
+                  <span className="ss-hd-ic">
+                    <Icon aria-hidden size={15} />
+                  </span>
+                )}
+                {heading}
+                <RD.Close className="ss-close" aria-label="Close">
+                  <X aria-hidden size={16} />
+                </RD.Close>
+              </div>
+            ) : (
+              heading
+            )}
+            {description && <RD.Description className={surface.desc}>{description}</RD.Description>}
             {children}
           </RD.Content>
         </RD.Overlay>

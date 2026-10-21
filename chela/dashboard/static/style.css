@@ -580,12 +580,14 @@ body {
    same (#term-approvals). Each is hidden while it has nothing to say. A phone
    has no row controls (the "+" FAB starts sessions) — there the floating pills stay. */
 #term-shares, #term-approvals { display: none; }
+/* CMX-240: each pill copy is a React island; its slot adds no box of its own. */
+.shares-pill-slot { display: contents; }
 @media (min-width: 769px) {
     #term-shares:not([hidden]), #term-approvals:not([hidden]) {
         display: inline-flex; height: var(--ctl-h-sm); margin-left: auto;
         padding: 0 11px; font-size: 12px;
     }
-    #term-shares:not([hidden]) ~ #term-approvals { margin-left: 0; }
+    #shares-pill-row:has(> #term-shares:not([hidden])) ~ #term-approvals { margin-left: 0; }
     body:has(#panel-terminals.active) .safety-float #btn-shares,
     body:has(#panel-terminals.active) .safety-float #btn-approvals { display: none; }
 }
@@ -739,19 +741,11 @@ body {
 
 /* A share's join link + pairing code (ShareInfoRows, CMX-239), inside the "Active shares"
    sheet (.ss-row-body): the sole place they are shown. The sheet is narrow, so its field
-   rows stack the label above the control. The tsp-lbl/tsp-row/tsp-in rules are the sheet's
-   own mode controls (terminals.js) until P25 ports them. */
-.ss-row-body .field-row { grid-template-columns: minmax(0, 1fr); margin: 6px 0 0; }
-.ss-row-body .field-row > * { grid-column: 1; }
-.ss-row-body .field-label { font-size: 10.5px; color: var(--muted, #7d8590); }
+   rows (these and the UNSANDBOXED upgrade's, CMX-240) stack the label above the control. */
+.shares-sheet .field-row { grid-template-columns: minmax(0, 1fr); margin: 6px 0 0; }
+.shares-sheet .field-row > * { grid-column: 1; }
+.shares-sheet .field-label { font-size: 10.5px; color: var(--muted, #7d8590); }
 .ss-row-body .ui-copy-in { font: 600 12px/1 ui-monospace, Menlo, Consolas, monospace; }
-.shares-sheet .tsp-lbl { display: block; margin: 8px 0 4px; font-size: 10.5px; color: var(--muted, #7d8590); }
-.shares-sheet .tsp-row { display: flex; gap: 6px; }
-.shares-sheet .tsp-in {
-    flex: 1; min-width: 0; padding: 6px 8px; border-radius: 6px;
-    background: var(--bg, #0a0c11); color: var(--text); border: 1px solid var(--border);
-    font: 600 12px/1 ui-monospace, Menlo, Consolas, monospace;
-}
 .shares-sheet .tsp-warn { color: var(--warn, #d29922); font-size: 11.5px; margin: 4px 0; }
 
 /* Host resources strip (#resources-strip, CMX-172) — three compact CPU/RAM/Disk
@@ -959,6 +953,12 @@ body {
 .shares-sheet .ss-hd { display: flex; align-items: center; gap: 8px; margin-bottom: 4px; font-weight: 700; font-size: 13px; }
 .shares-sheet .ss-close { margin-left: auto; background: none; border: 0; color: var(--muted, #7d8590);
     font-size: 20px; cursor: pointer; line-height: 1; padding: 0 4px; }
+.shares-sheet .ss-hd h3 { margin: 0; font: inherit; }
+/* CMX-240: the kit's sheet Dialog sits on the modal layer, so its own Select's list (210)
+   opens above it; the safety float (47) stays under it. */
+.shares-backdrop.ui-sheet { z-index: 200; }
+.shares-sheet .ss-mode-opt svg, .shares-indicator svg { flex: 0 0 auto; vertical-align: -2px; }
+.shares-sheet .ss-confirm-go { margin-top: 8px; min-height: 28px; }
 .shares-sheet .ss-sub { color: var(--muted, #7d8590); font-size: 11.5px; margin-bottom: 11px; }
 .shares-sheet .ss-list { display: flex; flex-direction: column; gap: 8px; max-height: 50vh; overflow-y: auto; }
 .shares-sheet .ss-row {
@@ -997,7 +997,6 @@ body {
 .shares-sheet .ss-mode-desc { color: var(--text-dim); font-size: 11.5px; margin-bottom: 4px; }
 .shares-sheet .ss-mode-desc-unsafe { color: var(--ok-vermillion, #d55e00); font-weight: 600; }
 .shares-sheet .ss-mode-reason, .shares-sheet .ss-mode-err { color: var(--warn, #d29922); font-size: 11.5px; margin-bottom: 4px; }
-.shares-sheet .ss-mode-err[hidden], .shares-sheet .ss-unsafe-confirm[hidden] { display: none; }
 .shares-sheet .ss-confirm-go {
     cursor: pointer; border-radius: 6px; padding: 0 12px; font-size: 12px; font-weight: 700;
     background: var(--ok-vermillion, #d55e00); border: 1px solid var(--ok-vermillion, #d55e00); color: #fff;
@@ -1018,8 +1017,6 @@ body {
     .shares-sheet .ss-stop { padding: 11px 16px; min-height: 44px; }
     .shares-sheet .ss-stopall { min-height: 48px; }
     .shares-sheet .ss-mode-opt, .shares-sheet .ss-confirm-go { min-height: 44px; }
-    .shares-sheet .tsp-in { padding: 11px 12px; font-size: 14px; }
-    .shares-sheet .tsp-copy { min-height: 44px; padding: 0 16px; }
     /* Keep the amber pill readable but compact in .safety-float on a phone. */
     .shares-indicator { height: 38px; padding: 0 11px; }
     /* CMX-135: "⚖️ 2 pending", not "…approvals" — the full pill pushed .safety-float
