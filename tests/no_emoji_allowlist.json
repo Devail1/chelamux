@@ -3,8 +3,6 @@
   "files": {
     "chela/dashboard/static/js/accessreq.js": { "count": 3, "removed_by": "P05" },
     "chela/dashboard/static/js/approvals.js": { "count": 5, "removed_by": "P05" },
-    "chela/dashboard/static/js/kanban.js": { "count": 13, "removed_by": "P12, P13" },
-    "chela/dashboard/static/js/kanbanlinearmodel.js": { "count": 3, "removed_by": "P12" },
     "chela/dashboard/static/js/nav.js": { "count": 3, "removed_by": "P15-P21 (by section)" },
     "chela/dashboard/static/js/runtoast.js": { "count": 5, "removed_by": "P06" },
     "chela/dashboard/static/js/terminals.js": { "count": 17, "removed_by": "P24-P33" },

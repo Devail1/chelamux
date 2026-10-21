@@ -4493,10 +4493,10 @@ def _runs_for_workflow(
     reviewer sent back is not done, not active, and not failed: with the old
     ``== 'awaiting_review'`` test it appeared in NO column of the Kanban at all — it simply
     vanished from the board while its agent was being re-spawned. Each card keeps its OWN
-    status (see kanban.js), so the column never claims a rejected PR is awaiting review.
+    status (see the board's flatten, frontend/src/features/work/board.ts), so the column never claims a rejected PR is awaiting review.
 
     ``closed`` (CMX-265) rides in `recent` alongside `done`/`failed` — it is just as
-    terminal, and the frontend's own bucketing (kanban.js's `_kanbanFlatten`) is what
+    terminal, and the frontend's own bucketing (features/work/board.ts's `flatten`) is what
     actually separates it back out into its own `archived` lane. Omitting it here would
     not just mis-lane it — it would make a closed-not-merged row vanish from this API
     payload ENTIRELY (the row survives in the DB either way; only the board view would
@@ -4999,7 +4999,7 @@ def api_dispatcher():
             r["tracker_url"] = r.get("tracker_url") or url_by_id.get(r.get("task_id"))
             # 🗂️📐 CMX-23: the issue's current tracker state, when it is still open there.
             # None for a finished/archived issue — the board then files the card by its
-            # run status (kanbanlinearmodel.js's fallback), never drops it.
+            # run status (features/work/linear.ts's fallback), never drops it.
             r["tracker_state"] = state_by_id.get(r.get("task_id"))
             # Per-run task-list progress (issue #462) — None (not "0/0", not an error)
             # whenever the run can't be joined to a live session's task directory; see
@@ -5019,7 +5019,7 @@ def api_dispatcher():
         "configured": bool(workflows_payload),
         "workflows": workflows_payload,
         # CMX-206: the Board's Pause/Resume button reads its state off THIS payload
-        # (the poll `work.js` already runs every 30s) rather than a second fetch of
+        # (the poll features/work already runs every 30s) rather than a second fetch of
         # `/api/settings` — see `hold.active()` for what makes a hold current.
         "dispatch_hold": (hold.active().as_dict() if hold.active() else None),
     })

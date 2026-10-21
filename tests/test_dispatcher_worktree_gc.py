@@ -206,7 +206,7 @@ def test_closed_run_travels_ledger_api_and_board_from_one_real_tick(ticking, mon
 
     The judge's round-4 verdict landed three surviving mutations that each deleted the
     word `closed` from a different layer (the ledger's `_run_trial_outcome`, the API's
-    `recent` filter, kanban.js's flattener) — and the round-4 fix added three guards
+    `recent` filter, the board's flattener) — and the round-4 fix added three guards
     that each independently hand-wrote `status='closed'` as a literal directly into
     that layer's OWN input. Every one of those catches its own layer's mutation, but
     none of them proves a `closed` row ever ARRIVES at that layer for real; the judge's
@@ -223,9 +223,9 @@ def test_closed_run_travels_ledger_api_and_board_from_one_real_tick(ticking, mon
       1. the trial ledger (`dispatcher._run_trial_outcome`, fed the row `list_runs()`
          reads back from the DB `tick()` just wrote to)
       2. the `/api/dispatcher` HTTP payload (the real Flask route, reading the real DB)
-      3. the REAL `renderKanban()` DOM — fed the exact JSON layer 2 produced, via
-         `tests/js_helpers/assert_closed_run_lane.mjs` (same jsdom bootstrap as
-         `tests/kanban_flatten.test.mjs`)
+      3. the REAL Work board's DOM (features/work) — fed the exact JSON layer 2 produced, via
+         `tests/js_helpers/assert_closed_run_lane.mjs` (the shared jsdom bootstrap,
+         `tests/js_helpers/dashboard_dom.mjs`)
 
     Narrow any of the three production tuples/conditions back down (the judge's three
     mutations) and this goes red at the layer that lost `closed` — the row either never
@@ -268,7 +268,7 @@ def test_closed_run_travels_ledger_api_and_board_from_one_real_tick(ticking, mon
     api_row = next(r for r in wf_entry["recent_runs"] if r["task_id"] == alpha)
     assert api_row["status"] == "closed"
 
-    # --- Layer 3: the real renderKanban() DOM, fed this exact payload -------------------
+    # --- Layer 3: the real Work board DOM, fed this exact payload -----------------------
     node = shutil.which("node")
     if not node:
         pytest.skip("node not available for the JS board-render layer")
