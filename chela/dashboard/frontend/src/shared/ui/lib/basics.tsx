@@ -1,6 +1,6 @@
 // CMX-218 (CMX-212 P04): buttons, badges, section headers and tabs, as style.css's classes.
 import * as RTabs from '@radix-ui/react-tabs';
-import { useState, type ButtonHTMLAttributes, type ReactNode } from 'react';
+import { useState, type ButtonHTMLAttributes, type ReactNode, type Ref } from 'react';
 
 export type ButtonVariant = 'primary' | 'secondary' | 'danger' | 'ghost';
 export type ButtonSize = 'sm' | 'md';
@@ -16,6 +16,14 @@ const BUTTON_SIZE: Record<ButtonSize, string> = { sm: 'btn-sm', md: 'btn-md' };
 
 export function Button({ variant = 'secondary', size = 'md', className, type = 'button', ...rest }: ButtonHTMLAttributes<HTMLButtonElement> & { variant?: ButtonVariant; size?: ButtonSize }) {
   return <button type={type} className={[BUTTON_VARIANT[variant], BUTTON_SIZE[size], className].filter(Boolean).join(' ')} {...rest} />;
+}
+
+/**
+ * An icon-only control, drawn by its own `className` (no .btn look): `label` is its accessible
+ * name and tooltip. It takes a ref, so a Menu or Popover can use it as its trigger.
+ */
+export function IconButton({ label, type = 'button', ...rest }: ButtonHTMLAttributes<HTMLButtonElement> & { label: string; ref?: Ref<HTMLButtonElement> }) {
+  return <button type={type} title={label} aria-label={label} {...rest} />;
 }
 
 /**

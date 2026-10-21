@@ -229,9 +229,11 @@ test('a group head: name, caret, menu and "+" (only with a folder); a collapsed 
   fireEvent.click(g?.querySelector('.group-add') as Element);
   expect(acts.groupNewSession.mock.calls).toEqual([['/srv/code/alpha']]);
   fireEvent.click(g?.querySelector('.group-more') as Element);
-  fireEvent.contextMenu(head as HTMLElement);
-  expect(acts.openGroupMenu.mock.calls.map(c => c[1])).toEqual(['/srv/code/alpha', '/srv/code/alpha']);
   // the buttons' clicks stop at the button: the head did not toggle again
+  expect(acts.toggleGroup).toHaveBeenCalledTimes(1);
+  expect(document.querySelector('[role="menu"]')).toBeNull();
+  fireEvent.contextMenu(head as HTMLElement);
+  expect(document.querySelector('[role="menu"]')?.textContent).toContain('Move up');   // right-click: the group menu
   expect(acts.toggleGroup).toHaveBeenCalledTimes(1);
   expect(g?.querySelector('.group-add')?.getAttribute('aria-label')).toBe('New session in alpha');
   expect(g?.querySelector('.group-more')?.getAttribute('aria-label')).toBe('alpha menu');
@@ -259,26 +261,22 @@ test('Needs you sits above the groups with its count', () => {
 
 // --- the row's wiring ---------------------------------------------------------------------
 
-test('a click opens the row; right-click and its ⋯ open the row menu with the row as anchor', () => {
+test('a click opens the row; a right-click opens ITS row menu, and the ⋯ click does not select the row', () => {
   const run = runWin('CMX-1', 'agent');
   const { el, acts } = draw(state([win('a'), run], { active: 'a' }));
-  const anchors: unknown[] = [];
-  acts.openRowMenu.mockImplementation(ev => { anchors.push(ev.currentTarget); });
   const row = rowOf(el, 'a');
   expect(row.classList.contains('active')).toBe(true);
   expect(rowOf(el, run.name ?? '').classList.contains('active')).toBe(false);
   fireEvent.click(row);
   expect(acts.selectAgent.mock.calls).toEqual([['a']]);
-  fireEvent.contextMenu(row);
-  expect(acts.openRowMenu.mock.calls[0]?.[1]).toBe(`w:${row.dataset.item?.slice(2)}`);
-  expect(anchors[0]).toBe(row);
   const more = rowOf(el, run.name ?? '').querySelector<HTMLElement>('.row-more');
   expect(more?.getAttribute('aria-label')).toBe('Run menu');
   expect(row.querySelector('.row-more')?.getAttribute('aria-label')).toBe('Row menu');
   fireEvent.click(more as HTMLElement);
-  expect(acts.openRowMenu.mock.calls[1]?.[1]).toBe('run:CMX-1');
-  expect(anchors[1]).toBe(more);
   expect(acts.selectAgent).toHaveBeenCalledTimes(1);   // the ⋯ click stopped at the button
+  fireEvent.contextMenu(rowOf(el, run.name ?? ''));
+  expect([...document.querySelectorAll('[role="menuitem"]')].map(i => i.textContent)).toEqual(['Open agent pane', 'Open judge pane', 'Archive']);
+  expect(acts.selectAgent).toHaveBeenCalledTimes(1);
   expect(rowOf(el, run.name ?? '').dataset.run).toBe('CMX-1');
   expect(row.hasAttribute('data-run')).toBe(false);
 });
@@ -297,7 +295,7 @@ test('holding Alt numbers the first nine VISIBLE rows: not a collapsed group, no
   expect(draw({ ...s, altHeld: false }).el.querySelector('.ar-altnum')).toBeNull();
 });
 
-// --- the archive (its actions stay legacy's until slice B) ---------------------------
+// --- the archive: ONE control, the Archived group (CMX-277) ----------------------------
 
 test('Status All draws the Archived section at the bottom: closed sessions and hidden rows, each with Unarchive', async () => {
   const a = win('arch');
@@ -319,12 +317,9 @@ test('Status All draws the Archived section at the bottom: closed sessions and h
   const hidden = sec?.querySelector<HTMLElement>('.agent-row[data-agent="arch"]');
   expect(hidden?.className).toContain('archived');
   expect(hidden?.querySelector('.row-unarchive')?.getAttribute('title')).toBe('Unarchive');
-  expect(el.querySelector('.side-archived-toggle')?.textContent).toBe('Hide archived');
 
   fireEvent.click(sec?.querySelector('.group-head') as Element);
   expect(acts.toggleArchivedSection).toHaveBeenCalledTimes(1);
-  fireEvent.click(el.querySelector('.side-archived-toggle') as Element);
-  expect(acts.toggleShowArchived).toHaveBeenCalledTimes(1);
 
   let done!: () => void;
   acts.unarchiveRow.mockImplementation(() => new Promise<void>(r => { done = r; }));
@@ -347,10 +342,24 @@ test('Status All draws the Archived section at the bottom: closed sessions and h
   expect(btn.textContent).toBe('Unarchive');
 });
 
-test('the archive: open when opened or under Status Archived; Active hides it behind "Show archived (N)"', () => {
+test('ONE archived control: archived present => one collapsed Archived group and no foot link; none => no group', () => {
   const a = win('arch');
   const base = { archived: [`w:${a.window_id}`] };
-  let { el } = draw(state([a, win('x')], { ...base, collapsed: ['~archived:open'], view: { ...state([]).view, status: 'all' } }));
+  // the default view (Status All)
+  let { el } = draw(state([a, win('x')], base));
+  expect(state([]).view.status).toBe('all');
+  const groups = el.querySelectorAll('.side-archived');
+  expect(groups.length).toBe(1);
+  expect(groups[0]?.className).toBe('side-group side-archived collapsed');
+  expect(groups[0]?.querySelector('.group-name')?.textContent).toBe('Archived');
+  expect(groups[0]?.querySelector('.archived-count')?.textContent).toBe('1');
+  expect(groups[0]?.querySelector('.group-head')?.getAttribute('aria-expanded')).toBe('false');
+  expect(el.querySelector('.side-archived-toggle')).toBeNull();
+  expect(el.querySelectorAll('button')).toHaveLength(el.querySelectorAll('.row-more, .group-more, .group-add, .row-unarchive').length);
+  expect(el.textContent).not.toMatch(/Show archived|Hide archived/);
+  cleanup();
+  // opened, as persisted per device (`~archived:open` in the collapsed list)
+  ({ el } = draw(state([a, win('x')], { ...base, collapsed: ['~archived:open'] })));
   expect(el.querySelector('.side-archived')?.className).toBe('side-group side-archived');
   expect(el.querySelector('.side-archived .group-head')?.getAttribute('aria-expanded')).toBe('true');
   cleanup();
@@ -358,11 +367,13 @@ test('the archive: open when opened or under Status Archived; Active hides it be
   expect(el.querySelector('.side-archived')?.className).toBe('side-group side-archived');
   expect(el.querySelector('.side-empty')).toBeNull();
   cleanup();
-  ({ el } = draw(state([a, win('x')], base)));
+  // View > Status > Active hides it entirely, and nothing else offers it
+  ({ el } = draw(state([a, win('x')], { ...base, view: { ...state([]).view, status: 'active' } })));
   expect(el.querySelector('.side-archived')).toBeNull();
-  expect(el.querySelector('.side-archived-toggle')?.textContent).toBe('Show archived (1)');
+  expect(el.textContent).not.toMatch(/archived/i);
   cleanup();
   ({ el } = draw(state([win('x')])));
+  expect(el.querySelector('.side-archived')).toBeNull();
   expect(el.querySelector('.side-archived-toggle')).toBeNull();
 });
 
@@ -398,18 +409,23 @@ test('legacyActions calls window.chela at CALL time (nav.js registers after the 
   expect(() => acts.selectAgent('a')).not.toThrow();
   const calls: unknown[][] = [];
   const rec = (name: string) => (...a: unknown[]) => { calls.push([name, ...a]); return name; };
-  w.chela = Object.fromEntries(['selectAgent', 'toggleGroup', 'openGroupMenu', 'openRowMenu', 'groupNewSession',
-    'toggleArchivedSection', 'toggleShowArchived', 'unarchiveRow'].map(n => [n, rec(n)]));
-  const ev = { preventDefault() {}, stopPropagation() {}, currentTarget: document.body };
+  const names = ['selectAgent', 'toggleGroup', 'groupNewSession', 'toggleArchivedSection', 'unarchiveRow', 'groupMenuAction',
+    'rowMenuAction', 'moveToGroup', 'viewMenuAction', 'newCustomGroup', 'renameCustomGroup', 'deleteCustomGroup'];
+  w.chela = Object.fromEntries(names.map(n => [n, rec(n)]));
   acts.selectAgent('a');
   acts.toggleGroup('g');
-  acts.openGroupMenu(ev, 'g');
-  acts.openRowMenu(ev, 'r');
   acts.groupNewSession('g');
   acts.toggleArchivedSection();
-  acts.toggleShowArchived();
   expect(acts.unarchiveRow(null, 'k')).toBe('unarchiveRow');
-  expect(calls).toEqual([['selectAgent', 'a'], ['toggleGroup', 'g'], ['openGroupMenu', ev, 'g'], ['openRowMenu', ev, 'r'],
-    ['groupNewSession', 'g'], ['toggleArchivedSection'], ['toggleShowArchived'], ['unarchiveRow', null, 'k']]);
+  acts.groupMenuAction('g', 'up');
+  acts.rowMenuAction('r', 'archive');
+  acts.moveToGroup('r', null);
+  acts.viewMenuAction('sort:name');
+  expect(acts.newCustomGroup()).toBe('newCustomGroup');
+  acts.renameCustomGroup('id1');
+  acts.deleteCustomGroup('id2');
+  expect(calls).toEqual([['selectAgent', 'a'], ['toggleGroup', 'g'], ['groupNewSession', 'g'], ['toggleArchivedSection'],
+    ['unarchiveRow', null, 'k'], ['groupMenuAction', 'g', 'up'], ['rowMenuAction', 'r', 'archive'], ['moveToGroup', 'r', null],
+    ['viewMenuAction', 'sort:name'], ['newCustomGroup'], ['renameCustomGroup', 'id1'], ['deleteCustomGroup', 'id2']]);
   delete w.chela;
 });

@@ -34,6 +34,10 @@ def _pane(input_line: str, *, above: str = RULE) -> str:
     ("❯ [Image #2]seems like the 3d view is stuck", "[Image #2]seems like the 3d view is stuck"),
     ("\x1b[39m❯ \x1b[2mTry \"fix the bug\"\x1b[0m", ""),         # ghost suggestion
     ("\x1b[39m❯ \x1b[1;2mghost\x1b[0m", ""),                     # faint among other params
+    # Captured verbatim 10-21: Claude Code puts a NO-BREAK SPACE (U+00A0) after `❯`, not a
+    # space. A ghost read as a draft refused every Telegram message to an idle agent.
+    ("\x1b[39m❯\xa0\x1b[2mupdate the handoff\x1b[0m", ""),       # real ghost, NBSP lead
+    ("\x1b[39m❯\xa0typed after nbsp", "typed after nbsp"),       # NBSP lead, a real draft
     ("\x1b[39m❯ \x1b[22mreal draft\x1b[0m", "real draft"),       # 22 is NOT faint
     ("❯ Try \"fix the bug\"", 'Try "fix the bug"'),              # no SGR: a typed draft
     ("❯ Press up to edit queued messages", ""),                  # busy, message queued

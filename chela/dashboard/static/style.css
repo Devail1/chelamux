@@ -737,22 +737,21 @@ body {
     font-size: 11px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
 }
 
-/* tsp-lbl/tsp-row/tsp-in/tsp-copy/tsp-warn are the join-link/pairing-code row
-   markup (_shareInfoRowsHTML), rendered inside the "Active shares" sheet
-   (.ss-row-body) — the sole place a share's link + code are shown. */
+/* A share's join link + pairing code (ShareInfoRows, CMX-239), inside the "Active shares"
+   sheet (.ss-row-body): the sole place they are shown. The sheet is narrow, so its field
+   rows stack the label above the control. The tsp-lbl/tsp-row/tsp-in rules are the sheet's
+   own mode controls (terminals.js) until P25 ports them. */
+.ss-row-body .field-row { grid-template-columns: minmax(0, 1fr); margin: 6px 0 0; }
+.ss-row-body .field-row > * { grid-column: 1; }
+.ss-row-body .field-label { font-size: 10.5px; color: var(--muted, #7d8590); }
+.ss-row-body .ui-copy-in { font: 600 12px/1 ui-monospace, Menlo, Consolas, monospace; }
 .shares-sheet .tsp-lbl { display: block; margin: 8px 0 4px; font-size: 10.5px; color: var(--muted, #7d8590); }
-.shares-sheet .tsp-hint { opacity: 0.8; }
 .shares-sheet .tsp-row { display: flex; gap: 6px; }
 .shares-sheet .tsp-in {
     flex: 1; min-width: 0; padding: 6px 8px; border-radius: 6px;
     background: var(--bg, #0a0c11); color: var(--text); border: 1px solid var(--border);
     font: 600 12px/1 ui-monospace, Menlo, Consolas, monospace;
 }
-.shares-sheet .tsp-copy {
-    cursor: pointer; border-radius: 6px; border: 1px solid var(--border);
-    background: var(--surface); color: var(--text); font-size: 11.5px; padding: 6px 10px;
-}
-.shares-sheet .tsp-copy:hover { border-color: var(--accent); }
 .shares-sheet .tsp-warn { color: var(--warn, #d29922); font-size: 11.5px; margin: 4px 0; }
 
 /* Host resources strip (#resources-strip, CMX-172) — three compact CPU/RAM/Disk
@@ -905,27 +904,17 @@ body {
 }
 .gs-net-badge[hidden] { display: none; }
 
-/* Share dialog (CMX-403) — reuses the Active-shares sheet chrome. */
-.share-dialog .sd-opt {
-    display: flex; gap: 10px; align-items: flex-start; cursor: pointer;
-    padding: 10px; margin: 8px 0; border: 1px solid var(--border); border-radius: 8px;
-}
-.share-dialog .sd-opt input { margin-top: 2px; }
-.share-dialog .sd-opt > span { display: flex; flex-direction: column; gap: 3px; font-size: 12.5px; }
+/* Share dialog (CMX-403; React since CMX-239): the kit's Dialog and RadioGroup, on the
+   modal layer (above the Wall and the safety float, under its own Select's list). */
+.modal.share-dialog { width: 460px; }
+.share-dialog .sd-opt { margin: 8px 0; }
+.share-dialog .sd-opt strong { display: flex; align-items: flex-start; gap: 6px; }
+.share-dialog .sd-opt strong svg { flex: 0 0 auto; margin-top: 2px; }
 .share-dialog .sd-desc { color: var(--text-dim); font-size: 11.5px; }
 .share-dialog .sd-reason { color: var(--warn, #d29922); font-size: 11.5px; }
-.share-dialog .sd-disabled { cursor: not-allowed; opacity: 0.7; }
 .share-dialog .sd-unsafe { border-color: var(--ok-vermillion, #d55e00); }
 .share-dialog .sd-confirm { margin: 4px 0 8px; }
-.share-dialog .sd-confirm .tsp-in { width: 100%; box-sizing: border-box; }
-.share-dialog .sd-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 10px; }
-.share-dialog .sd-actions button {
-    cursor: pointer; border-radius: 6px; border: 1px solid var(--border);
-    background: var(--surface); color: var(--text); font-size: 12.5px; padding: 7px 14px;
-}
-.share-dialog .sd-share { border-color: var(--accent); }
-.share-dialog .sd-share.sd-danger { background: var(--ok-vermillion, #d55e00); border-color: var(--ok-vermillion, #d55e00); color: #fff; }
-.share-dialog .sd-share:disabled { opacity: 0.5; cursor: not-allowed; }
+.share-dialog .sd-error { color: var(--warn, #d29922); font-size: 12px; margin: 6px 0 0; }
 .shares-sheet .ss-mode { font-size: 12px; }
 .shares-sheet .ss-mode-unsafe {
     background: var(--ok-vermillion, #d55e00); color: #fff; border-radius: 4px;
@@ -1387,6 +1376,8 @@ body.term-dragging { overflow: hidden; }
 .gs-room svg { vertical-align: -2px; margin-right: 3px; }
 .gs-room:hover { background: color-mix(in srgb, var(--room-accent, var(--accent)) 40%, transparent); }
 /* On-screen key bar: sticky bottom dock, collapsible, grouped + inverted-T D-pad */
+/* The keybar island's slot adds no box: #term-bar stays the panel's own sticky child. */
+.keybar-island { display: contents; }
 #term-stage { padding-bottom: 4px; }
 #term-bar {
     flex-direction: column;
@@ -2343,13 +2334,6 @@ input[type="text"]:focus, textarea:focus, select:focus {
     flex-direction: column;
     overflow: hidden;
 }
-#diff-modal-content {
-    display: flex;
-    flex-direction: column;
-    flex: 1 1 auto;
-    min-height: 0;
-    overflow: hidden;
-}
 .diff-modal-head {
     flex: 0 0 auto;
     padding-right: 28px;
@@ -2357,7 +2341,7 @@ input[type="text"]:focus, textarea:focus, select:focus {
     margin-bottom: 10px;
     padding-bottom: 10px;
 }
-.diff-modal-head h3 { margin: 0 0 4px; }
+.modal-diff > h3 { margin: 0 0 4px; padding-right: 28px; }
 .diff-modal-summary { font-size: 12px; color: var(--text-dim); font-variant-numeric: tabular-nums; }
 .diff-modal-body {
     flex: 1 1 auto;
@@ -3609,13 +3593,8 @@ a.kanban-tracker-link:focus-visible { text-decoration: underline; }
 .agent-row.rich.session-row { cursor: default; }
 /* The ONE Archived section sits at the bottom, a little apart from the folders. */
 .side-group.side-archived { margin-top: 8px; }
-/* "Show archived (N)" — the way into Status ▸ All, where the Archived section shows. */
-.side-archived-toggle {
-    align-self: flex-start; margin: 10px 0 2px 10px; padding: 2px 0; border: 0; background: none;
-    color: var(--text-dim); font: inherit; font-size: 11px; cursor: pointer;
-}
-.side-archived-toggle:hover { color: var(--text); text-decoration: underline; }
 /* CMX-66: the VIEW menu's button on the Sessions header (the desktop's sliders icon). */
+.side-view-slot { display: contents; }
 .side-view-btn {
     display: inline-flex; align-items: center; justify-content: center;
     width: 24px; height: 24px; padding: 0; margin: -4px -6px -4px 0; border: 0; border-radius: 6px;
@@ -3624,23 +3603,18 @@ a.kanban-tracker-link:focus-visible { text-decoration: underline; }
 }
 .side-view-btn:hover { background: var(--surface); color: var(--text); }
 .side-view-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
-/* The view menu: a submenu row reads `Label ......... value >`; a choice shows ✓ at the
-   right. A submenu is a second page of the same popover (‹ back on top), never a hover
-   flyout, so a phone reaches it by tap. Fits a 390px screen (max-width below). */
+/* The view menu (the kit's Menu, CMX-277): a submenu row reads `Label ......... value >`; a
+   choice shows a check at the right. A submenu is a second page of the same menu (‹ back on
+   top), never a hover flyout, so a phone reaches it by tap. Fits a 390px screen. */
 .side-menu.view-menu { min-width: 232px; max-width: calc(100vw - 24px); }
-.side-menu .vm-item, .side-menu .vm-back { display: flex; align-items: center; gap: 8px; min-height: 30px; }
-.side-menu .vm-label { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.side-menu .vm-val { flex: 0 0 auto; color: var(--text-dim); font-size: 0.92em; }
-.side-menu .vm-chev { flex: 0 0 auto; display: inline-flex; color: var(--text-dim); }
-.side-menu .vm-chev.back { transform: rotate(180deg); }
-.side-menu .vm-back { color: var(--text-dim); font-weight: 600; }
-.side-menu .vm-check { flex: 0 0 auto; color: var(--accent); font-weight: 700; }
-.side-menu .vm-group { cursor: default; }
-.side-menu .vm-mini {
-    flex: 0 0 auto; padding: 2px 6px; border: 1px solid var(--border); border-radius: 5px;
-    background: transparent; color: var(--text-dim); font: inherit; font-size: 11px; cursor: pointer;
-}
-.side-menu .vm-mini:hover { color: var(--text); border-color: var(--text-dim); }
+.side-menu .ov-item { gap: 8px; min-height: 30px; }
+.overflow-menu .ov-label { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.overflow-menu .ov-val { flex: 0 0 auto; color: var(--text-dim); font-size: 0.92em; }
+.overflow-menu .ov-chev, .overflow-menu .ov-check { flex: 0 0 auto; display: inline-flex; color: var(--text-dim); }
+.overflow-menu .ov-chev.back { transform: rotate(180deg); }
+.overflow-menu .ov-back { color: var(--text-dim); font-weight: 600; }
+.overflow-menu .ov-check { color: var(--accent); }
+.overflow-menu .popover-item[data-highlighted] :is(.ov-val, .ov-chev, .ov-check) { color: inherit; }
 /* A dispatched run's PR badge (View ▸ Show PR status): `#N`, its state as a word in the
    tooltip and as a border style — not hue alone. */
 .agent-row.rich .ar-pr {
@@ -3659,8 +3633,6 @@ a.kanban-tracker-link:focus-visible { text-decoration: underline; }
 /* A compact menu, dividers between action groups (.popover-sep). */
 .side-menu { min-width: 168px; }
 .side-menu .popover-item { padding: 6px 10px; }
-.side-menu .popover-item.disabled { opacity: 0.45; cursor: default; }
-.side-menu .popover-item.disabled:hover { background: transparent; color: inherit; }
 /* Judging (a dispatched run's judge is testing it) — a diamond, its own
    silhouette next to working's dot, waiting's triangle, idle's ring, done's check. */
 .term-status-dot.judging {
@@ -3826,8 +3798,7 @@ a.kanban-tracker-link:focus-visible { text-decoration: underline; }
     body.sidebar-collapsed .agent-row .row-unarchive,
     body.sidebar-collapsed .agent-row .recent-resume,
     body.sidebar-collapsed .agent-row .recent-dismiss,
-    body.sidebar-collapsed .agent-row .row-more,
-    body.sidebar-collapsed .side-archived-toggle { display: none; }
+    body.sidebar-collapsed .agent-row .row-more { display: none; }
 
     /* The section heads are gone, so a rule stands in for the section break. */
     body.sidebar-collapsed .side-section { margin-bottom: 10px; }
@@ -4911,3 +4882,20 @@ a.kanban-tracker-link:focus-visible { text-decoration: underline; }
     transform: translateX(2px); transition: transform 0.12s;
 }
 .ui-toggle[data-state="checked"] .ui-toggle-thumb { background: var(--on-accent); transform: translateX(16px); }
+/* RadioGroup: each option a bordered row, the radio then its label and hint. */
+.ui-radio-opt {
+    display: flex; gap: 10px; align-items: flex-start; cursor: pointer;
+    padding: 10px; border: 1px solid var(--border); border-radius: 8px;
+}
+.ui-radio-opt.ui-radio-disabled { cursor: not-allowed; opacity: 0.7; }
+.ui-radio {
+    flex: 0 0 auto; width: 16px; height: 16px; margin-top: 1px; padding: 0; border-radius: 50%;
+    border: 1.5px solid var(--text-dim); background: none; display: grid; place-items: center;
+}
+.ui-radio[data-state="checked"] { border-color: var(--accent); }
+.ui-radio:disabled { cursor: not-allowed; }
+.ui-radio-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--accent); }
+.ui-radio-text { display: flex; flex-direction: column; gap: 3px; font-size: 12.5px; }
+/* CopyField: a readonly value with its Copy button. */
+.ui-copy { display: flex; gap: 6px; flex: 1 1 auto; min-width: 0; }
+.ui-copy .ui-copy-in { flex: 1 1 auto; min-width: 0; }

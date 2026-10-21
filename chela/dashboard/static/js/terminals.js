@@ -5,11 +5,12 @@ import { orderByList, windowRunDot } from '../../frontend/src/features/sidebar/m
 import { applyRoomAccents, bezierPath, resolveDrop } from './wire';
 import { onOrchestratorChange, orchestratorRelease, orchestratorState, orchestratorSubscribe } from './orchestrator';
 import { actionBarKind, costView, ctxLevel, focusLayout, gridRowCollapsed, prChip, rankOrder, recapView, stateTitle, tileState } from './wallmodel';
-// Side-effect only: registers window.chela.openDiffModal/closeDiffModal for the
-// "Files" chip below (_ctxBarHTML) and the #modal-diff close button in index.html.
-import './diffpanel';
+import { openDiffModal } from '../../frontend/src/features/diffmodal';
+import { pinKeybar } from '../../frontend/src/features/keybar';
+import { termMode } from '../../frontend/src/shared/store/wall';
 import { windowIdQuery } from './windowid';
 import { onEvent } from '../../frontend/src/shared/events';
+import { SHARE_NOT_SANDBOXED_REASON, SHARE_TYPING_OFF_REASON, durLabel as _durLabel, openShareDialog, paneToast as _termShareToast, renderShareInfoRows, unsafeDurations as _unsafeDurations } from '../../frontend/src/features/share';
 
 // ---------------------------------------------------------------------------
 // Terminals (embedded ttyd via the gateway: /term/<wid>/)
@@ -26,7 +27,6 @@ import { onEvent } from '../../frontend/src/shared/events';
 
 let _termMode = localStorage.getItem('pc_term_mode') || 'wall';   // default view: wall
 let _termSig = '';
-let _termScroll = false;
 let _grid = null;                 // Gridstack instance (wall mode only)
 let _renderedWids = [];           // pane wids currently in the DOM (live render order)
 let _termTimer = null;            // fast reactive poll while the terminals tab is open
@@ -350,17 +350,6 @@ async function termPaste(btn) {
     } catch (e) { console.error('termPaste', e); _pasteFlash(btn, 'Failed'); }
 }
 
-function termScrollToggle() {
-    const btn = $('#term-scroll-btn');
-    if (!_termScroll) {
-        termKey('scroll'); _termScroll = true;
-        btn.textContent = 'Exit Scroll'; btn.classList.add('btn-accent');
-    } else {
-        termKey('scroll-exit'); _termScroll = false;
-        btn.innerHTML = '&#10514; Scroll'; btn.classList.remove('btn-accent');
-    }
-}
-
 // Per-tile copy-mode toggle for wall mode (each button tracks its own state).
 function termScrollFor(btn, wid) {
     const on = btn.classList.toggle('btn-accent');
@@ -604,7 +593,7 @@ function _seedSharedFromAgents(agents) {
 }
 
 // Re-key (or drop) owner presence when a share was stopped / re-created — possibly
-// from ANOTHER page, so this page never ran _stopShare/_mintShare (CMX-427). Only
+// from ANOTHER page, so this page never ran _stopShare/_onShareMinted (CMX-427). Only
 // wids that already have a presence session are touched; the module is a no-op for
 // an unchanged share_epoch, so this costs nothing per poll on a steady share.
 function _syncOwnerPresenceFromAgents(agents) {
@@ -712,20 +701,8 @@ const SHARE_MODE_UI = {
 // setting on (and it then asks for the typed window name). The server re-checks the
 // setting, the live sandbox verdict and the typed name; "only on a non-sandboxed window"
 // for the override is a UI rule, not a server gate (as in the share dialog).
-// The UNSANDBOXED duration picker (CMX-419), shared by the share dialog and the Active
-// shares upgrade: the server's choices (preselected to the configured default), and the
-// length past which the window name must be typed a SECOND time.
-function _unsafeDurations(o) {
-    const base = (o && o.unsandboxed_choices && o.unsandboxed_choices.length)
-        ? o.unsandboxed_choices : [30, 240, 1440, 10080, 20160];
-    const dflt = (o && o.unsandboxed_minutes) || 30;
-    const choices = [...new Set([...base, dflt])].sort((a, b) => a - b);
-    return { choices, longMins: (o && o.unsandboxed_long_minutes) || 240 };
-}
-function _durLabel(n) {
-    return n % 1440 === 0 ? (n / 1440) + (n === 1440 ? ' day' : ' days')
-        : n % 60 === 0 ? (n / 60) + ' h' : n + ' min';
-}
+// The UNSANDBOXED duration picker (CMX-419): its choices and labels come from the share
+// feature (unsafeDurations, durLabel), shared with the share dialog.
 function _durOptionsHTML(choices, sel) {
     return choices.map(n => `<option value="${attrEsc(String(n))}"${n === sel ? ' selected' : ''}>${escHtml(_durLabel(n))}</option>`).join('');
 }
@@ -877,7 +854,7 @@ async function _buildSharesSheet() {
             <button class="ss-stop" type="button" data-wid="${attrEsc(wid)}">Stop</button>
           </div>
           ${_shareModeControlHTML(wid, opts[i])}
-          <div class="ss-row-body">${_shareInfoRowsHTML(infos[i], 'Link unavailable. Reopen this sheet to retry.')}</div>
+          <div class="ss-row-body"></div>
         </div>`).join('');
     sheet.innerHTML =
         `<div class="ss-hd"><span class="ss-hd-ic">${lucideIcon('share-2', 15)}</span> Active shares
@@ -887,7 +864,7 @@ async function _buildSharesSheet() {
          ${wids.length ? `<button class="ss-stopall" type="button">Stop all sharing (${wids.length})</button>` : ''}`;
     backdrop.appendChild(sheet);
     document.body.appendChild(backdrop);
-    _wireShareCopyButtons(sheet);
+    sheet.querySelectorAll('.ss-row-body').forEach((el, i) => renderShareInfoRows(el, infos[i], 'Link unavailable. Reopen this sheet to retry.'));
     _wireShareModeControls(sheet);
     const fr = focus && sheet.querySelector('.ss-row-focus');
     if (fr && fr.scrollIntoView) { try { fr.scrollIntoView({ block: 'nearest' }); } catch (_) {} }
@@ -953,123 +930,12 @@ async function shareBtnClick(btn, wid) {
         openSharesSheet(wid);
         return;
     }
-    await openShareDialog(btn, wid);
+    await openShareDialog({ wid, title: _paneTitle(wid), dims: () => _paneTermDims(wid), onMinted: resp => _onShareMinted(wid, resp) });
 }
 
-// --- share dialog (CMX-403) -------------------------------------------------
-// Picks the share's ACCESS before minting it: "View only" (the default), "Allow typing"
-// (enabled only when the setting is on AND the window verifies LIVE as a sandboxed
-// session — else the reason is shown), and — only while the setting is on, on a window
-// that is NOT sandboxed — the trusted-peer "Full access — UNSANDBOXED" override, which
-// needs the window name TYPED to arm. The server re-checks every one of these, and the
-// host bridge re-checks per keystroke; this dialog only keeps the choice honest.
-const SHARE_TYPING_OFF_REASON = 'Typing is disabled in Settings';
-const SHARE_NOT_SANDBOXED_REASON = 'Not a sandboxed session. Start one from New session → Sandboxed';
-
-function closeShareDialog() {
-    const bd = document.getElementById('share-dialog-backdrop');
-    if (bd) bd.remove();
-}
-
-async function openShareDialog(btn, wid) {
-    let opts = null;
-    try { opts = await api('/api/term/' + encodeURIComponent(wid) + '/share-options'); } catch (_) {}
-    opts = opts || {};
-    closeShareDialog();
-    const typingOk = !!opts.typing_allowed;
-    const reason = typingOk ? '' : (opts.share_typing ? SHARE_NOT_SANDBOXED_REASON : SHARE_TYPING_OFF_REASON);
-    const offerUnsafe = !!(opts.share_typing && !opts.sandboxed && opts.unsandboxed_offered && opts.window_name);
-    const name = opts.window_name || '';
-    const mins = opts.unsandboxed_minutes || 30;
-    // Duration picker (CMX-419): preselected to the configured default; a pick longer
-    // than `longMins` (4 h) needs the window name typed a SECOND time.
-    const { choices, longMins } = _unsafeDurations(opts);
-    const backdrop = document.createElement('div');
-    backdrop.id = 'share-dialog-backdrop';
-    backdrop.className = 'shares-backdrop';
-    backdrop.onclick = (e) => { if (e.target === backdrop) closeShareDialog(); };
-    backdrop.innerHTML = `
-      <div class="shares-sheet share-dialog" role="dialog" aria-modal="true" aria-label="Share this session">
-        <div class="ss-hd"><span class="ss-hd-ic">${lucideIcon('share-2', 15)}</span> Share ${escHtml(_paneTitle(wid))}
-          <button class="ss-close" type="button" aria-label="Close">&times;</button></div>
-        <label class="sd-opt"><input type="radio" name="sd-mode" value="view" checked>
-          <span><strong>👁 View only</strong><span class="sd-desc">The guest watches. Nothing they type reaches this machine.</span></span></label>
-        <label class="sd-opt${typingOk ? '' : ' sd-disabled'}"><input type="radio" name="sd-mode" value="typing"${typingOk ? '' : ' disabled'}>
-          <span><strong>⌨ Allow typing</strong><span class="sd-desc">Into this sandboxed session only: a container that sees just the project, re-verified on every keystroke.</span>
-          ${reason ? `<span class="sd-reason">${escHtml(reason)}</span>` : ''}</span></label>
-        ${offerUnsafe ? `
-        <label class="sd-opt sd-unsafe"><input type="radio" name="sd-mode" value="unsandboxed">
-          <span><strong>⚠ Full access, UNSANDBOXED: the guest can type into a real shell on this machine</strong>
-          <span class="sd-desc">For a very trusted peer only. Bound to the first guest who joins, ends when the time you pick runs out, audited. Stop the share to revoke it at once.</span></span></label>
-        <div class="sd-confirm" hidden>
-          <label class="tsp-lbl" for="sd-dur">Lasts</label>
-          <select id="sd-dur" class="tsp-in">${_durOptionsHTML(choices, mins)}</select>
-          <label class="tsp-lbl" for="sd-confirm-in">Type <code>${escHtml(name)}</code> to confirm</label>
-          <input id="sd-confirm-in" class="tsp-in" autocomplete="off" spellcheck="false" placeholder="${attrEsc(name)}">
-          <div class="sd-confirm-long" hidden>
-            <label class="tsp-lbl" for="sd-confirm-long-in">Longer than 4 h: type <code>${escHtml(name)}</code> again</label>
-            <input id="sd-confirm-long-in" class="tsp-in" autocomplete="off" spellcheck="false" placeholder="${attrEsc(name)}">
-          </div>
-        </div>` : ''}
-        <div class="sd-actions">
-          <button class="sd-cancel" type="button">Cancel</button>
-          <button class="sd-share" type="button">Share</button>
-        </div>
-      </div>`;
-    document.body.appendChild(backdrop);
-    const sheet = backdrop.querySelector('.share-dialog');
-    const shareB = sheet.querySelector('.sd-share');
-    const confirmBox = sheet.querySelector('.sd-confirm');
-    const confirmIn = sheet.querySelector('#sd-confirm-in');
-    const durSel = sheet.querySelector('#sd-dur');
-    const longBox = sheet.querySelector('.sd-confirm-long');
-    const longIn = sheet.querySelector('#sd-confirm-long-in');
-    const chosen = () => (sheet.querySelector('input[name="sd-mode"]:checked') || {}).value || 'view';
-    const minutes = () => (durSel ? parseInt(durSel.value, 10) : mins) || mins;
-    const isLong = () => minutes() > longMins;
-    const confirmed = () => !!confirmIn && confirmIn.value.trim() === name
-        && (!isLong() || (!!longIn && longIn.value.trim() === name));
-    const sync = () => {
-        const m = chosen();
-        if (confirmBox) confirmBox.hidden = m !== 'unsandboxed';
-        if (longBox) longBox.hidden = !isLong();
-        // Without the typed window name (twice, past 4 h) the override is not requestable.
-        shareB.disabled = m === 'unsandboxed' && !confirmed();
-        shareB.classList.toggle('sd-danger', m === 'unsandboxed');
-    };
-    sheet.querySelectorAll('input[name="sd-mode"]').forEach(r => r.onchange = sync);
-    if (confirmIn) confirmIn.oninput = sync;
-    if (longIn) longIn.oninput = sync;
-    if (durSel) durSel.onchange = sync;
-    sheet.querySelector('.ss-close').onclick = closeShareDialog;
-    sheet.querySelector('.sd-cancel').onclick = closeShareDialog;
-    shareB.onclick = async () => {
-        const m = chosen();
-        const confirm = m === 'unsandboxed' && confirmIn ? confirmIn.value.trim() : '';
-        if (m === 'unsandboxed' && !confirmed()) return;
-        const extra = m === 'unsandboxed'
-            ? { minutes: minutes(), ...(isLong() ? { confirm_long: longIn.value.trim() } : {}) } : {};
-        shareB.disabled = true;
-        closeShareDialog();
-        await _mintShare(btn, wid, m, confirm, extra);
-    };
-    sync();
-    return sheet;
-}
-
-async function _mintShare(btn, wid, mode, confirm, extra) {
-    const body = { on: true, mode: mode || 'view', ...(extra || {}) };
-    if (confirm) body.confirm = confirm;
-    const d = _paneTermDims(wid);
-    if (d) { body.cols = d.cols; body.rows = d.rows; }
-    let resp;
-    try {
-        resp = await api('/api/term/' + encodeURIComponent(wid) + '/share', {
-            method: 'POST', headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(body),
-        });
-    } catch (e) { _termShareToast(btn, 'Share failed'); return; }
-    if (!resp || !resp.ok) { _termShareToast(btn, (resp && resp.error) || 'Share failed'); return; }
+// --- share dialog (CMX-403): React since CMX-239 (frontend/src/features/share) --------
+// A mint the server accepted: this page's share state, owner presence, the pane, the sheet.
+function _onShareMinted(wid, resp) {
     _sharedWids.add(wid);
     _shareModes.set(wid, resp.mode || 'view');
     _noteShareExpiry(wid, resp.expires_at);
@@ -1090,42 +956,6 @@ async function _stopShare(wid) {
     _sharedWids.delete(wid); _shareModes.delete(wid); _shareExpiry.delete(wid); _presenceByWid.delete(wid); _renderFacepile(wid);
     _ownerPresence().then(m => m && m.stopOwnerPresence(wid));
     _reloadPaneFrame(wid); _updateShareBtns(wid); _renderSharesIndicator();
-}
-
-// Join URL + pairing code, each as a labeled readonly input with a Copy button —
-// the markup for one share's info inside the "Active shares" sheet (.ss-row-body),
-// sourced from /api/term/<wid>/share-info since /api/term/shared deliberately
-// omits them — see api_term_shared.
-function _shareInfoRowsHTML(info, emptyMsg) {
-    const url = info && info.join_url ? info.join_url : '';
-    const code = info && info.pairing_code ? info.pairing_code : '';
-    const row = (label, val, extra) => `
-      <label class="tsp-lbl">${label}${extra || ''}</label>
-      <div class="tsp-row"><input class="tsp-in" readonly value="${attrEsc(val)}">
-        <button class="tsp-copy" data-copy="${attrEsc(val)}">Copy</button></div>`;
-    return (url ? row('Join link', url) : '') +
-        (code ? row('Pairing code', code, ' <span class="tsp-hint">(needed to decrypt)</span>') : '') +
-        (!url && !code ? `<div class="tsp-warn">${emptyMsg}</div>` : '');
-}
-function _wireShareCopyButtons(root) {
-    root.querySelectorAll('.tsp-copy').forEach(b => b.onclick = () => {
-        navigator.clipboard.writeText(b.dataset.copy)
-            .then(() => { b.textContent = 'Copied'; setTimeout(() => (b.textContent = 'Copy'), 1500); })
-            .catch(() => {});
-    });
-}
-
-// Throwaway toast bubble anchored to the pane header — same plain-DOM affordance
-// as kanban's _kanbanMergeToast.
-function _termShareToast(anchor, msg) {
-    const host = (anchor && anchor.closest('.gs-head')) || (anchor && anchor.parentElement);
-    if (!host) { console.log('[chela-share]', msg); return; }
-    host.querySelectorAll('.term-share-toast').forEach(t => t.remove());
-    const t = document.createElement('div');
-    t.className = 'term-share-toast';
-    t.textContent = msg;
-    host.appendChild(t);
-    setTimeout(() => t.remove(), 4000);
 }
 
 // Called by presence.js in the iframe (window.parent.chelaPresence) on every
@@ -1954,23 +1784,6 @@ function renderMinDock() {
     _colorTermDots(_agentsCache);   // colour the just-built chips (no re-sort → no recursion)
 }
 
-// Collapsible on-screen key bar. Default = collapsed (HTML ships with .kb-collapsed);
-// localStorage remembers the user's choice across sessions.
-function kbApplyState() {
-    const bar = $('#term-bar'), tog = $('#kb-toggle');
-    if (!bar) return;
-    const collapsed = localStorage.getItem('pc_kb_collapsed') !== '0';   // default collapsed
-    bar.classList.toggle('kb-collapsed', collapsed);
-    if (tog) tog.setAttribute('aria-expanded', String(!collapsed));
-}
-
-function kbToggle() {
-    const bar = $('#term-bar');
-    const collapsed = bar.classList.toggle('kb-collapsed');
-    localStorage.setItem('pc_kb_collapsed', collapsed ? '1' : '0');
-    $('#kb-toggle').setAttribute('aria-expanded', String(!collapsed));
-}
-
 // CMX-169: the single-mode pane a load opens. The last pane viewed on THIS device
 // (localStorage, like pc_term_mode) if it is still online, else the first session in the
 // sidebar's order (the top sidebar row), else the first option. The stored wid is
@@ -2042,10 +1855,9 @@ async function renderTerminals(ctxRead) {   // ctxRead: refresh()'s context read
 
     const sel = $('#term-agent');
     sel.style.display = _termMode === 'single' ? '' : 'none';
-    $('#term-bar').style.display = _termMode === 'single' ? 'flex' : 'none';
+    termMode.set(_termMode);   // the keybar island shows its desktop bar in single mode
     $('#term-wall-grid').style.display = _termMode === 'wall' ? 'inline-flex' : 'none';
     _buildGridPicker();
-    kbApplyState();
     if (sel.options.length !== wids.length) {
         const prev = sel.value;
         sel.innerHTML = wids.map(w => `<option value="${attrEsc(w)}">${escHtml(_paneTitle(w))}</option>`).join('');
@@ -2111,7 +1923,7 @@ async function renderTerminals(ctxRead) {   // ctxRead: refresh()'s context read
     // leaves exactly the right room above it (dock height feeds _wallFill).
     _refitWallForDock();
 
-    _kbPin();                 // CMX-102: a freshly built pane re-fits to the keybar if the keyboard is up
+    pinKeybar();              // CMX-102: a freshly built pane re-fits to the keybar if the keyboard is up
     _bindHeaderSwipe();       // header swipe → prev/next agent (idempotent)
     _bindFocusPromote();      // click a strip pane's header to promote it while Focus is on (idempotent)
     _refreshRooms();          // paint room accents on the first render, not 4s later
@@ -2536,7 +2348,7 @@ document.addEventListener('load', e => {
     if (!ifr || ifr.tagName !== 'IFRAME' || !ifr.classList.contains('term-frame')) return;
     _wireIframeShortcuts(ifr);
     _reportWatch(ifr);   // register this fresh connection's watched state (CMX-175)
-    _kbPin();            // CMX-154: a pane's terminal (first view, tile switch) fits the box it landed in
+    pinKeybar();         // CMX-154: a pane's terminal (first view, tile switch) fits the box it landed in
 }, true);
 
 // Rebuild the single-mode agent dropdown's <option> list in place, preserving
@@ -2750,7 +2562,7 @@ function _ctxBarHTML(wid, draggable) {
         ? `<a class="gs-pr" data-pr-for="${attrEsc(wid)}" hidden target="_blank" rel="noopener noreferrer"></a>
            <span class="gs-cost" hidden></span>` : '';
     // Files (CMX-299): opens the per-session changed-files/diff modal
-    // (diffpanel.js). Unlike every other chip in this bar it needs no poll to
+    // (frontend/src/features/diffmodal). Unlike every other chip in this bar it needs no poll to
     // populate — the modal fetches fresh on open — so it's just always
     // present, `pointer-events: auto` punched through the bar's own
     // `pointer-events: none` the same way `.gs-pr` already does.
@@ -3906,139 +3718,6 @@ function _bindFocusPromote() {
     _focusPromoteBound = true;
 }
 
-// ---- Mobile keybar v2: sticky-Ctrl modifier -------------------------------
-//
-// Modeled on Moshi's terminal keyboard. The Ctrl key is a three-state toggle
-// (tap cycles off → armed → locked → off). Engaging it reveals a Ctrl-letter
-// layer; tapping a letter sends C-<letter>. Armed = consumed after one letter
-// (Moshi's "next keystroke"); locked = stays for sequences (^C ^D ^Z without
-// re-tapping). The other keys (Esc/arrows/chars/paging) are independent of the
-// modifier — they have no useful Ctrl variant — and go straight through
-// termKey(). State lives in the keybar's data-ctrl attr (CSS reveals the layer).
-const _KB_CTRL_STATES = ['off', 'armed', 'locked'];
-
-function _kbCtrlState() {
-    const bar = document.getElementById('term-keybar');
-    return bar ? (bar.dataset.ctrl || 'off') : 'off';
-}
-function _kbSetCtrl(state) {
-    const bar = document.getElementById('term-keybar');
-    if (bar) bar.dataset.ctrl = state;
-}
-
-// Tap the Ctrl key: advance the three-state cycle.
-function kbCtrlTap() {
-    const i = _KB_CTRL_STATES.indexOf(_kbCtrlState());
-    _kbSetCtrl(_KB_CTRL_STATES[(i + 1) % _KB_CTRL_STATES.length]);
-}
-
-// Tap a Ctrl-letter: send C-<letter>; disarm if armed (one-shot), keep if locked.
-function kbCtrlKey(letter) {
-    termKey('C-' + letter);
-    if (_kbCtrlState() === 'armed') _kbSetCtrl('off');
-}
-
-// Pin the keybar just above the on-screen keyboard. When the soft keyboard
-// opens, the visual viewport shrinks below the layout viewport. We anchor the
-// bar's TOP to the visual viewport's bottom edge — (offsetTop + height) in
-// layout-viewport coords, minus the bar's own height — rather than lifting a
-// bottom:0 bar with translateY. The translate approach floats the bar up over
-// the terminal on iOS: rubber-band scrolling fires `scroll` with a changing
-// offsetTop, and a translated bottom-fixed bar chases it mid-gesture. Anchoring
-// `top` to the live viewport bottom is stable through that scroll. Best-effort:
-// where VisualViewport is unavailable the CSS bottom:0 keeps the bar in place.
-function _kbPin() {
-    const bar = document.getElementById('term-keybar');
-    const vv = window.visualViewport;
-    if (!vv) return;
-    // Publish how much of the layout viewport's BOTTOM the on-screen keyboard
-    // is covering, as --kb-occluded, so the pane's height rules can subtract it
-    // (style.css, mobile block). This is the whole reason the var exists: `dvh`
-    // tracks the browser's own dynamic chrome (address bar) but NOT the software
-    // keyboard, so on iOS a 100dvh pane keeps its full height when the keyboard
-    // opens and the terminal's bottom rows — the INPUT LINE you are typing into —
-    // sit behind it. VisualViewport is the only thing that reports the keyboard.
-    // Mobile-only: desktop browser zoom also moves the visual viewport, and we
-    // don't want that resizing wall tiles.
-    const occluded = _isMobileTerm()
-        ? Math.max(0, Math.round(window.innerHeight - (vv.offsetTop + vv.height)))
-        : 0;
-    document.documentElement.style.setProperty('--kb-occluded', occluded + 'px');
-    if (!bar) return;
-    const top = Math.max(0, Math.round(vv.offsetTop + vv.height - bar.offsetHeight));
-    bar.style.bottom = 'auto';
-    bar.style.top = top + 'px';
-    _kbFitPane(vv, bar, occluded);
-}
-
-// CMX-102: the phone pane's height, MEASURED rather than summed from constants.
-// The CSS calc (style.css, mobile block) subtracts --kb-occluded and a fixed set
-// of chrome constants, but it is blind to everything that is not one of them —
-// .canvas's 60px fab clearance, iOS's form-accessory row, a dvh that disagrees
-// with innerHeight once the keyboard is up — so with the keyboard open the pane
-// ran past the keybar and its bottom rows (Claude's status line, then each new
-// line of a multi-line prompt) sat behind it until you scrolled the page.
-// While the keyboard is open we therefore size the pane from live geometry: its
-// box ends exactly at the keybar's TOP edge, both read in layout-viewport coords
-// (the same coords `top` was just pinned in). ttyd's xterm re-fits to its iframe
-// on resize, so its rows follow. Keyboard closed / desktop → null (the CSS calc
-// stays in charge, unchanged).
-function _paneFitHeight({ mobile, occluded, vvTop, vvHeight, barHeight, paneTop }) {
-    if (!mobile || !(occluded > 0)) return null;
-    return Math.max(0, Math.floor(vvTop + vvHeight - barHeight - paneTop));
-}
-
-function _kbFitPane(vv, bar, occluded) {
-    const root = document.documentElement;
-    const pane = document.querySelector('#term-stage.term-single .term-pane');
-    const fit = pane ? _paneFitHeight({
-        mobile: _isMobileTerm(), occluded,
-        vvTop: vv.offsetTop, vvHeight: vv.height,
-        barHeight: bar.offsetHeight, paneTop: pane.getBoundingClientRect().top,
-    }) : null;
-    if (fit === null) {
-        root.classList.remove('kb-fit');
-        root.style.removeProperty('--kb-pane-fit-h');
-    } else {
-        root.style.setProperty('--kb-pane-fit-h', fit + 'px');
-        root.classList.add('kb-fit');
-    }
-    _refitPaneTerm();
-}
-
-// CMX-154: make the phone pane's terminal re-fit to the box it now has. Resizing
-// the pane resizes its ttyd iframe, and on a desktop browser that iframe's own
-// `resize` re-fits xterm — but on iPhone Safari the box shrank (keyboard up, pane
-// ended at the keybar) while xterm KEPT its taller row count, so its bottom rows
-// (the rest of a multi-line prompt, Claude's status line) sat clipped below the
-// tile footer until a scroll happened to re-fit it. So we don't rely on the
-// iframe's event: after every fit we call ttyd's own `window.term.fit()` (the
-// handle the font shim in app.py uses too). fit() reads the iframe's computed
-// size synchronously, so it sees the height just applied; it is a no-op when the
-// rows/cols already match. Phone only — desktop keeps ttyd's own resize handling.
-function _refitPaneTerm() {
-    if (!_isMobileTerm()) return;
-    const ifr = document.querySelector('#term-stage.term-single .term-pane iframe.term-frame');
-    let term = null;
-    try { term = ifr && ifr.contentWindow && ifr.contentWindow.term; } catch (e) { return; }
-    if (term && typeof term.fit === 'function') term.fit();
-}
-
-if (window.visualViewport) {
-    window.visualViewport.addEventListener('resize', _kbPin);
-    window.visualViewport.addEventListener('scroll', _kbPin);
-}
-// Re-fit when the keybar's OWN height changes (rotation, font size, the safe-area
-// inset its padding carries) or the window rotates — not only on viewport events.
-window.addEventListener('resize', _kbPin);
-// The pane's top is read live, so a scroll of the phone's scroller (.canvas)
-// moves it — re-fit then too, or the bottom edge drifts off the keybar.
-document.querySelector('.canvas')?.addEventListener('scroll', _kbPin, { passive: true });
-if (typeof ResizeObserver === 'function') {
-    const _kbBar = document.getElementById('term-keybar');
-    if (_kbBar) new ResizeObserver(() => _kbPin()).observe(_kbBar);
-}
-
 // --- SSE: the window set and terminal readiness (CMX-217: moved here from sse.js) ----------
 // The window set changed (util.js has already invalidated the agent cache). Reconcile by
 // stable window id, not the payload names: refetch the live agent set, drop tiles for
@@ -4074,8 +3753,8 @@ onEvent('term-ready', d => {
 });
 
 // --- Stage 0: ES-module exports ---
-export { adoptSidebarDefault, stepAgentMobile, SHARE_NOT_SANDBOXED_REASON, _kbPin, _paneFitHeight, _refitPaneTerm, SHARE_TYPING_OFF_REASON, _absorbFreshTerminals, _applyTermFocus, _cssEsc, _displayLabel, _paneKeyLabel, _jsStr, _minimized, _orderedWids, _refreshPaneLabels, _renderedWids, _shareBtnHTML, _shareExpiry, _shareModes, _shareTimeLeft, _sharedWids, _stopReadyPoll, _updateShareBtns, _stopShare, closeShareDialog, closeSharesSheet, openShareDialog, _swapToFrame, _termReady, dropTerminalPane, focusPaneByWid, isWallVisible, minimizePane, renderTerminals, setTermMode, termTick, shareBtnClick, startTermTimer, stopTermTimer };
+export { adoptSidebarDefault, stepAgentMobile, _absorbFreshTerminals, _applyTermFocus, _cssEsc, _displayLabel, _paneKeyLabel, _jsStr, _minimized, _orderedWids, _refreshPaneLabels, _renderedWids, _shareBtnHTML, _shareExpiry, _shareModes, _shareTimeLeft, _sharedWids, _stopReadyPoll, _updateShareBtns, _stopShare, closeSharesSheet, _swapToFrame, _termReady, dropTerminalPane, focusPaneByWid, isWallVisible, minimizePane, renderTerminals, setTermMode, termTick, shareBtnClick, startTermTimer, stopTermTimer };
 
 // --- Stage 0: window.chela — surface reachable from inline HTML handlers ---
 window.chela = window.chela || {};
-Object.assign(window.chela, { applyGridLayout, copyWindowId, kbCtrlKey, kbCtrlTap, kbToggle, openSharesSheet, orchestratorBtnClick, renamePane, renderTerminals, retryReady, setTermMode, shareBtnClick, shareCurrentAgent, termActionClick, termKey, termKillClick, termKillConfirm, termMaxFor, termMinFor, termMobileFull, termPaste, termPinToggle, termScrollToggle, toggleDockChip, toggleGridRow, togglePaneOverflow, toggleRecap, toggleWallAuto, toggleWallFocus, toggleWallLock, wireDragStart, wireRoomClick });
+Object.assign(window.chela, { applyGridLayout, copyWindowId, openDiffModal, openSharesSheet, orchestratorBtnClick, renamePane, renderTerminals, retryReady, setTermMode, shareBtnClick, shareCurrentAgent, termActionClick, termKey, termKillClick, termKillConfirm, termMaxFor, termMinFor, termMobileFull, termPaste, termPinToggle, toggleDockChip, toggleGridRow, togglePaneOverflow, toggleRecap, toggleWallAuto, toggleWallFocus, toggleWallLock, wireDragStart, wireRoomClick });

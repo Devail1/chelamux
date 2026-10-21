@@ -18,6 +18,7 @@
 import { beforeAll, test } from 'vitest';
 import assert from 'node:assert/strict';
 import { JSDOM } from 'jsdom';
+import { exposeDomConstructors } from './js_helpers/dashboard_dom.mjs';
 
 const PANEL = `
 <div class="panel" id="panel-terminals">
@@ -79,6 +80,7 @@ beforeAll(async () => {
         'getComputedStyle', 'requestAnimationFrame', 'cancelAnimationFrame']) {
         Object.defineProperty(globalThis, k, { value: dom.window[k], writable: true, configurable: true });
     }
+    exposeDomConstructors(dom.window);   // CMX-239: the share dialog is React on Radix
     globalThis.GridStack = fakeGridStack();
     globalThis.fetch = fakeFetch;
     dom.window.document.elementFromPoint = () => null;
@@ -116,7 +118,7 @@ test('clicking Share mints a share and opens the Active shares sheet, not a popo
     await terminals.shareBtnClick(shareBtn, '@1');
     // CMX-403: an unshared pane first opens the share DIALOG (access choice, view only
     // by default); confirming it is what mints the share.
-    const go = document.querySelector('#share-dialog-backdrop .sd-share');
+    const go = document.querySelector('.share-dialog .sd-share');
     assert.ok(go, 'Share must open the access dialog before minting');
     go.click();
     await flush();   // let the /share POST + openSharesSheet's own reconcile fetch resolve
@@ -126,7 +128,7 @@ test('clicking Share mints a share and opens the Active shares sheet, not a popo
         'the per-pane popover must be gone — Share now opens the sheet directly');
     const row = document.querySelector('.shares-sheet .ss-row[data-wid="@1"]');
     assert.ok(row, 'the Active shares sheet must open and show a row for the just-shared pane');
-    const values = Array.from(row.querySelectorAll('.tsp-in')).map(i => i.value);
+    const values = Array.from(row.querySelectorAll('.ss-row-body input')).map(i => i.value);
     assert.ok(values.includes('https://relay.test/j/abc'), 'row must show the freshly-minted join link');
     assert.ok(values.includes('PAIRXYZ'), 'row must show the freshly-minted pairing code');
 });
@@ -142,7 +144,7 @@ test('the Active shares sheet shows the join link + pairing code, not just Stop'
 
     const row = document.querySelector('.shares-sheet .ss-row[data-wid="@1"]');
     assert.ok(row, 'sheet must render a row for the shared pane');
-    const values = Array.from(row.querySelectorAll('.tsp-in')).map(i => i.value);
+    const values = Array.from(row.querySelectorAll('.ss-row-body input')).map(i => i.value);
     assert.ok(values.includes('https://relay.test/j/xyz'), 'row must show the join link');
     assert.ok(values.includes('PAIR456'), 'row must show the pairing code');
     assert.ok(row.querySelector('.ss-stop'), 'Stop must still be present');
