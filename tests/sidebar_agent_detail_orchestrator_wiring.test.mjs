@@ -15,7 +15,7 @@
 // (pytest via tests/test_js_suites.py; needs `pnpm install` for jsdom).
 import { beforeAll, test } from 'vitest';
 import assert from 'node:assert/strict';
-import { bootDashboardDom, flush, sliceTemplate } from './js_helpers/dashboard_dom.mjs';
+import { bootDashboardDom, flush, ORCHESTRATOR, sliceTemplate } from './js_helpers/dashboard_dom.mjs';
 
 const CANVAS_HTML = sliceTemplate(
     '<div class="panel" id="panel-agent-detail">', '<!-- /panel-work -->');
@@ -66,7 +66,7 @@ beforeAll(async () => {
             const body = u.includes('/api/agents/context') ? [] : {};
             return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve(body) });
         },
-        extraModules: ['util.js', 'nav.js', 'orchestrator.js'],
+        extraModules: ['util.js', 'nav.js', ORCHESTRATOR],
     }));
     await flush();
     await flush();

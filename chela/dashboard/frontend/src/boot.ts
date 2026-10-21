@@ -7,7 +7,6 @@ import { renderNav, selectView } from '../../static/js/nav';
 import { startWorkPoll } from '../../static/js/work';
 import { VIEWS } from '../../static/js/views';
 import { findView } from '../../static/js/viewreg';
-import '../../static/js/decisions';
 import { BOOT } from './shared/api/index.ts';
 import { openEvents } from './shared/events/index.ts';
 import { refresh, setViewTicks, startScheduler } from './shared/scheduler/index.ts';

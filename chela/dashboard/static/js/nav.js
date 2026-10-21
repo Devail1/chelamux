@@ -1,6 +1,6 @@
 // --- Stage 0: ES-module imports ---
 import { $, $$, TERMINALS_ON, _agentProject, _agentsCache, agentDotColor, api, attrEsc, currentTab, escHtml, lucideIcon, publish, setAgentsCache, setCurrentTab, updateTabSignal, wantsHuman } from './util';
-import { onOrchestratorChange, orchestratorState } from './orchestrator';
+import { onOrchestratorChange, orchestratorState } from '../../frontend/src/shared/orchestrator';
 import { refreshSummary } from '../../frontend/src/features/primarymenu';
 import { detailAgent, redrawAgentDetail, setAgentDetailHost } from '../../frontend/src/features/agentdetail';
 import { showAddSchedule } from '../../frontend/src/features/schedules';
@@ -877,7 +877,7 @@ async function refreshSidebar(onAgents, ctxRead) {
 
 // The orchestrator slot (who owns the decisions inbox) changes independently of
 // the agent list poll — a click on ANY pane's toggle (terminals.js) or the
-// decisions-panel dropdown (decisions.js) fires this for every listener. Redraw
+// Decisions inbox's re-register (frontend/src/features/decisions) fires this for every listener. Redraw
 // off the already-cached agent list; no need to refetch /api/agents just to move
 // one badge.
 onOrchestratorChange(() => {
@@ -885,18 +885,11 @@ onOrchestratorChange(() => {
     redrawAgentDetail();   // its Role row reads the slot too
 });
 
-// CMX-76: the sidebar header's inbox icon. The orchestrator HOLDS the inbox, so with
-// one registered a click jumps to it — its pane focused (or its detail view, with no
-// wall), its row scrolled into view (its folder group expanded if collapsed) — and the
-// decisions log still opens over it, so nothing the icon did before is lost (the log
-// is its only way in, and opening it is what clears the unread badge). With no
-// orchestrator (or its window gone) the icon only opens the log, as it always has.
-function inboxClick() {
-    jumpToOrchestrator();
-    if (window.chela && window.chela.openDecisionsMenu) window.chela.openDecisionsMenu();
-}
-
-// Focus the orchestrator's pane and row. NOT selectAgent: that one TOGGLES — on a pane
+// CMX-76: the sidebar header's inbox icon (the Decisions island, frontend/src/features/
+// decisions) calls this on a click before it opens the log: the orchestrator HOLDS the inbox,
+// so with one registered the click jumps to it, its pane focused (or its detail view, with no
+// wall), its row scrolled into view (its folder group expanded if collapsed).
+// NOT selectAgent: that one TOGGLES — on a pane
 // already open on the wall it minimizes it, the opposite of "jump to". Returns false
 // when there is no orchestrator window to jump to.
 function jumpToOrchestrator() {
@@ -917,15 +910,6 @@ function jumpToOrchestrator() {
     return true;
 }
 
-// The icon says what a click will do (a tooltip / screen-reader label, not just a dot).
-function _syncInboxBtn() {
-    const btn = document.getElementById('btn-decisions');
-    if (!btn) return;
-    const label = orchestratorState().wid ? 'Decisions inbox: jump to the orchestrator' : 'Decisions inbox';
-    btn.title = orchestratorState().wid ? 'Decisions: jump to the orchestrator' : 'Decisions';
-    btn.setAttribute('aria-label', label);
-}
-onOrchestratorChange(_syncInboxBtn);
 
 // The WORK badges used to be a THIRD independent poller of /api/dispatcher, right
 // here — fetching the same payload the Dispatch and Kanban views were each already
@@ -2907,8 +2891,8 @@ function closeShortcuts() {
 document.body.dataset.theme = localStorage.getItem('chela_theme') || 'dark';
 
 // --- Stage 0: ES-module exports ---
-export { sidebarOrder, altSwitchKeydown, setAltHeld, openSidebarRow, archiveKeys, rowMenuAction, inboxClick, jumpToOrchestrator, refreshArchive, refreshLayout, toggleArchivedSection, unarchiveKeys, unarchiveRow, _closeRecentUndoToast, closeShortcuts, deleteCustomGroup, newCustomGroup, groupMenuAction, groupNewSession, moveToGroup, renameCustomGroup, toggleGroup, viewMenuAction, dispatcherToggleLabel, openPalette, openShortcuts, refreshRecentSessions, refreshSidebar, renderNav, renderRecentSessions, renderSidebarAgents, selectView, updateCtxCache };
+export { sidebarOrder, altSwitchKeydown, setAltHeld, openSidebarRow, archiveKeys, rowMenuAction, jumpToOrchestrator, refreshArchive, refreshLayout, toggleArchivedSection, unarchiveKeys, unarchiveRow, _closeRecentUndoToast, closeShortcuts, deleteCustomGroup, newCustomGroup, groupMenuAction, groupNewSession, moveToGroup, renameCustomGroup, toggleGroup, viewMenuAction, dispatcherToggleLabel, openPalette, openShortcuts, refreshRecentSessions, refreshSidebar, renderNav, renderRecentSessions, renderSidebarAgents, selectView, updateCtxCache };
 
 // --- Stage 0: window.chela — surface reachable from inline HTML handlers ---
 window.chela = window.chela || {};
-Object.assign(window.chela, { sidebarOrder, _updateFlowDeps, applyUpdate, archiveKeys, rowMenuAction, inboxClick, jumpToOrchestrator, toggleArchivedSection, unarchiveKeys, unarchiveRow, groupMenuAction, groupNewSession, moveToGroup, newCustomGroup, renameCustomGroup, deleteCustomGroup, viewMenuAction, clearRecentSessions, clearSettingsSearch, closePalette, closeShortcuts, closeSidebar, dismissRecentSession, openPalette, openShortcuts, _palRun, _renderPalette, resumeSession, saveDispatch, saveProjectsDir, saveTiming, selectAgent, setConcurrency, setTelegramDelete, deleteArchivedTopics, selectSettingsTab, selectView, setAgentModel, setAgentPermissionMode, setCollabName, setFileDrop, setRemoteControl, setRunToastsMuted, setApprovalNotify, setShareTyping, setTermFont, setTermLatin, setTermSize, setTheme, settingsSearch, sidebarJumpInput, toggleDispatcherSessions, toggleGroup, toggleSettings, toggleSidebar, undoDismissRecent });
+Object.assign(window.chela, { sidebarOrder, _updateFlowDeps, applyUpdate, archiveKeys, rowMenuAction, jumpToOrchestrator, toggleArchivedSection, unarchiveKeys, unarchiveRow, groupMenuAction, groupNewSession, moveToGroup, newCustomGroup, renameCustomGroup, deleteCustomGroup, viewMenuAction, clearRecentSessions, clearSettingsSearch, closePalette, closeShortcuts, closeSidebar, dismissRecentSession, openPalette, openShortcuts, _palRun, _renderPalette, resumeSession, saveDispatch, saveProjectsDir, saveTiming, selectAgent, setConcurrency, setTelegramDelete, deleteArchivedTopics, selectSettingsTab, selectView, setAgentModel, setAgentPermissionMode, setCollabName, setFileDrop, setRemoteControl, setRunToastsMuted, setApprovalNotify, setShareTyping, setTermFont, setTermLatin, setTermSize, setTheme, settingsSearch, sidebarJumpInput, toggleDispatcherSessions, toggleGroup, toggleSettings, toggleSidebar, undoDismissRecent });

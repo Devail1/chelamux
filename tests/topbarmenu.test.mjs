@@ -43,10 +43,11 @@ test('.sidebar-foot in the REAL index.html holds the readouts and the ONE menu, 
 });
 
 test('#btn-decisions lives in .sidebar-head in the REAL index.html (CMX-393)', () => {
+    // CMX-228: the Decisions island draws the button into its slot, after the toggle.
     const head = HTML.match(/<div class="sidebar-head">[\s\S]*?\n    <\/div>/)[0];
-    const buttonIds = [...head.matchAll(/<button[^>]*\bid="([^"]+)"/g)].map(m => m[1]);
-    assert.deepEqual(buttonIds, ['btn-menu', 'btn-decisions'],
-        `.sidebar-head has unexpected buttons: ${buttonIds.join(', ')}`);
+    const ids = [...head.matchAll(/<(?:button|span)[^>]*\bid="([^"]+)"/g)].map(m => m[1]);
+    assert.deepEqual(ids, ['btn-menu', 'decisions-island'],
+        `.sidebar-head has unexpected controls: ${ids.join(', ')}`);
 });
 
 test('#btn-shares lives in .safety-float, not .sidebar-foot, in the REAL index.html', () => {
@@ -64,6 +65,8 @@ beforeAll(async () => {
     const PALETTE = sliceTemplate('<div class="palette-overlay" id="palette"', '</div>\n\n<!-- Keyboard shortcuts')
         .replace(/\n\n<!-- Keyboard shortcuts$/, '');
     await bootDashboardDom({ body: APP_HTML + PALETTE });
+    // The islands commit on a later turn than the boot's own reads: wait for the inbox's.
+    for (let i = 0; i < 100 && !document.querySelector('#btn-decisions'); i++) await flush();
     for (let i = 0; i < 5; i++) await flush();
 });
 

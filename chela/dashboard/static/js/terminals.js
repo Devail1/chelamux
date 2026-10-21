@@ -3,7 +3,7 @@ import { $, BASE_PATH, TERMINALS_ON, WALL_TILE_DISPATCHED, _agentsCache, api, at
 import { altSwitchKeydown, openPalette, renderSidebarAgents, selectView, setAltHeld, sidebarOrder, updateCtxCache } from './nav';
 import { orderByList, windowRunDot } from '../../frontend/src/features/sidebar/model';
 import { applyRoomAccents, bezierPath, resolveDrop } from './wire';
-import { onOrchestratorChange, orchestratorRelease, orchestratorState, orchestratorSubscribe } from './orchestrator';
+import { onOrchestratorChange, orchestratorRelease, orchestratorState, orchestratorSubscribe } from '../../frontend/src/shared/orchestrator';
 import { actionBarKind, costView, ctxLevel, focusLayout, gridRowCollapsed, prChip, rankOrder, recapView, stateTitle, tileState } from './wallmodel';
 import { openDiffModal } from '../../frontend/src/features/diffmodal';
 import { pinKeybar } from '../../frontend/src/features/keybar';

@@ -590,8 +590,8 @@ describe('CMX-393 fonts: pane headers, pane footers and modals are the Geist chr
     test('the Decisions modal, opened from the head\'s inbox button, is the Geist stack', async () => {
         ready();
         await page.locator('#btn-decisions').click();
-        await page.waitForSelector('#decisions-menu.open .modal-sheet', { state: 'visible', timeout: 5000 });
-        for (const sel of ['#decisions-menu .modal-sheet-head', '#decisions-menu .modal-sheet-body']) {
+        await page.waitForSelector('[role="dialog"].modal-decisions', { state: 'visible', timeout: 5000 });
+        for (const sel of ['.modal-decisions h3', '.modal-decisions .decisions-body']) {
             const f = await familyOf(sel);
             assert.match(f, GEIST, `${sel} font-family is ${f}`);
         }
@@ -600,7 +600,7 @@ describe('CMX-393 fonts: pane headers, pane footers and modals are the Geist chr
 
     test('the settings/menu popover, opened from the foot\'s gear, is the Geist stack', async () => {
         ready();
-        await page.evaluate(() => window.chela.hideDecisionsMenu && window.chela.hideDecisionsMenu());
+        if (await page.locator('[role="dialog"].modal-decisions').count()) await page.keyboard.press('Escape');
         await page.locator('#btn-primary-menu').click();
         // the gear menu (CMX-219: the primary-menu island, a kit Menu)
         await page.waitForSelector('[role="menu"]', { state: 'visible', timeout: 5000 });

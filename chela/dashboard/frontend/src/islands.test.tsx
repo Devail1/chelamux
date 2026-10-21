@@ -64,3 +64,16 @@ test('boot mounts the chrome into its slots (CMX-219): pills, gear, New session,
   expect(document.querySelector('[role="dialog"] h3')?.textContent).toBe('Send Message to w1');
   vi.unstubAllGlobals();
 });
+
+test('boot mounts the Decisions inbox into its slot and the task modal island (CMX-228)', async () => {
+  vi.stubGlobal('fetch', () => Promise.resolve({ ok: true, json: () => Promise.resolve({}) }));
+  document.body.innerHTML = '<span id="decisions-island"></span><div id="task-modal-island"></div>';
+  Reflect.deleteProperty(window, 'chelaBridge');
+  await act(async () => boot(window));
+  expect(document.querySelector('#decisions-island #btn-decisions')).not.toBeNull();
+  const { openTaskModal, closeTaskModal } = await import('./features/taskmodal/index.ts');
+  await act(async () => openTaskModal({ title: 'a task' }));
+  expect(document.querySelector('[role="dialog"].modal-task')?.textContent).toContain('a task');
+  await act(async () => closeTaskModal());
+  vi.unstubAllGlobals();
+});

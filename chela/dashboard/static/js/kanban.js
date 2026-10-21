@@ -3,13 +3,13 @@ import { $, BASE_PATH, attrEsc, escHtml, lucideIcon } from './util';
 import { runPrCellHtml as _runPrCell, taskProgressChipHtml as _taskProgressChip } from '../../frontend/src/features/runs/legacy';
 import { postWorkDelete } from '../../frontend/src/features/runs';
 import { pollWork } from './work';
-import { openTaskModal } from './taskmodal';
-import { displayTitle, riskChip } from './taskmodalmodel';
-import { knInline } from './knowledge';
+import { openTaskModal } from '../../frontend/src/features/taskmodal';
+import { displayTitle } from '../../frontend/src/features/taskmodal/model';
+import { inlineHtml as knInline } from '../../frontend/src/shared/markdown';
 import { KANBAN_LANES, KANBAN_LANE_LABELS, laneOf } from './kanbanlanemodel';
 import { columnKey, runStateBadges, sampledLabel, trackerBoard, trackerColumns } from './kanbanlinearmodel';
 import { hiddenSummary, loadColPrefs, saveColPrefs, splitColumns } from './kanbanhiddenmodel';
-import { runCardNote, runCloseAction, runDisplayId as _runDisplayId, runHandoffNote, runStallNote } from '../../frontend/src/features/runs/model';
+import { riskChip, runCardNote, runCloseAction, runDisplayId as _runDisplayId, runHandoffNote, runStallNote } from '../../frontend/src/features/runs/model';
 
 // ---------------------------------------------------------------------------
 // Render: the Board segment of WORK (the global cross-workflow kanban)

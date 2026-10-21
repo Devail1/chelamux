@@ -2,7 +2,7 @@
 import { act, fireEvent, render, screen } from '@testing-library/react';
 import { useState } from 'react';
 import { expect, test, vi } from 'vitest';
-import { AnchoredPopover, Button, Dialog, DialogClose, ItemButton, Menu, Popover, Sheet, Toast, ToastProvider, Tooltip } from '../index.ts';
+import { AnchoredPopover, Button, Dialog, DialogClose, ItemButton, Menu, Popover, Sheet, TextInput, Toast, ToastProvider, Tooltip } from '../index.ts';
 import { must } from './setup.ts';
 
 function DialogHarness({ onOpenChange = () => {} }: { onOpenChange?: (o: boolean) => void }) {
@@ -256,4 +256,53 @@ test('a click on a Toast closes it; a click on a link inside it does not', () =>
   expect(onOpenChange).not.toHaveBeenCalled();
   fireEvent.click(must(document.querySelector('.run-toast')));
   expect(onOpenChange).toHaveBeenCalledWith(false);
+});
+
+test('Dialog: focus returns to the opener even when a field inside took focus with autoFocus (CMX-228)', async () => {
+  function Harness() {
+    const [open, setOpen] = useState(false);
+    return (
+      <>
+        <button onClick={() => setOpen(true)}>opener</button>
+        <Dialog open={open} onOpenChange={setOpen} title="Auto">
+          <TextInput label="first" value="" onChange={() => {}} autoFocus />
+        </Dialog>
+      </>
+    );
+  }
+  render(<Harness />);
+  const opener = screen.getByRole('button', { name: 'opener' });
+  act(() => opener.focus());
+  fireEvent.click(opener);
+  expect(document.activeElement).toBe(screen.getByRole('textbox', { name: 'first' }));
+  fireEvent.keyDown(screen.getByRole('dialog'), { key: 'Escape' });
+  await act(() => new Promise((r) => setTimeout(r, 0)));
+  expect(document.activeElement).toBe(opener);
+});
+
+test('Dialog: one dialog handing over to another leaves focus in the new one', async () => {
+  function Harness() {
+    const [which, setWhich] = useState<'a' | 'b' | null>(null);
+    return (
+      <>
+        <button onClick={() => setWhich('a')}>opener</button>
+        <Dialog open={which === 'a'} onOpenChange={(o) => !o && setWhich(null)} title="A">
+          <button onClick={() => setWhich('b')}>to b</button>
+        </Dialog>
+        <Dialog open={which === 'b'} onOpenChange={(o) => !o && setWhich(null)} title="B">
+          <button>in b</button>
+        </Dialog>
+      </>
+    );
+  }
+  render(<Harness />);
+  const opener = screen.getByRole('button', { name: 'opener' });
+  act(() => opener.focus());
+  fireEvent.click(opener);
+  fireEvent.click(screen.getByRole('button', { name: 'to b' }));
+  await act(() => new Promise((r) => setTimeout(r, 0)));
+  expect(screen.getByRole('dialog', { name: 'B' }).contains(document.activeElement)).toBe(true);
+  fireEvent.keyDown(screen.getByRole('dialog'), { key: 'Escape' });
+  await act(() => new Promise((r) => setTimeout(r, 0)));
+  expect(document.activeElement).toBe(opener); // B returns to what A was opened from
 });

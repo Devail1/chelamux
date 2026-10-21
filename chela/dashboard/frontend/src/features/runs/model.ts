@@ -124,7 +124,7 @@ export function trackerHref(item: { tracker_url?: string | null } | null | undef
 const RISK_CLS: Record<string, string> = { high: 'risk-high', normal: 'risk-normal', low: 'risk-low' };
 export function riskChip(item: { risk?: unknown; risk_reason?: string | null } | null | undefined) {
   const level = item && typeof item.risk === 'string' ? item.risk.toLowerCase() : '';
-  const cls = RISK_CLS[level];
+  const cls = Object.hasOwn(RISK_CLS, level) ? RISK_CLS[level] : undefined;
   return cls ? { label: `risk: ${level}`, cls, reason: (item && item.risk_reason) || '' } : null;
 }
 
