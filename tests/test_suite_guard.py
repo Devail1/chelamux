@@ -502,9 +502,11 @@ def inbox_env(tmp_path, monkeypatch):
 
 
 def test_a_queued_self_check_past_the_ceiling_gets_no_notice(inbox_env):
+    """4990s of running, 10s queued so far: past the 3600s ceiling even net of the wait,
+    and still no notice while it waits."""
     sc = {"what": "task-finished self-check", "since": 0.0, "pid": 5}
     assert _inbox_tick(inbox_env, 5000.0, selfcheck=sc,
-                       slot_wait={"waiting_since": 100.0, "waited": 0.0}) == []
+                       slot_wait={"waiting_since": 4990.0, "waited": 0.0}) == []
     assert _inbox_tick(inbox_env, 5000.0, selfcheck=sc) == ["run_selfcheck_long"]
 
 
