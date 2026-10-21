@@ -108,7 +108,8 @@ def test_scope_probe_pins_its_argv_and_fails_closed(monkeypatch):
                             lambda *a, _e=exc, **k: (_ for _ in ()).throw(_e))
         assert suite_guard._scope_works() is False
     monkeypatch.setattr(suite_guard.memcap, "available", lambda: False)
-    assert suite_guard._scope_works() is False
+    monkeypatch.setattr(suite_guard.subprocess, "run", lambda *a, **k: pytest.fail("probed"))
+    assert suite_guard._scope_works() is False       # no systemd-run: not even probed
     assert suite_guard._scope_works() is False       # a failure is not remembered as success
 
 
