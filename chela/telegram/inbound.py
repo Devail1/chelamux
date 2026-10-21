@@ -88,7 +88,8 @@ def _keyboard_rows(markup) -> list[list[dict]]:
     return rows
 
 # A sender delivers text to a tmux window: ``send(window_id, text) -> ok``.
-# Production is ``chela.messenger.send_tmux``; tests inject a recording stub.
+# Production is ``chela.messenger.deliver_prompt`` (send_tmux that refuses to append to
+# an unsubmitted prompt, CMX-117); tests inject a recording stub.
 Sender = Callable[[str, str], bool]
 
 # Bridge-level slash commands: handled HERE (never forwarded to Claude Code),
@@ -240,7 +241,7 @@ class TopicRouter:
         # named topic reports its id. Normalise a configured topic to str so it
         # compares cleanly against the int thread id off the wire.
         self._topic_id = str(topic_id) if topic_id not in (None, "") else None
-        self._sender = sender or messenger.send_tmux
+        self._sender = sender or messenger.deliver_prompt
 
     @property
     def chat_id(self) -> str | None:
@@ -297,7 +298,7 @@ class RegistryRouter:
         # The chat gate is the CMX-8 security boundary; a registry with no chat
         # bound routes nothing (fail-closed) rather than accepting every chat.
         self._chat_id = str(registry.chat_id) if registry.chat_id is not None else None
-        self._sender = sender or messenger.send_tmux
+        self._sender = sender or messenger.deliver_prompt
 
     @property
     def chat_id(self) -> str | None:
@@ -547,6 +548,9 @@ def build_application(
             return
         try:
             ok = router.route(chat_id, thread_id, text)
+        except messenger.PendingDraft:  # appending would merge it into that turn
+            await msg.reply_text(media.PENDING_DRAFT_TEXT)
+            return
         except Exception:  # a stuck tmux send must not wedge the update queue
             log.exception("inbound routing failed")
             ok = False
@@ -565,8 +569,8 @@ def build_application(
 
         The window is resolved from the message's OWN topic through
         ``router.resolve`` (the same chat/topic gate as a text message); the file
-        is delivered via :func:`chela.messenger.send_tmux` so Claude Code can
-        ``Read`` the image by path. See :func:`chela.telegram.media.receive_photo`.
+        is delivered via :func:`chela.messenger.deliver_image`, which verifies the
+        submit, so Claude Code can ``Read`` the image by path. See :func:`chela.telegram.media.receive_photo`.
         """
         msg = update.message
         if msg is None or not getattr(msg, "photo", None):
@@ -578,7 +582,7 @@ def build_application(
             await media.receive_photo(
                 msg, chat_id, thread_id,
                 resolve=router.resolve,
-                deliver=messenger.send_tmux,
+                deliver=messenger.deliver_image,
                 docs_dir=config.CHELA_DIR / "documents",
             )
         except Exception:  # a media hiccup must not wedge the update queue
@@ -601,7 +605,7 @@ def build_application(
             await media.receive_document(
                 msg, chat_id, thread_id,
                 resolve=router.resolve,
-                deliver=messenger.send_tmux,
+                deliver=messenger.deliver_prompt,
                 docs_dir=config.CHELA_DIR / "documents",
             )
         except Exception:  # a media hiccup must not wedge the update queue
