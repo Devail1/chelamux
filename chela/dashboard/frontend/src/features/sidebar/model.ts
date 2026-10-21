@@ -770,7 +770,7 @@ export function clampWidth(w: unknown): number {
 }
 
 // --- The nav rows (CMX-278) ---------------------------------------------------
-/** A badge slot on a nav row (views.js); its text is work.js's, by id. */
+/** A badge slot on a nav row (views.js); its text is the Work poll's (features/work/lib/poll.ts), by id. */
 export interface NavBadge { id: string; cls?: string; title?: string; text?: string }
 /** One views.js view, as the nav row draws it. */
 export interface NavItem { id: string; label?: string; lucide?: string; badges?: NavBadge[] }

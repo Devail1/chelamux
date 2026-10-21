@@ -4,7 +4,7 @@ import { openPalette, selectView } from './nav';
 import { altSwitchKeydown, renderSidebarAgents, setAltHeld, sidebarOrder, updateCtxCache } from '../../frontend/src/features/sidebar/controller';
 import { orderByList, windowRunDot } from '../../frontend/src/features/sidebar/model';
 import { applyRoomAccents, bezierPath, resolveDrop } from './wire';
-import { onOrchestratorChange, orchestratorRelease, orchestratorState, orchestratorSubscribe } from './orchestrator';
+import { onOrchestratorChange, orchestratorRelease, orchestratorState, orchestratorSubscribe } from '../../frontend/src/shared/orchestrator';
 import { actionBarKind, costView, ctxLevel, focusLayout, gridRowCollapsed, prChip, rankOrder, recapView, stateTitle, tileState } from './wallmodel';
 import { openDiffModal } from '../../frontend/src/features/diffmodal';
 import { pinKeybar } from '../../frontend/src/features/keybar';

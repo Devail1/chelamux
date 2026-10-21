@@ -12,6 +12,7 @@
 import type { Register } from 'claude-code'
 import { refresh } from './status'
 import { band as needsBand, start as needsStart } from './needsyou'
+import { report as reportDenial } from './denial'
 
 const RESERVED = new Set(['tool', 'tool_use_id', 'consent', 'agentId', 'requestMeta'])
 
@@ -74,7 +75,12 @@ export const register: Register = (on, options) => {
   on('classic.SessionEnd', ($, e, next) => { void relay($, e); return next(e) })
   on('classic.Stop', ($, e, next) => { void relay($, e); return next(e) })
   on('classic.PostToolUse', ($, e, next) => { void relay($, e); return next(e) })
-  on('classic.PermissionDenied', ($, e, next) => { void relay($, e); return next(e) })
+  // Mod 4/4 (denial.ts): the denial goes to the inbox directly, besides the event post
+  on('classic.PermissionDenied', ($, e, next) => {
+    void relay($, e)
+    void reportDenial($, e)
+    return next(e)
+  })
 
   // PreToolUse rides `tool.call`, not `classic.PreToolUse`: the classic event fires BENEATH
   // every tool.call hook, so a call the gate denies would never be posted — the shell

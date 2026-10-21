@@ -95,8 +95,9 @@ dependency, and it renders a consistent value even during concurrent rendering. 
 
 Since CMX-217 the page's state is `src/shared/store/`, one file per slice (`view.ts`, the
 active view; `agents.ts`, the bridge's `agents` store; `work.ts`, the last `/api/dispatcher`
-payload, which `work.js`'s one poll publishes and the Runs and New-task islands read; they ask
-for a fresh poll with `refreshWork()`, CMX-231). Legacy imports those objects through
+payload, which `src/features/work`'s one poll (a scheduler lane, CMX-233) publishes and the Work
+view and New-task dialog read; they ask for a fresh poll with `refreshWork()`, CMX-231; `orchestrator.ts`, who holds the decisions
+inbox, read and written through `src/shared/orchestrator`, CMX-228). Legacy imports those objects through
 `util.js`, whose `currentTab` and `_agentsCache` are a facade over them: the store is the
 truth, the live bindings mirror it. `sidebarLayout` still goes through `window.chelaBridge`:
 
@@ -140,6 +141,13 @@ from `src/shared/icons`, a map from a meaning to a Lucide icon.
 The desktop width (CMX-278) is `--sidebar-w` on the root element, set from the layout's `width`
 (clamped to 264-480 px, default 288; `chela/sidebar_layout.py` clamps the same). The handle sets
 it live while dragging and saves it on release. The phone drawer keeps its own 264 px.
+
+### Markdown
+
+`src/shared/markdown` renders the task briefs and judge reports (`markdownHtml`, `inlineHtml`).
+It escapes every character of its source and links only http(s), mailto and relative URLs: a
+`javascript:`/`data:` link renders as its text (CMX-228). React renders its output only through
+`<Markdown>`, the app's one `dangerouslySetInnerHTML`.
 
 ## Polls, pushes and the boot config
 

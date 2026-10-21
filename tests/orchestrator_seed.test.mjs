@@ -1,4 +1,4 @@
-// main.js's INITIAL SEED of orchestrator state — the other half of "the pane
+// The boot's INITIAL SEED of orchestrator state (shared/orchestrator's lane, CMX-228) — the other half of "the pane
 // buttons reflect the real owner without waiting on a tab-open or an SSE delta."
 //
 // orchestrator_ui.test.mjs proves the SSE-delta repaint path (a frame arrives ->
@@ -101,7 +101,7 @@ beforeAll(async () => {
     // triggering a second read.
     await import('../chela/dashboard/frontend/src/boot.ts');
     const util = await import('../chela/dashboard/static/js/util.js');
-    orchestrator = await import('../chela/dashboard/static/js/orchestrator.js');
+    orchestrator = await import('../chela/dashboard/frontend/src/shared/orchestrator/index.ts');
     util.setAgentsCache(AGENTS);
 
     // Flush the seed fetch's microtask chain (fetch -> res.json() -> _apply ->

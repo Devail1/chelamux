@@ -125,7 +125,7 @@ import time
 from contextlib import contextmanager
 from pathlib import Path
 
-from chela import agent_manager, discovery, epoch, event_log, judge, messenger, notify, sessions, transcripts
+from chela import agent_manager, discovery, epoch, event_log, hooks, judge, messenger, notify, sessions, transcripts
 from chela import config, stall_alerts
 from chela.config import INBOX_ENABLED
 from chela.hold import human_duration
@@ -250,8 +250,10 @@ def _empty() -> dict:
             "expected_edges": {}, "review_wait": {}, "hold_seen": None, "hold_ended": None,
             "ci_red_seen": {}, "conflict_seen": {}, "stuck": {},
             # CMX-155: the event-log cursor of the classifier-denial scan, and the per-run
-            # cooldown latch of its notice (`denied_events`).
-            "denied_cursor": None, "denied_seen": {}}
+            # cooldown latch of its notice (`denied_events`). CMX-184: the tool_use ids of the
+            # denials already judged, so the Mod's direct post and the event-log copy of ONE
+            # denial are one notice (`denied_keys`).
+            "denied_cursor": None, "denied_seen": {}, "denied_keys": {}}
 
 
 def _clear_address_alarm(store: dict) -> None:
@@ -2995,6 +2997,11 @@ def _live_judge_heads(runs: list[dict], queue: list[dict]) -> dict[str, str]:
 
 DENIED_KIND = "run_permission_denied"
 DENIED_COOLDOWN_S = 10 * 60   # at most one notice per run per this many seconds
+DENIED_KEY_TTL_S = 60 * 60    # how long a denial's tool_use id is remembered (CMX-184)
+DENIED_REASON_CHARS = 200
+WID_RE = re.compile(r"@\d+\Z")
+# what the Mod's direct post carries besides `wid` — the PermissionDenied hook's own fields
+DENIAL_FIELDS = ("session_id", "tool_name", "tool_input", "tool_use_id", "reason")
 
 
 def read_denials(store: dict, now: float) -> tuple[list[dict], dict]:
@@ -3028,6 +3035,12 @@ def denied_events(denials: list[dict], runs: list[dict], store: dict, now: float
     already sees its denials as tool results, and a human session keeps the phone push only.
     One notice per run per :data:`DENIED_COOLDOWN_S` (``store["denied_seen"]``), so a looping
     agent cannot flood the inbox.
+
+    CMX-184: ONE denial reaches here twice when the Mod is loaded beside ``plugin/`` — the Mod
+    files it directly (:func:`file_denial`), the shell hook through the event log. Its
+    ``tool_use_id`` (``store["denied_keys"]``, kept :data:`DENIED_KEY_TTL_S`) is the dedupe
+    key: a denial whose id was already judged is skipped whatever the cooldown says, so a copy
+    that arrives after the cooldown expired is still not a second notice.
     """
     orch = orchestrator_wid(store)
     active: dict[str, dict] = {}
@@ -3038,12 +3051,20 @@ def denied_events(denials: list[dict], runs: list[dict], store: dict, now: float
                 active[wid] = run
     seen: dict = {t: ts for t, ts in (store.get("denied_seen") or {}).items()
                   if now - ts < DENIED_COOLDOWN_S}
+    keys: dict = {k: ts for k, ts in (store.get("denied_keys") or {}).items()
+                  if now - ts < DENIED_KEY_TTL_S}
     out: list[dict] = []
     for denial in denials:
         wid = denial.get("wid")
         run = active.get(wid) if wid and wid != orch else None
         if run is None or epoch.is_dangling(denial.get("epoch"), now_epoch):
             continue
+        payload = denial.get("payload") or {}
+        key = denial_key(payload)
+        if key:
+            if key in keys:
+                continue
+            keys[key] = now
         task = run["task_id"]
         if task in seen:
             continue
@@ -3054,9 +3075,59 @@ def denied_events(denials: list[dict], runs: list[dict], store: dict, now: float
             f"🔒 {task} · {wid} was blocked by its permission classifier: {tool} "
             f"{detail} — the agent is stopped on it: hand the human a bang-prefixed command "
             f"to run, or redirect the agent.",
-            _run_payload(run, tool=tool, detail=detail, denied_at=denial.get("ts")), wid=wid))
+            _run_payload(run, tool=tool, detail=detail, denied_at=denial.get("ts"),
+                         reason=_one_line(payload.get("reason"), DENIED_REASON_CHARS),
+                         session_id=payload.get("session_id") or None, tool_use_id=key),
+            wid=wid))
     store["denied_seen"] = seen
+    store["denied_keys"] = keys
     return out
+
+
+def denial_key(payload: dict) -> str | None:
+    """The dedupe key of one denial: its ``tool_use_id``, or ``None`` when it carries none."""
+    key = payload.get("tool_use_id")
+    return key if isinstance(key, str) and key else None
+
+
+def _one_line(text, limit: int) -> str:
+    text = " ".join(str(text or "").split())
+    return text[:limit - 1] + "…" if len(text) > limit else text
+
+
+def file_denial(body: dict, now: float | None = None) -> list[dict]:
+    """CMX-184: file a classifier denial the Mod posted directly — no event-log tail.
+
+    ``body`` is the Mod's post (``mods/chela-hooks/hooks/denial.ts``): the window, the session
+    and the ``PermissionDenied`` fields. It goes through :func:`denied_events` exactly as an
+    event-log record would, so the run, orchestrator, cooldown and dedupe rules are one set.
+    Returns the queued notices (zero or one). Raises :class:`ValueError` on a body with no
+    window or no ``tool_use_id``: without the key it could not be told from the shell hook's
+    copy, and that copy still arrives through the event log.
+    """
+    if not enabled():
+        return []
+    wid = body.get("wid")
+    if not isinstance(wid, str) or not WID_RE.match(wid):
+        raise ValueError("a denial needs the window id it came from")
+    payload = hooks.clip_payload({k: body.get(k) for k in DENIAL_FIELDS if k in body})
+    if not denial_key(payload):
+        raise ValueError("a denial needs its tool_use_id (the dedupe key)")
+    from chela import dispatcher
+    runs = dispatcher.list_runs()
+    windows = discovery.get_windows_by_id()
+    now_epoch = epoch.current()
+    now = time.time() if now is None else now
+    # stamped by the tmux server running NOW: a live session posting its own window is current
+    record = {"wid": wid, "epoch": now_epoch, "ts": now, "payload": payload}
+    with locked_store() as store:
+        events = denied_events([record], runs, store, now, windows=windows,
+                               now_epoch=now_epoch)
+        store["queue"].extend(events)
+    for event in events:
+        log.info("inbox: queued %s (%s, direct)", event["kind"], wid)
+        event_log.from_inbox(event)
+    return events
 
 
 def tick(prev: dict[str, str], runs: list[dict] | None = None) -> dict[str, str]:

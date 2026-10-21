@@ -3920,6 +3920,31 @@ def api_needs_you():
         return jsonify({"items": [], "error": f"{exc.__class__.__name__}: {exc}"}), 503
 
 
+# 🔒 CMX-184: the Mod (mods/chela-hooks) files a classifier denial straight into the inbox,
+# no event-log tail. One denial the shell hook also logs is still ONE notice: both go through
+# inbox.denied_events, keyed on the tool_use_id. A body that cannot be filed is a 400 and the
+# shell path still carries the denial; the agent never waits on this (the Mod does not await).
+@app.route("/api/inbox/denial", methods=["POST"])
+@require_auth
+def api_inbox_denial():
+    if (request.content_length or 0) > hooks.MAX_BODY:
+        return jsonify({"ok": False, "error": "body too large"}), 413
+    # application/json only: a cross-origin page can send text/plain with no preflight, never this
+    if not request.is_json:
+        return jsonify({"ok": False, "error": "Content-Type must be application/json"}), 415
+    body = request.get_json(silent=True)
+    if not isinstance(body, dict):
+        return jsonify({"ok": False, "error": "a JSON object is required"}), 400
+    try:
+        events = inbox.file_denial(body)
+    except ValueError as exc:
+        return jsonify({"ok": False, "error": str(exc)}), 400
+    except Exception as exc:  # noqa: BLE001 - report it, do not 500 into silence
+        log.exception("inbox: a direct denial could not be filed")
+        return jsonify({"ok": False, "error": f"{exc.__class__.__name__}: {exc}"}), 503
+    return jsonify({"ok": True, "queued": len(events)})
+
+
 @app.route("/api/override/<request_id>/<action>", methods=["POST"])
 @require_auth
 def api_override_decide(request_id, action):
@@ -4534,10 +4559,10 @@ def _runs_for_workflow(
     reviewer sent back is not done, not active, and not failed: with the old
     ``== 'awaiting_review'`` test it appeared in NO column of the Kanban at all — it simply
     vanished from the board while its agent was being re-spawned. Each card keeps its OWN
-    status (see kanban.js), so the column never claims a rejected PR is awaiting review.
+    status (see the board's flatten, frontend/src/features/work/board.ts), so the column never claims a rejected PR is awaiting review.
 
     ``closed`` (CMX-265) rides in `recent` alongside `done`/`failed` — it is just as
-    terminal, and the frontend's own bucketing (kanban.js's `_kanbanFlatten`) is what
+    terminal, and the frontend's own bucketing (features/work/board.ts's `flatten`) is what
     actually separates it back out into its own `archived` lane. Omitting it here would
     not just mis-lane it — it would make a closed-not-merged row vanish from this API
     payload ENTIRELY (the row survives in the DB either way; only the board view would
@@ -5040,7 +5065,7 @@ def api_dispatcher():
             r["tracker_url"] = r.get("tracker_url") or url_by_id.get(r.get("task_id"))
             # 🗂️📐 CMX-23: the issue's current tracker state, when it is still open there.
             # None for a finished/archived issue — the board then files the card by its
-            # run status (kanbanlinearmodel.js's fallback), never drops it.
+            # run status (features/work/linear.ts's fallback), never drops it.
             r["tracker_state"] = state_by_id.get(r.get("task_id"))
             # Per-run task-list progress (issue #462) — None (not "0/0", not an error)
             # whenever the run can't be joined to a live session's task directory; see
@@ -5060,7 +5085,7 @@ def api_dispatcher():
         "configured": bool(workflows_payload),
         "workflows": workflows_payload,
         # CMX-206: the Board's Pause/Resume button reads its state off THIS payload
-        # (the poll `work.js` already runs every 30s) rather than a second fetch of
+        # (the poll features/work already runs every 30s) rather than a second fetch of
         # `/api/settings` — see `hold.active()` for what makes a hold current.
         "dispatch_hold": (hold.active().as_dict() if hold.active() else None),
     })

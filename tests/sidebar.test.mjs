@@ -44,7 +44,7 @@ import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 import { JSDOM } from 'jsdom';   // needs `pnpm install` — tests/test_js_suites.py enforces it
-import { bootDashboardDom, clickIsland, SIDEBAR } from './js_helpers/dashboard_dom.mjs';
+import { bootDashboardDom, clickIsland, ORCHESTRATOR, SIDEBAR } from './js_helpers/dashboard_dom.mjs';
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..', 'chela', 'dashboard');
 const src = p => readFileSync(join(ROOT, p), 'utf8');
@@ -139,7 +139,7 @@ beforeAll(async () => {
             }
             return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve({}) });
         },
-        extraModules: ['util.js', 'nav.js', 'orchestrator.js', SIDEBAR],
+        extraModules: ['util.js', 'nav.js', ORCHESTRATOR, SIDEBAR],
     }));
 });
 

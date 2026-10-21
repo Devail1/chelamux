@@ -100,7 +100,7 @@ export function setSidebarWidth(w: number): void {
   refit();
 }
 
-// --- The nav rows (views.js) and their Work badges (work.js) ------------------------------
+// --- The nav rows (views.js) and their Work badges (the Work poll) ------------------------
 let nav: NavState = { items: [], active: null, badges: {} };
 export function setNav(patch: Partial<NavState>): void {
   nav = { ...nav, ...patch };
@@ -392,6 +392,7 @@ export function viewMenuAction(act: string): void {
 }
 
 // --- The orchestrator: the head's inbox icon (CMX-76) --------------------------------------
+// The Decisions island (features/decisions) owns the icon and calls this on a click.
 /** Focus the orchestrator's pane and row (its group expanded). False with no orchestrator. */
 export function jumpToOrchestrator(): boolean {
   const wid = host.orchWid();
@@ -408,21 +409,6 @@ export function jumpToOrchestrator(): boolean {
   }
   row?.scrollIntoView?.({ block: 'nearest' });
   return true;
-}
-
-/** The orchestrator HOLDS the inbox: a click jumps to it, and the log still opens over it. */
-export function inboxClick(): void {
-  jumpToOrchestrator();
-  (chelaNs().openDecisionsMenu as (() => void) | undefined)?.();
-}
-
-/** The icon says what a click will do. */
-export function syncInboxBtn(): void {
-  const btn = document.getElementById('btn-decisions');
-  if (!btn) return;
-  const jumps = !!host.orchWid();
-  btn.title = jumps ? 'Decisions: jump to the orchestrator' : 'Decisions';
-  btn.setAttribute('aria-label', jumps ? 'Decisions inbox: jump to the orchestrator' : 'Decisions inbox');
 }
 
 // --- Alt fast switch (CMX-85) --------------------------------------------------------------
@@ -593,6 +579,6 @@ export async function resumeSession(r: RecentRow): Promise<boolean> {
 Object.assign(chelaNs(), {
   toggleSidebar, closeSidebar, setSidebarWidth, toggleGroup, toggleArchivedSection, unarchiveRow, archiveKeys,
   unarchiveKeys, groupMenuAction, groupNewSession, rowMenuAction, moveToGroup, newCustomGroup, renameCustomGroup,
-  deleteCustomGroup, viewMenuAction, sidebarOrder, inboxClick, jumpToOrchestrator, resumeSession, dismissRecentSession,
+  deleteCustomGroup, viewMenuAction, sidebarOrder, jumpToOrchestrator, resumeSession, dismissRecentSession,
   clearRecentSessions, undoDismissRecent, closeRecentUndo, toggleDispatcherSessions,
 });

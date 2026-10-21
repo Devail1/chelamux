@@ -218,6 +218,31 @@ CMX-183 shipped item 3: a "needs you" band above the prompt in the orchestrator 
 `GET /api/needs-you`
 ([`mods/chela-hooks/README.md`](../mods/chela-hooks/README.md#needs-you-cmx-183)).
 
+CMX-184 shipped item 4: classifier-denial reporting read straight from
+`classic.PermissionDenied`. The Mod POSTs the denial to the daemon's
+`POST /api/inbox/denial`, which files CMX-155's inbox notice with no event-log tail. With
+both layers loaded one denial is still one notice: the daemon keys both copies on the
+`tool_use_id`
+([`mods/chela-hooks/README.md`](../mods/chela-hooks/README.md#classifier-denials-cmx-184)).
+Under `--permission-mode dontAsk` no PermissionDenied fires in either layer (§4 item 3), so
+neither reports a denial there.
+
+### 8.0 After Mod 4/4: what `plugin/` can drop
+
+**Nothing yet.** Each `plugin/` hook the four Mods touch still has a job the Mods do not take
+over:
+
+| `plugin/` piece | Why it stays |
+|---|---|
+| merge gate (`PreToolUse` → `mergegate.py`) | spike NO-GO (§7.4): the Mod runs the same script, so dropping the shell hook only helps where the Mod is loaded, and the Mod is opt-in |
+| event posting (every `/hooks/<Event>`) | spike NO-GO (§7.3): `classic.PreToolUse` has no base fields, and managed installs cannot load a Mod |
+| `PermissionDenied` → `/hooks/PermissionDenied` | the phone push (CMX-25 `DeniedWatch`) and every session without the Mod still read the denial from the event log; the Mod's direct post files the inbox notice only |
+| `chela install-statusline` | the documented default without the Mod (CMX-181) |
+
+Revisit when Claude Code adds base fields to `classic.PreToolUse` and managed installs have
+an answer; at that point the event-posting swap is the first candidate, and the
+`PermissionDenied` shell hook goes with it.
+
 ### 8.1 Soak: NOT RUN yet
 
 ⛔ **The ≥ 2 h side-by-side soak has not been run.** CMX-181 was a dispatched run, and the

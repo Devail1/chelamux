@@ -1,6 +1,6 @@
 // The Runs segment of WORK: one card per workflow, its open tasks and its run tables (ported
 // from static/js/dispatcher.js by CMX-231, FRONTEND_PORT_PLAN.md P10). It reads the payload
-// work.js's one /api/dispatcher poll published (shared/store/work); it never fetches it.
+// features/work's one /api/dispatcher poll published (shared/store/work); it never fetches it.
 import { useState, type ReactNode } from 'react';
 import { icons } from '../../../shared/icons/index.ts';
 import { useStore } from '../../../shared/store/index.ts';

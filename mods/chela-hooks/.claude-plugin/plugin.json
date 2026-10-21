@@ -1,8 +1,8 @@
 {
   "name": "chela-hooks-mod",
-  "version": "0.4.0",
+  "version": "0.5.0",
   "types": "./types/index.d.ts",
-  "description": "Opt-in chela Mod (Claude Code >= 2.1.301): chela's status line via $.ui.status, a \"needs you\" band in the orchestrator session, plus the CMX-157 hook spike. plugin/ stays the baseline (see mods/chela-hooks/README.md).",
+  "description": "Opt-in chela Mod (Claude Code >= 2.1.301): chela's status line via $.ui.status, a \"needs you\" band in the orchestrator session, classifier denials posted straight to the inbox, plus the CMX-157 hook spike. plugin/ stays the baseline (see mods/chela-hooks/README.md).",
   "userConfig": {
     "statusLine": {
       "type": "boolean",

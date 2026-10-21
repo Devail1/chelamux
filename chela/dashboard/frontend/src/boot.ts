@@ -7,10 +7,8 @@ import '../../static/js/header';
 import '../../static/js/agents';
 import { renderNav, selectView } from '../../static/js/nav';
 import '../../static/js/launcher';
-import { startWorkPoll } from '../../static/js/work';
 import { VIEWS } from '../../static/js/views';
 import { findView } from '../../static/js/viewreg';
-import '../../static/js/decisions';
 import '../../static/js/resources';
 import '../../static/js/statushealth';
 import '../../static/js/version';
@@ -26,7 +24,4 @@ renderNav(); // the sidebar's view list, from the registry, before anything sele
 if (BOOT.terminalsEnabled) selectView('terminals');
 else void refresh();
 startScheduler(REFRESH_MS);
-// The ONE /api/dispatcher poll (board, runs, the always-visible sidebar badges): app-level,
-// not view-level, since the badges are on screen from every view.
-startWorkPoll();
 openEvents();

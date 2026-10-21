@@ -1,27 +1,11 @@
-// CMX-290 — a real CLICK on a real kanban card actually opens the task modal.
+// CMX-290, on the ported board (CMX-233): a real CLICK on a real Work board card opens the task
+// modal, on the REAL page. features/work's RTL suite proves the Board and the TaskModal
+// together; this one proves the page around them: the template's #panel-work and
+// #task-modal-island slots, both islands mounted by the real entry, the one /api/dispatcher
+// poll feeding the board, and a click crossing from one island's root to the other's.
 //
-// The two DASHBOARD SUITE members closest to this surface each prove one
-// piece and stop short of the boundary a user's mouse actually crosses:
-//   - tests/kanban_flatten.test.mjs drives renderKanban() and reads the
-//     rendered card back, but never clicks it.
-//   - tests/taskmodal_render.test.mjs calls `taskmodal.openTaskModal(item)`
-//     directly — proving the modal's OWN rendering, but not that a click on a
-//     card ever reaches that call, nor that the modal actually becomes
-//     VISIBLE (showModal()'s `.active` class toggle) the way a user watching
-//     the screen would see it.
-// Nothing anywhere simulates the actual chain a click travels: the card's
-// `onclick="chela.openTaskModalFromCard(this)"` attribute (kanban.js) ->
-// `_kanbanCardIndex` lookup -> `openTaskModal()` (taskmodal.js) ->
-// `showModal('modal-task')` (util.js, adds `.active`). A judge mutation that
-// drops the onclick attribute, breaks the `_kanbanCardIndex` lookup, or
-// deletes the `showModal()` call would leave every existing test green.
-//
-// Both fixtures below are `sliceTemplate()`d straight out of the REAL
-// templates/index.html — not hand-typed copies — so this also closes the
-// template-drift half of the same gap: a rename of `#kanban-board` or
-// `#modal-task` (or the loss of `modal-overlay`'s visibility-gating class)
-// shows up here, not just in a fixture that happens to still agree with
-// today's markup.
+// Both fixtures are `sliceTemplate()`d out of the REAL templates/index.html, so renaming a slot
+// shows up here, not just in a hand-typed fixture that happens to agree with today's markup.
 //
 // Run: pnpm exec vitest run tests/kanban_task_modal_wiring.test.mjs (tests/test_js_suites.py
 // runs every .test.mjs inside pytest, by discovery).
@@ -31,334 +15,88 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { JSDOM } from 'jsdom';   // needs `pnpm install` — tests/test_js_suites.py enforces it
-import { bootDashboardDom, clickOnclick, sliceTemplate } from './js_helpers/dashboard_dom.mjs';
+import { bootDashboardDom, clickIsland, flush, sliceTemplate } from './js_helpers/dashboard_dom.mjs';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
-const STYLE_CSS = fs.readFileSync(
-    path.join(HERE, '..', 'chela', 'dashboard', 'static', 'style.css'), 'utf8');
+const STYLE_CSS = fs.readFileSync(path.join(HERE, '..', 'chela', 'dashboard', 'static', 'style.css'), 'utf8');
 
-const KANBAN_BOARD_HTML = sliceTemplate(
-    '<div class="work-pane active" id="work-board" data-seg="board">', '<!-- /work-board -->');
-const MODAL_TASK_HTML = sliceTemplate(
-    '<div class="modal-overlay" id="modal-task">', '<!-- /modal-task -->');
+const PANEL = sliceTemplate('<div class="panel active" id="panel-work">', '</div>', { terminals_enabled: false });
+const MODAL = sliceTemplate('<div id="task-modal-island">', '</div>');
 
-let renderKanban;
+let payload = {};
+let pollWork, closeTaskModal;
 
 beforeAll(async () => {
-    ({ modules: { kanban: { renderKanban } } } = await bootDashboardDom({
-        body: `${KANBAN_BOARD_HTML}\n${MODAL_TASK_HTML}`,
-        extraModules: ['kanban.js'],
-    }));
+    const fetchImpl = url => Promise.resolve({
+        ok: true, status: 200, json: () => Promise.resolve(String(url).endsWith('/api/dispatcher') ? payload : {}),
+    });
+    await bootDashboardDom({ body: `${PANEL}\n${MODAL}`, fetchImpl, terminalsEnabled: false });
+    ({ pollWork } = await import('../chela/dashboard/frontend/src/features/work/index.ts'));
+    ({ closeTaskModal } = await import('../chela/dashboard/frontend/src/features/taskmodal/index.ts'));
 });
 
-function _payload(run) {
-    return {
-        configured: true,
-        workflows: [{
-            path: '/x/WORKFLOW.md', project_key: 'CMX', open_tasks: [], backlog_items: [],
-            active_runs: [], awaiting_review_runs: [], recent_runs: [run],
-        }],
-    };
+async function show(wf) {
+    payload = { configured: true, workflows: [{ path: '/x/WORKFLOW.md', project_key: 'CMX', ...wf }] };
+    await pollWork();
+    for (let i = 0; i < 4; i++) await flush();
+}
+const modal = () => document.querySelector('[role="dialog"].modal-task');
+const titleHtml = () => modal()?.querySelector('#task-modal-content .task-modal-title > span')?.innerHTML;
+async function click(el) {
+    assert.ok(el, 'the card to click is missing');
+    clickIsland(el);
+    for (let i = 0; i < 3; i++) await flush();
+}
+async function close() {
+    closeTaskModal();
+    await flush();
 }
 
-test('clicking a REAL rendered kanban card opens the REAL task modal, visibly, with THAT card\'s content — and no function of the fixture alone (index 0, last, middle, or any other f(length)) can fake it', () => {
-    // Earlier rounds tried to defeat a positional-shortcut lookup by placing
-    // the card under test at a "safe" index — first a non-zero index, then a
-    // non-last index, then (this round) discovered that even "the middle of
-    // exactly 3" is itself a positional slot: Math.floor(length / 2) resolves
-    // to it directly, no data-kidx read required. Chasing a safer index is an
-    // arms race with no last round — every fixture of fixed size N has SOME
-    // constant that lands on it.
-    //
-    // The fix that actually closes the class: click TWO different cards in
-    // the SAME render (same fixture, same length) and assert a DIFFERENT
-    // title for each. A positional lookup is a pure function of the fixture
-    // — f(3) computes to exactly one value — so it can match at most one of
-    // the two clicks. Hardcoded 0, hardcoded length-1, floor(length/2),
-    // length-2, or any formula nobody has thought of yet: all of them fail
-    // one of the two assertions below. Only an actual el.dataset.kidx read,
-    // which sees WHICH element was clicked, can satisfy both in one render.
-    renderKanban({
-        configured: true,
-        workflows: [{
-            path: '/x/WORKFLOW.md', project_key: 'CMX',
-            open_tasks: [{ id: 't-decoy', title: 'decoy — must never appear in the modal', raw: 'decoy', body: null }],
-            backlog_items: [], active_runs: [], awaiting_review_runs: [],
-            recent_runs: [
-                {
-                    task_id: 't-card-a', title: 'ship **the wall** now', status: 'done', pr_state: 'merged',
-                    started_at: '2026-08-01T00:00:00Z', ended_at: '2026-08-01T01:00:00Z',
-                    attempt: 1, pr_url: null, pr_checks: null, branch_name: 'cmx-1',
-                },
-                {
-                    task_id: 't-card-b', title: 'raise the **second** gate', status: 'closed', pr_state: 'closed',
-                    started_at: '2026-08-01T00:00:00Z', ended_at: '2026-08-01T00:30:00Z',
-                    attempt: 1, pr_url: null, pr_checks: null, branch_name: 'cmx-9',
-                },
-            ],
-        }],
-    });
+const run = (task_id, title, status) => ({ task_id, title, status, pr_state: null, started_at: '2026-08-01T00:00:00Z', ended_at: '2026-08-01T01:00:00Z', attempt: 1 });
 
-    const modal = document.getElementById('modal-task');
-    assert.ok(modal, 'sliceTemplate did not carry #modal-task into the fixture');
-    assert.equal(modal.classList.contains('active'), false,
-        'the task modal starts open — the test below could not tell a real open from a no-op');
-
-    const cardA = document.querySelector('.kanban-card[data-task-id="t-card-a"]');
-    const cardB = document.querySelector('.kanban-card[data-task-id="t-card-b"]');
-    assert.ok(cardA, 'card A is missing — check .kanban-card[data-task-id]');
-    assert.ok(cardB, 'card B is missing — check .kanban-card[data-task-id]');
-    assert.match(cardA.getAttribute('onclick') || '', /chela\.openTaskModalFromCard\(this\)/,
-        'card A is not wired to chela.openTaskModalFromCard(this)');
-    assert.match(cardB.getAttribute('onclick') || '', /chela\.openTaskModalFromCard\(this\)/,
-        'card B is not wired to chela.openTaskModalFromCard(this)');
-
-    const totalCards = document.querySelectorAll('.kanban-card').length;
-    assert.equal(totalCards, 3,
-        'setup: expected exactly 3 rendered cards (decoy + card A + card B) — check the fixture above');
-    assert.notEqual(cardA.dataset.kidx, cardB.dataset.kidx,
-        'setup: card A and card B claimed the SAME data-kidx — the fixture above is not rendering two distinct cards');
-
-    // 🔴 CLICK A — the same two hops (onclick attribute -> window.chela ->
-    // handler) a real mouse click takes, compiled by clickOnclick() instead
-    // of jsdom's HTML parser (jsdom does not execute inline onclick= on a
-    // dispatched click event without runScripts:"dangerously").
-    clickOnclick(cardA);
-
-    // 🔴 GUARD: the modal must actually become VISIBLE. showModal('modal-task')
-    // (util.js) adding `.active` to the REAL #modal-task (sliced from
-    // index.html, whose `.modal-overlay` CSS gates display on that class) is
-    // the only thing a user watching the screen would see happen.
-    assert.equal(modal.classList.contains('active'), true,
-        'the task modal never became visible after clicking card A — openTaskModalFromCard -> ' +
-        'openTaskModal -> showModal chain is broken');
-
-    let titleEl = document.querySelector('#task-modal-content .task-modal-title');
-    assert.ok(titleEl, 'the task modal opened with no .task-modal-title rendered');
-    assert.equal(titleEl.innerHTML, 'ship <strong>the wall</strong> now',
-        `task modal title does not match card A — got: "${titleEl.innerHTML}"`);
-
-    // 🔴 CLICK B — SAME render, SAME fixture length, a DIFFERENT clicked
-    // element. Whatever answered "card A" for the click above (correctly, by
-    // reading el.dataset.kidx, OR by accident via a positional formula that
-    // happens to equal card A's index) must now answer "card B" — which no
-    // f(fixture) can do, since f(3) cannot be two different values at once.
-    clickOnclick(cardB);
-
-    assert.equal(modal.classList.contains('active'), true,
-        'the task modal closed or never re-opened after clicking card B');
-
-    titleEl = document.querySelector('#task-modal-content .task-modal-title');
-    assert.ok(titleEl, 'the task modal opened with no .task-modal-title rendered');
-    assert.equal(titleEl.innerHTML, 'raise the <strong>second</strong> gate',
-        `task modal title does not match card B (still showing a stale/wrong card) — got: "${titleEl.innerHTML}"`);
+test('the board is drawn inside the page\'s #panel-work, from the one poll', async () => {
+    await show({ recent_runs: [run('t-a', 'a task', 'done')] });
+    assert.ok(document.querySelector('#panel-work #work-seg'), 'the Work toolbar is not on the page');
+    assert.ok(document.querySelector('#panel-work #work-board .kanban-card[data-task-id="t-a"]'), 'the polled card is not on the board');
 });
 
-test('clicking either of TWO REAL rendered BACKLOG cards — _kCard\'s OTHER renderer, never driven by the test above — opens the REAL task modal with THAT card\'s content, not a hardcoded first one', () => {
-    // _kCard returns from TWO places: the backlog branch (no task_id, no
-    // branch, no PR — just a BACKLOG.md bullet) and the run-backed branch the
-    // test above exclusively drives. Both branches emit their OWN `data-kidx`
-    // + `onclick="chela.openTaskModalFromCard(this)"` from source that is
-    // duplicated, not shared (kanban.js:170 vs :244) — see docs/defeat_shapes/07
-    // (two callers, one guarded).
-    //
-    // Round 3 closed shape 07 here (this test used to render exactly ONE
-    // backlog card and prove the onclick attribute + the click reached the
-    // modal) but that single-card fixture reintroduced shape 38 on this
-    // SIBLING call site: with only one backlog card ever rendered, its real
-    // `data-kidx` is always 0, so `_kCard`'s backlog branch could have
-    // emitted the literal `data-kidx="0"` instead of the real `${kidx}` and
-    // this test could not have told the difference — the judge proved
-    // exactly that mutation stayed green. The fix is the same one shape 38's
-    // own guard form prescribes: render two backlog cards in the SAME
-    // render, click both, and assert each shows ITS OWN content. A hardcoded
-    // `0` (or any other constant) can match at most one of the two clicks.
-    renderKanban({
-        configured: true,
-        workflows: [{
-            path: '/x/WORKFLOW.md', project_key: 'CMX',
-            open_tasks: [], active_runs: [], awaiting_review_runs: [], recent_runs: [],
-            backlog_items: [
-                { text: 'the FIRST backlog bullet needs its own click', section: 'Now', file: 'TODO.md' },
-                { text: 'the SECOND backlog bullet needs its own click', section: 'Now', file: 'TODO.md' },
-            ],
-        }],
+test('clicking either of TWO cards in one render opens the modal with THAT card, run cards and backlog cards alike', async () => {
+    await show({
+        open_tasks: [{ id: 't-decoy', title: 'decoy, must never appear' }],
+        backlog_items: [{ text: 'first **backlog** idea' }, { text: 'second idea' }],
+        parked_tasks: [{ id: 'p1', title: 'parked one', raw: '- [ ] parked one <!-- blocked: a -->' }],
+        recent_runs: [run('t-card-a', 'ship **the wall** now', 'done'), run('t-card-b', 'raise the **second** gate', 'closed')],
     });
-
-    const modal = document.getElementById('modal-task');
-    modal.classList.remove('active');
-
-    const cards = document.querySelectorAll('.kanban-card-backlog');
-    assert.equal(cards.length, 2,
-        'setup: expected exactly 2 rendered backlog cards — check the backlog_items fixture above');
-    const [cardA, cardB] = cards;
-    assert.match(cardA.getAttribute('onclick') || '', /chela\.openTaskModalFromCard\(this\)/,
-        'backlog card A is not wired to chela.openTaskModalFromCard(this) — this is the OTHER _kCard ' +
-        'renderer, not covered by the run-backed click test above');
-    assert.match(cardB.getAttribute('onclick') || '', /chela\.openTaskModalFromCard\(this\)/,
-        'backlog card B is not wired to chela.openTaskModalFromCard(this)');
-    assert.notEqual(cardA.dataset.kidx, cardB.dataset.kidx,
-        'setup: backlog card A and B claimed the SAME data-kidx — the fixture above is not rendering two ' +
-        'distinct cards (or the backlog branch is emitting a constant instead of its render-order index)');
-
-    // 🔴 CLICK A
-    clickOnclick(cardA);
-    assert.equal(modal.classList.contains('active'), true,
-        'clicking backlog card A never opened the task modal — the backlog branch\'s wiring is broken');
-    let titleEl = document.querySelector('#task-modal-content .task-modal-title');
-    assert.ok(titleEl, 'the task modal opened with no .task-modal-title rendered');
-    assert.equal(titleEl.innerHTML, 'the FIRST backlog bullet needs its own click',
-        `task modal title does not match backlog card A — got: "${titleEl.innerHTML}"`);
-
-    // 🔴 CLICK B — same render, same fixture length, a different clicked
-    // element. A hardcoded `data-kidx="0"` (shape 38) would resolve THIS
-    // click back to card A's object too, since card A is index 0 here —
-    // only an actual el.dataset.kidx read can tell card B apart.
-    clickOnclick(cardB);
-    assert.equal(modal.classList.contains('active'), true,
-        'the task modal closed or never re-opened after clicking backlog card B');
-    titleEl = document.querySelector('#task-modal-content .task-modal-title');
-    assert.ok(titleEl, 'the task modal opened with no .task-modal-title rendered');
-    assert.equal(titleEl.innerHTML, 'the SECOND backlog bullet needs its own click',
-        `task modal title does not match backlog card B (still showing card A, or a stale card) — got: "${titleEl.innerHTML}"`);
+    assert.equal(modal(), null, 'the task modal starts open');
+    const backlog = [...document.querySelectorAll('.kanban-card-backlog')];
+    for (const [el, want] of [
+        [document.querySelector('.kanban-card[data-task-id="t-card-b"]'), 'raise the <strong>second</strong> gate'],
+        [document.querySelector('.kanban-card[data-task-id="t-card-a"]'), 'ship <strong>the wall</strong> now'],
+        [backlog[1], 'second idea'],
+        [backlog[0], 'first <strong>backlog</strong> idea'],
+    ]) {
+        await click(el);
+        assert.ok(modal(), 'the task modal never opened');
+        assert.equal(titleHtml(), want);
+    }
+    await click(document.querySelector('.kanban-card-parked'));
+    assert.match(modal()?.querySelector('.task-modal-brief')?.textContent ?? '', /parked one/,
+        'the parked card\'s raw bullet did not reach the modal');
+    await close();
 });
 
-test('clicking either of TWO REAL rendered PARKED cards — _kCard\'s THIRD renderer, added by CMX-298 — opens the REAL task modal wired to THAT card, with its `raw` bullet text intact through the JS flatten hop', () => {
-    // _kCard now returns from THREE places (run-backed, backlog, parked). The two tests
-    // above each cover one of the first two branches; this is the third, and it carries
-    // its own risk the other two don't: a parked task object has no `brief` and no
-    // `body`, so taskmodalmodel.js's briefSource(item) (brief -> body -> raw) has `raw`
-    // as its ONLY source for the modal's brief pane. tests/test_taskmodal_data.py pins
-    // `raw` surviving the /api/dispatcher hop (server side); nothing before this pinned
-    // it surviving _kanbanFlatten's OWN `raw: t.raw` copy (client side) — the judge
-    // proved nulling that line left every existing test green, because none of them
-    // read the flattened card object or opened the modal for a parked card.
-    //
-    // Same shape-38 counterweight as the backlog test above: two parked cards, same
-    // render, click both, assert each shows ITS OWN title AND its own raw-sourced brief
-    // text. A hardcoded index or a card missing its `raw` payload can satisfy at most
-    // one assertion below, never both for both cards.
-    renderKanban({
-        configured: true,
-        workflows: [{
-            path: '/x/WORKFLOW.md', project_key: 'CMX',
-            open_tasks: [], active_runs: [], awaiting_review_runs: [], recent_runs: [], backlog_items: [],
-            parked_tasks: [
-                {
-                    id: 'p-card-a', title: 'parked bullet A', file: 'TODO.md', line_number: 10,
-                    raw: 'the RAW body unique to parked card A', reason: 'waiting on fixtures',
-                },
-                {
-                    id: 'p-card-b', title: 'parked bullet B', file: 'TODO.md', line_number: 20,
-                    raw: 'the RAW body unique to parked card B', reason: 'waiting on review',
-                },
-            ],
-        }],
-    });
-
-    const modal = document.getElementById('modal-task');
-    modal.classList.remove('active');
-
-    const cards = document.querySelectorAll('.kanban-card-parked');
-    assert.equal(cards.length, 2,
-        'setup: expected exactly 2 rendered parked cards — check the parked_tasks fixture above');
-    const [cardA, cardB] = cards;
-    assert.match(cardA.getAttribute('onclick') || '', /chela\.openTaskModalFromCard\(this\)/,
-        'parked card A is not wired to chela.openTaskModalFromCard(this) — this is the THIRD _kCard ' +
-        'renderer, not covered by the run-backed or backlog click tests above');
-    assert.match(cardB.getAttribute('onclick') || '', /chela\.openTaskModalFromCard\(this\)/,
-        'parked card B is not wired to chela.openTaskModalFromCard(this)');
-    assert.notEqual(cardA.dataset.kidx, cardB.dataset.kidx,
-        'setup: parked card A and B claimed the SAME data-kidx — the fixture above is not rendering two ' +
-        'distinct cards');
-
-    // 🔴 CLICK A
-    clickOnclick(cardA);
-    assert.equal(modal.classList.contains('active'), true,
-        'clicking parked card A never opened the task modal — the parked branch\'s onclick wiring is broken');
-
-    let titleEl = document.querySelector('#task-modal-content .task-modal-title');
-    assert.ok(titleEl, 'the task modal opened with no .task-modal-title rendered');
-    assert.equal(titleEl.innerHTML, 'parked bullet A',
-        `task modal title does not match parked card A — got: "${titleEl.innerHTML}"`);
-
-    // 🔴 GUARD: raw must survive _kanbanFlatten's copy onto the card object. A parked
-    // task has no brief/body, so this is the ONLY way its brief pane can show anything
-    // but "No brief recorded for this task."
-    let briefEl = document.querySelector('#task-modal-content .task-modal-brief');
-    assert.ok(briefEl, 'the task modal opened with no .task-modal-brief rendered');
-    assert.match(briefEl.textContent, /the RAW body unique to parked card A/,
-        `the modal's brief pane does not show parked card A's raw bullet text — kanban.js is dropping ` +
-        `\`raw\` on the _kanbanFlatten hop — got: "${briefEl.textContent}"`);
-
-    // 🔴 CLICK B — SAME render, a DIFFERENT clicked element.
-    clickOnclick(cardB);
-    assert.equal(modal.classList.contains('active'), true,
-        'the task modal closed or never re-opened after clicking parked card B');
-
-    titleEl = document.querySelector('#task-modal-content .task-modal-title');
-    assert.ok(titleEl, 'the task modal opened with no .task-modal-title rendered');
-    assert.equal(titleEl.innerHTML, 'parked bullet B',
-        `task modal title does not match parked card B (still showing a stale/wrong card) — got: "${titleEl.innerHTML}"`);
-
-    briefEl = document.querySelector('#task-modal-content .task-modal-brief');
-    assert.ok(briefEl, 'the task modal opened with no .task-modal-brief rendered');
-    assert.match(briefEl.textContent, /the RAW body unique to parked card B/,
-        `the modal's brief pane does not show parked card B's raw bullet text (still showing card A's, ` +
-        `or dropped entirely) — got: "${briefEl.textContent}"`);
-});
-
-test('the REAL #modal-task VISIBLY appears when .active is added — .modal-overlay.active cascades to display:flex under the REAL style.css, not just a class toggling with nothing rendering it', () => {
-    // The click tests above assert `modal.classList.contains('active')` —
-    // that the CLASS was added. Neither one asserts the OTHER half of
-    // "visibly": that `.modal-overlay`'s CSS actually gates screen visibility
-    // on that class. A judge mutation that flips `.modal-overlay.active`'s
-    // `display` from `flex` to `none` leaves classList.contains('active')
-    // true while the modal never appears on screen — invisible to every
-    // assertion above. This test mounts the REAL #modal-task fragment under
-    // the REAL style.css in jsdom (which resolves CSS cascade/specificity,
-    // same recipe as tests/wire_live_css.test.mjs) and reads the CASCADED
-    // `display` value with getComputedStyle, closing that gap directly.
-    const cssDom = new JSDOM(
-        `<!doctype html><html><head><style>${STYLE_CSS}</style></head><body>${MODAL_TASK_HTML}</body></html>`,
+test('the open modal is VISIBLE under the REAL style.css, and its close button hides it', async () => {
+    await show({ recent_runs: [run('t-css', 'a task', 'done')] });
+    await click(document.querySelector('.kanban-card[data-task-id="t-css"]'));
+    const overlay = modal()?.parentElement;
+    assert.ok(overlay, 'setup: the task modal did not open');
+    const cssDom = new JSDOM(`<!doctype html><html><head><style>${STYLE_CSS}</style></head><body>${overlay.outerHTML}</body></html>`,
         { pretendToBeVisual: true });
-    const modal = cssDom.window.document.getElementById('modal-task');
-    assert.ok(modal, 'sliceTemplate did not carry #modal-task into the fixture');
-
-    assert.equal(cssDom.window.getComputedStyle(modal).display, 'none',
-        'setup: #modal-task should start hidden (no .active class) — check .modal-overlay\'s base `display` rule');
-
-    modal.classList.add('active');
-    assert.equal(cssDom.window.getComputedStyle(modal).display, 'flex',
-        '.modal-overlay.active must cascade to display:flex — otherwise the task modal never becomes ' +
-        'visible even though .active was added (the classList assertions elsewhere in this file cannot see this)');
-});
-
-test('clicking the REAL close button hides the REAL task modal', () => {
-    // Earlier tests in this file leave #modal-task open (they never close
-    // it), and this suite shares one DOM (bootDashboardDom runs once in
-    // `before`) — so entering this test the modal may already carry
-    // `.active` regardless of what happens below. Force it CLOSED first so
-    // the "setup: the modal did not open" assertion actually proves this
-    // test's own click opened it, instead of passing vacuously off a
-    // previous test's leftover state.
-    document.getElementById('modal-task').classList.remove('active');
-
-    renderKanban(_payload({
-        task_id: 't-close', title: 'a task', status: 'done', pr_state: 'merged',
-        started_at: '2026-08-01T00:00:00Z', ended_at: '2026-08-01T01:00:00Z',
-        attempt: 1, pr_url: null, pr_checks: null, branch_name: 'cmx-2',
-    }));
-    const modal = document.getElementById('modal-task');
-    clickOnclick(document.querySelector('.kanban-card[data-task-id="t-close"]'));
-    assert.equal(modal.classList.contains('active'), true, 'setup: the modal did not open');
-
-    const closeBtn = document.querySelector('.task-modal-close');
-    assert.ok(closeBtn, 'the modal has no .task-modal-close button');
-    assert.match(closeBtn.getAttribute('onclick') || '', /chela\.closeTaskModal\(\)/,
-        'the close button is not wired to chela.closeTaskModal()');
-    clickOnclick(closeBtn);
-
-    assert.equal(modal.classList.contains('active'), false,
-        'the close button did not actually hide the modal — closeTaskModal -> closeModal\'s `.active` removal is broken');
+    const copy = cssDom.window.document.body.firstElementChild;
+    assert.equal(cssDom.window.getComputedStyle(copy).display, 'flex');
+    copy.classList.remove('active');
+    assert.equal(cssDom.window.getComputedStyle(copy).display, 'none', '.modal-overlay without .active must stay hidden');
+    clickIsland(document.querySelector('.task-modal-close'));
+    await flush();
+    assert.equal(modal(), null, 'the close button did not hide the modal');
 });

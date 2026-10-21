@@ -1,6 +1,6 @@
 // --- Stage 0: ES-module imports ---
 import { $$, TERMINALS_ON, _agentsCache, ageStr, agentDotColor, api, attrEsc, escHtml, lucideIcon, setAgentsCache, setCurrentTab, shortTime, updateTabSignal, wantsHuman } from './util';
-import { onOrchestratorChange, orchestratorState } from './orchestrator';
+import { onOrchestratorChange, orchestratorState } from '../../frontend/src/shared/orchestrator';
 import { refreshSummary } from './header';
 import { checkContext } from './agents';
 import { showAddSchedule } from '../../frontend/src/features/schedules';
@@ -15,7 +15,7 @@ import { refreshCostTab } from './usage';
 import { resolveWindowId } from './windowid';
 import { followUpdate } from './updateflow';
 import { memNote, stepPayload, workflowNote } from './concurrencymodel';
-import { closeSidebar, configureSidebar, refreshSidebar, renderSidebarAgents, setActiveRow, setNav, syncInboxBtn } from '../../frontend/src/features/sidebar/controller';
+import { closeSidebar, configureSidebar, refreshSidebar, renderSidebarAgents, setActiveRow, setNav } from '../../frontend/src/features/sidebar/controller';
 
 // ---------------------------------------------------------------------------
 // Sidebar + canvas navigation (replaces the old tab bar)
@@ -56,7 +56,6 @@ onOrchestratorChange(() => {
     renderSidebarAgents(_agentsCache || []);
     if (_detailAgent) renderAgentDetail();
 });
-onOrchestratorChange(syncInboxBtn);
 
 // --- The nav, rendered from the registry ------------------------------------
 // One nav row per registered, enabled, non-virtual view, including its badge slots
