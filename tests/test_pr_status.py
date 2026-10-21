@@ -163,6 +163,8 @@ def _fleet(gh, runs=()):
         patch("chela.inbox.is_done", return_value=False),
         # A tmux read (CMX-62) — stubbed so `gh.calls` counts only gh.
         patch("chela.agent_manager.is_manual_name", return_value=False),
+        # So is a shell pane's cwd (CMX-241: every pane here has no claude pid).
+        patch("chela.dashboard.app._pane_path", return_value=None),
         patch("chela.pr_status.subprocess.run", gh),
     ):
         yield
