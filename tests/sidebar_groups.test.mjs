@@ -12,7 +12,7 @@
 // Run: pnpm exec vitest run tests/sidebar_groups.test.mjs  (pytest runs it via tests/test_js_suites.py)
 import { beforeAll, beforeEach, test } from 'vitest';
 import assert from 'node:assert/strict';
-import { bootDashboardDom, flush } from './js_helpers/dashboard_dom.mjs';
+import { bootDashboardDom, flush, SIDEBAR } from './js_helpers/dashboard_dom.mjs';
 import { fakeArchiveServer } from './js_helpers/fake_archive.mjs';
 import { clickMenu, closeMenu, menu, menuItems, openMenu, rightClick } from './js_helpers/side_menu.mjs';
 import {
@@ -28,12 +28,12 @@ const BODY = `
 
 // Every POST /api/agents/spawn the launcher makes, body parsed.
 const spawns = [];
-let nav, util;
+let nav, util, sidebar;
 // CMX-75: the archive is SERVER state — this stands in for /api/sidebar/archive.
 const server = fakeArchiveServer(() => util && util._agentsCache);
 
 beforeAll(async () => {
-    ({ modules: { util, nav } } = await bootDashboardDom({
+    ({ modules: { util, nav, sidebar } } = await bootDashboardDom({
         body: BODY,
         canvasStub: true,
         // Off, so "Open … pane" lands on the agent-detail view (a real DOM node to read
@@ -48,7 +48,7 @@ beforeAll(async () => {
             const body = u.includes('/api/agents/spawn') ? { ok: true } : /\/api\/(agents|summary)/.test(u) ? [] : {};
             return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve(body) });
         },
-        extraModules: ['util.js', 'nav.js'],
+        extraModules: ['util.js', 'nav.js', SIDEBAR],
     }));
 });
 
@@ -57,8 +57,8 @@ beforeEach(async () => {
     localStorage.clear();
     spawns.length = 0;
     server.reset();
-    await nav.refreshArchive();   // the page's copy of the archive, re-read from the (reset) server
-    await nav.refreshLayout();    // CMX-82: and of the layout (group order) — none saved yet
+    await sidebar.refreshArchive();   // the page's copy of the archive, re-read from the (reset) server
+    await sidebar.refreshLayout();    // CMX-82: and of the layout (group order) — none saved yet
 });
 
 const wants = a => !!a && (a.needs_human === true || a.session_status === 'waiting');
@@ -70,7 +70,7 @@ const win = (name, over = {}) => ({
 
 function render(rows) {
     util.setAgentsCache(rows);
-    nav.renderSidebarAgents(rows);
+    sidebar.renderSidebarAgents(rows);
 }
 
 const host = () => document.getElementById('sidebar-agents');
@@ -226,9 +226,9 @@ test('a THROWING localStorage still renders, and collapse / order / archive stil
         assert.deepEqual(groupKeys(), ['/srv/code/alpha', '/srv/code/beta']);
         fire(group('/srv/code/alpha').querySelector('.group-head'));
         assert.ok(group('/srv/code/alpha').classList.contains('collapsed'));
-        nav.groupMenuAction('/srv/code/beta', 'up');
+        sidebar.groupMenuAction('/srv/code/beta', 'up');
         assert.deepEqual(groupKeys(), ['/srv/code/beta', '/srv/code/alpha']);
-        await nav.groupMenuAction('/srv/code/beta', 'archive');
+        await sidebar.groupMenuAction('/srv/code/beta', 'archive');
         assert.deepEqual(rowsIn('/srv/code/beta'), ['b']);
     });
 });
@@ -296,8 +296,8 @@ test('Move up / Move down through the kit menu POST the layout, one write per pi
     openMenu(group('/srv/code/alpha').querySelector('.group-more'));
     assert.equal(menuItems().find(i => i.text === 'Move down').disabled, true);
     closeMenu();
-    nav.groupMenuAction('/srv/code/beta', 'up');
-    nav.groupMenuAction('/srv/code/alpha', 'down');
+    sidebar.groupMenuAction('/srv/code/beta', 'up');
+    sidebar.groupMenuAction('/srv/code/alpha', 'down');
     await flush();
     assert.equal(writes().length, 2, 'a move off the end wrote the layout');
 });
@@ -384,7 +384,7 @@ test('a refused archive (no session id) leaves the window where it is and SAYS s
     try {
         const rows = [win('unknown', { cwd: '/srv/code/mix', done: true, no_session: true })];
         render(rows);
-        await nav.groupMenuAction('/srv/code/mix', 'archive');
+        await sidebar.groupMenuAction('/srv/code/mix', 'archive');
         assert.deepEqual(rowsIn('/srv/code/mix'), ['unknown'], 'a refused window keeps its row');
         assert.equal(server.st.sessions.length, 0);
         assert.equal(said.length, 1, 'the refusal is shown, not swallowed');
@@ -399,7 +399,7 @@ test('a hidden row that comes back to life is shown again, and leaves the SERVER
     const run = (status) => win('liavacc/cmx-5', { cwd: `${WT}/CMX-5`, dispatched: true, run: runCard('CMX-5', 'T', 'agent', { status }) });
     const settled = run('done');
     render([settled]);
-    await nav.groupMenuAction(DISPATCHED_KEY, 'archive');
+    await sidebar.groupMenuAction(DISPATCHED_KEY, 'archive');
     assert.deepEqual(server.st.hidden, ['run:CMX-5'], 'a settled run is HIDDEN, not closed');
     assert.equal(group(DISPATCHED_KEY), null);
     render([{ ...settled, run: { ...settled.run, status: 'running' } }]);
@@ -417,7 +417,7 @@ test('"Archive all" never SENDS a live row to be archived — not even one the r
     const unknown = win('unknown-status', { cwd: '/srv/code/mix', session_status: undefined });
     const finished = win('finished', { cwd: '/srv/code/mix', done: true });
     render([working, unknown, finished]);
-    await nav.groupMenuAction('/srv/code/mix', 'archive');
+    await sidebar.groupMenuAction('/srv/code/mix', 'archive');
     const sent = server.calls.filter(c => c.method === 'POST' && c.path === '/api/sidebar/archive');
     assert.ok(sent.length > 0, 'Archive all sent nothing');
     for (const c of sent) {
@@ -432,7 +432,7 @@ test('the Archive all count is the group\'s archivable rows, and is DISABLED at 
     openMenu(group('/srv/code/mix').querySelector('.group-more'));
     assert.ok(menuItems().some(i => i.text === 'Archive all (2)'));
     closeMenu();
-    await nav.groupMenuAction('/srv/code/mix', 'archive');
+    await sidebar.groupMenuAction('/srv/code/mix', 'archive');
     openMenu(group('/srv/code/mix').querySelector('.group-more'));
     const item = menuItems().find(i => i.text.startsWith('Archive all'));
     assert.equal(item.text, 'Archive all (0)', 'rows already archived are not counted again');
@@ -497,7 +497,7 @@ test('CMX-81: busy and unknown/missing-status rows are NOT archivable — Archiv
     assert.equal(rowMenuOf('idle').disabled, false);
     closeMenu();
     // even called directly, the row action refuses a live row (it re-checks at click time)
-    await nav.rowMenuAction(`w:${rows[0].window_id}`, 'archive');
+    await sidebar.rowMenuAction(`w:${rows[0].window_id}`, 'archive');
     assert.equal(archivePosts().length, 0, 'a busy row was sent to be archived');
     openMenu(group('/srv/code/mix').querySelector('.group-more'));
     assert.ok(menuItems().some(i => i.text === 'Archive all (1)'),
@@ -531,13 +531,13 @@ test('the browser\'s old localStorage archive is imported ONCE, as hidden — ne
     const w = win('old', { cwd: '/srv/code/mix', done: true });
     localStorage.setItem('chela_sb_archived', JSON.stringify([`w:${w.window_id}`, 'run:CMX-3']));
     render([w]);
-    await nav.refreshArchive();
+    await sidebar.refreshArchive();
     const mig = server.calls.filter(c => c.path === '/api/sidebar/archive/migrate');
     assert.deepEqual(mig.map(c => c.body.keys), [[`w:${w.window_id}`, 'run:CMX-3']]);
     assert.equal(localStorage.getItem('chela_sb_archived'), null, 'the old key is removed once imported');
     assert.ok(!server.calls.some(c => c.path === '/api/sidebar/archive' && c.method === 'POST'),
         'a migration must never archive (= close) a window');
-    await nav.refreshArchive();
+    await sidebar.refreshArchive();
     assert.equal(server.calls.filter(c => c.path === '/api/sidebar/archive/migrate').length, 1, 'only once');
     render([w]);
     assert.equal(group('/srv/code/mix'), null, 'the migrated row is hidden');
@@ -766,7 +766,7 @@ test('model: sort by name is NUMERIC — CMX-100 sorts after CMX-37, not between
 test('Collapse all keeps groups collapsed earlier that are off screen now', () => {
     localStorage.setItem('chela_grp_collapsed', JSON.stringify(['/srv/code/away']));
     render([win('a', { cwd: '/srv/code/alpha' })]);
-    nav.groupMenuAction('/srv/code/alpha', 'collapse-all');
+    sidebar.groupMenuAction('/srv/code/alpha', 'collapse-all');
     assert.deepEqual(JSON.parse(localStorage.getItem('chela_grp_collapsed')).sort(), ['/srv/code/alpha', '/srv/code/away']);
 });
 

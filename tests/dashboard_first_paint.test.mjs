@@ -27,7 +27,8 @@ import { cssForViewport, PHONE, DESKTOP } from './js_helpers/css_viewport.mjs';
 const here = path.dirname(fileURLToPath(import.meta.url));
 const DASH = path.join(here, '..', 'chela', 'dashboard');
 const CSS = fs.readFileSync(path.join(DASH, 'static', 'style.css'), 'utf8');
-const NAV_JS = fs.readFileSync(path.join(DASH, 'static', 'js', 'nav.js'), 'utf8');
+// CMX-278: the sidebar's state left nav.js for the sidebar feature's controller.
+const NAV_JS = fs.readFileSync(path.join(DASH, 'frontend', 'src', 'features', 'sidebar', 'controller.ts'), 'utf8');
 
 const TOOLBAR = sliceTemplate('<div class="term-toolbar">', '<div id="term-stage"',
     { terminals_enabled: true, wall_tile_dispatched: false });
@@ -75,9 +76,9 @@ function bodyClassesAfterInlineScripts(stored) {
 const KEY = (NAV_JS.match(/const SIDEBAR_COLLAPSED_KEY = '([^']+)'/) || [])[1];
 
 test('a collapsed sidebar is restored before first paint, with nav.js\'s own key', () => {
-    assert.ok(KEY, "nav.js's SIDEBAR_COLLAPSED_KEY not found");
+    assert.ok(KEY, "the controller's SIDEBAR_COLLAPSED_KEY not found");
     assert.ok(bodyClassesAfterInlineScripts('1').includes('sidebar-collapsed'),
-        'the persisted collapsed sidebar is only restored by nav.js — it paints expanded, then folds');
+        'the persisted collapsed sidebar is only restored by the controller — it paints expanded, then folds');
     assert.ok(!bodyClassesAfterInlineScripts(null).includes('sidebar-collapsed'));
     assert.ok(!bodyClassesAfterInlineScripts('0').includes('sidebar-collapsed'));
 });

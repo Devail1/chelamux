@@ -70,7 +70,7 @@ function fakeGridStack() {
     return { init: () => grid };
 }
 
-let terminals, nav, util;
+let terminals, nav, util, sidebar;
 
 beforeAll(async () => {
     const dom = new JSDOM(`<!doctype html><html><body>${PANEL}</body></html>`,
@@ -101,6 +101,7 @@ beforeAll(async () => {
     util = await import('../chela/dashboard/static/js/util.js');
     terminals = await import('../chela/dashboard/static/js/terminals.js');
     nav = await import('../chela/dashboard/static/js/nav.js');
+    sidebar = await import('../chela/dashboard/frontend/src/features/sidebar/controller.ts');
     util.setCurrentTab('terminals');
 
     AGENTS = fleet();   // WORKER opens minimized (walldock's property 1)
@@ -111,13 +112,13 @@ beforeAll(async () => {
 const rowFor = wid => document.querySelector(`#sidebar-agents .agent-row[data-agent="${wid === HUMAN ? 'orchestrator' : 'cmx-137'}"]`);
 
 test('a pane open on the wall (not docked) gets the on-wall cue', () => {
-    nav.renderSidebarAgents(AGENTS);
+    sidebar.renderSidebarAgents(AGENTS);
     assert.ok(rowFor(HUMAN).classList.contains('on-wall'),
         "the orchestrator's pane is live on the wall — its row must carry the cue");
 });
 
 test('a pane docked to the min-dock (minimized) does NOT get the cue', () => {
-    nav.renderSidebarAgents(AGENTS);
+    sidebar.renderSidebarAgents(AGENTS);
     assert.ok(!rowFor(WORKER).classList.contains('on-wall'),
         'a minimized pane is not "open on the wall" — the cue must not fire for it');
 });
@@ -125,7 +126,7 @@ test('a pane docked to the min-dock (minimized) does NOT get the cue', () => {
 test('popping the dock out flips the cue on — driven by the SAME wall state, live', async () => {
     AGENTS = fleet({ needsHuman: true });   // worker blocks -> pops out of the dock
     await terminals.termTick();
-    nav.renderSidebarAgents(AGENTS);
+    sidebar.renderSidebarAgents(AGENTS);
     assert.ok(rowFor(WORKER).classList.contains('on-wall'),
         'a popped-out (restored) pane must now read as open on the wall');
 });
@@ -133,7 +134,7 @@ test('popping the dock out flips the cue on — driven by the SAME wall state, l
 test('minimizing a wall pane by hand flips the cue back off', () => {
     const tile = document.querySelector(`#term-stage .grid-stack-item[gs-id="${HUMAN}"]`);
     window.chela.termMinFor(tile.querySelector('.gs-min-btn'));
-    nav.renderSidebarAgents(AGENTS);
+    sidebar.renderSidebarAgents(AGENTS);
     assert.ok(!rowFor(HUMAN).classList.contains('on-wall'),
         'a pane just minimized to the dock must lose the on-wall cue immediately');
 });

@@ -104,10 +104,16 @@ describe('CMX-291 desktop 1440×900: the build string is in Settings, not the si
         await page.evaluate(() => window.chela.toggleSettings());
     });
 
-    test('at the 264px sidebar the resources strip meets no other foot element, nothing clipped', async () => {
+    // CMX-278: the column is resizable (default 288px); 264px is its floor, so the strip must
+    // fit there. The handle's Home key takes it to the floor, as a user would.
+    test('at the narrowest sidebar (264px) the resources strip meets no other foot element, nothing clipped', async () => {
         ready();
-        const w = await page.evaluate(() => document.querySelector('aside.sidebar').getBoundingClientRect().width);
-        assert.equal(Math.round(w), 264, `the sidebar is ${w}px wide, not 264`);
+        const width = () => page.evaluate(() => document.querySelector('aside.sidebar').getBoundingClientRect().width);
+        assert.equal(Math.round(await width()), 288, 'the default sidebar is not 288px');
+        await page.locator('.sidebar-resize').focus();
+        await page.keyboard.press('Home');
+        await page.waitForFunction(() => Math.round(document.querySelector('aside.sidebar').getBoundingClientRect().width) === 264,
+            null, { timeout: 5000 });
         assertStripAlone(await footLayout(page), 'desktop 264px');
         assert.deepEqual(errors, []);
     });

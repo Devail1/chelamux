@@ -12,10 +12,10 @@ import assert from 'node:assert/strict';
 import { clickIsland } from './js_helpers/dashboard_dom.mjs';
 import { KEY, bootPhone, pane, settle, stored } from './js_helpers/term_pane_fixture.mjs';
 
-let nav, chela;
+let nav, sidebar, chela;
 beforeAll(async () => {
     // A stored pane that is offline: the boot falls through to the sidebar's first.
-    ({ nav, chela } = await bootPhone({ order: ['/srv/code/gamma', '/srv/code/beta', '/srv/code/alpha'], seed: { [KEY]: stored('@299', 's-z', 'z') } }));
+    ({ nav, sidebar, chela } = await bootPhone({ order: ['/srv/code/gamma', '/srv/code/beta', '/srv/code/alpha'], seed: { [KEY]: stored('@299', 's-z', 'z') } }));
     await settle();
 });
 
@@ -28,7 +28,7 @@ test('the boot opens the first session in the sidebar order, not the first /api/
 test('after the boot, a sidebar re-render never moves a pane the user picked', async () => {
     clickIsland(document.querySelector('#sidebar-agents .agent-row[data-item="w:@201"]'));
     await settle();
-    await nav.refreshSidebar();
+    await sidebar.refreshSidebar();
     await settle();
     assert.deepEqual(pane(), { value: '@201', shown: '@201' });
 });
