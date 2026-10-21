@@ -5,4 +5,4 @@ export { closeShareDialog, openShareDialog, type OpenShareDialog } from './lib/m
 export { durLabel, isLong, mintBody, SHARE_NOT_SANDBOXED_REASON, SHARE_TYPING_OFF_REASON, shareOffer, unsafeDurations, type ShareDraft, type ShareMode, type ShareOffer, type ShareOptions } from './lib/model.ts';
 export { paneToast } from './lib/paneToast.ts';
 export { ShareDialog, type PaneDims, type ShareDialogProps } from './lib/ShareDialog.tsx';
-export { renderShareInfoRows, ShareInfoRows, type ShareInfo } from './lib/ShareInfoRows.tsx';
+export { mountedInfoRows, renderShareInfoRows, ShareInfoRows, type ShareInfo } from './lib/ShareInfoRows.tsx';

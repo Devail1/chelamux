@@ -27,15 +27,27 @@ export function ShareInfoRows({ info, emptyMsg }: { info: ShareInfo | null; empt
   );
 }
 
-const roots = new WeakMap<Element, Root>();
+const roots = new Map<Element, Root>();
 
-/** Render the rows into a legacy element, synchronously (legacy reads them straight back). */
+/**
+ * Render the rows into a legacy element, synchronously (legacy reads them straight back). The
+ * sheet rebuilds its rows on every refresh, so each call first unmounts the roots whose element
+ * has left the page.
+ */
 export function renderShareInfoRows(el: Element, info: ShareInfo | null, emptyMsg: string): void {
-  let r = roots.get(el);
-  if (!r) {
-    r = createRoot(el);
-    roots.set(el, r);
+  for (const [old, r] of roots)
+    if (!old.isConnected) {
+      r.unmount();
+      roots.delete(old);
+    }
+  let root = roots.get(el);
+  if (!root) {
+    root = createRoot(el);
+    roots.set(el, root);
   }
-  const root = r;
-  flushSync(() => root.render(<ShareInfoRows info={info} emptyMsg={emptyMsg} />));
+  const r = root;
+  flushSync(() => r.render(<ShareInfoRows info={info} emptyMsg={emptyMsg} />));
 }
+
+/** How many rows are mounted (tests: the sheet's rebuilds must not leak roots). */
+export const mountedInfoRows = () => roots.size;

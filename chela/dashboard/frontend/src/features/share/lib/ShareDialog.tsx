@@ -45,6 +45,10 @@ export function ShareDialog({ wid, title, options, dims, onClose, onMinted }: Sh
   const [error, setError] = useState('');
   const unsafe = mode === 'unsandboxed';
   const body = mintBody(offer, { mode, minutes, confirm, confirmLong });
+  // Once Share is pressed the mint is underway: it cannot be cancelled, only awaited.
+  const dismiss = () => {
+    if (!busy) onClose();
+  };
 
   const share = async () => {
     if (!body || busy) return;
@@ -85,7 +89,7 @@ export function ShareDialog({ wid, title, options, dims, onClose, onMinted }: Sh
     });
 
   return (
-    <Dialog open onOpenChange={(open) => !open && onClose()} title={`Share ${title}`} className="share-dialog">
+    <Dialog open onOpenChange={(open) => !open && dismiss()} title={`Share ${title}`} className="share-dialog">
       <RadioGroup label="Who can type" value={mode} onChange={(v) => setMode(v as ShareMode)} options={choices} />
       {unsafe && (
         <div className="sd-confirm">
@@ -108,7 +112,9 @@ export function ShareDialog({ wid, title, options, dims, onClose, onMinted }: Sh
         </p>
       )}
       <div className="modal-actions sd-actions">
-        <Button onClick={onClose}>Cancel</Button>
+        <Button onClick={dismiss} disabled={busy}>
+          Cancel
+        </Button>
         <Button variant={unsafe ? 'danger' : 'primary'} className="sd-share" disabled={!body || busy} onClick={() => void share()}>
           Share
         </Button>

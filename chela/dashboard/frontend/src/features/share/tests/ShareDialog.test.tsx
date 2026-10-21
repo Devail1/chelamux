@@ -227,3 +227,46 @@ test('the mounted dialog mints and hands the response to its opener', async () =
   expect(onMinted.mock.calls).toEqual([[MINTED]]);
   expect(screen.queryByRole('dialog')).toBeNull();
 });
+
+test('once Share is pressed the mint cannot be cancelled: Cancel and Escape wait for it', async () => {
+  let release!: (v: unknown) => void;
+  vi.stubGlobal('fetch', vi.fn(() => new Promise((r) => (release = r))));
+  const { onClose, onMinted } = show(SANDBOXED);
+  await clickShare();
+  const cancel = screen.getByRole('button', { name: 'Cancel' }) as HTMLButtonElement;
+  expect(cancel.disabled).toBe(true);
+  fireEvent.click(cancel);
+  fireEvent.keyDown(screen.getByRole('dialog'), { key: 'Escape' });
+  expect(onClose).not.toHaveBeenCalled();
+  await act(async () => release({ json: () => Promise.resolve(MINTED) }));
+  expect([onClose.mock.calls.length, onMinted.mock.calls]).toEqual([1, [[MINTED]]]);
+});
+
+test('a dialog whose mint lands after a newer dialog opened reports the share but leaves the newer one open', async () => {
+  let release!: (v: unknown) => void;
+  vi.stubGlobal('fetch', vi.fn((url: string) => (url.endsWith('/share-options') ? Promise.resolve({ json: () => Promise.resolve(SANDBOXED) }) : new Promise((r) => (release = r)))));
+  const mintedA = vi.fn();
+  await act(() => openShareDialog({ wid: '@1', title: 'one', onMinted: mintedA }));
+  await clickShare();
+  await act(() => openShareDialog({ wid: '@2', title: 'two', onMinted: () => {} }));
+  await act(async () => release({ json: () => Promise.resolve(MINTED) }));
+  expect(mintedA.mock.calls).toEqual([[MINTED]]);
+  expect(screen.getByRole('heading').textContent).toBe('Share two');
+  act(() => closeShareDialog());
+});
+
+test('closing returns focus to the control that opened the dialog', async () => {
+  stubFetch(() => SANDBOXED);
+  const opener = document.createElement('button');
+  document.body.append(opener);
+  opener.focus();
+  await act(() => openShareDialog({ wid: '@1', title: 'shell', onMinted: () => {} }));
+  expect(document.activeElement).not.toBe(opener);
+  await act(async () => {
+    fireEvent.click(screen.getByRole('button', { name: 'Cancel' }));
+    await new Promise((r) => setTimeout(r, 0));
+  });
+  expect(screen.queryByRole('dialog')).toBeNull();
+  expect(document.activeElement).toBe(opener);
+  opener.remove();
+});

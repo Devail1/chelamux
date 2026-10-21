@@ -35,7 +35,11 @@ export async function openShareDialog({ wid, title, dims, onMinted }: OpenShareD
   const mine = ++gen;
   const options = await fetchShareOptions(wid);
   if (mine !== gen) return;
-  paint(<ShareDialog key={mine} wid={wid} title={title} options={options} dims={dims} onClose={closeShareDialog} onMinted={onMinted} />);
+  // This dialog closes only itself: a late close never takes down a newer dialog.
+  const close = () => {
+    if (mine === gen) closeShareDialog();
+  };
+  paint(<ShareDialog key={mine} wid={wid} title={title} options={options} dims={dims} onClose={close} onMinted={onMinted} />);
 }
 
 export function closeShareDialog(): void {
