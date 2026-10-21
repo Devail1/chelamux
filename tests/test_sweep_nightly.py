@@ -747,3 +747,35 @@ def test_the_issue_lists_at_most_100_sites_and_counts_the_rest():
     assert "- … and 5 more (`git grep -nF` the line)" in body
     _, body = sweep_nightly.render_issue([_mut(file="f0.py", line=1)], sites[:100], "a" * 40, {})
     assert "more (`git grep" not in body
+
+
+# --- sweep survivors ----------------------------------------------------------------------
+
+
+def test_a_merge_commit_brings_in_its_side_branch_lines(tmp_path, notices):
+    """A non-squash merge: the guard blames to the SIDE commit, which the merge introduced."""
+    repo = _repo(tmp_path, prs=[])
+    _git(repo, "checkout", "-qb", "side")
+    (repo / "size.py").write_text(WEAK)
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-qm", "side work")
+    _git(repo, "checkout", "-q", "dev")
+    _git(repo, "merge", "-q", "--no-ff", "-m", "Merge PR #5", "side")
+    _git(repo, "push", "-q", "origin", "dev")
+    filer = Filer()
+    res = _run(repo, tmp_path / "chela", filer)
+    assert (res["status"], res["filed"]) == ("filed", ["CMX-901"])
+    assert "Merge PR #5" in filer.calls[0][1]
+
+
+def test_an_unset_nightly_at_is_the_default_without_a_warning(tmp_path, caplog):
+    with caplog.at_level("WARNING", logger="chela.sweep_nightly"):
+        assert sweep_nightly.nightly_at(_wf(tmp_path)) == (2, 0)
+    assert caplog.records == []
+
+
+def test_label_nodes_without_an_id_or_of_another_name_are_ignored(tmp_path):
+    t = LabelTeam([{"name": "sweep"}, "junk", {"id": "L-x", "name": "other", "team": None}])
+    out = _source(tmp_path, t).create_issue("T", "B", labels=("sweep",))
+    assert out["warnings"] == []
+    assert next(v for n, v in t.calls if n == "create")["input"]["labelIds"] == ["new-sweep"]
