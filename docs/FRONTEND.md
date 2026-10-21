@@ -75,7 +75,7 @@ The page's chrome (CMX-219) mounts from `src/chrome.tsx`, which has no side effe
 the jsdom suites can mount it on a page of their own: the safety float's pills, the sidebar's
 New session, agent count, resources strip and gear menu, the phone "+", the agent detail, and
 `Overlays` (one root for the launch menu, the send-message dialog, the approvals and
-access-request sheets, the update banner and the run toasts). An island that draws one control
+access-request sheets and the update banner). An island that draws one control
 inside a legacy row renders into a `<span class="island-slot">` (`display: contents`), so the
 control lays out as the row's own child.
 
@@ -106,8 +106,8 @@ dependency, and it renders a consistent value even during concurrent rendering. 
 
 Since CMX-217 the page's state is `src/shared/store/`, one file per slice (`view.ts`, the
 active view; `agents.ts`, the bridge's `agents` store; `work.ts`, the last `/api/dispatcher`
-payload, which `work.js`'s one poll publishes and the Runs and New-task islands read; they ask
-for a fresh poll with `refreshWork()`, CMX-231; `orchestrator.ts`, who holds the decisions
+payload, which `src/features/work`'s one poll (a scheduler lane, CMX-233) publishes and the Work
+view and New-task dialog read; they ask for a fresh poll with `refreshWork()`, CMX-231; `orchestrator.ts`, who holds the decisions
 inbox, read and written through `src/shared/orchestrator`, CMX-228; `context.ts`, the last
 `/api/agents/context` rows, which the gear menu's usage readouts and the agent detail read,
 CMX-219). Legacy imports those objects through
@@ -148,7 +148,7 @@ from a meaning to a Lucide icon.
 `src/shared/markdown` renders the task briefs and judge reports (`markdownHtml`, `inlineHtml`).
 It escapes every character of its source and links only http(s), mailto and relative URLs: a
 `javascript:`/`data:` link renders as its text (CMX-228). React renders its output only through
-`<Markdown>`, the app's one `dangerouslySetInnerHTML`; legacy `kanban.js` reads `inlineHtml`.
+`<Markdown>`, the app's one `dangerouslySetInnerHTML`.
 
 ## Polls, pushes and the boot config
 

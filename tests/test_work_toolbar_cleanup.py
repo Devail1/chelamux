@@ -36,8 +36,12 @@ def test_per_card_merge_route_still_answers(client):
 
 
 def test_toolbar_has_no_seed_hint_line_but_keeps_init_button():
+    # CMX-233: the toolbar is the Work view island (features/work), not index.html markup.
+    # Its RTL suite clicks the button; this pins the CMX-207 cleanup in both places.
     html = INDEX_HTML.read_text()
-    assert not re.search(r'<span class="work-toolbar-hint">\s*Seed a starter', html)
-    init = re.search(r'<button[^>]*onclick="chela\.openInitRepo\(\)"[^>]*>\+ Init a repo</button>', html)
+    view = (INDEX_HTML.parent.parent / "frontend" / "src" / "features" / "work" / "lib" / "WorkView.tsx").read_text()
+    for src in (html, view):
+        assert "Seed a starter WORKFLOW.md + TODO.md into a repo</span>" not in src
+        assert not re.search(r'work-toolbar-hint">\s*Seed a starter', src)
+    init = re.search(r'<Button [^\n]*title="Seed a starter WORKFLOW\.md \+ TODO\.md into a repo"[^\n]*>\+ Init a repo</Button>', view)
     assert init, "the + Init a repo button must stay"
-    assert 'title="Seed a starter WORKFLOW.md + TODO.md into a repo"' in init.group(0)

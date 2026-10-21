@@ -35,6 +35,14 @@ export function ItemButton({ className, type = 'button', ...rest }: ButtonHTMLAt
 }
 
 /**
+ * A text control drawn by its own `className` (a filter pill, a segment, a card's action), not
+ * the .btn look. `aria-pressed` makes it a toggle.
+ */
+export function TextButton({ type = 'button', ...rest }: ButtonHTMLAttributes<HTMLButtonElement>) {
+  return <button type={type} {...rest} />;
+}
+
+/**
  * A chip's tone, by meaning: ok (ci green), warn (RESTART, awaiting), bad (failed, off),
  * info (rework N), alert (needs a human), muted (done). Each is an existing .badge-* class.
  */

@@ -21,8 +21,8 @@
 // absent block defaults to terminals ON) — and reads every claim back off
 // the actually running program: the live `currentTab` binding, the real DOM
 // node's classList (mounted from index.html's OWN markup, not a hand copy),
-// and the real renderKanban() paint that only happens once the currentTab gate
-// (work.js:174) lets pollWork() through.
+// and the Work board's first paint, which needs the boot tick to have run the Work poll's
+// lane (features/work, CMX-233).
 //
 // Run: pnpm exec vitest run tests/dashboard_default_view.test.mjs (pytest via
 // tests/test_js_suites.py; needs `pnpm install` for jsdom).
@@ -37,7 +37,7 @@ import { bootDashboardDom, clickIsland, flush, sliceTemplate } from './js_helper
 // CMX-89: `active` is a Jinja conditional now (terminals_enabled picks the
 // first panel), so the slice is rendered for the terminals-off config.
 const CANVAS_HTML = sliceTemplate(
-    '<div class="panel" id="panel-agent-detail">', '<!-- /panel-work -->',
+    '<div class="panel" id="panel-agent-detail">', 'id="panel-work"></div>',
     { terminals_enabled: false, wall_tile_dispatched: false });
 
 const BODY = `
@@ -78,11 +78,9 @@ beforeAll(async () => {
         extraModules: ['util.js', 'nav.js'],
     }));
 
-    // Flush pollWork()'s fetch -> json() -> render microtask chain (startWorkPoll
-    // fires pollWork() immediately on boot — main.js:60) without advancing any
-    // fake timer.
-    await flush();
-    await flush();
+    // Flush the boot tick's Work poll (a scheduler lane): fetch -> json() -> store -> React
+    // paint, without advancing any fake timer.
+    for (let i = 0; i < 4; i++) await flush();
 
     // showAgentDetail (driven below via chela.selectAgent) fires an unawaited
     // refreshSummary(), which reaches for these two header nodes — absent from
@@ -95,7 +93,7 @@ beforeAll(async () => {
 });
 
 test('currentTab defaults to work on boot when terminals are off — never the deleted agents view', () => {
-    // The live binding main.js/work.js actually read (main.js:41, work.js:174),
+    // The live binding the scheduler and the Work view read (shared/store/view.ts),
     // not a re-parse of util.js's source text: nothing in this boot calls
     // selectView('terminals') (TERMINALS_ON is false), so whatever value is here
     // is util.js's OWN initial default — exactly the literal the judge reverted.
@@ -135,19 +133,14 @@ test('the sidebar nav on a terminals-off boot lists only Work — not Wall, whos
         'are enabled) and blank the canvas');
 });
 
-test('the currentTab gate actually lets the Work board paint — not just a value that happens to read "work"', () => {
-    // work.js:174 (`if (currentTab !== 'work') return;`) is the load-bearing
-    // consumer of the literal above. Proven behaviourally: renderKanban() only
-    // flips #kanban-empty to 'block' (its not-configured state, matching the {}
-    // /api/dispatcher stub) if pollWork()'s early return was NOT taken. If
-    // currentTab defaulted to 'agents' instead, this assertion is the one that
-    // would catch it even if the direct currentTab check above were somehow
-    // gamed.
-    const empty = document.getElementById('kanban-empty');
-    assert.ok(empty, '#kanban-empty is missing from the mounted panel-work markup');
-    assert.equal(empty.style.display, 'block',
-        'renderKanban() never ran — the Work board never painted on a terminals-off boot, which means the ' +
-        "currentTab gate at work.js:174 did not let it through (currentTab did not actually resolve to 'work')");
+test('the boot tick paints the Work board on a terminals-off boot — the canvas is never blank', () => {
+    // The Work view is a React island in index.html's #panel-work; its board draws once the
+    // boot tick's Work lane has polled /api/dispatcher. The {} stub is a not-configured
+    // payload, so what paints is the board's explainer. No paint = the lane never ran on
+    // this boot path, and the visible panel would be an empty toolbar.
+    const empty = document.querySelector('#panel-work #work-board #kanban-empty');
+    assert.ok(empty, 'the Work board never painted on a terminals-off boot (no explainer in #panel-work)');
+    assert.equal(empty.querySelector('.work-empty-title')?.textContent, 'A board for work in flight');
 });
 
 // --- the agent-detail "← Back" control, both branches ---------------------

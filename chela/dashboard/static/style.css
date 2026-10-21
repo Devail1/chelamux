@@ -2463,14 +2463,19 @@ input[type="text"]:focus, textarea:focus, select:focus {
 
 .kanban-board {
     display: grid;
-    /* --kanban-cols: set by kanban.js — chela's 6 lanes, or a Linear team's visible
-       states (CMX-23). */
-    grid-template-columns: repeat(var(--kanban-cols, 6), minmax(0, 1fr));
+    /* --kanban-cols: set by the board (features/work): chela's 6 lanes, or a Linear team's
+       visible states (CMX-23). A column is a lane, not a share of the window (Liav,
+       2026-10-19): it never grows past 400px, so one visible column leaves the rest of the
+       row empty instead of drawing 1400px-wide cards, and many columns scroll sideways
+       instead of squeezing below 240px. */
+    grid-template-columns: repeat(var(--kanban-cols, 6), minmax(240px, 400px));
+    overflow-x: auto;
     gap: 10px;
     align-items: stretch;
 }
 
 .kanban-col {
+    max-width: 400px;
     background: var(--surface);
     border: 1px solid var(--border);
     border-radius: 8px;
@@ -2529,9 +2534,9 @@ input[type="text"]:focus, textarea:focus, select:focus {
 }
 
 /* 6 lanes (Backlog / To Do / In Progress / Review / Done / Archived —
-   kanbanlanemodel.js's KANBAN_LANES). Review holds awaiting_review +
+   features/work/lanes.ts's KANBAN_LANES). Review holds awaiting_review +
    changes_requested + needs_human + failed cards together — its head colour
-   is a lane-level cue only; each card's own status pill (kanban.js's
+   is a lane-level cue only; each card's own status pill (features/work's
    STATUS_CHIPS) is what says which of the four it is. Archived (CMX-265) is
    the `closed`-run lane — PRs a human closed without merging — kept separate
    from Done so counting Done's cards always answers "what shipped?" correctly. */
@@ -2671,10 +2676,10 @@ a.kanban-tracker-link:focus-visible { text-decoration: underline; }
 .kanban-card-changes_requested { border-left-color: var(--orange, #d18616); background: rgba(209, 134, 22, 0.06); }
 .kanban-card-needs_human       { border-left-color: var(--red); background: rgba(248, 81, 73, 0.07); }
 
-/* Per-card status pill (kanban.js's STATUS_CHIPS) — shown on every non-backlog card so a
+/* Per-card status pill (features/work/board.ts's STATUS_CHIPS) — shown on every non-backlog card so a
    reader can tell two cards sharing a lane apart (claimed vs running in In Progress;
    awaiting/changes/needs-human/failed in Review). The base rule is a neutral outline; each
-   `.st-*` modifier only ADDS a colour — the pill's WORD (set in kanban.js) is what actually
+   `.st-*` modifier only ADDS a colour — the pill's WORD (set in board.ts) is what actually
    carries the meaning, exactly like .kanban-ci-chip below. */
 .kanban-state-chip {
     background: var(--surface);
@@ -2693,13 +2698,13 @@ a.kanban-tracker-link:focus-visible { text-decoration: underline; }
 .kanban-state-chip.st-needs-human  { color: var(--red); border-color: rgba(248, 81, 73, 0.5); background: rgba(248, 81, 73, 0.10); font-weight: 600; }
 .kanban-state-chip.st-failed       { color: var(--red); border-color: rgba(248, 81, 73, 0.55); background: rgba(248, 81, 73, 0.14); font-weight: 600; }
 .kanban-state-chip.st-done         { color: var(--text-dim); }
-/* 🗂️📐 CMX-23 — run-state badges that ride beside the status pill (kanbanlinearmodel.js). */
+/* 🗂️📐 CMX-23 — run-state badges that ride beside the status pill (features/work/linear.ts). */
 .kanban-state-chip.st-judging      { color: var(--accent); border-color: rgba(88, 166, 255, 0.45); background: rgba(88, 166, 255, 0.10); }
 .kanban-state-chip.st-rework       { color: var(--orange, #d18616); border-color: rgba(209, 134, 22, 0.45); background: rgba(209, 134, 22, 0.10); }
 .kanban-state-chip.st-blocked-race { color: var(--red); border-color: rgba(248, 81, 73, 0.5); background: rgba(248, 81, 73, 0.10); }
 .kanban-state-chip.st-closed-unmerged { color: var(--orange, #d18616); border-color: rgba(209, 134, 22, 0.45); background: rgba(209, 134, 22, 0.10); }
 
-/* ⚖️🎚️ CMX-405 — the run's RISK level (kanban.js / the task modal via riskChip). The WORD
+/* ⚖️🎚️ CMX-405 — the run's RISK level (the board card / the task modal via riskChip). The WORD
    ("risk: high") carries it; the colour only agrees. */
 .kanban-risk-chip {
     background: var(--surface);
@@ -3012,10 +3017,6 @@ summary.runs-section { cursor: pointer; }
 
 /* ---- Responsive ---- */
 
-@media (max-width: 900px) {
-    .kanban-board { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-}
-
 @media (max-width: 768px) {
     .header { padding: 8px 12px; gap: 10px; flex-wrap: wrap; }
     .content { padding: 10px 12px; }
@@ -3136,6 +3137,7 @@ summary.runs-section { cursor: pointer; }
     }
     .kanban-col {
         flex: 0 0 86%;
+        max-width: none;
         scroll-snap-align: start;
         margin-bottom: 0;
     }

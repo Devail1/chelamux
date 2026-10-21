@@ -1,7 +1,7 @@
 // CMX-217 (CMX-212 P03): sse.js is gone; each SSE event's handler lives with its owner and
 // subscribes through frontend/src/shared/events. This drives the handlers sse.js used to hold
-// that no other suite reaches: `runs`/`hello` (the run-toast island, features/runtoast since
-// CMX-219, and work.js's board redraw), `windows` (util.js invalidates the agent cache; terminals.js reconciles the Wall)
+// that no other suite reaches: `runs`/`hello` (features/work since CMX-233, the run-state
+// toasts and the board redraw), `windows` (util.js invalidates the agent cache; terminals.js reconciles the Wall)
 // and `term-ready` (terminals.js swaps a placeholder for its iframe). The real page, booted
 // through the real entry, a fake EventSource (jsdom has none). `log`, `orchestrator` and
 // `overrides` are driven by decisions_sse, orchestrator_ui and approvals_wiring.
@@ -23,7 +23,7 @@ const PANEL = `
   <div id="term-bar" class="kb-collapsed"><button class="kb-toggle" id="kb-toggle"></button><div class="kb-body" id="kb-body"></div></div>
 </div>
 <div class="panel" id="panel-work"></div>
-<div id="overlays-island"></div>`;
+<div id="work-toasts"></div>`;
 
 const agent = wid => ({ name: `agent-${wid}`, window_id: wid, online: true, session_status: 'idle' });
 let liveAgents = [agent('@1'), agent('@2')];
@@ -54,10 +54,10 @@ function frame(type, data) {
     handlers.forEach(cb => cb({ data: JSON.stringify(data) }));
 }
 async function settle() { for (let i = 0; i < 10; i++) await flush(); }
-const toasts = () => [...document.querySelectorAll('.run-toast-stack .run-toast')];
+const toasts = () => [...document.querySelectorAll('#work-toasts .run-toast')];
 const dispatcherReads = () => requests.filter(r => r.split('?')[0].endsWith('/api/dispatcher')).length;
 
-let util, terminals;
+let util, terminals, toastStore;
 beforeAll(async () => {
     const grid = new Proxy({ engine: { nodes: [] }, save: () => [], getGridItems: () => [] },
         { get: (t, k) => (k in t ? t[k] : el => el) });
@@ -66,6 +66,7 @@ beforeAll(async () => {
         body: PANEL, canvasStub: true, fetchImpl: fakeFetch, EventSource: FakeEventSource,
         extraModules: ['util.js', 'terminals.js'],
     }));
+    ({ toasts: toastStore } = await import('../chela/dashboard/frontend/src/features/work/index.ts'));
     await settle();
     assert.ok(FakeEventSource.last, 'the boot never opened the event stream');
     assert.equal(FakeEventSource.last.url, '/api/events');
@@ -75,7 +76,7 @@ beforeEach(async () => {
     requests = [];
     localStorage.clear();
     util.setCurrentTab('terminals');
-    toasts().forEach(t => t.click());   // a click dismisses one: start each test with none
+    toastStore.set([]);
     await settle();
 });
 

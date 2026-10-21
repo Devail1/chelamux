@@ -8,7 +8,6 @@ import { ApprovalsPill, ApprovalsSheet } from './features/approvals/index.ts';
 import { LaunchMenu, NewSessionButton, NewSessionFab } from './features/launcher/index.ts';
 import { PrimaryMenu, SessionsCount } from './features/primarymenu/index.ts';
 import { Resources } from './features/resources/index.ts';
-import { RunToasts } from './features/runtoast/index.ts';
 import { StatusHealth } from './features/statushealth/index.ts';
 import { UpdateBanner } from './features/update/index.ts';
 import { mountIsland } from './shared/islands/index.tsx';
@@ -22,7 +21,6 @@ export function Overlays() {
       <ApprovalsSheet />
       <AccessRequestsSheet />
       <UpdateBanner />
-      <RunToasts />
     </>
   );
 }

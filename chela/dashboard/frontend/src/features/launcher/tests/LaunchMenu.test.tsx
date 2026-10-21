@@ -119,7 +119,7 @@ test('a refused or failed edit keeps the lists', async () => {
   await act(() => pinFav('/y'));
   fail = '/api/launcher/forget';
   await act(() => forgetRecent('/x'));
-  expect(launcher.get().favorites.map((f) => f.path)).toEqual(['/x']);
+  expect((launcher.get().favorites ?? []).map((f) => f?.path)).toEqual(['/x']);
 });
 
 test('+ opens the favorites picker: the unpinned repos; a pick pins it and closes', async () => {

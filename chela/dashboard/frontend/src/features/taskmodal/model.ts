@@ -2,8 +2,8 @@
 // TASK-DETAIL MODAL MODEL: pure helpers for the brief pane + review timeline.
 // No DOM: lib/TaskModal.tsx owns the render (the Jira-like "issue" view a kanban
 // card click opens); this file only turns raw task/run fields into what the
-// modal displays, so both are directly unit-testable. Legacy kanban.js and
-// dispatcher.js import it too. (static/js/taskmodalmodel.js until CMX-228.)
+// modal displays, so both are directly unit-testable. The Work board
+// imports it too. (static/js/taskmodalmodel.js until CMX-228.)
 // ---------------------------------------------------------------------------
 
 /**
@@ -135,7 +135,7 @@ export function defaultTab(item: TaskItem | null | undefined, nRounds: number): 
   return _REVIEW_STATUSES.has(item.status ?? '') || _BLOCKING_JUDGE.has(item.judge_state ?? '') ? 'review' : 'brief';
 }
 
-// Short workflow label: the workflow file's directory (kanban.js's _wfName).
+// Short workflow label: the workflow file's directory (the Work board's workflow chip too).
 export function wfShort(path: string | undefined): string {
   if (!path) return '';
   const parts = String(path).replace(/\/+$/, '').split('/');
@@ -147,7 +147,7 @@ export function statusLabel(status: string | undefined): string {
   return String(status || '?').replace(/_/g, ' ');
 }
 
-// The CI chip: kanban.js's CI_CHIPS words and `.kanban-ci-chip`/`.ci-*` classes. The word
+// The CI chip: the Work board's CI words and `.kanban-ci-chip`/`.ci-*` classes. The word
 // carries the meaning; the icon and the colour only agree with it.
 export type CiKind = 'passing' | 'failing' | 'pending' | 'none' | 'unknown';
 export const CI_CHIP: Record<CiKind, { label: string; cls: string }> = {

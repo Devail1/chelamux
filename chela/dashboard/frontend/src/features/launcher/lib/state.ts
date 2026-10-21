@@ -8,12 +8,15 @@
 import { BASE_PATH, BOOT, api } from '../../../shared/api/index.ts';
 import { agents } from '../../../shared/store/agents.ts';
 import { registerLane } from '../../../shared/scheduler/index.ts';
-import { createStore } from '../../../shared/store/index.ts';
+import { launcher, type LauncherData, type LauncherEntry } from '../../../shared/store/launcher.ts';
 
 export type LaunchEntry = { path: string; label: string; exists?: boolean };
-export type LauncherData = { recent: LaunchEntry[]; favorites: LaunchEntry[] };
+export { launcher, type LauncherData };
 
-export const launcher = createStore<LauncherData>({ recent: [], favorites: [] });
+/** The rows a list can draw: each with a path, labelled by it when the server sent none. */
+export function entries(list: LauncherEntry[] | undefined): LaunchEntry[] {
+  return (list || []).flatMap((e) => (e?.path ? [{ path: e.path, label: e.label || e.path, exists: e.exists }] : []));
+}
 
 /** What a launch does to the legacy page, which owns the Wall and the sidebar. nav.js sets it. */
 export type LauncherHost = {
@@ -113,7 +116,7 @@ export async function newShellWindow(): Promise<void> {
  */
 export async function newSandboxedSession(web = false): Promise<void> {
   const { favorites, recent } = launcher.get();
-  const guess = [...favorites, ...recent][0]?.path ?? '';
+  const guess = [...entries(favorites), ...entries(recent)][0]?.path ?? '';
   const label = web ? 'Sandboxed session with WEB ACCESS' : 'Sandboxed session';
   const cwd = (window.prompt(`${label}: project directory (the guest sees ONLY this):`, guess) || '').trim();
   if (!cwd) return;

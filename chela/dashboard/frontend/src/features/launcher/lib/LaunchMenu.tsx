@@ -10,7 +10,7 @@ import { createStore, useStore } from '../../../shared/store/index.ts';
 import { AnchoredPopover, IconButton, ItemButton } from '../../../shared/ui/index.ts';
 import { openInitRepo } from '../../runs/index.ts';
 import { showAddSchedule } from '../../schedules/index.ts';
-import { forgetRecent, launchProject, launcher, newSandboxedSession, newShellWindow, pinFav, refreshLauncher, unpinFav, type LaunchEntry } from './state.ts';
+import { entries, forgetRecent, launchProject, launcher, newSandboxedSession, newShellWindow, pinFav, refreshLauncher, unpinFav, type LaunchEntry } from './state.ts';
 
 /** The control the menu hangs off; null = closed. */
 const anchor = createStore<HTMLElement | null>(null);
@@ -73,7 +73,9 @@ function FavAdd({ onDone }: { onDone: () => void }) {
 }
 
 function Launch({ onAdd }: { onAdd: () => void }) {
-  const { favorites, recent } = useStore(launcher);
+  const data = useStore(launcher);
+  const favorites = entries(data.favorites);
+  const recent = entries(data.recent);
   const act = (fn: () => unknown) => () => {
     closeLaunchMenu();
     void fn();

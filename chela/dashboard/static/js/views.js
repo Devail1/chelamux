@@ -29,7 +29,6 @@
 // See viewreg.js for the entry shape.
 // ---------------------------------------------------------------------------
 import { renderTerminals, startTermTimer, stopTermTimer } from './terminals';
-import { pollWork } from './work';
 
 export const VIEWS = [
     {
@@ -54,10 +53,9 @@ export const VIEWS = [
             { id: 'side-runs-count', title: 'Active runs', text: '0' },
             { id: 'side-pr-count', cls: 'badge-pr', title: 'Open PRs', text: '0 PR' },
         ],
-        // Dispatch + Kanban + Schedules, merged. work.js owns the ONE /api/dispatcher
-        // poll for the whole app (it also feeds the badges above, which are visible on
-        // every view) — so there is no timer to start here, only an immediate redraw.
-        enter: () => pollWork(),
+        // Board + Runs + Schedules, a React island (frontend/src/features/work). Its ONE
+        // /api/dispatcher poll is a scheduler lane (it also feeds the badges above, which
+        // are visible on every view), and selectView's refresh runs it: no hook here.
     },
     {
         id: 'agent-detail',

@@ -249,15 +249,6 @@ test('a Menu draws its footer after its items, and is named by its trigger, what
   expect(screen.getByRole('menu', { name: 'Mine' }).getAttribute('aria-labelledby')).toBe('my-trigger');
 });
 
-test('a click on a Toast closes it; a click on a link inside it does not', () => {
-  const onOpenChange = vi.fn();
-  render(<ToastProvider><Toast open onOpenChange={onOpenChange} title={<>Run <a href="https://x.test">PR</a></>} /></ToastProvider>);
-  fireEvent.click(screen.getByText('PR'));
-  expect(onOpenChange).not.toHaveBeenCalled();
-  fireEvent.click(must(document.querySelector('.run-toast')));
-  expect(onOpenChange).toHaveBeenCalledWith(false);
-});
-
 test('Dialog: focus returns to the opener even when a field inside took focus with autoFocus (CMX-228)', async () => {
   function Harness() {
     const [open, setOpen] = useState(false);

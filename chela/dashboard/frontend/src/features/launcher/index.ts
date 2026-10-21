@@ -2,4 +2,4 @@
 // (the sidebar's New session, the phone "+"); the launches legacy nav.js still calls (the ⌘K
 // palette, a sidebar group's "+").
 export { LaunchMenu, NewSessionButton, NewSessionFab, closeLaunchMenu, openLaunchMenu } from './lib/LaunchMenu.tsx';
-export { forgetRecent, launchProject, launcher, newSandboxedSession, newShellWindow, pinFav, refreshLauncher, samePath, setLauncherHost, unpinFav, type LaunchEntry, type LauncherData, type LauncherHost } from './lib/state.ts';
+export { entries, forgetRecent, launchProject, launcher, newSandboxedSession, newShellWindow, pinFav, refreshLauncher, samePath, setLauncherHost, unpinFav, type LaunchEntry, type LauncherData, type LauncherHost } from './lib/state.ts';

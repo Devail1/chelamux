@@ -1,5 +1,5 @@
 // Run state → how it LOOKS (pure). Moved from static/js/runstate.js by CMX-231 (CMX-212
-// P10); kanban.js and taskmodal.js import it from here.
+// P10); the Work board and the task modal import it from here.
 //
 // A pure module, because this mapping is exactly the kind that rots silently: CMX-68 added
 // two run states to the dispatcher and the badge table was never updated, so `needs_human`

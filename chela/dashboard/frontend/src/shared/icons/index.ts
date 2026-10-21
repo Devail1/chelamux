@@ -1,7 +1,7 @@
 // CMX-276: the dashboard's icons, by MEANING (FRONTEND_PORT_PLAN.md §2.5): a component asks
 // for `icons.orchestrator`, never for a Lucide name, so a meaning is chosen once. Lucide is
 // bundled by the build (no CDN). An icon is aria-hidden unless it is the only label.
-import { ArrowUpToLine, Ban, Bell, CalendarClock, Check, ChevronDown, ChevronRight, ChevronUp, CircleDot, CircleHelp, CircleMinus, CircleSlash, Crown, Ellipsis, ExternalLink, Eye, FlaskConical, GitPullRequest, Hand, Inbox, Keyboard, Menu, Minus, OctagonAlert, Play, Plus, RefreshCw, Scale, Search, Settings, Share2, SlidersHorizontal, SquareCheck, SquareTerminal, Star, TriangleAlert, Workflow, X } from 'lucide-react';
+import { ArrowUpToLine, Ban, Bell, CalendarClock, Check, ChevronDown, ChevronRight, ChevronUp, Circle, CircleDashed, CircleDot, CircleHelp, CircleMinus, Crown, Ellipsis, ExternalLink, Eye, FlaskConical, GitMerge, GitPullRequest, Hand, Inbox, Keyboard, LayoutGrid, Lock, Menu, Minus, NotebookPen, OctagonX, Play, Plus, RefreshCw, Scale, Search, Settings, Share2, SlidersHorizontal, Snowflake, SquareCheck, SquareTerminal, Star, TriangleAlert, Workflow, X } from 'lucide-react';
 
 export const icons = {
   orchestrator: Crown,
@@ -34,14 +34,24 @@ export const icons = {
   ciPending: CircleDot,
   ciNone: Minus,
   ciUnknown: CircleHelp,
-  // CMX-219: the safety float, run toasts, the launcher and the gear menu
+  // CMX-233: the Work board's cards. A run's status pill: the word carries it, the icon agrees.
+  statusOpen: Circle,
+  claimed: CircleDashed,
+  running: Play,
+  awaitingReview: Eye,
+  needsHuman: OctagonX,
+  closedUnmerged: Ban,
+  blockedRace: Snowflake,
+  parked: Lock,
+  handoff: NotebookPen,
+  merged: GitMerge,
+  board: LayoutGrid,
+  // CMX-219: the safety float, the launcher and the gear menu
   approvals: Scale,
   accessRequest: Hand,
   blocked: Ban,
   review: Search,
   rework: RefreshCw,
-  needsHuman: OctagonAlert,
-  closedUnmerged: CircleSlash,
   search: Search,
   notifications: Bell,
   settings: Settings,
@@ -51,4 +61,5 @@ export const icons = {
   favorite: Star,
 } as const;
 
+/** A meaning in the map, for a pure model that names the icon its renderer draws. */
 export type IconName = keyof typeof icons;

@@ -1,6 +1,7 @@
-// CMX-231 (CMX-212 P10): the last /api/dispatcher payload. work.js owns the app's ONE poll of
-// it and publishes every answer here; the Runs tables and the New-task form read it, and ask
-// work.js for a fresh poll through refreshWork() (after an init, a delete, a create).
+// CMX-231 (CMX-212 P10): the last /api/dispatcher payload. features/work owns the app's ONE
+// poll of it (a scheduler lane since CMX-233) and publishes every answer here; the Work view,
+// the Runs tables and the New-task form read it, and ask for a fresh poll through
+// refreshWork() (after an init, a delete, a create).
 import { createStore } from '../bridge/index.ts';
 
 export type TaskProgress = {
@@ -30,6 +31,10 @@ export type Run = {
   handoff?: string | null;
   closed_run_stall?: string | null;
   tasks?: TaskProgress | null;
+  pr_checks?: string | null;
+  judge_state?: string | null;
+  rework_count?: number | null;
+  tracker_state?: string | null;
 };
 
 /** An open task: a TODO.md line, or a Linear issue (with `group`, `tracker_state`, `risk`). */
@@ -44,7 +49,14 @@ export type OpenTask = {
   blocked?: boolean;
   risk?: string | null;
   risk_reason?: string | null;
+  raw?: string | null;
+  body?: string | null;
+  closed_run_stall?: string | null;
 };
+
+/** A BACKLOG.md bullet (read-only on the board) and a parked TODO.md bullet. */
+export type BacklogItem = { text?: string; section?: string; file?: string };
+export type ParkedTask = { id?: string; title?: string; file?: string; line_number?: number; raw?: string; reason?: string };
 
 export type Workflow = {
   path: string;
@@ -55,21 +67,30 @@ export type Workflow = {
   active_runs?: Run[];
   awaiting_review_runs?: Run[];
   recent_runs?: Run[];
+  backlog_items?: BacklogItem[];
+  parked_tasks?: ParkedTask[];
+  /** A Linear team's workflow states, in board order (CMX-23); absent for other trackers. */
+  tracker_columns?: unknown;
+  /** The server cut `recent_runs` at its cap (CMX-193). */
+  recent_runs_capped?: boolean;
 };
 
-export type WorkPayload = { configured?: boolean; workflows?: Workflow[] };
+/** `chela dispatch --pause` (CMX-206): null/absent when dispatch runs. */
+export type DispatchHold = { summary?: string } | null;
 
-/** null until work.js's first poll lands. */
+export type WorkPayload = { configured?: boolean; workflows?: Workflow[]; dispatch_hold?: DispatchHold };
+
+/** null until the first poll lands. */
 export const work = createStore<WorkPayload | null>(null);
 
 let poll: () => Promise<void> = () => Promise.resolve();
 
-/** work.js registers its poll here at import. */
+/** features/work registers its poll here at import. */
 export function setWorkPoll(fn: () => Promise<void>) {
   poll = fn;
 }
 
-/** Refetch /api/dispatcher now (work.js's poll); resolves once it has been published. */
+/** Refetch /api/dispatcher now; resolves once it has been published. */
 export function refreshWork(): Promise<void> {
   return poll();
 }
