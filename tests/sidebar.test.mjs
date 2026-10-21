@@ -44,7 +44,7 @@ import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 import { JSDOM } from 'jsdom';   // needs `pnpm install` — tests/test_js_suites.py enforces it
-import { bootDashboardDom, ORCHESTRATOR } from './js_helpers/dashboard_dom.mjs';
+import { bootDashboardDom, clickIsland, ORCHESTRATOR, SIDEBAR } from './js_helpers/dashboard_dom.mjs';
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..', 'chela', 'dashboard');
 const src = p => readFileSync(join(ROOT, p), 'utf8');
@@ -83,12 +83,12 @@ const SIDEBAR_COLLAPSED_KEY = 'chela_sidebar_collapsed';
 // The phone/desktop split is `matchMedia('(max-width: 768px)')`. Make it steerable.
 let PHONE = false;
 
-let nav, util, orchestrator;
+let nav, util, orchestrator, sidebar;
 
 beforeAll(async () => {
     // The dashboard's modules are a cycle (nav ↔ main), so evaluation ORDER is the
     // browser's: main.js is the entry and everything else is pulled in behind it.
-    ({ modules: { util, nav, orchestrator } } = await bootDashboardDom({
+    ({ modules: { util, nav, orchestrator, sidebar } } = await bootDashboardDom({
         body: BODY,
         // jsdom ships no canvas, and `getContext('2d')` returns null. The tab-signal
         // badge (util.js::_drawFavicon) paints one whenever the "needs you" count goes
@@ -139,7 +139,7 @@ beforeAll(async () => {
             }
             return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve({}) });
         },
-        extraModules: ['util.js', 'nav.js', ORCHESTRATOR],
+        extraModules: ['util.js', 'nav.js', ORCHESTRATOR, SIDEBAR],
     }));
 });
 
@@ -151,7 +151,7 @@ const agent = (name, over = {}) => ({
 const rowFor = name => document.querySelector(`#sidebar-agents .agent-row[data-agent="${name}"]`);
 
 test('CMX-377 round 2: the live agent row renders no .ar-type, .ar-role or .agent-pin — the row face is status mark · title · "state · ctx" · time only', () => {
-    nav.renderSidebarAgents([
+    sidebar.renderSidebarAgents([
         agent('bot', { window_type: 'claude', cwd: '/home/x/proj-a' }),
         agent('sh', { window_type: 'shell', dispatched: true }),
     ]);
@@ -196,7 +196,7 @@ test('CMX-62: a manual name beats Claude\'s title, the title beats the window na
         { name: 'shell-1', window_id: '@4', cwd: '/home/u/projects/nautilus', online: true },
     ];
     util.setAgentsCache(rows);
-    nav.renderSidebarAgents(rows);
+    sidebar.renderSidebarAgents(rows);
 
     assert.equal(nameFor('reviewer'), 'reviewer', 'a manual name must beat Claude\'s title');
     assert.equal(nameFor('billing-fix'), 'Open-MMO game on Windows PC', 'Claude\'s title must beat the window name');
@@ -215,7 +215,7 @@ test('CMX-62: a manual name beats Claude\'s title, the title beats the window na
 test('a session name is ESCAPED — it is tmux/user-derived, never trusted into the DOM', () => {
     const rows = [{ name: 'claude', window_id: '@9', session_name: '<img src=x>', online: true }];
     util.setAgentsCache(rows);
-    nav.renderSidebarAgents(rows);
+    sidebar.renderSidebarAgents(rows);
     const span = document.querySelector('#sidebar-agents .agent-row-name');
     assert.equal(span.textContent, '<img src=x>');           // shown as text…
     assert.equal(span.querySelector('img'), null);           // …never parsed as markup
@@ -320,29 +320,16 @@ test('every nav item renders its REAL label as text — not an icon-only row', (
 test('selecting a view lights its own row and clears the other — via the REAL onclick handler', () => {
     nav.renderNav();
 
-    // round 20/21 (judge findings on PR #326, CMX-257): the ONLY thing that
-    // makes a rendered nav row route anywhere is the onclick _navItemHtml
-    // emits — calling window.chela.selectView(...) directly never touches it,
-    // and a substring regex on the attribute cannot tell a live statement from
-    // dead code (`if (false) chela.selectView(...)` still contains the exact
-    // bytes a presence-only regex looks for). So below, the attribute is
-    // EVALUATED as a function body — the same body the browser would run on
-    // click — against a recording stub bound to the row as `this` (matching
-    // _navItemHtml's `this.dataset.view`), and the assertion is that the stub
-    // was actually CALLED.
-    const _invokeOnclick = (row, chelaStub) => {
-        const handler = new Function('chela', row.getAttribute('onclick') || '');
-        handler.call(row, chelaStub);
-    };
-
+    // round 20/21 (judge findings on PR #326, CMX-257): what routes a nav row is its click,
+    // not a direct window.chela.selectView(...) call. CMX-278: the row is the island's, so a
+    // REAL bubbling click on it must reach chela.selectView with its view id.
     const workRow = document.querySelector('#side-nav .side-item[data-view="work"]');
-    assert.match(workRow.getAttribute('onclick'), /chela\.selectView\(this\.dataset\.view\)/,
-        'the Work row is not wired to chela.selectView(this.dataset.view)');
+    const real = window.chela.selectView;
     const calls = [];
-    _invokeOnclick(workRow, { selectView: (...args) => calls.push(args) });
+    window.chela.selectView = (...args) => calls.push(args);
+    try { clickIsland(workRow); } finally { window.chela.selectView = real; }
     assert.deepEqual(calls, [['work']],
-        "the Work row's onclick did not actually CALL chela.selectView — dead-coding the handler leaves the " +
-        'attribute text intact but the row unreachable');
+        "a click on the Work row did not CALL chela.selectView('work'): the row is unreachable");
 
     window.chela.selectView('work');
     assert.equal(
@@ -751,7 +738,7 @@ test('the sidebar is two sections — Launch folded into the launch menu', () =>
 const stateOf = row => row.querySelector('.term-status-dot').getAttribute('aria-label');
 
 test('CMX-230: the sidebar row\'s dot names the real status word, not blank — colour is not the only cue', () => {
-    nav.renderSidebarAgents([
+    sidebar.renderSidebarAgents([
         agent('working-one', { session_status: 'busy' }),
         agent('idle-one', { session_status: 'idle' }),
         agent('waiting-one', { session_status: 'waiting' }),
@@ -766,8 +753,8 @@ test('CMX-230: the sidebar row\'s dot names the real status word, not blank — 
 });
 
 test('CMX-230: the sidebar row\'s .ar-ctx renders the real percentage number, not blank — colour is not the only cue', () => {
-    nav.updateCtxCache([{ window_id: '@1', used_pct: 87 }]);
-    nav.renderSidebarAgents([agent('ctx-one', { window_id: '@1' })]);
+    sidebar.updateCtxCache([{ window_id: '@1', used_pct: 87 }]);
+    sidebar.renderSidebarAgents([agent('ctx-one', { window_id: '@1' })]);
     const chip = rowFor('ctx-one').querySelector('.ar-ctx');
     assert.ok(chip, '.ar-ctx chip did not render for an agent with a cached context %');
     assert.equal(chip.textContent, '87%',
@@ -784,7 +771,7 @@ test('CMX-230: the sidebar row\'s .ar-ctx renders the real percentage number, no
 // up as a missing node, not a passing regex over the source text.
 
 test('CMX-359: a `done` agent renders the word "done" on its row — colour is not the only cue', () => {
-    nav.renderSidebarAgents([agent('finished-one', { session_status: 'idle', done: true })]);
+    sidebar.renderSidebarAgents([agent('finished-one', { session_status: 'idle', done: true })]);
     const row = rowFor('finished-one');
     assert.equal(stateOf(row), 'Session: done',
         'the dot must carry the real "done" word, not fall back to "idle" — a red-weak viewer needs the word, not the dot colour');
@@ -795,7 +782,7 @@ test('CMX-359: a `done` agent renders the word "done" on its row — colour is n
 test('CMX-359: an idle agent with no `done` evidence still reads plain "idle" — the counterweight', () => {
     // The issue's explicit guard: dropping the did_work_since-style ordering check
     // would badge EVERY idle row "done". Pin the false/undefined case stays "idle".
-    nav.renderSidebarAgents([
+    sidebar.renderSidebarAgents([
         agent('untouched-one', { session_status: 'idle' }),          // done: undefined
         agent('untouched-two', { session_status: 'idle', done: false }),
     ]);
@@ -807,7 +794,7 @@ test('CMX-359: an idle agent with no `done` evidence still reads plain "idle" �
 // app's look), and a done row stays in its folder — its check shape and the word
 // "done" carry the state. It must still render exactly once.
 test('CMX-35: a `done` agent stays in its folder group — no Finished cluster, rendered once', () => {
-    nav.renderSidebarAgents([
+    sidebar.renderSidebarAgents([
         agent('done-agent', { window_id: '@2', session_status: 'idle', done: true, cwd: '/home/x/proj' }),
         agent('plain-agent', { window_id: '@3', session_status: 'idle', cwd: '/home/x/proj' }),
     ]);
@@ -826,7 +813,7 @@ test('CMX-359: "Needs you" outranks "done" — a row can only ever appear in one
     // `!needs_human`), but nav.js's own partition must still resolve the conflict
     // the same way if it ever saw one: wantsHuman wins, so the row is never
     // duplicated into the Needs-you cluster AND its folder.
-    nav.renderSidebarAgents([
+    sidebar.renderSidebarAgents([
         agent('blocked-and-done', { session_status: 'waiting', done: true }),
     ]);
     const needsYou = document.querySelector('#sidebar-agents .side-needs-you');
@@ -847,7 +834,7 @@ test('CMX-72: the orchestrator session stays in its folder group — no "Pinned"
         agent('teammate', { window_id: '@2', cwd: '/home/x/proj-a' }),
     ];
     util.setAgentsCache(rows);
-    nav.renderSidebarAgents(rows);
+    sidebar.renderSidebarAgents(rows);
     const inProjA = () => {
         const g = [...document.querySelectorAll('#sidebar-agents .side-group')].find(x => x.dataset.g === '/home/x/proj-a');
         return g ? [...g.querySelectorAll('.agent-row')].map(r => r.dataset.agent).sort() : [];
@@ -877,7 +864,7 @@ test('CMX-72: the orchestrator session stays in its folder group — no "Pinned"
 });
 
 test('CMX-35: "Needs you" renders BEFORE the folder groups in the actual DOM order', () => {
-    nav.renderSidebarAgents([
+    sidebar.renderSidebarAgents([
         agent('blocked-one', { window_id: '@2', session_status: 'waiting', cwd: '/home/x/proj-b' }),
         agent('plain-one', { window_id: '@3', session_status: 'idle', cwd: '/home/x/proj-b' }),
     ]);

@@ -25,7 +25,7 @@
 // Run: pnpm exec vitest run tests/sidebar_alt_switch.test.mjs  (pytest runs it via tests/test_js_suites.py)
 import { beforeAll, beforeEach, test } from 'vitest';
 import assert from 'node:assert/strict';
-import { bootDashboardDom } from './js_helpers/dashboard_dom.mjs';
+import { bootDashboardDom, SIDEBAR } from './js_helpers/dashboard_dom.mjs';
 import { fakeArchiveServer } from './js_helpers/fake_archive.mjs';
 
 const BODY = `
@@ -37,11 +37,11 @@ const BODY = `
 <div id="agent-detail"></div>
 <span id="hdr-agents"></span><span id="hdr-next"></span><span id="hdr-updated"></span>`;
 
-let nav, util;
+let nav, util, sidebar;
 const server = fakeArchiveServer(() => util && util._agentsCache);
 
 beforeAll(async () => {
-    ({ modules: { util, nav } } = await bootDashboardDom({
+    ({ modules: { util, nav, sidebar } } = await bootDashboardDom({
         body: BODY,
         canvasStub: true,
         terminalsEnabled: false,
@@ -51,7 +51,7 @@ beforeAll(async () => {
             const body = /\/api\/(agents|summary)/.test(String(url)) ? [] : {};
             return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve(body) });
         },
-        extraModules: ['util.js', 'nav.js'],
+        extraModules: ['util.js', 'nav.js', SIDEBAR],
     }));
 });
 
@@ -85,12 +85,12 @@ const altDigit = (n, extra = {}, target) =>
 beforeEach(async () => {
     localStorage.clear();
     server.reset();
-    await nav.refreshArchive();
-    await nav.refreshLayout();
+    await sidebar.refreshArchive();
+    await sidebar.refreshLayout();
     altUp();
     document.getElementById('palette').classList.remove('open');
     util.setAgentsCache(ROWS);
-    nav.renderSidebarAgents(ROWS);
+    sidebar.renderSidebarAgents(ROWS);
     host().querySelectorAll('.agent-row.active').forEach(r => r.classList.remove('active'));
 });
 
@@ -103,7 +103,7 @@ test('holding Alt numbers the visible rows 1..N in draw order; releasing Alt rem
         'holding Alt must number every visible row 1..N, top to bottom as drawn');
 
     // A re-render while Alt is still held (a poll) keeps the numbers.
-    nav.renderSidebarAgents(ROWS);
+    sidebar.renderSidebarAgents(ROWS);
     assert.equal(badges().length, 5, 'a sidebar re-render while Alt is held dropped the numbers');
 
     altUp();
@@ -149,7 +149,7 @@ test('an OPEN Archived section\'s rows are skipped by the numbers and by Alt+N',
     // `.side-archived` exclusion keeps it out (without it, it would take number 5).
     const hiddenRow = ROWS[0];
     server.st.hidden.push(`w:${hiddenRow.window_id}`);
-    await nav.refreshArchive();
+    await sidebar.refreshArchive();
     // View ▸ Status ▸ All (the default since CMX-277) draws the section
     window.chela.toggleArchivedSection();    // …and OPEN, so .side-group.collapsed cannot hide it
     const sec = host().querySelector('.side-archived');
@@ -204,7 +204,7 @@ test('Alt+N past the last visible row does nothing', () => {
 test('only the first NINE visible rows are numbered — rows 10 and 11 carry nothing', () => {
     const many = Array.from({ length: 11 }, (_, i) => win(`m-${String(i + 1).padStart(2, '0')}`, '/srv/code/many'));
     util.setAgentsCache(many);
-    nav.renderSidebarAgents(many);
+    sidebar.renderSidebarAgents(many);
     try {
         assert.equal(drawn().length, 11, 'fixture must draw eleven visible rows, or the cap is untested');
         altDown();
@@ -222,7 +222,7 @@ test('only the first NINE visible rows are numbered — rows 10 and 11 carry not
     } finally {
         altUp();
         util.setAgentsCache(ROWS);
-        nav.renderSidebarAgents(ROWS);
+        sidebar.renderSidebarAgents(ROWS);
     }
 });
 

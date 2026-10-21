@@ -21,7 +21,7 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { activateDom, bootDashboardDom, copyDashboard, flush } from './js_helpers/dashboard_dom.mjs';
+import { activateDom, bootDashboardDom, copyDashboard, flush, SIDEBAR } from './js_helpers/dashboard_dom.mjs';
 import { fakeArchiveServer } from './js_helpers/fake_archive.mjs';
 
 const BODY = `
@@ -72,10 +72,10 @@ async function boot({ hidden = [], sessions = [], hold = [], seedLocalStorage, o
     const { dom, modules } = await bootDashboardDom({
         body: BODY, canvasStub: true, terminalsEnabled: false, fetchImpl, seedLocalStorage,
         jsRoot,
-        extraModules: ['util.js', 'nav.js'],
+        extraModules: ['util.js', 'nav.js', SIDEBAR],
     });
     const page = {
-        dom, server, sent, nav: modules.nav, util: modules.util,
+        dom, server, sent, nav: modules.nav, sidebar: modules.sidebar, util: modules.util,
         use() { activateDom(dom); globalThis.fetch = fetchImpl; return page; },
         async release(name) { gates.get(name).resolve(); gates.delete(name); await settle(); },
         posts: path => sent.filter(c => c.method === 'POST' && c.path === path),
@@ -97,15 +97,15 @@ const record = sid => ({ key: `s:${sid}`, session_id: sid, name: sid, cwd: '/srv
 
 test('the periodic refresh draws what ANOTHER device archived, and what it resumed', async () => {
     const page = (await boot()).use();
-    await page.nav.refreshSidebar();
+    await page.sidebar.refreshSidebar();
     assert.equal(archivedCount(), 0);
 
     page.server.st.sessions.push(record('sid-other'));    // the laptop archived a session
-    await page.nav.refreshSidebar();                       // the phone's next tick
+    await page.sidebar.refreshSidebar();                       // the phone's next tick
     assert.equal(archivedCount(), 1, 'the next refresh renders the archive as the server holds it now');
 
     page.server.st.sessions.length = 0;                    // ...and the laptop resumed it
-    await page.nav.refreshSidebar();
+    await page.sidebar.refreshSidebar();
     assert.equal(archivedCount(), 0, 'a session resumed elsewhere leaves this page\'s Archived too');
 });
 
@@ -114,13 +114,13 @@ test('nothing is pruned before the first archive answer — then the prune runs'
     // Before that, the page has not seen the archive, and must not act on it.
     const page = (await boot({ hidden: ['run:CMX-9'], hold: ['GET /api/sidebar/archive'] })).use();
     page.util.setAgentsCache(ROWS);
-    page.nav.renderSidebarAgents(ROWS);                    // a render before the archive loads
+    page.sidebar.renderSidebarAgents(ROWS);                    // a render before the archive loads
     await settle();
     assert.ok(host().querySelector('.agent-row[data-agent="a"]'), 'the rows still render');
     assert.deepEqual(page.posts('/api/sidebar/unarchive'), [], 'no prune before the first answer');
 
     await page.release('GET /api/sidebar/archive');        // the archive arrives
-    page.nav.renderSidebarAgents(ROWS);
+    page.sidebar.renderSidebarAgents(ROWS);
     await settle();
     assert.deepEqual(page.posts('/api/sidebar/unarchive').map(c => c.body.keys), [['run:CMX-9']],
         'once the archive is known, the gone row is pruned (the setup can prune at all)');
@@ -132,15 +132,15 @@ test('an empty agent list prunes nothing and drops no custom assignment; a real 
     const page = (await boot({ hidden: ['run:CMX-9'],
         override: (method, path) => (path === '/api/agents' ? [] : undefined) })).use();
     page.server.st.layout = { order: [], view: {}, custom: { groups: [{ id: 'g', name: 'G' }], assign: { 'w:@999': 'g' } } };
-    await page.nav.refreshLayout();
+    await page.sidebar.refreshLayout();
     const sentBefore = page.sent.length;
-    page.nav.renderSidebarAgents([]);
+    page.sidebar.renderSidebarAgents([]);
     await settle();
     assert.equal(host().textContent, 'No agents');
     assert.deepEqual(page.posts('/api/sidebar/unarchive'), [], 'an empty list pruned the archive');
     assert.deepEqual(page.sent.slice(sentBefore).filter(c => c.method === 'POST'), [], 'an empty list wrote something');
     // control: the same page with a real list prunes the gone run and drops the gone window
-    page.nav.renderSidebarAgents(ROWS);
+    page.sidebar.renderSidebarAgents(ROWS);
     await settle();
     assert.deepEqual(page.posts('/api/sidebar/unarchive').map(c => c.body.keys), [['run:CMX-9']]);
     assert.deepEqual(page.server.st.layout.custom.assign, {});
@@ -151,14 +151,14 @@ test('a prune in flight is never sent twice, and the next one goes once it lands
     // The boot's own refresh loaded the archive and sent the prune — held, so the server
     // still lists the key: the next refresh re-reads it as hidden.
     assert.equal(page.posts('/api/sidebar/unarchive').length, 1);
-    await page.nav.refreshSidebar();
+    await page.sidebar.refreshSidebar();
     await settle();
     assert.equal(page.posts('/api/sidebar/unarchive').length, 1, 'the in-flight prune is not resent');
 
     await page.release('POST /api/sidebar/unarchive');
     assert.deepEqual(page.server.st.hidden, []);
     page.server.st.hidden.push('run:CMX-8');               // another gone row, later
-    await page.nav.refreshSidebar();
+    await page.sidebar.refreshSidebar();
     await settle();
     assert.deepEqual(page.posts('/api/sidebar/unarchive').map(c => c.body.keys), [['run:CMX-9'], ['run:CMX-8']],
         'a settled prune frees the next one');
@@ -170,10 +170,10 @@ test('an error answer from the archive route never wipes the archive this page h
         sessions: [record('sid-kept')],
         override: (m, p) => (broken && m === 'GET' && p === '/api/sidebar/archive' ? { error: 'unauthorized' } : undefined),
     })).use();
-    await page.nav.refreshSidebar();
+    await page.sidebar.refreshSidebar();
     assert.equal(archivedCount(), 1);
     broken = true;
-    await page.nav.refreshSidebar();
+    await page.sidebar.refreshSidebar();
     assert.equal(archivedCount(), 1, 'a body that is not an archive keeps the last answer');
 });
 
@@ -183,7 +183,7 @@ test('the localStorage import is sent ONCE while in flight, and forgotten only o
         hold: ['POST /api/sidebar/archive/migrate'],
     })).use();
     assert.equal(page.posts('/api/sidebar/archive/migrate').length, 1);
-    await page.nav.refreshArchive();                       // a second tick while it is held
+    await page.sidebar.refreshArchive();                       // a second tick while it is held
     assert.equal(page.posts('/api/sidebar/archive/migrate').length, 1, 'one import in flight');
     await page.release('POST /api/sidebar/archive/migrate');
     assert.equal(localStorage.getItem('chela_sb_archived'), null, 'imported ⇒ the local copy goes');
@@ -200,7 +200,7 @@ test('a refused localStorage import keeps the local copy, and the next refresh r
     assert.equal(localStorage.getItem('chela_sb_archived'), JSON.stringify(['run:CMX-5']),
         'not imported ⇒ the only copy stays');
     refuse = false;
-    await page.nav.refreshArchive();
+    await page.sidebar.refreshArchive();
     assert.equal(page.posts('/api/sidebar/archive/migrate').length, 2, 'the next refresh retries');
     assert.equal(localStorage.getItem('chela_sb_archived'), null);
 });

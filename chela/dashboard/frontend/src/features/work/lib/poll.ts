@@ -10,14 +10,12 @@ import { setWorkPoll, work, type WorkPayload } from '../../../shared/store/work.
 import { RUN_TOAST_KINDS, runToastKind } from '../../../../../static/js/runtoast';
 import { workBadgeCounts } from '../board.ts';
 import { showToast } from './toasts.ts';
+import { setNavBadges } from '../../sidebar/controller.ts';
 
-// The badges live in the legacy sidebar's view list (nav.js renders them from views.js).
+// The nav rows are the sidebar island's (CMX-278): it draws the badges by id.
 function renderBadges(data: WorkPayload | null) {
   const { runs, prs } = workBadgeCounts(data);
-  const runsEl = document.getElementById('side-runs-count');
-  const prEl = document.getElementById('side-pr-count');
-  if (runsEl) runsEl.textContent = String(runs);
-  if (prEl) prEl.textContent = `${prs} PR`;
+  setNavBadges({ 'side-runs-count': String(runs), 'side-pr-count': `${prs} PR` });
 }
 
 /** Fetch once and publish. Never throws: a failed read keeps the last payload (the next tick retries). */

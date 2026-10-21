@@ -1,5 +1,6 @@
 // CMX-218: the kit's overlays keep their behaviour (Radix) under our class names.
 import { act, fireEvent, render, screen } from '@testing-library/react';
+import { Share2 } from 'lucide-react';
 import { useState } from 'react';
 import { expect, test, vi } from 'vitest';
 import { Button, Dialog, DialogClose, Menu, Popover, TextInput, Toast, ToastProvider, Tooltip } from '../index.ts';
@@ -76,6 +77,32 @@ test('a description is wired as the Dialog\'s description', () => {
   const desc = screen.getByText('This ends the session.');
   expect(desc.className).toBe('modal-desc');
   expect(dialog.getAttribute('aria-describedby')).toBe(desc.id);
+});
+
+test('CMX-240: the sheet variant is drawn as the safety sheets are, its title in a header with a close button', async () => {
+  const onOpenChange = vi.fn();
+  render(
+    <Dialog open variant="sheet" icon={Share2} title="Active shares" description="Stop one to revoke it." onOpenChange={onOpenChange}>
+      <p>rows</p>
+    </Dialog>,
+  );
+  const dlg = screen.getByRole('dialog', { name: 'Active shares' });
+  expect(dlg.className).toBe('shares-sheet');
+  expect(must(dlg.parentElement).className).toBe('shares-backdrop ui-sheet');
+  expect(dlg.querySelector('.modal-desc')).toBeNull();
+  expect(must(dlg.querySelector('.ss-sub')).textContent).toBe('Stop one to revoke it.');
+  const hd = must(dlg.querySelector('.ss-hd'));
+  expect([hd.querySelector('.ss-hd-ic svg') !== null, hd.querySelector('h3')?.textContent]).toEqual([true, 'Active shares']);
+  await act(async () => {
+    fireEvent.click(screen.getByRole('button', { name: 'Close' }));
+  });
+  expect(onOpenChange).toHaveBeenCalledWith(false);
+});
+
+test('the modal variant has no sheet header or close button of its own', () => {
+  render(<Dialog open title="Plain" onOpenChange={() => {}} />);
+  const dlg = screen.getByRole('dialog', { name: 'Plain' });
+  expect([dlg.querySelector('.ss-hd'), screen.queryByRole('button', { name: 'Close' })]).toEqual([null, null]);
 });
 
 test('Popover opens from its trigger as a .popover', () => {

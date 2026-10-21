@@ -24,8 +24,8 @@ const styleCss = fs.readFileSync(path.join(here, '..', 'chela', 'dashboard', 'st
 const LONG = 'Dismissed liavacc/cmx-20-retry-of-cmx-17-batch-per-window-tmuxpgrep-probes-via';
 
 function render() {
-    // Same markup nav.js `_showRecentUndoToast` writes (tests/sidebar_recent_sessions
-    // .test.mjs pins the span's class on the real render), plus a NEGATIVE CONTROL: a
+    // Same markup the sidebar island's Undo toast renders (CMX-278: Recent.test.tsx
+    // pins the span's class on the real render), plus a NEGATIVE CONTROL: a
     // bare button in a plain .run-toast, which no CMX-22 rule targets.
     const dom = new JSDOM(`<!doctype html><html><head><style>${styleCss}</style></head><body>
   <div class="run-toast-stack" id="run-toast-stack">

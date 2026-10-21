@@ -448,7 +448,7 @@ def test_recent_sessions_does_not_offer_an_archived_session_twice(client, monkey
                         store="session-ids", label="mywin", manual_command=lambda: "claude --resume x")
     monkeypatch.setattr(client, "_restore_verdicts", lambda: [v])
     monkeypatch.setattr(client, "_dispatcher_owned_wid_epochs", lambda: set())
-    monkeypatch.setattr(client, "_terminal_run_claims", lambda: (set(), set()))
+    monkeypatch.setattr(client, "_terminal_run_claims", lambda *a: (set(), set()))
     monkeypatch.setattr(client.dismissed_sessions, "ids", lambda: set())
     c = client.app.test_client()
     assert [r["session_id"] for r in c.get("/api/restore").get_json()["rows"]] == [SID]

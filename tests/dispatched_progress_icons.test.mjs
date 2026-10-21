@@ -5,7 +5,7 @@
 import { beforeAll, test } from 'vitest';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
-import { bootDashboardDom, sliceTemplate, flush } from './js_helpers/dashboard_dom.mjs';
+import { bootDashboardDom, sliceTemplate, flush, SIDEBAR } from './js_helpers/dashboard_dom.mjs';
 import { cssForViewport, resolveVars, shapeSignature, DESKTOP, DESKTOP_DARK } from './js_helpers/css_viewport.mjs';
 
 const CSS = readFileSync(new URL('../chela/dashboard/static/style.css', import.meta.url), 'utf8');
@@ -50,19 +50,19 @@ const fakeGridStack = () => ({ init: () => ({
     cellHeight: noop, column: noop, getGridItems: () => [], removeAll: noop, float: noop, engine: { nodes: [] },
 }) });
 
-let win, doc, util, terminals, nav, sheet;
+let win, doc, util, terminals, nav, sheet, sidebar;
 beforeAll(async () => {
     globalThis.GridStack = fakeGridStack();
     const body = sliceTemplate('<div class="app">', '\n  </main>') + '</div>';
     const { dom, modules } = await bootDashboardDom({ body, fetchImpl: fakeFetch, canvasStub: true,
-        extraModules: ['util.js', 'terminals.js', 'nav.js'] });
+        extraModules: ['util.js', 'terminals.js', 'nav.js', SIDEBAR] });
     win = dom.window; doc = win.document;
     doc.elementFromPoint = () => null;
-    ({ util, terminals, nav } = modules);
+    ({ util, terminals, nav, sidebar } = modules);
     util.setCurrentTab('terminals');
     util.setAgentsCache(AGENTS);
     await terminals.renderTerminals();
-    nav.renderSidebarAgents(AGENTS);
+    sidebar.renderSidebarAgents(AGENTS);
     await flush();
     sheet = doc.head.appendChild(doc.createElement('style'));
     sheet.textContent = cssForViewport(CSS, DESKTOP);

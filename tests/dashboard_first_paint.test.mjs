@@ -4,8 +4,8 @@
 //
 //   1. the Wall toolbar row (CMX-135): no "+ New shell" in it any more — the
 //      New menu is the one place a shell starts — and its in-row pill copies
-//      (#term-shares, #term-approvals) ship [hidden], so neither paints before
-//      the modules have counted anything, at either width.
+//      ship empty: #term-approvals [hidden], #term-shares as an empty island slot
+//      (CMX-240), so neither paints before the modules have counted anything.
 //   2. the collapsed desktop sidebar — nav.js restores it, but as a module it
 //      runs late; index.html's inline <body> script must restore it first.
 //
@@ -27,7 +27,8 @@ import { cssForViewport, PHONE, DESKTOP } from './js_helpers/css_viewport.mjs';
 const here = path.dirname(fileURLToPath(import.meta.url));
 const DASH = path.join(here, '..', 'chela', 'dashboard');
 const CSS = fs.readFileSync(path.join(DASH, 'static', 'style.css'), 'utf8');
-const NAV_JS = fs.readFileSync(path.join(DASH, 'static', 'js', 'nav.js'), 'utf8');
+// CMX-278: the sidebar's state left nav.js for the sidebar feature's controller.
+const NAV_JS = fs.readFileSync(path.join(DASH, 'frontend', 'src', 'features', 'sidebar', 'controller.ts'), 'utf8');
 
 const TOOLBAR = sliceTemplate('<div class="term-toolbar">', '<div id="term-stage"',
     { terminals_enabled: true, wall_tile_dispatched: false });
@@ -48,11 +49,15 @@ test('the Wall toolbar renders no "+ New shell" button (CMX-135)', () => {
 for (const [name, vp] of [['@390', PHONE], ['@1440', DESKTOP]]) {
     test(`${name} before any JS: neither in-row pill paints`, () => {
         const dom = toolbarDom(vp);
-        for (const id of ['term-shares', 'term-approvals']) {
-            const el = dom.window.document.getElementById(id);
-            assert.ok(el, `#${id} is missing from index.html`);
-            assert.equal(dom.window.getComputedStyle(el).display, 'none', `#${id} paints before JS at ${name}`);
-        }
+        const approvals = dom.window.document.getElementById('term-approvals');
+        assert.ok(approvals, '#term-approvals is missing from index.html');
+        assert.equal(dom.window.getComputedStyle(approvals).display, 'none', `#term-approvals paints before JS at ${name}`);
+        // CMX-240: #term-shares is the share feature's pill island; before JS its slot is
+        // empty and draws no box of its own.
+        const slot = dom.window.document.getElementById('shares-pill-row');
+        assert.ok(slot, "#term-shares's island slot is missing from index.html");
+        assert.equal(slot.children.length, 0, `the shares pill slot ships content at ${name}`);
+        assert.equal(dom.window.getComputedStyle(slot).display, 'contents', `the shares pill slot draws a box at ${name}`);
     });
 }
 
@@ -71,9 +76,9 @@ function bodyClassesAfterInlineScripts(stored) {
 const KEY = (NAV_JS.match(/const SIDEBAR_COLLAPSED_KEY = '([^']+)'/) || [])[1];
 
 test('a collapsed sidebar is restored before first paint, with nav.js\'s own key', () => {
-    assert.ok(KEY, "nav.js's SIDEBAR_COLLAPSED_KEY not found");
+    assert.ok(KEY, "the controller's SIDEBAR_COLLAPSED_KEY not found");
     assert.ok(bodyClassesAfterInlineScripts('1').includes('sidebar-collapsed'),
-        'the persisted collapsed sidebar is only restored by nav.js — it paints expanded, then folds');
+        'the persisted collapsed sidebar is only restored by the controller — it paints expanded, then folds');
     assert.ok(!bodyClassesAfterInlineScripts(null).includes('sidebar-collapsed'));
     assert.ok(!bodyClassesAfterInlineScripts('0').includes('sidebar-collapsed'));
 });
