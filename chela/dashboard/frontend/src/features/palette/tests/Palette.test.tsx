@@ -240,8 +240,8 @@ test('the sidebar "Jump to session" box drives the palette in place: it opens, f
   box.remove();
 });
 
-test('the jump box\'s handler is on window.chela, for index.html\'s inline oninput/onfocus', () => {
-  expect((window as unknown as { chela: { sidebarJumpInput: unknown } }).chela.sidebarJumpInput).toBe(sidebarJumpInput);
+test('installing the keys puts nothing on window.chela: the jump box is the shell\'s, wired in React (CMX-248)', () => {
+  expect((window as unknown as { chela?: object }).chela).toBeUndefined();
 });
 
 // --- the shortcuts sheet (CMX-121) --------------------------------------------------------

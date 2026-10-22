@@ -83,12 +83,13 @@ beforeAll(async () => {
     });
     globalThis.window.chela = globalThis.window.chela || {};
     globalThis.setInterval = () => 0;   // the 250ms poll is driven by hand below
-    await import('../chela/dashboard/frontend/src/boot.ts');
-    const util = await import('../chela/dashboard/static/js/util.js');
+    (await import('../chela/dashboard/frontend/src/boot.ts')).start();
+    const { agents: agentsStore } = await import('../chela/dashboard/frontend/src/shared/store/agents.ts');
+    const { view: viewStore } = await import('../chela/dashboard/frontend/src/shared/store/view.ts');
     terminals = await import('../chela/dashboard/frontend/src/features/wall/index.ts');
     paneframe = await import('../chela/dashboard/frontend/src/features/paneframe/index.ts');
-    util.setCurrentTab('terminals');
-    util.setAgentsCache(AGENTS);
+    viewStore.set('terminals');
+    agentsStore.set(AGENTS);
     await terminals.renderTerminals();
 });
 

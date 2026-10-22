@@ -15,31 +15,13 @@
 // (pytest via tests/test_js_suites.py; needs `pnpm install` for jsdom).
 import { beforeAll, test } from 'vitest';
 import assert from 'node:assert/strict';
-import { bootDashboardDom, flush, ORCHESTRATOR, sliceTemplate } from './js_helpers/dashboard_dom.mjs';
+import { APP_BODY, bootDashboardDom, flush, ORCHESTRATOR, AGENTS_STORE, VIEW_STORE, NAV } from './js_helpers/dashboard_dom.mjs';
 
-const CANVAS_HTML = sliceTemplate(
-    '<div class="panel" id="panel-agent-detail">', 'id="panel-work"></div>');
-
-const BODY = `
-<div class="app">
-  <aside class="sidebar">
-    <section class="side-section">
-      <div class="side-list" id="side-nav"></div>
-    </section>
-    <section class="side-section">
-      <div class="side-list" id="sidebar-agents"><div class="side-empty">No agents</div></div>
-    </section>
-  </aside>
-  <main class="canvas" id="canvas">
-    ${CANVAS_HTML}
-  </main>
-</div>`;
-
-let util, nav, orchestrator;
+let agentsStore, viewStore, nav, orchestrator;
 
 beforeAll(async () => {
-    ({ modules: { util, nav, orchestrator } } = await bootDashboardDom({
-        body: BODY,
+    ({ modules: { agents: { agents: agentsStore }, view: { view: viewStore }, nav, orchestrator } } = await bootDashboardDom({
+        body: APP_BODY,
         terminalsEnabled: false,
         canvasStub: true,
         // Same fixture shape as tests/sidebar.test.mjs: wid and name are
@@ -66,7 +48,7 @@ beforeAll(async () => {
             const body = u.includes('/api/agents/context') ? [] : {};
             return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve(body) });
         },
-        extraModules: ['util.js', 'nav.js', ORCHESTRATOR],
+        extraModules: [AGENTS_STORE, VIEW_STORE, NAV, ORCHESTRATOR],
     }));
     await flush();
     await flush();
@@ -78,11 +60,11 @@ function _detailRowValue(key) {
 }
 
 test('an OPEN agent-detail panel updates its Role row off the real onOrchestratorChange listener — no manual re-render', async () => {
-    util.setAgentsCache([{ name: 'cmx300-detail-wired', window_id: '@2', online: true }]);
+    agentsStore.set([{ name: 'cmx300-detail-wired', window_id: '@2', online: true }]);
     const prevFetch = globalThis.fetch;
     globalThis.fetch = () => Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve([]) });
     try {
-        window.chela.selectAgent('cmx300-detail-wired');   // terminals off -> always showAgentDetail
+        nav.selectAgent('cmx300-detail-wired');   // terminals off -> always showAgentDetail
         await flush();
     } finally {
         globalThis.fetch = prevFetch;

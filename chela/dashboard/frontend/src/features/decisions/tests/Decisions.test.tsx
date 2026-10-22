@@ -627,26 +627,6 @@ test('openDecisionTicket on an event with no task_id opens nothing and reads not
   expect(screen.queryByRole('dialog')).toBeNull();
 });
 
-test('mountDecisions draws into #decisions-island, and the jump is nav.js\'s, looked up at click time', async () => {
-  const slot = document.createElement('span');
-  slot.id = 'decisions-island';
-  document.body.append(slot);
-  expect(m.d.mountDecisions({ document: { getElementById: () => null } } as unknown as Window)).toBeNull();
-  const root = must(m.d.mountDecisions(window));
-  await flush();
-  expect(slot.querySelector('#btn-decisions')).toBeTruthy();
-  const jumpTo = vi.fn();
-  (window as unknown as { chela: object }).chela = { jumpToOrchestrator: jumpTo };
-  await act(async () => {
-    fireEvent.click(must(slot.querySelector('#btn-decisions')));
-  });
-  expect(jumpTo).toHaveBeenCalledTimes(1);
-  delete (window as unknown as { chela?: object }).chela;
-  expect(() => m.d.legacyJump(window)()).not.toThrow();
-  act(() => root.unmount());
-  slot.remove();
-});
-
 // --- focus and the seen cursor (CMX-228 review)
 
 test('opening focuses the search box; closing returns focus to the inbox button', async () => {

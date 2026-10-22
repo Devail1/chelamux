@@ -2,8 +2,7 @@
 // nav.js's (the actions); these pin what each menu offers and which action each choice calls.
 import { act, cleanup, fireEvent, render, screen } from '@testing-library/react';
 import { afterEach, expect, test } from 'vitest';
-import { createBridge } from '../../../shared/bridge/index.ts';
-import { Sidebar, ViewMenu, mountSidebar } from '../index.ts';
+import { Sidebar, ViewMenu } from '../index.ts';
 import { DISPATCHED_KEY, type SidebarState } from '../model.ts';
 import { actions, runWin, state, win } from './fixtures.ts';
 
@@ -223,21 +222,6 @@ test('the VIEW menu: the Custom groups page renames, deletes and creates, and sa
   pick(rowOf('Custom groups')?.textContent ?? '');
   expect(items()).toEqual(['Custom groups', 'No custom groups yet', 'New group…']);
   expect(disabled('No custom groups yet')).toBe(true);
-});
-
-test('mountSidebar draws the VIEW menu into #sidebar-view-menu and repaints it on every publish', () => {
-  document.body.innerHTML = '<span id="sidebar-view-menu"></span><div id="sidebar-agents"></div>';
-  const bridge = createBridge();
-  const acts = actions();
-  const root = mountSidebar(window, bridge, acts);
-  const btn = document.querySelector('#sidebar-view-menu #btn-sidebar-view');
-  expect(btn?.tagName).toBe('BUTTON');
-  const s = state([win('a')]);
-  act(() => bridge.sidebar.set({ ...s, view: { ...s.view, sort: 'created' } }));
-  open(btn);
-  expect(valueOf('Sort by')).toBe('Created');
-  act(() => root?.unmount());
-  document.body.innerHTML = '';
 });
 
 test('a choice page marks ONLY the current value: Status, Last activity, Sort by', () => {

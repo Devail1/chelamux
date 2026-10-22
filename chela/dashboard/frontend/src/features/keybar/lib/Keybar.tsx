@@ -7,12 +7,16 @@ import { icons } from '../../../shared/icons/index.ts';
 import { termMode } from '../../../shared/store/wall.ts';
 import { useStore } from '../../../shared/store/index.ts';
 import { ARROWS, ARROW_FACE, type Arrow, CHARS, CTRL_LETTERS, type CtrlState, DESK_NAV, type Key, PAGING, afterCtrlLetter, nextCtrl } from '../model.ts';
+import { termKey, termPaste } from '../../paneframe/index.ts';
 import { bindKeybarPin } from './pin.ts';
 
 export interface KeybarActions {
   termKey: (key: string) => void;
   termPaste: (btn: HTMLButtonElement) => void;
 }
+
+/** The single pane's keys and Paste (features/paneframe, CMX-246). */
+export const paneKeybarActions: KeybarActions = { termKey: (key) => void termKey(key), termPaste: (btn) => void termPaste(btn) };
 
 /** localStorage's remembered collapse; collapsed unless the user opened it. */
 const COLLAPSED_KEY = 'pc_kb_collapsed';

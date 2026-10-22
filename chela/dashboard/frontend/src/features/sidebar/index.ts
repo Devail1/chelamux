@@ -1,7 +1,6 @@
-// CMX-276: the sidebar's island. `model.ts` (the pure grouping model) and `controller.ts` (its
-// state and commands, CMX-278) are this module's other entry points, which legacy imports.
+// CMX-276: the sidebar's components. `model.ts` (the pure grouping model) and `controller.ts`
+// (its state and commands, CMX-278) are this module's other entry points.
 export { LONG_PRESS_MS, Sidebar, type SidebarActions } from './lib/Sidebar.tsx';
-export { legacyActions, mountSidebar } from './lib/mount.tsx';
 export { ViewMenu } from './lib/menus.tsx';
 export { Nav } from './lib/Nav.tsx';
 export { Recent } from './lib/Recent.tsx';

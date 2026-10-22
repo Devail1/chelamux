@@ -18,7 +18,7 @@ import { clickIsland } from './js_helpers/dashboard_dom.mjs';
 import { KEY, bootPhone, pane, settle, shown, stored } from './js_helpers/term_pane_fixture.mjs';
 
 const SIDEBAR = ['/srv/code/beta', '/srv/code/gamma', '/srv/code/alpha'];   // sidebar rows: @202, @203, @201
-let nav, sidebar, terminals, chela, bootPane;
+let nav, sidebar, terminals, bootPane;
 const storedWid = () => JSON.parse(localStorage.getItem(KEY)).wid;
 async function reload() {
     await terminals.showPane('');
@@ -26,7 +26,7 @@ async function reload() {
 }
 
 beforeAll(async () => {
-    ({ nav, sidebar, terminals, chela } = await bootPhone({ order: SIDEBAR, seed: { [KEY]: stored('@203', 's-c', 'c') } }));
+    ({ nav, sidebar, terminals } = await bootPhone({ order: SIDEBAR, seed: { [KEY]: stored('@203', 's-c', 'c') } }));
     await settle();
     bootPane = pane();
 });
@@ -37,7 +37,7 @@ beforeEach(async () => {
 });
 
 test('a stored pane that is online opens on load, not the first row', () => {
-    assert.deepEqual(chela.sidebarOrder(), ['@202', '@203', '@201']);
+    assert.deepEqual(sidebar.sidebarOrder(), ['@202', '@203', '@201']);
     assert.deepEqual(bootPane, { value: '@203', shown: '@203' });
 });
 

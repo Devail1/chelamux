@@ -212,7 +212,7 @@ function fakeGridStack() {
     };
 }
 
-let terminals, util, wall;
+let terminals, agentsStore, viewStore, wall;
 
 beforeAll(async () => {
     const dom = new JSDOM(`<!doctype html><html><body>${PANEL}</body></html>`,
@@ -247,12 +247,13 @@ beforeAll(async () => {
     // import anything else first and nav.js's `let`s are in their TDZ).
     globalThis.setInterval = () => 0;
     await mountIslands(dom.window);   // CMX-276: the sidebar island draws #sidebar-agents
-    await import('../chela/dashboard/frontend/src/boot.ts');
-    util = await import('../chela/dashboard/static/js/util.js');
+    (await import('../chela/dashboard/frontend/src/boot.ts')).start();
+    ({ agents: agentsStore } = await import('../chela/dashboard/frontend/src/shared/store/agents.ts'));
+    ({ view: viewStore } = await import('../chela/dashboard/frontend/src/shared/store/view.ts'));
     terminals = await import('../chela/dashboard/frontend/src/features/wall/index.ts');
     wall = await import('../chela/dashboard/frontend/src/shared/store/wall.ts');
-    util.setCurrentTab('terminals');
-    util.setAgentsCache(AGENTS);
+    viewStore.set('terminals');
+    agentsStore.set(AGENTS);
     await terminals.renderTerminals();
     // CMX-85: Alt+N targets the sidebar's rows — draw them.
     (await import('../chela/dashboard/frontend/src/features/sidebar/controller.ts')).renderSidebarAgents(AGENTS);
@@ -712,7 +713,7 @@ test('an empty-query palette floats live wall panes to the top, in wall order, b
 // ahead of idle peers even though it trails them in wall order — the sidebar's own
 // status word/rank, reused so the two never disagree about what needs you.
 test('a pane that wants the human floats ahead of idle panes, still inside the panes section', async () => {
-    util.setAgentsCache([
+    agentsStore.set([
         { name: 'alpha', window_id: '@1', online: true },
         { name: 'bravo', window_id: '@2', online: true, session_status: 'waiting' },
         { name: 'charlie', window_id: '@3', online: true },
@@ -722,7 +723,7 @@ test('a pane that wants the human floats ahead of idle panes, still inside the p
     assert.deepEqual(paneRows.map(r => r.querySelector('.pi-title').textContent), ['bravo', 'alpha', 'charlie'],
         'bravo (waiting on the human) must float ahead of idle alpha/charlie despite trailing them in wall order');
     await closePalette();
-    util.setAgentsCache(AGENTS);   // restore for any test that runs after this one
+    agentsStore.set(AGENTS);   // restore for any test that runs after this one
 });
 
 // 10c — TYPING ESCAPES THE "PANES ONLY" TRAP. A non-empty query drops the panes-first
@@ -1850,7 +1851,7 @@ test('CMX-130: --term-keybar-h (declared on :root) is consumed by EXACT name in 
 const paneTitle = wid => tile(wid).querySelector('.gs-grip .pane-title').textContent;
 test('CMX-146: a pane\'s ai_title renders as a dim subtitle under the name, and only when present', () => {
     const withTitle = AGENTS.map(a => a.window_id === '@1' ? { ...a, ai_title: 'Fix the flaky wall test' } : a);
-    util.setAgentsCache(withTitle);
+    agentsStore.set(withTitle);
     try {
         terminals.refreshPaneLabels();
         const sub1 = tile('@1').querySelector('.gs-grip .pane-subtitle');
@@ -1864,7 +1865,7 @@ test('CMX-146: a pane\'s ai_title renders as a dim subtitle under the name, and 
         assert.equal(tile('@2').querySelector('.gs-grip .pane-subtitle'), null,
             'a pane with no ai_title must render NO .pane-subtitle element');
     } finally {
-        util.setAgentsCache(AGENTS);
+        agentsStore.set(AGENTS);
         terminals.refreshPaneLabels();
     }
 });
@@ -1879,14 +1880,14 @@ test('CMX-146: a pane\'s ai_title renders as a dim subtitle under the name, and 
 test('CMX-146: a NEW pane (never refreshed) still shows its ai_title from PaneHead\'s first render', async () => {
     const withNewAgent = [...AGENTS, { name: 'delta', window_id: '@4', online: true, ai_title: 'Ship the delta feature' }];
     try {
-        util.setAgentsCache(withNewAgent);
+        agentsStore.set(withNewAgent);
         await terminals.renderTerminals();
         const sub = tile('@4').querySelector('.gs-grip .pane-subtitle');
         assert.ok(sub, 'a freshly-built tile (via PaneHead, not _refreshPaneLabels) must carry the subtitle');
         assert.equal(paneTitle('@4'), 'Ship the delta feature');
         assert.equal(sub.textContent, 'delta');
     } finally {
-        util.setAgentsCache(AGENTS);
+        agentsStore.set(AGENTS);
         await terminals.renderTerminals();
         assert.equal(tile('@4'), null, 'the injected 4th pane must not leak into later tests');
     }
@@ -1897,7 +1898,7 @@ test('CMX-146: a NEW pane (never refreshed) still shows its ai_title from PaneHe
 // title beats the window name, and with no title the header is the window name.
 test('CMX-62: pane header — manual name beats the title, the title beats the window name', () => {
     try {
-        util.setAgentsCache(AGENTS.map(a =>
+        agentsStore.set(AGENTS.map(a =>
             a.window_id === '@1' ? { ...a, manual_name: true, ai_title: 'Review the auth PR' }
                 : a.window_id === '@2' ? { ...a, ai_title: 'Open-MMO game on Windows PC' } : a));
         terminals.refreshPaneLabels();
@@ -1912,7 +1913,7 @@ test('CMX-62: pane header — manual name beats the title, the title beats the w
         // A manual name whose ai_title says the same thing: nothing distinct to add,
         // so no subtitle repeating the header. And with both titles present the
         // ai_title — not the live session name — leads a non-manual header.
-        util.setAgentsCache(AGENTS.map(a =>
+        agentsStore.set(AGENTS.map(a =>
             a.window_id === '@1' ? { ...a, manual_name: true, ai_title: 'alpha' }
                 : a.window_id === '@2' ? { ...a, ai_title: 'Open-MMO game', session_name: 'stale session' } : a));
         terminals.refreshPaneLabels();
@@ -1921,7 +1922,7 @@ test('CMX-62: pane header — manual name beats the title, the title beats the w
             'a subtitle that only repeats the header must not render');
         assert.equal(paneTitle('@2'), 'Open-MMO game', 'ai_title must outrank the live session name');
     } finally {
-        util.setAgentsCache(AGENTS);
+        agentsStore.set(AGENTS);
         terminals.refreshPaneLabels();
     }
 });
@@ -1931,7 +1932,7 @@ test('CMX-146: _refreshPaneLabels tracks ai_title live — added, changed, and r
         // starts absent (restored AGENTS fixture carries no ai_title)
         assert.equal(tile('@3').querySelector('.gs-grip .pane-subtitle'), null);
 
-        util.setAgentsCache(AGENTS.map(a => a.window_id === '@3' ? { ...a, ai_title: 'Investigate flaky CI' } : a));
+        agentsStore.set(AGENTS.map(a => a.window_id === '@3' ? { ...a, ai_title: 'Investigate flaky CI' } : a));
         terminals.refreshPaneLabels();
         let sub = tile('@3').querySelector('.gs-grip .pane-subtitle');
         assert.ok(sub, 'a fresh ai_title must appear on the next refresh, no full rebuild required');
@@ -1939,7 +1940,7 @@ test('CMX-146: _refreshPaneLabels tracks ai_title live — added, changed, and r
         assert.equal(sub.textContent, 'charlie');
 
         // a revised title (Claude re-titles as the conversation evolves) must replace it in place
-        util.setAgentsCache(AGENTS.map(a => a.window_id === '@3' ? { ...a, ai_title: 'Investigate and fix flaky CI' } : a));
+        agentsStore.set(AGENTS.map(a => a.window_id === '@3' ? { ...a, ai_title: 'Investigate and fix flaky CI' } : a));
         terminals.refreshPaneLabels();
         sub = tile('@3').querySelector('.gs-grip .pane-subtitle');
         assert.ok(sub, 'the subtitle element must still be there after a revision');
@@ -1948,13 +1949,13 @@ test('CMX-146: _refreshPaneLabels tracks ai_title live — added, changed, and r
 
         // and it must be removed again once the field goes back to empty/absent — not left
         // stale, which would read as a title Claude never actually confirmed.
-        util.setAgentsCache(AGENTS);
+        agentsStore.set(AGENTS);
         terminals.refreshPaneLabels();
         assert.equal(tile('@3').querySelector('.gs-grip .pane-subtitle'), null,
             'the subtitle must be REMOVED once ai_title is gone, not left stale from the prior refresh');
         assert.equal(paneTitle('@3'), 'charlie', 'no title ⇒ the window name is the header again');
     } finally {
-        util.setAgentsCache(AGENTS);
+        agentsStore.set(AGENTS);
         terminals.refreshPaneLabels();
     }
 });

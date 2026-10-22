@@ -172,8 +172,8 @@ def asset_path(path: str) -> str:
     return f"static/v/{ASSET_VERSION}/{path}"
 
 
-# CMX-178/CMX-215: the page's one module script, the Vite build's entry: the React islands
-# plus the legacy static/js graph bundled behind them. The manifest names it, because its file
+# CMX-178/CMX-215: the page's one module script, the Vite build's entry: the whole page
+# (CMX-248: one React root and the modules it imports). The manifest names it, because its file
 # name is a content hash. Read once, like ASSET_VERSION: a build only lands with a deploy.
 _APP_MANIFEST = _STATIC_DIR / "app" / "manifest.json"
 
@@ -194,6 +194,24 @@ def app_entry(manifest: Path = _APP_MANIFEST) -> str | None:
 
 
 APP_ENTRY = app_entry()
+
+
+def app_css(manifest: Path = _APP_MANIFEST) -> str | None:
+    """CMX-248: the entry's stylesheet (style.css, imported by ``src/main.tsx``) as the build
+    emitted it, ``app/assets/main-<hash>.css``; None, logged as an error, when the manifest
+    names none. The page links it in its ``<head>``, so it never paints unstyled."""
+    try:
+        css = json.loads(manifest.read_text())["src/main.tsx"]["css"]
+    except (OSError, ValueError, LookupError, TypeError) as e:
+        log.error("dashboard has no stylesheet: %s unreadable (%s)", manifest, e)
+        return None
+    if not isinstance(css, list) or len(css) != 1 or not isinstance(css[0], str) or not css[0]:
+        log.error("dashboard has no stylesheet: %s names %r, not one file", manifest, css)
+        return None
+    return f"app/{css[0]}"
+
+
+APP_CSS = app_css()
 
 
 @app.route("/static/v/<ver>/<path:filename>")
@@ -230,6 +248,7 @@ def index():
         boot={"assetVersion": ASSET_VERSION, "terminalsEnabled": config.TERMINALS_ENABLED,
               "wallTileDispatched": config.WALL_TILE_DISPATCHED},
         app_src=asset_path(APP_ENTRY) if APP_ENTRY else None,
+        app_css=asset_path(APP_CSS) if APP_CSS else None,
     ))
     # The HTML names the versioned assets, so it must be revalidated on every load.
     resp.headers["Cache-Control"] = "no-cache"

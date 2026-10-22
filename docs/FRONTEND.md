@@ -7,17 +7,16 @@ plan for porting the rest of the dashboard is `docs/FRONTEND_PORT_PLAN.md` (CMX-
 ## The stack
 
 The dashboard is a Flask API (`chela/dashboard/app.py`) serving one page,
-`chela/dashboard/templates/index.html`. Two kinds of code run in it:
+`chela/dashboard/templates/index.html`, whose body is one React root (CMX-248). Its code:
 
 | | Where | Built? |
 |---|---|---|
-| **Legacy** | `chela/dashboard/static/js/*.js`, plain ES modules, booted by `src/boot.ts` | Vite, bundled with React (CMX-215) |
 | **React** | `chela/dashboard/frontend/src/`, TypeScript + React 19 | Vite, into `static/app/` |
+| **Pure models** | `chela/dashboard/static/js/*.ts` (`wallmodel`, `windowid`, `wire`), imported by `src/` | bundled with it |
 
-Both reach the browser as ONE bundle: the build's entry `src/main.tsx` imports the islands,
-then `src/boot.ts` (which imports the legacy graph), so a legacy module can `import` a `.ts`
-one directly. Legacy imports are extensionless (`'./util'`, not `'./util.js'`), so a module
-converted to TypeScript renames no importer.
+It reaches the browser as ONE bundle: the build's entry `src/main.tsx` imports
+`static/style.css` (emitted as the bundle's stylesheet, which `app.py` links from the
+manifest) and `src/boot.ts`, then mounts the page and starts it.
 
 The React side is a Vite single-page build, **not** Next.js: no server components, no
 `"use client"`, no file routing, no `next/*`. Tests are Vitest + React Testing Library in
@@ -37,7 +36,7 @@ the bundle on the merge, runs the stale-asset check and pushes it, instead of se
 back. A conflict on any other file, or a rebuild that fails, is still sent back.
 
 What each test suite runs: the `tests/browser/` Playwright suites load the **committed
-bundle** (what Flask serves), so they see a legacy edit only after the rebuild; the jsdom
+bundle** (what Flask serves), so they see a source edit only after the rebuild; the jsdom
 suites (`tests/js_helpers/dashboard_dom.mjs`) boot `src/main.tsx`'s source, compiled by Vitest.
 
 The CI gates, each also run inside pytest by `tests/test_frontend.py`: `pnpm typecheck`
@@ -51,41 +50,46 @@ directory is a deep module: its root files (`index.ts`) are its entry points, an
 a subfolder (`lib/`, `tests/`) is private to it. Tests import the module's entry point, never
 its internals. `pnpm lint:boundaries` enforces this (`.dependency-cruiser.cjs`).
 
-## Islands
+## The app shell
 
-The page is still the legacy page. React takes it over one region at a time: an **island** is
-a React root rendered into an element `index.html` already has. Legacy keeps owning
-everything else and keeps working untouched.
+`templates/index.html` is the Vite entry's page (FRONTEND_PORT_PLAN.md §6.2): its `<head>`, the
+pre-paint script that restores the collapsed sidebar, the boot JSON block and `<div id="root">`.
+No inline handler, no `chela.` call. `app.py`'s `app_entry()` and `app_css()` read the build's
+`static/app/manifest.json` once at import, and `index()` renders the entry
+(`app/assets/main-<hash>.js`) as the page's one versioned `<script type="module">` and its
+stylesheet as a `<link>` in the head. There is no unbundled fallback: a missing or unreadable
+manifest logs an error and the page loads without it.
 
-How the page loads them: `app.py`'s `app_entry()` reads the build's
-`static/app/manifest.json` once at import and finds the entry `src/main.tsx` compiled to
-(`app/assets/main-<hash>.js`). `index()` renders it as the page's one versioned
-`<script type="module">`. `main.tsx` imports `islands.tsx` **before** `boot.ts`, and
-imports run in order, so the state bridge below exists before any legacy module publishes to
-it. There is no unbundled fallback: a missing or unreadable manifest logs an error and the
-page loads with no JS.
+`src/boot.ts` is what the entry runs: `mountPage()` (the bridge, the saved theme, the panes'
+`window.chela` contract, the page keys, tap tooltips, and the root), then `start()` (the
+view ticks, the nav rows, the shares, the first view, the 30 s loop and the event stream).
 
-`src/islands.tsx` installs the bridge and mounts every island (`pnpm dev` loads it alone):
+The page itself is `src/features/shell` (CMX-248, plan P34): `<App>` renders the sidebar, the
+canvas of views, the phone controls, the safety float and the overlays, with the classes and
+ids `style.css` and the browser suites have always read. `mountApp()` renders it synchronously,
+so the features that find their elements by id (the Wall's stage, the sidebar's rows) start
+right after. What each slot draws is one table, `SLOTS` (`lib/slots.tsx`), keyed by the slot
+element's id: `<App>` renders every slot in place, and a page of its own without `#root` (a jsdom
+fixture of a few slots) mounts the same table into whichever slots it has (`mountSlots()`). A
+slot that draws one control inside a row is a `<span class="island-slot">` (`display:
+contents`), so the control lays out as the row's own child.
 
-```tsx
-mountIsland('version-island', VersionBadge, {});
-```
+The views are a registry (`lib/registry.ts`, read through the pure `views.ts`): one entry per
+view (`id`, `label`, the nav icon, badges, `enabled`, `virtual`, and `enter` / `exit` / `tick`).
+The nav rows, the view switch, the scheduler's view tick and the ⌘K palette all derive from it,
+so adding or deleting a view is one entry. The active view is the `view` store; each view's
+panel (`panel-<id>`) is shown while the store names it and stays mounted while hidden (the
+Wall's live frames must never reload). `selectView()` sets it synchronously, so the panel is
+visible before the view's `enter` hook runs.
 
-`mountIsland(id, Component, props)` (`src/shared/islands`) renders `<Component {...props} />`
-into `#id` and returns the React root, or `null` when the page has no such element.
+What a feature needs from the rest of the page (the view switch, the Wall, the orchestrator
+slot), the shell hands it at import (`lib/nav.ts`): `configureSidebar`, `setAgentDetailHost`,
+`setLauncherHost`, `setPaletteHost` and `configureWall`. The tab title and the favicon badge
+(`lib/tabSignal.ts`) count the panes blocked on you.
 
-The page's chrome (CMX-219) mounts from `src/chrome.tsx`, which has no side effect at import so
-the jsdom suites can mount it on a page of their own: the safety float's pills, the sidebar's
-New session, agent count, resources strip and gear menu, the phone "+", the agent detail, and
-`Overlays` (one root for Settings, the ⌘K palette and the shortcuts sheet, the launch menu, the
-send-message dialog, the approvals and access-request sheets and the update banner). An island that draws one control
-inside a legacy row renders into a `<span class="island-slot">` (`display: contents`), so the
-control lays out as the row's own child.
-
-When a ported surface needs something only legacy knows (the Wall, the view switch, the
-orchestrator slot), legacy hands it in at import, the way `work.js` hands `setWorkPoll` its poll:
-`nav.js` calls `setLauncherHost`, `setAgentDetailHost` and `setPaletteHost`. A legacy surface
-the island only opens (sharing the current pane) is looked up on `window.chela` at call time.
+The Wall's own roots are not the shell's: the pane headers, footers and frames portal into
+tiles Gridstack owns, and the Wall mounts its toolbar and Minimized tray into the elements
+the shell gives it (`#wall-toolbar-island`, `#term-min-dock`).
 
 ### Settings, the palette and the iframe contract
 
@@ -101,56 +105,39 @@ page's global keys (Ctrl/⌘+K, Ctrl/⌘+,). A focused pane's keys never reach t
 `.toggleSettings()`, which `src/iframeBridge.ts` registers, exactly those two
 (`iframeBridge.test.ts` fails if one goes missing or another is added).
 
-Islands are a migration path, not the end state: each island is its own root, so context and
-portals do not cross between them. `FRONTEND_PORT_PLAN.md` §2.1 ends in one app shell.
-
 ## The state bridge
 
-Legacy code owns the fetches until the component reading their result is ported. The bridge
-(`src/shared/bridge`) is how a ported component reads what legacy fetched:
+The page's state is `src/shared/store/`, one file per slice (`view.ts`, the active view;
+`agents.ts`, the `/api/agents` rows; `work.ts`, the last `/api/dispatcher` payload, which
+`src/features/work`'s one poll (a scheduler lane, CMX-233) publishes and the Work view and
+New-task dialog read; they ask for a fresh poll with `refreshWork()`, CMX-231; `orchestrator.ts`,
+who holds the decisions inbox, read and written through `src/shared/orchestrator`, CMX-228;
+`context.ts`, the last `/api/agents/context` rows, which the gear menu's usage readouts and the
+agent detail read, CMX-219; `wall.ts`, the Wall's). The sidebar's stores are the bridge's
+(`src/shared/bridge`), on `window.chelaBridge`:
 
-| Store | Published by legacy from | Value |
+| Store | Published by | Value |
 |---|---|---|
-| `agents` | `util.js` `setAgentsCache()` | the `/api/agents` rows |
+| `agents` | the sidebar controller's `/api/agents` read, the Wall's | the `/api/agents` rows (also `shared/store/agents.ts`) |
 | `sidebarLayout` | the sidebar controller's layout (`features/sidebar/lib/layout.ts`) | `{order, custom, view, width, loaded}` (CMX-82, CMX-278) |
-| `sidebar` | the sidebar controller's `renderSidebarAgents()` (and Alt held, the active row) | `SidebarState`: what the sidebar island draws (CMX-276) |
-| `nav` | `nav.js` `renderNav()` / `selectView()`, `work.js` (the badges) | the nav rows, the active view, the Work badge counts (CMX-278) |
+| `sidebar` | the sidebar controller's `renderSidebarAgents()` (and Alt held, the active row) | `SidebarState`: what the sidebar draws (CMX-276) |
+| `nav` | the shell's `renderNav()` / `selectView()`, the Work poll (the badges) | the nav rows, the active view, the Work badge counts (CMX-278) |
 | `recent` | the sidebar controller (`/api/restore`, dismiss, Undo) | Recent sessions (CMX-278) |
 
 A store is a value plus listeners (`createStore`: `get`, `set`, `subscribe`; `set` with the
 same value notifies nobody, so always publish a NEW array or object, never one mutated in place). React reads it with `useStore(store)`, a one-line
 `useSyncExternalStore`. That is React's own primitive for an external store: it adds no
 dependency, and it renders a consistent value even during concurrent rendering. A library
-(zustand) would add selectors and middleware nobody needs for two values; Redux is ruled out.
+(zustand) would add selectors and middleware nobody needs; Redux is ruled out.
+`useStoreNow(store)` is the same read, repainted before `set` returns, for a store whose writer
+reads the DOM straight back (the sidebar's).
 
-Since CMX-217 the page's state is `src/shared/store/`, one file per slice (`view.ts`, the
-active view; `agents.ts`, the bridge's `agents` store; `work.ts`, the last `/api/dispatcher`
-payload, which `src/features/work`'s one poll (a scheduler lane, CMX-233) publishes and the Work
-view and New-task dialog read; they ask for a fresh poll with `refreshWork()`, CMX-231; `orchestrator.ts`, who holds the decisions
-inbox, read and written through `src/shared/orchestrator`, CMX-228; `context.ts`, the last
-`/api/agents/context` rows, which the gear menu's usage readouts and the agent detail read,
-CMX-219). Legacy imports those objects through
-`util.js`, whose `currentTab` and `_agentsCache` are a facade over them: the store is the
-truth, the live bindings mirror it. `sidebarLayout` still goes through `window.chelaBridge`:
+To add a bridge store: add it to `Bridge` and `createBridge()` in `src/shared/bridge/index.ts`.
 
-```js
-setAgentsCache(rows);                     // util.js: writes the agents store
-publish('sidebarLayout', layout);         // util.js: a no-op when the islands did not load
-```
+### The sidebar
 
-In React:
-
-```tsx
-const agents = useStore(installBridge(window).agents);   // the page's one bridge
-```
-
-To add a store: add it to `Bridge` and `createBridge()` in `src/shared/bridge/index.ts`, and
-call `publish('<name>', value)` wherever legacy changes it.
-
-### The sidebar island
-
-The sidebar is `src/features/sidebar` (CMX-172: slices CMX-276, CMX-277, CMX-278). Its roots
-draw into slots `index.html` keeps: the session list `#sidebar-agents`, the VIEW menu
+The sidebar is `src/features/sidebar` (CMX-172: slices CMX-276, CMX-277, CMX-278). Its parts
+draw into the shell's slots: the session list `#sidebar-agents`, the VIEW menu
 `#sidebar-view-menu`, the nav rows `#side-nav`, Recent sessions `#side-recent-island` and the
 width handle `#sidebar-resize`. Its group, row and VIEW menus are the kit's `Menu`.
 
@@ -159,16 +146,17 @@ Its state and commands are `controller.ts`, the module's second entry point (the
 per-device collapsed groups, the server layout and archive, Recent sessions, the collapsed rail
 and phone drawer, the Alt fast switch, and the width. What it needs from the rest of the page
 (a window's label, the wall, opening a pane, the launcher, the orchestrator slot) it reaches
-through the host `nav.js` gives `configureSidebar()`, so it imports no legacy module; legacy
-(`nav.js`, `launcher.js`, `work.js`, `features/wall`) imports it. The islands' clicks reach it
-through `window.chela` (`legacyActions`, looked up at call time).
+through the host the shell gives `configureSidebar()`; the shell, the launcher, the Work poll
+and `features/wall` import it. Its components' clicks reach it through the shell's
+`sidebarActions` (the controller's commands, and the shell's `selectView` and `selectAgent`).
 
-Every root repaints synchronously (`flushSync`) on a publish of its stores, because legacy
-code reads the rows straight back (Alt+N, jump to the orchestrator).
-`tests/js_helpers/dashboard_dom.mjs` mounts the islands (from `src/`) for every suite that boots
-the page, and returns the controller as `modules.sidebar` (`extraModules: [SIDEBAR]`); a suite
-with its own jsdom boot calls `mountIslands(window)` before it imports `src/boot.ts`. Icons come
-from `src/shared/icons`, a map from a meaning to a Lucide icon.
+Every part repaints synchronously (`useStoreNow`) on a publish of its stores, because the
+controller reads the rows straight back (Alt+N, jump to the orchestrator).
+`tests/js_helpers/dashboard_dom.mjs` boots the page (`APP_BODY` is the real one, `#root`) for
+every suite, and returns the controller as `modules.sidebar` (`extraModules: [SIDEBAR]`); a
+suite with its own jsdom boot calls `mountIslands(window)` (the entry's `mountPage()`, or a
+fixture's slots) and then `boot.ts`'s `start()`. Icons come from `src/shared/icons`, a map from
+a meaning to a Lucide icon.
 
 The desktop width (CMX-278) is `--sidebar-w` on the root element, set from the layout's `width`
 (clamped to 264-480 px, default 288; `chela/sidebar_layout.py` clamps the same). The handle sets
@@ -184,7 +172,7 @@ reconcile and the `windows` event). The vendored Gridstack bundle stays the layo
 global read when the wall builds. A tile element is plain DOM, because Gridstack owns it (it
 adopts, moves and removes it); everything inside a tile is React, portaled into the tile's
 slots. Single mode has no picker of its own: the open pane is `activePane()`, switched by
-`showPane(wid)` (a sidebar tap, the header swipe, a focus). `nav.js` hands it the view switch
+`showPane(wid)` (a sidebar tap, the header swipe, a focus). The shell hands it the view switch
 and the tab signal through `configureWall()`.
 
 The pane headers are React (`src/features/panehead`, CMX-241, plan P26), the first Wall surface ported inside out. Every
@@ -266,8 +254,8 @@ width; a new overlay gets a row there.
 2. Test it in `src/features/<name>/tests/<Name>.test.tsx` with React Testing Library,
    importing `../index.ts`. Stub the network with `vi.stubGlobal('fetch', …)`. Cover every
    branch, including what a failed read renders: unknown must never render as a value.
-3. For a new island: give it an element in `templates/index.html` and one `mountIsland` line
-   in `src/islands.tsx`. Delete the legacy code it replaces in the same PR.
+3. For a new region of the page: give it a slot in `features/shell`'s `<App>` and its entry in
+   `SLOTS`.
 4. `pnpm -C chela/dashboard/frontend typecheck lint lint:boundaries test`, then `build`, and
    commit `static/app/` with the source.
 5. A UI that must render on the real page gets a browser test in `tests/browser/` too:
@@ -283,10 +271,10 @@ pnpm install --frozen-lockfile                       # once, from the repo root
 CHELA_DEV_API=http://127.0.0.1:<port> pnpm -C chela/dashboard/frontend dev
 ```
 
-`pnpm dev` serves `frontend/index.html`, a page holding just the island slots, with hot
-reload, and proxies `/api` to the dashboard at `CHELA_DEV_API` (default
-`http://127.0.0.1:5001`, the dashboard's default port). To see an island on the real page,
-`build` and reload the dashboard.
+`pnpm dev` serves `frontend/index.html`, the page without Flask (so without the Gridstack
+bundle and ttyd: it runs with terminals off), with hot reload, and proxies `/api` to the
+dashboard at `CHELA_DEV_API` (default `http://127.0.0.1:5001`, the dashboard's default port).
+To see the Wall, `build` and reload the dashboard.
 
 ## How the judge grades TypeScript
 

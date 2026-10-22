@@ -11,7 +11,7 @@ import { formatUnreadCount, unreadCount, unreadUrgency } from '../model.ts';
 import { chipMeta } from './chip.ts';
 import { inbox, openDecisions } from './inbox.ts';
 
-/** nav.js's jump, looked up on `win.chela` at call time (legacy loads after the islands). */
+/** The sidebar's jump to the orchestrator's row (the shell hands it in). */
 export type JumpToOrchestrator = () => unknown;
 
 export function DecisionsButton({ jump }: { jump: JumpToOrchestrator }) {
