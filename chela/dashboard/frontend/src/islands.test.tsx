@@ -1,15 +1,29 @@
 import { act } from 'react';
+import type { Root } from 'react-dom/client';
 import { afterEach, expect, test, vi } from 'vitest';
 import { boot } from './islands.tsx';
 
-// Each test resets document.body. A dialog left open keeps its portal there; the reset
-// orphans it and a later commit that removes it throws (NotFoundError). So none stays open.
+// Every root boot creates, so each test can unmount its islands before the next resets
+// document.body (CMX-311). A root left mounted stays subscribed to the stores, and a portal it
+// still holds (a Radix overlay whose Presence commits a turn later on a loaded machine) is
+// orphaned by the reset: the commit that later removes it throws NotFoundError in another test.
+const roots = vi.hoisted(() => [] as Root[]);
+vi.mock('react-dom/client', async (importOriginal) => {
+  const real = await importOriginal<typeof import('react-dom/client')>();
+  return {
+    ...real,
+    createRoot: (...args: Parameters<typeof real.createRoot>) => {
+      const root = real.createRoot(...args);
+      roots.push(root);
+      return root;
+    },
+  };
+});
+
 const escape = () => act(async () => document.activeElement?.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true })));
-// A close commits through Radix's Presence, which can land a turn later on a loaded machine
-// (the full pytest run): wait for it, so the next test's reset never orphans a live portal.
-afterEach(async () => {
-  // up to the test timeout, not waitFor's 1 s: under the full run that turn can take longer
-  await vi.waitFor(() => expect(document.querySelector('[role="dialog"]')).toBeNull(), { timeout: 4500 });
+// Unmounting removes every portal synchronously, with the DOM it was drawn into still in place.
+afterEach(() => {
+  act(() => roots.splice(0).forEach((r) => r.unmount()));
 });
 
 test('boot installs the bridge, the saved theme, the panes\' window.chela contract and the page keys', async () => {

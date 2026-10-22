@@ -3,7 +3,7 @@
 // task_handoff, task_progress_chip and risk_chip .test.mjs, which drove legacy kanban.js).
 import { act, fireEvent, render, screen } from '@testing-library/react';
 import STYLE_CSS from '../../../../../static/style.css?raw';
-import { afterEach, beforeEach, expect, test, vi } from 'vitest';
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, test, vi } from 'vitest';
 import { setWorkPoll, type Run, type WorkPayload, type Workflow } from '../../../shared/store/work.ts';
 import { TaskModal, closeTaskModal } from '../../taskmodal/index.ts';
 import { Board, moveCard, toasts } from '../index.ts';
@@ -669,25 +669,25 @@ test('the quick-nav strip: one chip per drawn column with its count; a tap scrol
 
 // --- Liav 2026-10-19: a column is a lane, not a share of the window -----------------------------
 
-test('a column carries a max width, and the board scrolls sideways rather than squeezing (style.css)', () => {
-  const sheet = document.createElement('style');
-  sheet.textContent = STYLE_CSS;
-  document.head.append(sheet);
-  try {
+// CMX-311: jsdom parses the 240 KB style.css on insertion, ~2 s on a loaded machine: once, in
+// beforeAll (the hook's own 10 s budget), not inside a test's 5 s, and only around these tests.
+describe('under style.css', () => {
+  let sheet: HTMLStyleElement;
+  beforeAll(() => {
+    sheet = document.createElement('style');
+    sheet.textContent = STYLE_CSS;
+    document.head.append(sheet);
+  });
+  afterAll(() => sheet.remove());
+
+  test('a column carries a max width, and the board scrolls sideways rather than squeezing (style.css)', () => {
     show(payload({ active_runs: [run()] }));
     expect(getComputedStyle(col('In Progress')).maxWidth).toBe('400px');
     expect(getComputedStyle(board()).overflowX).toBe('auto');
     expect(getComputedStyle(board()).gridTemplateColumns).toBe('repeat(var(--kanban-cols, 6), minmax(240px, 400px))');
-  } finally {
-    sheet.remove();
-  }
-});
+  });
 
-test('a parked card and its reason chip are on screen under style.css, a long reason ellipsized (CMX-298)', () => {
-  const sheet = document.createElement('style');
-  sheet.textContent = STYLE_CSS;
-  document.head.append(sheet);
-  try {
+  test('a parked card and its reason chip are on screen under style.css, a long reason ellipsized (CMX-298)', () => {
     show(payload({ parked_tasks: [{ id: 'p1', title: 'parked', reason: 'a fairly long blocked reason that would need to ellipsize past the card edge' }] }));
     const card = must(document.querySelector('.kanban-card-parked'));
     const chip = must(card.querySelector('.kanban-parked-reason'));
@@ -695,9 +695,7 @@ test('a parked card and its reason chip are on screen under style.css, a long re
     expect([Number(c.opacity) > 0, c.display, c.visibility]).toEqual([true, 'block', 'visible']);
     expect([parseFloat(r.fontSize) > 0, r.display === 'none', r.visibility]).toEqual([true, false, 'visible']);
     expect([r.overflow, r.textOverflow, r.whiteSpace]).toEqual(['hidden', 'ellipsis', 'nowrap']);
-  } finally {
-    sheet.remove();
-  }
+  });
 });
 
 test('a poll that adds a card above keeps the cards below theirs: an open delete confirm survives', () => {
