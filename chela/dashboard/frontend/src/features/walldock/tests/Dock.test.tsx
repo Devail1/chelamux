@@ -2,7 +2,7 @@
 // and judge_battery_badge (the chip's dot) .test.mjs, plus Liav's 10-19 ask: ONE row that
 // scrolls sideways, with a count, edge fades and a sideways wheel.
 import { cleanup, fireEvent, render } from '@testing-library/react';
-import { afterEach, beforeEach, expect, test, vi } from 'vitest';
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, test, vi } from 'vitest';
 import css from '../../../../../static/style.css?raw';
 import { agents } from '../../../shared/store/agents.ts';
 import { minimizedPanes, setMinimized, termMode } from '../../../shared/store/wall.ts';
@@ -65,11 +65,18 @@ test('a dispatched run\'s chip wears the run\'s own progress icon, labelled (CMX
   expect(dot.title).toBe(dot.getAttribute('aria-label'));
 });
 
-test('the tray is ONE row: nowrap, scrolling sideways, chips never shrink (style.css)', () => {
-  const style = document.createElement('style');
-  style.textContent = css;
-  document.head.append(style);
-  try {
+// CMX-311: jsdom parses the 240 KB style.css on insertion, ~2 s on a loaded machine: once, in
+// beforeAll (the hook's own 10 s budget), not inside a test's 5 s, and only around these tests.
+describe('under style.css', () => {
+  let style: HTMLStyleElement;
+  beforeAll(() => {
+    style = document.createElement('style');
+    style.textContent = css;
+    document.head.append(style);
+  });
+  afterAll(() => style.remove());
+
+  test('the tray is ONE row: nowrap, scrolling sideways, chips never shrink (style.css)', () => {
     const host = document.createElement('div');
     host.id = 'term-min-dock';
     document.body.append(host);
@@ -85,9 +92,7 @@ test('the tray is ONE row: nowrap, scrolling sideways, chips never shrink (style
     host.hidden = true;
     expect(getComputedStyle(host).display).toBe('none');
     host.remove();
-  } finally {
-    style.remove();
-  }
+  });
 });
 
 /** jsdom lays nothing out: give the strip a scroll geometry. */
