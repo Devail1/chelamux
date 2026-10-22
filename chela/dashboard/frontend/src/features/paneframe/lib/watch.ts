@@ -1,18 +1,9 @@
-// Who is watching a pane, told to the server two ways (from terminals.js).
-//
-// Grouped tmux sessions SHARE one real window, and a tmux window has one size: with
-// `window-size largest` (scripts/agent-terminals.sh) a wall left open in a background tab keeps
-// its ttyd socket alive (keepalive pings auto-pong while hidden) and pins every shared window to
-// that ghost's geometry, cropping the wall you are looking at.
-//
-// 1. Ignore-size (CMX-175), instant and non-destructive: the moment a frame stops (or starts)
-//    being watched (tab hidden or shown, pane minimized or restored) POST /api/term/<wid>/watch
-//    with its cid, and app.py flags that ONE tmux client out of the `largest` computation.
-// 2. Background-tab teardown, to reclaim --max-clients slots from a really abandoned tab: hidden
-//    past TERM_HIDE_GRACE_MS, blank the frames whose window has a second viewer
-//    (/api/term/clients; a lone client always fits, so it keeps its terminal). A blanked frame
-//    keeps its src in `data-suspended-src` (term-reconnect.js reads it, §3 of the port plan) and
-//    reconnects when the tab is shown again.
+// Who is watching a pane, told to the server two ways. Grouped tmux sessions share one window of
+// one size, and `window-size largest` lets a ghost wall in a background tab pin it to its size.
+// 1. Ignore-size (CMX-175), instant: POST /api/term/<wid>/watch {cid, watching} when a frame
+//    stops or starts being watched (tab hidden/shown, pane docked/restored).
+// 2. Teardown: hidden past the grace, blank the frames a second viewer shares (a lone client
+//    always fits), src kept in `data-suspended-src` (term-reconnect.js reads it, plan §3).
 import { api } from '../../../shared/api/index.ts';
 import { createStore } from '../../../shared/bridge/index.ts';
 import { minimizedPanes } from '../../../shared/store/wall.ts';
@@ -37,40 +28,26 @@ export function framesOf(wid?: string): HTMLIFrameElement[] {
   return wid === undefined ? all : all.filter((f) => widOfFrame(f) === wid);
 }
 
-/** Watched: the tab is visible AND the pane is not in the dock (a minimized tile is still a live
- * tmux client, only hidden, and would go on sizing the window from inside the dock). */
+/** Watched: the tab is visible AND the pane is not docked (a docked tile is still a client). */
 export function isWatched(wid: string): boolean {
   return document.visibilityState !== 'hidden' && !minimizedPanes.get().has(wid);
 }
 
-/** Report one frame's watched state to the tmux client its cid names. Best effort: a missed
- * report leaves tmux's default (`largest` over every client). */
+/** Report one frame's watched state to the tmux client its cid names. Best effort. */
 export function reportWatch(ifr: HTMLIFrameElement): void {
-  const src = ifr.getAttribute('src') || '';
-  if (!src || src === 'about:blank') return; // torn down: nothing to flag
-  const wid = widOfSrc(src);
-  const cid = cidOfSrc(src);
+  const src = ifr.getAttribute('src') || ''; // about:blank (torn down) names no wid: nothing to flag
+  const wid = widOfSrc(src), cid = cidOfSrc(src);
   if (!wid || !cid) return;
-  api('/api/term/' + encodeURIComponent(wid) + '/watch', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ cid, watching: isWatched(wid) }),
-  }).catch(() => {});
+  const body = JSON.stringify({ cid, watching: isWatched(wid) });
+  api(`/api/term/${encodeURIComponent(wid)}/watch`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body }).catch(() => {});
 }
 
 async function teardown(): Promise<void> {
-  let counts: Record<string, number>;
-  try {
-    counts = ((await api('/api/term/clients')) ?? {}) as Record<string, number>;
-  } catch {
-    return; // contention unknown: disturb nothing
-  }
-  if (document.visibilityState !== 'hidden') return; // shown again mid-fetch
+  const counts = (await api('/api/term/clients').catch(() => null)) as Record<string, number> | null;
+  if (!counts || document.visibilityState !== 'hidden') return; // contention unknown, or shown again mid-fetch: disturb nothing
   const next = new Set(suspendedPanes.get());
   for (const ifr of framesOf()) {
-    const src = ifr.getAttribute('src') || '';
-    if (!src || src === 'about:blank') continue;
-    const wid = widOfSrc(src);
+    const wid = widOfSrc(ifr.getAttribute('src') || ''); // a blank frame names none
     if (wid && (counts[wid] || 0) > 1) next.add(wid); // sole viewer: stays connected
   }
   if (next.size !== suspendedPanes.get().size) suspendedPanes.set(next);

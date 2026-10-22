@@ -4,10 +4,7 @@ import { termKey, termPaste } from '../../paneframe/index.ts';
 import { Keybar, type KeybarActions } from './Keybar.tsx';
 
 /** The single pane's keys and Paste (features/paneframe, CMX-246). */
-export const paneKeybarActions: KeybarActions = {
-  termKey: (key) => void termKey(key),
-  termPaste: (btn) => void termPaste(btn),
-};
+export const paneKeybarActions: KeybarActions = { termKey: (key) => void termKey(key), termPaste: (btn) => void termPaste(btn) };
 
 /** Mount into `#keybar-island`; null when the page has none (terminals off). */
 export function mountKeybar(win: Window, actions = paneKeybarActions): Root | null {

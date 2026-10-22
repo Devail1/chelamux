@@ -6,11 +6,8 @@ export function termSrc(wid: string): string {
 }
 
 /** A per-connection id (CMX-175). */
-export function newCid(): string {
-  const c = (globalThis as { crypto?: Crypto }).crypto;
-  if (c && typeof c.randomUUID === 'function') return c.randomUUID();
-  return 'c' + Math.random().toString(36).slice(2) + Math.random().toString(36).slice(2);
-}
+export const newCid = (): string =>
+  typeof globalThis.crypto?.randomUUID === 'function' ? globalThis.crypto.randomUUID() : 'c' + Math.random().toString(36).slice(2) + Math.random().toString(36).slice(2);
 
 /** The iframe's src: the clean path plus its `cid`. ttyd's client builds its WebSocket URL from
  * `location.search` verbatim, so the cid reaches /term/<wid>/ws and lets app.py's term_ws match

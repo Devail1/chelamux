@@ -1,11 +1,7 @@
-// CMX-246 (CMX-212 P31): every pane's terminal on the page is ONE React root, portaled into a
-// slot in each tile legacy terminals.js still builds, as the headers and footers are. A tile's
-// markup carries `<div class="island-slot" data-frame-for="@N">` where its terminal goes; after
-// inserting it, terminals.js calls mountPaneFrames(scope). A slot that leaves the page is
-// dropped on the next paint (its poll stops with it).
-//
-// Paints are SYNCHRONOUS (flushSync): legacy reads the frames straight back (the share reload,
-// the focus ring, the keybar fit).
+// CMX-246 (CMX-212 P31): every pane's terminal is ONE React root, portaled into the
+// `[data-frame-for="@N"]` slot of each tile terminals.js builds (mountPaneFrames(scope) after it
+// inserts them), as the headers are. A slot that leaves the page is dropped on the next paint,
+// its poll with it. Paints are synchronous: legacy reads the frames straight back.
 import { createPortal, flushSync } from 'react-dom';
 import { createRoot, type Root } from 'react-dom/client';
 import { BOOT } from '../../../shared/api/index.ts';
@@ -36,16 +32,11 @@ function loaded(ifr: HTMLIFrameElement): void {
 
 function draw() {
   for (const el of [...slots.keys()]) if (!el.isConnected) slots.delete(el);
-  const by = new Map<string, HeadAgent>();
-  for (const a of agents.get() as HeadAgent[]) if (a.window_id) by.set(a.window_id, a);
+  const by = new Map((agents.get() as HeadAgent[]).map((a) => [a.window_id, a]));
   const ready = readiness.get();
   const off = suspendedPanes.get();
   return [...slots].map(([el, s]) =>
-    createPortal(
-      <PaneFrame wid={s.wid} title={displayLabel(by.get(s.wid), s.wid)} ready={ready.get(s.wid) ?? 'pending'} suspended={off.has(s.wid)} onLoad={loaded} />,
-      el,
-      String(s.key),
-    ),
+    createPortal(<PaneFrame wid={s.wid} title={displayLabel(by.get(s.wid), s.wid)} ready={ready.get(s.wid) ?? 'pending'} suspended={off.has(s.wid)} onLoad={loaded} />, el, String(s.key)),
   );
 }
 
@@ -81,8 +72,7 @@ export function configurePaneFrames(h: PaneFrameHost): void {
   installWatch(() => BOOT.terminalsEnabled, () => {
     if (onWall()) host.tick();
   });
-  // A terminal just got its port: swap its placeholder in now. The ~1.5 s ready poll stays the
-  // reliable default, so this only accelerates. `ready` carries window ids (@N).
+  // A terminal got its port: swap its shown placeholder in now (the poll stays the default).
   onEvent('term-ready', (d) => {
     if (!onWall()) return;
     const wids = (d as { ready?: unknown } | null)?.ready;
@@ -92,10 +82,8 @@ export function configurePaneFrames(h: PaneFrameHost): void {
   });
 }
 
-// ---- The Wall's 4 s tick --------------------------------------------------------------------
-// A dead pane (window killed, `claude` exited) would otherwise sit blank until the 30 s refresh,
-// so while the Wall is open the host's reconcile runs every TERM_REFRESH_MS (it diffs by window
-// id, so a rename is never a drop and an add). Never while a teardown holds frames blank.
+// The Wall's 4 s tick: the host's reconcile, so a dead pane never sits blank until the 30 s
+// refresh. Never while a teardown holds frames blank.
 export const TERM_REFRESH_MS = 4000;
 let timer: ReturnType<typeof setInterval> | null = null;
 

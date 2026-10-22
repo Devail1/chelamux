@@ -1075,8 +1075,7 @@ body {
     border: 2px solid var(--border); border-top-color: var(--accent);
     border-radius: 50%; animation: term-spin 0.8s linear infinite;
 }
-/* A real <button> since CMX-246 (features/paneframe), drawn as the link it was. */
-.term-retry { color: var(--accent); cursor: pointer; background: none; border: 0; padding: 0; font: inherit; text-decoration: underline; }
+.term-retry { /* a <button> since CMX-246, drawn as the link it was */ color: var(--accent); cursor: pointer; background: none; border: 0; padding: 0; font: inherit; text-decoration: underline; }
 @keyframes term-spin { to { transform: rotate(360deg); } }
 
 /* Maximize / shrink: expand the pane to fill the wall area IN PLACE rather

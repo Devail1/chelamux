@@ -1,7 +1,6 @@
-// One pane's terminal: the ttyd <iframe> once its port is assigned, a spinner placeholder until
-// then. React owns the element and its src and never renders inside it (FRONTEND_PORT_PLAN.md
-// §3). The cid is drawn once per mount, so a repaint never reconnects; a rebuilt tile is a new
-// mount and a new connection, as before.
+// One pane's terminal: the ttyd <iframe> once its port is up, a spinner until then. React owns
+// the element and its src, never what is inside it (plan §3). The cid is drawn once per mount,
+// so a repaint never reconnects.
 import { useEffect, useState } from 'react';
 import { TextButton } from '../../../shared/ui/index.ts';
 import { frameSrc, newCid } from '../model.ts';
@@ -9,8 +8,7 @@ import { retryReady, startReadyPoll, type Readiness } from './ready.ts';
 
 export interface PaneFrameProps {
   wid: string;
-  /** The window's label (the iframe's title, the placeholder's text). */
-  title: string;
+  title: string; // the window's label
   ready: Readiness;
   /** Blanked by the background-tab teardown: about:blank, its src kept in data-suspended-src. */
   suspended: boolean;
@@ -36,18 +34,13 @@ export function PaneFrame({ wid, title, ready, suspended, onLoad }: PaneFramePro
   }
   return (
     <div className="term-frame term-pending" data-pending={wid}>
-      {ready === 'retry' ? (
-        <div className="term-pending-inner">
-          still starting.{' '}
-          <TextButton className="term-retry" onClick={() => retryReady(wid)}>
-            click to retry
-          </TextButton>
-        </div>
-      ) : (
-        <div className="term-pending-inner">
-          <span className="term-spinner" /> starting {title}…
-        </div>
-      )}
+      <div className="term-pending-inner">
+        {ready === 'retry' ? (
+          <>still starting. <TextButton className="term-retry" onClick={() => retryReady(wid)}>click to retry</TextButton></>
+        ) : (
+          <><span className="term-spinner" /> starting {title}…</>
+        )}
+      </div>
     </div>
   );
 }

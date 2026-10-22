@@ -15,7 +15,7 @@ import { mountTileFoots, refreshTileFoots } from '../../frontend/src/features/ti
 import { configureDock, forgetAutoDock, mountDock, refreshDock, runLazyDock } from '../../frontend/src/features/walldock';
 import { mountWallToolbar } from '../../frontend/src/features/walltoolbar';
 import { leaveRoom, refreshRooms, replayRoomAccents, startWire } from '../../frontend/src/features/wire';
-import { configurePaneFrames, focusedPane, focusFrame, forgetReady, framesOf, isSuspended, mountPaneFrames, refreshPaneFrames, resolveReady } from '../../frontend/src/features/paneframe';
+import { configurePaneFrames, focusedPane, focusFrame, forgetReady, framesOf, isSuspended, mountPaneFrames, resolveReady } from '../../frontend/src/features/paneframe';
 
 // ---------------------------------------------------------------------------
 // Terminals (embedded ttyd via the gateway: /term/<wid>/)
@@ -106,10 +106,8 @@ try { localStorage.removeItem('pc_pane_titles'); } catch (e) { /* private mode *
 function _displayLabel(wid) { return displayLabel(_agentByWid(wid), wid); }
 function _paneTitle(wid) { return _displayLabel(wid); }
 
-// The pane's terminal is React since CMX-246 (features/paneframe): one root, portaled into each
-// tile's `[data-frame-for]` slot. It owns the iframe (its src, readiness, focus ring, the keys a
-// pane carries, watch reporting and the background-tab teardown); the share feature reloads it
-// and reads its size through framesOf.
+// The pane's terminal (its iframe) is React since CMX-246: features/paneframe, portaled into
+// each tile's `[data-frame-for]` slot (_frameSlot). The share feature reaches it through framesOf.
 configureShareHost({ paneTitle: wid => _paneTitle(wid), paneFrames: wid => framesOf(wid) });
 configurePaneFrames({
     activeWid: () => ($('#term-agent') || {}).value || '',
@@ -142,7 +140,6 @@ function _footSlot(wid, wall) {
 function _recapSlot(wid) {
     return `<div class="island-slot" data-recap-slot="${attrEsc(wid)}"></div>`;
 }
-// The terminal (features/paneframe, CMX-246): the iframe once its port is up, a placeholder before.
 function _frameSlot(wid) {
     return `<div class="island-slot" data-frame-for="${attrEsc(wid)}"></div>`;
 }
@@ -386,6 +383,18 @@ async function renderTerminals(ctxRead) {   // ctxRead: refresh()'s context read
     refreshRooms();           // paint room accents on the first render, not 4s later
 }
 
+// ---- Reactive pane lifecycle ----------------------------------------------
+//
+// A dead ttyd iframe (window killed / `claude` exited / killed elsewhere) would
+// otherwise sit blank until the 30s renderTerminals cycle. Instead features/paneframe's
+// 4s timer runs termTick while the terminals tab is open, which polls the live agent set and:
+//   - drop tiles for wids that vanished (no flicker for survivors), and
+//   - in WALL mode, rebuild when a NEW wid appears (layout genuinely changed);
+//     in SINGLE mode, only refresh the dropdown so the new shell is selectable —
+//     the displayed pane's iframe is never reloaded.
+// Panes whose windows still exist are left completely untouched. Because the
+// diff is by wid, a window rename never reads as a drop+add.
+
 // Bring an existing pane to the user's attention: switch to the wall, restore it
 // if minimized, scroll it into view, focus its iframe (which lights the focus
 // ring), and flash it briefly. The launcher's dedup calls this when you click a
@@ -418,17 +427,6 @@ function focusPaneByWid(wid) {
     }, 60);
 }
 
-// ---- Reactive pane lifecycle ----------------------------------------------
-//
-// A dead ttyd iframe (window killed / `claude` exited / killed elsewhere) would
-// otherwise sit blank until the 30s renderTerminals cycle. Instead features/paneframe's
-// 4s timer runs termTick while the terminals tab is open, which polls the live agent set and:
-//   - drop tiles for wids that vanished (no flicker for survivors), and
-//   - in WALL mode, rebuild when a NEW wid appears (layout genuinely changed);
-//     in SINGLE mode, only refresh the dropdown so the new shell is selectable —
-//     the displayed pane's iframe is never reloaded.
-// Panes whose windows still exist are left completely untouched. Because the
-// diff is by wid, a window rename never reads as a drop+add.
 async function termTick() {
     if (!TERMINALS_ON || currentTab !== 'terminals') return;
     let agents;

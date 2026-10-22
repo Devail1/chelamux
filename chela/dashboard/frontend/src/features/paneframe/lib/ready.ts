@@ -1,8 +1,6 @@
-// A freshly spawned pane's /term/<wid>/ 404s ("Unknown terminal") until agent-terminals.sh
-// assigns it a ttyd port (~12 s). So a pane whose terminal is not ready yet draws a spinner
-// placeholder and polls GET /api/term/ready every READY_POLL_MS (capped), then swaps in the
-// iframe in place: no stage rebuild, so live sibling iframes never reload. A pane already in
-// the port map draws its iframe at once (resolveReady, before the tiles are built).
+// A fresh pane's /term/<wid>/ 404s until agent-terminals.sh assigns it a ttyd port (~12 s), so
+// it draws a spinner that polls /api/term/ready (capped), then swaps its iframe in place: live
+// siblings never reload. A pane already in the port map draws its iframe at once (resolveReady).
 import { api } from '../../../shared/api/index.ts';
 import { createStore } from '../../../shared/bridge/index.ts';
 
@@ -26,14 +24,9 @@ function put(wid: string, r: Readiness | null): void {
   readiness.set(next);
 }
 
-async function checkReady(wid: string): Promise<boolean> {
-  try {
-    const r = (await api('/api/term/ready?agent=' + encodeURIComponent(wid))) as { ready?: unknown } | null;
-    return Boolean(r && r.ready);
-  } catch {
-    return false;
-  }
-}
+/** A failed probe is not ready, never ready. */
+const checkReady = (wid: string): Promise<boolean> =>
+  api('/api/term/ready?agent=' + encodeURIComponent(wid)).then((r) => Boolean((r as { ready?: unknown } | null)?.ready), () => false);
 
 export const isReady = (wid: string): boolean => readiness.get().get(wid) === 'ready';
 
@@ -47,11 +40,8 @@ export async function resolveReady(wids: readonly string[]): Promise<void> {
 }
 
 function stopPoll(wid: string): void {
-  const h = pollers.get(wid);
-  if (h !== undefined) {
-    clearInterval(h);
-    pollers.delete(wid);
-  }
+  clearInterval(pollers.get(wid));
+  pollers.delete(wid);
 }
 
 /** The terminal is up (its poll, or the `term-ready` push): its frame swaps in. */
@@ -65,26 +55,19 @@ export function startReadyPoll(wid: string): () => void {
   stopPoll(wid);
   let tries = 0;
   const h = setInterval(() => {
-    tries += 1;
+    const last = ++tries >= READY_MAX_TRIES;
     void checkReady(wid).then((ok) => {
       if (pollers.get(wid) !== h) return; // stopped while the probe was in flight
       if (ok) markReady(wid);
-      else if (tries >= READY_MAX_TRIES) {
-        stopPoll(wid);
-        put(wid, 'retry');
-      }
+      else if (last) { stopPoll(wid); put(wid, 'retry'); }
     });
   }, READY_POLL_MS);
   pollers.set(wid, h);
-  return () => {
-    if (pollers.get(wid) === h) stopPoll(wid);
-  };
+  return () => { if (pollers.get(wid) === h) stopPoll(wid); };
 }
 
 /** The retry link: back to the spinner, whose poll starts again. */
-export function retryReady(wid: string): void {
-  put(wid, 'pending');
-}
+export const retryReady = (wid: string): void => put(wid, 'pending');
 
 /** The pane is gone: a re-spawn under the same wid must re-probe its port. */
 export function forgetReady(wid: string): void {
