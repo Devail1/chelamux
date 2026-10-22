@@ -78,7 +78,7 @@ beforeAll(async () => {
     util = await import('../chela/dashboard/static/js/util.js');
     nav = await import('../chela/dashboard/static/js/nav.js');
     sidebar = await import('../chela/dashboard/frontend/src/features/sidebar/controller.ts');
-    terminals = await import('../chela/dashboard/static/js/terminals.js');
+    terminals = await import('../chela/dashboard/frontend/src/features/wall/index.ts');
     util.setCurrentTab('terminals');
     util.setAgentsCache(AGENTS);
 });

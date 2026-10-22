@@ -1,7 +1,7 @@
 // MOBILE KEYBAR "Paste" — real-DOM guard for CMX-423.
 //
 // The keybar's Paste button (the keybar island, CMX-237 → features/paneframe termPaste, CMX-246) reads the DEVICE clipboard in
-// the parent page and POSTs it to /api/term/paste for the active pane (#term-agent). After
+// the parent page and POSTs it to /api/term/paste for the active pane (features/wall activePane). After
 // CMX-412 it "stopped working": every early exit was silent, and a phone clipboard holding
 // a screenshot came back empty from readText(), so the tap did nothing visible.
 //
@@ -68,7 +68,7 @@ function setClipboard(value) {
     Object.defineProperty(globalThis.navigator, 'clipboard', { configurable: true, value });
 }
 
-let paneframe;
+let paneframe, terminals;
 
 beforeAll(async () => {
     const dom = new JSDOM(`<!doctype html><html><body>${PANEL}</body></html>`,
@@ -90,7 +90,7 @@ beforeAll(async () => {
     await mountIslands(dom.window);
     await import('../chela/dashboard/frontend/src/boot.ts');
     const util = await import('../chela/dashboard/static/js/util.js');
-    const terminals = await import('../chela/dashboard/static/js/terminals.js');
+    terminals = await import('../chela/dashboard/frontend/src/features/wall/index.ts');
     paneframe = await import('../chela/dashboard/frontend/src/features/paneframe/index.ts');
     util.setCurrentTab('terminals');
     util.setAgentsCache(AGENTS);
@@ -99,9 +99,7 @@ beforeAll(async () => {
 
 beforeEach(() => {
     calls = [];
-    const sel = document.getElementById('term-agent');
-    if (![...sel.options].some(o => o.value === '@1')) sel.add(new window.Option('shell', '@1'));
-    sel.value = '@1';
+    void terminals.showPane('@1');   // the active pane
 });
 
 // The island's real Paste button.

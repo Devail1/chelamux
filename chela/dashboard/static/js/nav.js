@@ -3,7 +3,7 @@ import { $$, TERMINALS_ON, _agentsCache, agentDotColor, setCurrentTab, updateTab
 import { onOrchestratorChange, orchestratorState } from '../../frontend/src/shared/orchestrator';
 import { refreshSummary } from '../../frontend/src/features/primarymenu';
 import { detailAgent, redrawAgentDetail, setAgentDetailHost } from '../../frontend/src/features/agentdetail';
-import { _displayLabel, adoptSidebarDefault, _renderedWids, focusPaneByWid, isWallVisible, minimizePane, setTermMode } from './terminals';
+import { adoptSidebarDefault, configureWall, focusPaneByWid, isWallVisible, label as wallLabel, minimizePane, renderedWids, setTermMode } from '../../frontend/src/features/wall';
 import { minimizedPanes, orderedWids } from '../../frontend/src/shared/store/wall';
 import { launchProject, setLauncherHost } from '../../frontend/src/features/launcher';
 import { setPaletteHost } from '../../frontend/src/features/palette';
@@ -35,7 +35,7 @@ import { closeSidebar, configureSidebar, refreshSidebar, renderSidebarAgents, se
 // are controller.ts's. What it needs from the rest of the page, it reaches through this.
 configureSidebar({
     label: _agentLabel,
-    onWall: () => _renderedWids.filter(w => !minimizedPanes.get().has(w)),
+    onWall: () => renderedWids.filter(w => !minimizedPanes.get().has(w)),
     orchWid: () => orchestratorState().wid,
     wants: wantsHuman,
     tabSignal: agents => updateTabSignal(agents),
@@ -96,11 +96,11 @@ function selectView(view) {
 // The metadata "detail" card is the fallback only when there's no wall to
 // land on (terminals off) or the window isn't resolved yet.
 function selectAgent(name) {
-    if (TERMINALS_ON && typeof focusPaneByWid === 'function') {
+    if (TERMINALS_ON) {
         const a = (_agentsCache || []).find(x => x.name === name);
         if (a && a.window_id) {
             const wid = a.window_id;
-            const openOnWall = _renderedWids.includes(wid) && !minimizedPanes.get().has(wid);
+            const openOnWall = renderedWids.includes(wid) && !minimizedPanes.get().has(wid);
             if (isWallVisible() && openOnWall) {
                 minimizePane(wid);
             } else {
@@ -116,7 +116,7 @@ function selectAgent(name) {
 // minimizes a pane that is already open, a menu's "Open … pane" and Alt+N always land on it.
 function _openPane(w) {
     if (!w) return;
-    if (TERMINALS_ON && w.window_id && typeof focusPaneByWid === 'function') {
+    if (TERMINALS_ON && w.window_id) {
         if (!isWallVisible()) setTermMode('wall');
         focusPaneByWid(w.window_id);
         return;
@@ -187,12 +187,11 @@ function _agentRole(a) {
 const _ROLE_LABEL = { orchestrator: 'Orchestrator', dispatched: 'Dispatched', plain: 'Plain session' };
 
 
-// Friendly label, shared with the wall panes (_displayLabel): a manual rename
-// wins, else Claude's session title, else the window name (CMX-62) — so a
-// session reads identically in the sidebar and on its pane title. Falls back to
-// the raw name when terminals.js isn't loaded.
+// Friendly label, shared with the wall panes (features/wall `label`): a manual rename wins,
+// else Claude's session title, else the window name (CMX-62), so a session reads identically
+// in the sidebar and on its pane title.
 function _agentLabel(a) {
-    if (typeof _displayLabel === 'function' && a && a.window_id) return _displayLabel(a.window_id);
+    if (a && a.window_id) return wallLabel(a.window_id);
     return a ? a.name : '';
 }
 
@@ -214,7 +213,7 @@ setPaletteHost({
     showAgentDetail,
     resolveWid: resolveWindowId,
     wall: {
-        rendered: () => _renderedWids,
+        rendered: () => renderedWids,
         minimized: () => minimizedPanes.get(),
         ordered: orderedWids,
         visible: isWallVisible,
@@ -222,6 +221,9 @@ setPaletteHost({
         focus: focusPaneByWid,
     },
 });
+
+// The Wall (features/wall) switches to itself on a focus, and badges the tab from its 4 s poll.
+configureWall({ selectView, tabSignal: agents => updateTabSignal(agents) });
 
 // --- Stage 0: ES-module exports ---
 export { renderNav, selectView };

@@ -137,7 +137,7 @@ def test_every_module_import_inherits_the_version():
         bare = re.findall(r"['\"]/static/[^'\"]+['\"]", code)
         assert not bare, f"{p.name} names a bare static URL: {bare}"
     # CMX-212: each port slice moves imports out of static/js; the floor follows them down.
-    assert seen > 30, "the import scan found almost nothing — the regexes no longer match"
+    assert seen > 20, "the import scan found almost nothing — the regexes no longer match"
 
 
 def test_version_is_stable_within_a_deploy(client):

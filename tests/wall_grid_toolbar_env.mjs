@@ -66,7 +66,7 @@ export async function bootWall(storage) {
     globalThis.setInterval = () => 0;
     await import('../chela/dashboard/frontend/src/boot.ts');
     const util = await import('../chela/dashboard/static/js/util.js');
-    const terminals = await import('../chela/dashboard/static/js/terminals.js');
+    const terminals = await import('../chela/dashboard/frontend/src/features/wall/index.ts');
     util.setCurrentTab('terminals');
     util.setAgentsCache(AGENTS);
     await terminals.renderTerminals();

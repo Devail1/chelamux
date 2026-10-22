@@ -44,6 +44,9 @@ const DEFAULT_JS_ROOT = new URL('../../chela/dashboard/static/js/', import.meta.
 /** CMX-278: the sidebar's state and commands (they left nav.js), for `extraModules`; it is
  * returned as `modules.sidebar`. */
 export const SIDEBAR = ['sidebar', '../../frontend/src/features/sidebar/controller.ts'];
+/** CMX-247: the Wall (it left static/js/terminals.js), for `extraModules`; returned as
+ * `modules.terminals`. */
+export const WALL = ['terminals', '../../frontend/src/features/wall/index.ts'];
 const SRC_URL = new URL('../../chela/dashboard/frontend/src/', import.meta.url).href;
 
 /** CMX-217: index.html's boot config block (frontend/src/shared/api readBoot), for a fixture

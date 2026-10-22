@@ -103,7 +103,7 @@ beforeAll(async () => {
     util = await import('../chela/dashboard/static/js/util.js');
     nav = await import('../chela/dashboard/static/js/nav.js');
     sidebar = await import('../chela/dashboard/frontend/src/features/sidebar/controller.ts');
-    terminals = await import('../chela/dashboard/static/js/terminals.js');
+    terminals = await import('../chela/dashboard/frontend/src/features/wall/index.ts');
     util.setCurrentTab('terminals');
     util.setAgentsCache(AGENTS);
     await terminals.renderTerminals();
@@ -308,19 +308,19 @@ test('a legacy copy that fails says so — never a false "Copied"', async () => 
 // --- the palette reaches a window with no /api/agents row (a plain shell) -------
 
 test('"@N" for an open plain-shell pane (no agent row) still resolves to that window', async () => {
-    terminals._renderedWids.push('@40');
+    terminals.renderedWids.push('@40');
     try {
         const rows = await paletteRows('@40');
         assert.ok(rows.length, 'no palette row for the shell\'s "@40"');
         assert.deepEqual({ title: rows[0].title, sub: rows[0].sub }, { title: '@40', sub: 'window · @40' });
         await closePalette();
     } finally {
-        terminals._renderedWids.splice(terminals._renderedWids.indexOf('@40'), 1);
+        terminals.renderedWids.splice(terminals.renderedWids.indexOf('@40'), 1);
     }
 });
 
 test('jumping to "@32" from the single-pane view switches to the Wall and focuses @32', async () => {
-    window.chela.setTermMode('single');
+    terminals.setTermMode('single');
     await sleep(0);
     runRow((await paletteRows('@32'))[0]);
     await sleep(120);

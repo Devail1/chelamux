@@ -3250,12 +3250,10 @@ summary.runs-section { cursor: pointer; }
     /* Hide rows with no useful payload (e.g. Error column when empty). */
     .dispatcher-table td.cell-empty { display: none; }
 
-    /* Terminals: wall mode doesn't fit a 375px viewport. Hide the toggle
-       and grid presets; renderTerminals() also force-switches to single. */
-    #term-mode-wall { display: none; }
+    /* Terminals: wall mode doesn't fit a 375px viewport. Hide the grid presets;
+       renderTerminals() also force-switches to single. */
     #term-wall-grid { display: none !important; }
     #panel-terminals > div:first-child { flex-wrap: wrap; }
-    #term-agent { margin-left: 0 !important; flex: 1 1 100%; }
     /* Fill the screen: 100dvh (NOT vh — the mobile address bar collapses and
        vh overshoots the real visible height) minus the chrome that sits
        above/below the pane on a phone. CMX-130's 70vh was a rough guess
@@ -4421,12 +4419,6 @@ body.sidebar-resizing iframe { pointer-events: none; }
        the 8px left edge) never runs off the right: a long nowrap project label
        would otherwise size the popover past a 390px screen. */
     .launch-menu { max-width: calc(100vw - 16px); }
-}
-
-@media (max-width: 768px) {
-    /* The dropdown never shows on a phone: the sidebar is the session
-       switcher (CMX-202), and the pane header names the open session. */
-    #term-agent { display: none !important; }
 }
 
 /* ---- Mobile keybar v2 (Moshi-style accessory row) ----

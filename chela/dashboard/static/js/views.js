@@ -28,7 +28,7 @@
 // sidebar Sessions list, the Wall, or the palette), no nav item of its own.
 // See viewreg.js for the entry shape.
 // ---------------------------------------------------------------------------
-import { renderTerminals } from './terminals';
+import { renderTerminals } from '../../frontend/src/features/wall';
 import { startTermTimer, stopTermTimer } from '../../frontend/src/features/paneframe';
 
 export const VIEWS = [
@@ -40,7 +40,7 @@ export const VIEWS = [
         lucide: 'layout-grid',
         enabled: ctx => !!ctx.terminalsOn,
         // The wall holds LIVE iframes: entering reconciles by stable window id and
-        // never reloads a pane (terminals.js), so this hook only owns the timer.
+        // never reloads a pane (features/wall), so this hook only owns the timer.
         enter: () => startTermTimer(),
         exit: () => stopTermTimer(),
         tick: ctxRead => renderTerminals(ctxRead),
