@@ -4,7 +4,7 @@
 // the server's versions are both known and differ; unknown hides the stale half; dismiss is
 // per version and per stale set; Restart is confirm-gated and POSTs /api/update/apply.
 import { act, cleanup, fireEvent, render } from '@testing-library/react';
-import { afterEach, beforeEach, expect, test, vi } from 'vitest';
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, test, vi } from 'vitest';
 import css from '../../../../../static/style.css?raw';
 import { UpdateBanner, applyStale, applyVersion, banner, checkForUpdate, reloadOffered, restartStale } from '../index.ts';
 import type { UpdateStatus } from '../flow.ts';
@@ -222,22 +222,30 @@ test('refused, not started, failed request and never confirmed each end in their
   expect($('update-banner-restart')).not.toBeNull(); // a failed restart keeps the offer to retry
 });
 
-test('the dismiss x is 24px high with a 24x24 minimum target and a 14px glyph; a toolbar .icon-btn keeps 38x38', () => {
-  const style = document.createElement('style');
-  style.textContent = css;
-  document.head.appendChild(style);
-  ver('bbbbbbbbbbbb');
-  const close = $('update-banner-close') as HTMLElement;
-  expect(close.closest('.update-banner')).not.toBeNull();
-  const cs = getComputedStyle(close);
-  expect([cs.height, cs.minWidth, cs.minHeight, cs.fontSize, cs.width]).toEqual(['24px', '24px', '24px', '14px', 'auto']);
-  const other = document.createElement('button');
-  other.className = 'icon-btn';
-  document.body.appendChild(other);
-  const ocs = getComputedStyle(other);
-  expect([ocs.width, ocs.height, ocs.fontSize]).toEqual(['38px', '38px', '17px']);
-  other.remove();
-  style.remove();
+// CMX-311: jsdom parses the 240 KB style.css on insertion, ~2 s on a loaded machine: once, in
+// beforeAll (the hook's own 10 s budget), not inside a test's 5 s, and only around these tests.
+describe('under style.css', () => {
+  let style: HTMLStyleElement;
+  beforeAll(() => {
+    style = document.createElement('style');
+    style.textContent = css;
+    document.head.append(style);
+  });
+  afterAll(() => style.remove());
+
+  test('the dismiss x is 24px high with a 24x24 minimum target and a 14px glyph; a toolbar .icon-btn keeps 38x38', () => {
+    ver('bbbbbbbbbbbb');
+    const close = $('update-banner-close') as HTMLElement;
+    expect(close.closest('.update-banner')).not.toBeNull();
+    const cs = getComputedStyle(close);
+    expect([cs.height, cs.minWidth, cs.minHeight, cs.fontSize, cs.width]).toEqual(['24px', '24px', '24px', '14px', 'auto']);
+    const other = document.createElement('button');
+    other.className = 'icon-btn';
+    document.body.appendChild(other);
+    const ocs = getComputedStyle(other);
+    expect([ocs.width, ocs.height, ocs.fontSize]).toEqual(['38px', '38px', '17px']);
+    other.remove();
+  });
 });
 
 test('a restart that restarts THIS dashboard ends as success, not an error', async () => {
