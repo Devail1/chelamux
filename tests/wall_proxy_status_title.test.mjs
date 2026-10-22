@@ -96,7 +96,8 @@ beforeAll(async () => {
     util.setCurrentTab('terminals');
     window.chela.setTermMode('wall');
     await terminals.renderTerminals();
-    [SANDBOXED, ORDINARY].forEach(w => terminals._minimized.delete(w));
+    const wall = await import('../chela/dashboard/frontend/src/shared/store/wall.ts');
+    [SANDBOXED, ORDINARY].forEach(w => wall.setMinimized(w, false));
     await terminals.renderTerminals();
 });
 

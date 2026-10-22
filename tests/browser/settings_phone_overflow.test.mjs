@@ -9,7 +9,7 @@
 // as a touch device (CMX-409's 16px controls apply), in two themes, and reads scrollWidth vs clientWidth on
 //   - the document and the modal itself (no page or dialog scrolls sideways),
 //   - the modal's own box (inside the viewport),
-//   - the tab panel and EVERY row-shaped element in it (.s-row, .s-status-row,
+//   - the tab panel and EVERY row-shaped element in it (.s-row, .field-row, .s-status-row,
 //     .s-ex, .s-kv, .settings-section, …): a row whose content is wider than the
 //     row is a field poking out of its card,
 //   - the tab strip: it may scroll sideways ON ITS OWN, but then it must say so
@@ -142,7 +142,7 @@ const viewName = v => v.usage ? 'cost/usage' : v.tab;
 
 // What the panel holds that must fit its own box. Every element matching one of
 // these, inside the active panel, is measured.
-const ROWS = '.settings-section, .s-row, .s-status-row, .s-status-group, .s-ex, .s-examples, .s-kv, .s-desc, '
+const ROWS = '.settings-section, .s-row, .field-row, .s-status-row, .s-status-group, .s-ex, .s-examples, .s-kv, .s-desc, '
     + '.work-toolbar, .usage-limits, .usage-roots, #cost-table, #usage-table, #timing-rows, #dispatch-rows';
 
 // Measure inside the page: every offender, named, with its numbers.
@@ -276,10 +276,8 @@ function measureTabs(page) {
 }
 
 async function openView(page, v) {
-    await page.evaluate(({ tab, usage }) => {
-        window.chela.selectSettingsTab(tab);
-        if (tab === 'cost') window.chela.setCostView(usage ? 'usage' : 'cost');
-    }, v);
+    await page.locator(`.settings-tab[data-tab="${v.tab}"]`).click();
+    if (v.tab === 'cost') await page.locator(`#cost-view [data-view="${v.usage ? 'usage' : 'cost'}"]`).click();
     // Let the async loaders (/api/settings, timing, dispatch, cost, usage) land.
     await page.waitForFunction(() => !document.querySelector('.settings-tabpanel.active .s-desc')
         || ![...document.querySelectorAll('.settings-tabpanel.active #timing-rows, .settings-tabpanel.active #dispatch-rows, .settings-tabpanel.active #usage-table')]
@@ -301,7 +299,7 @@ for (const [width, height] of [[390, 844], [360, 740]]) {
                 await page.evaluate(() => window.chela.toggleSettings());
                 await page.waitForFunction(() => {
                     const m = document.getElementById('settings-drawer');
-                    return m.classList.contains('open') && getComputedStyle(m).opacity === '1';
+                    return !!m && m.classList.contains('open') && getComputedStyle(m).opacity === '1';   // CMX-221: drawn once open
                 }, null, { timeout: 5000 });
                 // The Update card's stale-services detail is what Liav saw break.
                 await page.waitForFunction(() => /pm2 restart/.test(document.getElementById('update-status-row').textContent),
@@ -347,7 +345,7 @@ for (const [width, height] of [[390, 844], [360, 740]]) {
 
             test('the tab strip scrolls on its own, inside the modal, with a visible affordance', async () => {
                 ready();
-                await page.evaluate(() => window.chela.selectSettingsTab('general'));
+                await page.locator('.settings-tab[data-tab="general"]').click();
                 await page.evaluate(() => { document.getElementById('settings-tabs').scrollLeft = 0; });
                 await page.waitForTimeout(100);
                 const t = await measureTabs(page);

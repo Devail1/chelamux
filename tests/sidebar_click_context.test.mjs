@@ -72,7 +72,8 @@ function fakeGridStack() {
     return { init: () => grid };
 }
 
-let terminals, nav, util;
+let terminals, nav, util, wall;
+const minimized = wid => wall.minimizedPanes.get().has(wid);
 
 beforeAll(async () => {
     const dom = new JSDOM(`<!doctype html><html><body>${PANEL}</body></html>`,
@@ -103,6 +104,7 @@ beforeAll(async () => {
     util = await import('../chela/dashboard/static/js/util.js');
     terminals = await import('../chela/dashboard/static/js/terminals.js');
     nav = await import('../chela/dashboard/static/js/nav.js');
+    wall = await import('../chela/dashboard/frontend/src/shared/store/wall.ts');
     util.setAgentsCache(AGENTS);
 });
 
@@ -112,14 +114,14 @@ beforeEach(async () => {
     util.setCurrentTab('terminals');
     window.chela.setTermMode('wall');
     await terminals.renderTerminals();
-    [HUMAN, WORKER].forEach(wid => { if (terminals._minimized.has(wid)) terminals._minimized.delete(wid); });
+    [HUMAN, WORKER].forEach(wid => wall.setMinimized(wid, false));
     await terminals.renderTerminals();
 });
 
 test('1. wall visible + pane open on it -> click MINIMIZES it', () => {
-    assert.ok(!terminals._minimized.has(HUMAN), 'setup: orchestrator must start open, not docked');
+    assert.ok(!minimized(HUMAN), 'setup: orchestrator must start open, not docked');
     window.chela.selectAgent('orchestrator');
-    assert.ok(terminals._minimized.has(HUMAN),
+    assert.ok(minimized(HUMAN),
         'clicking an already-open pane while the wall is visible must dock it, not just re-focus it');
 });
 
@@ -129,21 +131,21 @@ test('1. wall visible + pane open on it -> click MINIMIZES it', () => {
 const settleFocus = () => new Promise(r => setTimeout(r, 120));
 
 test('2. wall visible + pane minimized -> click restores + focuses (unchanged)', async () => {
-    window.chela.termMinFor(document.querySelector(`#term-stage .grid-stack-item[gs-id="${WORKER}"] .gs-min-btn`));
-    assert.ok(terminals._minimized.has(WORKER), 'setup: worker must be docked before the click');
+    document.querySelector(`#term-stage .grid-stack-item[gs-id="${WORKER}"] .gs-min-btn`).click();
+    assert.ok(minimized(WORKER), 'setup: worker must be docked before the click');
     window.chela.selectAgent('cmx-139');
     await settleFocus();
-    assert.ok(!terminals._minimized.has(WORKER),
+    assert.ok(!minimized(WORKER),
         'clicking a docked pane while the wall is visible must restore it');
 });
 
 test('3. not on the wall (another tab) -> click switches to the wall AND focuses, never minimizes', async () => {
     util.setCurrentTab('agents');   // simulate being on a different tab
-    assert.ok(!terminals._minimized.has(HUMAN), 'setup: orchestrator is open on the wall underneath');
+    assert.ok(!minimized(HUMAN), 'setup: orchestrator is open on the wall underneath');
     window.chela.selectAgent('orchestrator');
     assert.equal(util.currentTab, 'terminals', 'the click must switch back to the wall tab');
     await settleFocus();
-    assert.ok(!terminals._minimized.has(HUMAN),
+    assert.ok(!minimized(HUMAN),
         'an open pane must be focused, NOT minimized, when the click is what brings the wall into view');
 });
 

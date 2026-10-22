@@ -6,7 +6,7 @@
 import * as RRG from '@radix-ui/react-radio-group';
 import * as RS from '@radix-ui/react-select';
 import * as RSw from '@radix-ui/react-switch';
-import { createContext, useContext, useId, useState, type ReactElement, type ReactNode } from 'react';
+import { createContext, useContext, useEffect, useId, useRef, useState, type ReactElement, type ReactNode } from 'react';
 import { icons } from '../../icons/index.ts';
 import { Button } from './basics.tsx';
 import { Tooltip } from './overlays.tsx';
@@ -14,10 +14,15 @@ import { Tooltip } from './overlays.tsx';
 /** The id FieldRow's <label> points at; a control inside one takes it. */
 const FieldId = createContext<string | undefined>(undefined);
 
-export function FieldRow({ label, hint, unit, badge, children }: { label: string; hint?: ReactNode; unit?: string; badge?: ReactNode; children: ReactNode }) {
-  const id = useId();
+/**
+ * `id` names the control (the label points at it); `keywords` are extra words a search over
+ * the rendered rows matches (Settings, CMX-396), beyond the label.
+ */
+export function FieldRow({ label, hint, unit, badge, id: fixedId, keywords, children }: { label: string; hint?: ReactNode; unit?: string; badge?: ReactNode; id?: string; keywords?: string; children: ReactNode }) {
+  const ownId = useId();
+  const id = fixedId ?? ownId;
   return (
-    <div className="field-row">
+    <div className="field-row" data-keywords={keywords}>
       <label className="field-label" htmlFor={id}>
         {label}
         {badge}
@@ -51,16 +56,20 @@ function withEnvTip(lockedBy: string | undefined, el: ReactElement) {
 
 /**
  * `plain` is for a typed confirmation or a search: no autocomplete, no spellcheck. `list` names a
- * <datalist> of suggestions; `autoFocus` takes focus when a Dialog opens.
+ * <datalist> of suggestions; `autoFocus` takes focus when a Dialog opens. `search` is a search
+ * box (`id` names one outside a FieldRow); `onEnter` runs on Enter. `className` replaces the
+ * field's look (the ⌘K palette's own input).
  */
-export function TextInput({ value, onChange, lockedBy, disabled, label, placeholder, plain, list, autoFocus }: InputProps<string> & { placeholder?: string; plain?: boolean; list?: string; autoFocus?: boolean }) {
-  const id = useContext(FieldId);
+export function TextInput({ value, onChange, lockedBy, disabled, label, placeholder, plain, list, autoFocus, search, id: ownId, maxLength, onEnter, className = 's-input' }: InputProps<string> & { placeholder?: string; plain?: boolean; list?: string; autoFocus?: boolean; search?: boolean; id?: string; maxLength?: number; onEnter?: () => void; className?: string }) {
+  const id = useContext(FieldId) ?? ownId;
   return withEnvTip(
     lockedBy,
     <input
-      className="s-input"
-      type="text"
+      className={className}
+      type={search ? 'search' : 'text'}
       id={id}
+      maxLength={maxLength}
+      onKeyDown={onEnter ? (e) => { if (e.key === 'Enter') onEnter(); } : undefined}
       aria-label={label}
       value={value}
       placeholder={placeholder}
@@ -71,6 +80,58 @@ export function TextInput({ value, onChange, lockedBy, disabled, label, placehol
       {...(plain ? { spellCheck: false } : {})}
       onChange={(e) => onChange(e.target.value)}
     />,
+  );
+}
+
+/**
+ * A label edited in place (a pane title): it opens focused with its text selected; Enter or
+ * leaving it commits, Escape cancels, and each fires once. Its keys and presses stay inside it:
+ * a press must not start a drag of whatever it sits in (a Gridstack handle listens on its own
+ * element, below React's root), and a key must not reach a page shortcut.
+ */
+export function InlineEdit({ initial, label, className, onCommit, onCancel }: { initial: string; label: string; className?: string; onCommit: (value: string) => void; onCancel: () => void }) {
+  const [value, setValue] = useState(initial);
+  const done = useRef(false);
+  const ref = useRef<HTMLInputElement>(null);
+  useEffect(() => {
+    const el = ref.current;
+    if (!el) return;
+    el.focus();
+    el.select();
+    const stop = (e: Event) => e.stopPropagation();
+    const presses = ['pointerdown', 'mousedown', 'touchstart'] as const;
+    for (const t of presses) el.addEventListener(t, stop, { passive: true });
+    return () => {
+      for (const t of presses) el.removeEventListener(t, stop);
+    };
+  }, []);
+  const finish = (save: boolean) => {
+    if (done.current) return;
+    done.current = true;
+    if (save) onCommit(value);
+    else onCancel();
+  };
+  return (
+    <input
+      ref={ref}
+      className={className}
+      type="text"
+      aria-label={label}
+      title="Enter to save, Esc to cancel"
+      value={value}
+      onChange={(e) => setValue(e.target.value)}
+      onBlur={() => finish(true)}
+      onKeyDown={(e) => {
+        e.stopPropagation();
+        if (e.key === 'Enter') {
+          e.preventDefault();
+          finish(true);
+        } else if (e.key === 'Escape') {
+          e.preventDefault();
+          finish(false);
+        }
+      }}
+    />
   );
 }
 

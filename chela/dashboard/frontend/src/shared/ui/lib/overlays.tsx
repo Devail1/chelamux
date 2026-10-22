@@ -8,7 +8,7 @@ import * as RP from '@radix-ui/react-popover';
 import * as RToast from '@radix-ui/react-toast';
 import * as RT from '@radix-ui/react-tooltip';
 import { Check, ChevronRight, X, type LucideIcon } from 'lucide-react';
-import { useLayoutEffect, useMemo, useRef, type ReactElement, type ReactNode, type RefObject, type SyntheticEvent } from 'react';
+import { useLayoutEffect, useMemo, useRef, type ReactElement, type MouseEvent as ReactMouseEvent, type ReactNode, type RefObject, type SyntheticEvent } from 'react';
 
 const cx = (...names: (string | false | undefined)[]) => names.filter(Boolean).join(' ');
 
@@ -44,18 +44,78 @@ export type DialogProps = {
   /** Extra class on the .modal box (e.g. `modal-newtask` for its width). */
   className?: string;
   /** `sheet`: the safety sheets' look (anchored top right, a bottom sheet on a phone), with
-   * the title in a header row beside its icon and a close button (CMX-240). */
-  variant?: 'modal' | 'sheet';
+   * the title in a header row beside its icon and a close button (CMX-240). `settings`: the
+   * Settings modal, its title and close button in a header row. `palette`: the ⌘K palette's
+   * box (its title for assistive tech only). `shortcuts`: the shortcuts sheet, over the
+   * palette's backdrop, its header row the icon, title, an Esc hint and a close button. */
+  variant?: 'modal' | 'sheet' | 'settings' | 'palette' | 'shortcuts';
   icon?: LucideIcon;
   /** The title names the dialog for assistive tech only: the content draws its own heading. */
   hideTitle?: boolean;
+  /** The box's id. */
+  id?: string;
+  /** Escape, before the dialog closes on it: `preventDefault()` keeps it open. */
+  onEscapeKeyDown?: (e: KeyboardEvent) => void;
+  /** Focus stays where it is as the dialog opens (a field outside it is still typing into it). */
+  keepFocus?: boolean;
   children?: ReactNode;
 };
 
 const SURFACE = {
   modal: { overlay: 'modal-overlay active', box: 'modal', desc: 'modal-desc' },
   sheet: { overlay: 'shares-backdrop ui-sheet', box: 'shares-sheet', desc: 'ss-sub' },
+  settings: { overlay: 'drawer-scrim open', box: 'settings-modal open', desc: 's-desc' },
+  palette: { overlay: 'palette-overlay open', box: 'palette', desc: 'palette-desc' },
+  shortcuts: { overlay: 'palette-overlay open', box: 'shortcuts-sheet', desc: 'palette-desc' },
 } as const;
+
+/** The title row each variant draws: its heading, plus a close button where it has one. */
+function DialogHead({ variant, heading, title, Icon }: { variant: keyof typeof SURFACE; heading: ReactNode; title: string; Icon?: LucideIcon }) {
+  if (variant === 'sheet') {
+    return (
+      <div className="ss-hd">
+        {Icon && (
+          <span className="ss-hd-ic">
+            <Icon aria-hidden size={15} />
+          </span>
+        )}
+        {heading}
+        <RD.Close className="ss-close" aria-label="Close">
+          <X aria-hidden size={16} />
+        </RD.Close>
+      </div>
+    );
+  }
+  if (variant === 'settings') {
+    return (
+      <div className="settings-modal-head">
+        <RD.Title asChild>
+          <span>{title}</span>
+        </RD.Title>
+        <RD.Close className="icon-btn" aria-label="Close">
+          <X aria-hidden size={16} />
+        </RD.Close>
+      </div>
+    );
+  }
+  if (variant === 'shortcuts') {
+    return (
+      <div className="shortcuts-head">
+        {Icon && (
+          <span className="sc-ic">
+            <Icon aria-hidden size={16} />
+          </span>
+        )}
+        {heading}
+        <span className="sc-esc">close <kbd>Esc</kbd></span>
+        <RD.Close className="icon-btn" aria-label="Close">
+          <X aria-hidden size={16} />
+        </RD.Close>
+      </div>
+    );
+  }
+  return heading;
+}
 
 /**
  * A modal dialog: focus moves in, is trapped, and returns to whatever had it when the dialog
@@ -71,6 +131,9 @@ export function Dialog({
   hideTitle,
   variant = 'modal',
   icon: Icon,
+  id,
+  onEscapeKeyDown,
+  keepFocus,
   children,
 }: DialogProps) {
   const opener = useRef<Element | null>(null);
@@ -91,8 +154,11 @@ export function Dialog({
       <RD.Portal>
         <RD.Overlay className={surface.overlay}>
           <RD.Content
+            id={id}
             className={cx(surface.box, className)}
             {...(description ? {} : { 'aria-describedby': undefined })}
+            onEscapeKeyDown={onEscapeKeyDown}
+            onOpenAutoFocus={keepFocus ? (e) => e.preventDefault() : undefined}
             onCloseAutoFocus={(e) => {
               // A dialog handing over to another (a Decisions row opening its task) needs nothing
               // here: the new dialog's focus trap keeps focus inside it.
@@ -102,21 +168,7 @@ export function Dialog({
               }
             }}
           >
-            {variant === 'sheet' ? (
-              <div className="ss-hd">
-                {Icon && (
-                  <span className="ss-hd-ic">
-                    <Icon aria-hidden size={15} />
-                  </span>
-                )}
-                {heading}
-                <RD.Close className="ss-close" aria-label="Close">
-                  <X aria-hidden size={16} />
-                </RD.Close>
-              </div>
-            ) : (
-              heading
-            )}
+            <DialogHead variant={variant} heading={heading} title={title} Icon={Icon} />
             {description && <RD.Description className={surface.desc}>{description}</RD.Description>}
             {children}
           </RD.Content>
@@ -254,6 +306,15 @@ export type MenuItem =
       submenu?: boolean;
       /** A page's back row: a chevron pointing back. */
       back?: boolean;
+      /** Extra classes on the row (the pane menu's rows keep their legacy names). */
+      className?: string;
+      title?: string;
+      /** `data-*` attributes on the row, for code that finds it by them. */
+      data?: Record<`data-${string}`, string>;
+      /** A press that starts a gesture (the Wire row's drag), before any pick. */
+      onMouseDown?: (e: ReactMouseEvent<HTMLElement>) => void;
+      /** Read-only content after the label (a mode glyph, a count). */
+      trailing?: ReactNode;
     }
   | 'separator';
 
@@ -278,7 +339,8 @@ function MenuEntry({ it }: { it: Entry }) {
   };
   const role = it.check === 'radio' ? 'menuitemradio' : it.check === 'checkbox' ? 'menuitemcheckbox' : undefined;
   return (
-    <RM.Item className={cx('popover-item ov-item', it.checked && 'on', it.back && 'ov-back')} disabled={it.disabled} onSelect={onSelect}
+    <RM.Item className={cx('popover-item ov-item', it.checked && 'on', it.back && 'ov-back', it.className)} disabled={it.disabled} onSelect={onSelect}
+      title={it.title} onMouseDown={it.onMouseDown} {...it.data}
       {...(role ? { role, 'aria-checked': !!it.checked } : {})} {...(it.submenu ? { 'aria-haspopup': 'menu' as const } : {})}>
       {it.back && <span className="ov-chev back"><ChevronRight size={12} aria-hidden /></span>}
       {it.icon && (
@@ -288,6 +350,7 @@ function MenuEntry({ it }: { it: Entry }) {
       )}
       <span className="ov-label">{it.label}</span>
       {it.value !== undefined && <span className="ov-val">{it.value}</span>}
+      {it.trailing}
       {it.checked && <span className="ov-check"><Check size={12} aria-hidden /></span>}
       {it.submenu && <span className="ov-chev"><ChevronRight size={12} aria-hidden /></span>}
     </RM.Item>

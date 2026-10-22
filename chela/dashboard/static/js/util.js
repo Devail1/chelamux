@@ -25,43 +25,27 @@ const _LUCIDE = {
     'bot': '<path d="M12 8V4H8"/><rect width="16" height="12" x="4" y="8" rx="2"/><path d="M2 14h2"/><path d="M20 14h2"/><path d="M15 13v2"/><path d="M9 13v2"/>',
     'terminal': '<path d="m4 17 6-6-6-6"/><path d="M12 19h8"/>',
     'clock': '<circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/>',
-    'more-vertical': '<circle cx="12" cy="12" r="1"/><circle cx="12" cy="5" r="1"/><circle cx="12" cy="19" r="1"/>',
     'bell': '<path d="M10.268 21a2 2 0 0 0 3.464 0"/><path d="M3.262 15.326A1 1 0 0 0 4 17h16a1 1 0 0 0 .74-1.673C19.41 13.956 18 12.499 18 8A6 6 0 0 0 6 8c0 4.499-1.411 5.956-2.738 7.326"/>',
     'settings': '<path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z"/><circle cx="12" cy="12" r="3"/>',
     // `drama` — the comedy/tragedy theatre masks: the Personas view (the persona layer).
     'drama': '<path d="M10 11h.01"/><path d="M14 6h.01"/><path d="M18 6h.01"/><path d="M6.5 13.1h.01"/><path d="M22 5c0 9-4 12-6 12s-6-3-6-12c0-2 2-3 6-3s6 1 6 3"/><path d="M17.4 9.9c-.8.8-2 .8-2.8 0"/><path d="M10.1 7.1C9 7.2 7.7 7.7 6 8.6c-3.5 2-4.7 3.9-3.7 5.6 4.5 7.8 9.5 8.4 11.2 7.4.9-.5 1.9-2.1 1.9-4.7"/><path d="M9.1 16.5c.3-1.1 1.4-1.7 2.4-1.4"/>',
     // `dollar-sign` — the Cost view (fleet spend, from the cost chela already ingests).
     'dollar-sign': '<line x1="12" x2="12" y1="1" y2="23"/><path d="M17 5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6"/>',
-    // `pin` — the per-pane layout pin toggle (terminals.js _pinBtnHTML), replacing
-    // the old pushpin emoji so it matches the rest of the pane header's icon set.
-    'pin': '<path d="M12 17v5"/><path d="M9 10.76a2 2 0 0 1-1.11 1.79l-1.78.9A2 2 0 0 0 5 15.24V16a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-.76a2 2 0 0 0-1.11-1.79l-1.78-.9A2 2 0 0 1 15 10.76V7a1 1 0 0 1 1-1 2 2 0 0 0 0-4H8a2 2 0 0 0 0 4 1 1 0 0 1 1 1z"/>',
-    // `link-2` — the per-pane "Wire to…" row (terminals.js paneHead's `port`
-    // button), replacing the bare PORT_GLYPH circle now that the overflow menu
-    // is a labeled row list, not an icon-only strip (CMX-114).
-    'link-2': '<path d="M9 17H7A5 5 0 0 1 7 7h2"/><path d="M15 7h2a5 5 0 1 1 0 10h-2"/><line x1="8" x2="16" y1="12" y2="12"/>',
-    // `circle-dot` — the per-pane "Orchestrator" row (terminals.js _orchBtnHTML),
-    // replacing the bare "⊙" text glyph for the same reason (CMX-114).
-    'circle-dot': '<circle cx="12" cy="12" r="10"/><circle cx="12" cy="12" r="1"/>',
     // `keyboard` — the command palette's "Keyboard shortcuts" row (nav.js
     // _paletteItems), opening the shortcuts cheatsheet overlay (CMX-121).
     'keyboard': '<rect width="20" height="16" x="2" y="4" rx="2"/><path d="M6 8h.01M10 8h.01M14 8h.01M18 8h.01M8 12h.01M12 12h.01M16 12h.01M7 16h10"/>',
-    // `maximize-2` / `minimize-2` — the pane header's maximize/restore toggle
-    // (terminals.js termMaxFor) and the min-dock chip's restore icon, replacing
-    // the 🗖/🗗 window-chrome emoji (U+1F5D6/U+1F5D7): a rare Unicode block most
-    // fonts, including macOS defaults, don't cover — they rendered as tofu (CMX-154).
+    // `maximize-2` / `minus` — the min-dock chip's restore and minimize icons, replacing the
+    // 🗖/🗕 window-chrome emoji (U+1F5D6/U+1F5D5): a rare Unicode block most fonts, including
+    // macOS defaults, don't cover — they rendered as tofu (CMX-154). (The pane header draws
+    // its own, lucide-react, since CMX-241.)
     'maximize-2': '<polyline points="15 3 21 3 21 9"/><polyline points="9 21 3 21 3 15"/><line x1="21" x2="14" y1="3" y2="10"/><line x1="3" x2="10" y1="21" y2="14"/>',
-    'minimize-2': '<polyline points="4 14 10 14 10 20"/><polyline points="20 10 14 10 14 4"/><line x1="14" x2="21" y1="10" y2="3"/><line x1="3" x2="10" y1="21" y2="14"/>',
-    // `minus` — the pane header's "minimize to dock" button and the min-dock
-    // chip's minimize icon, replacing the 🗕 window-chrome emoji (U+1F5D5) for
-    // the same tofu reason as maximize-2/minimize-2 above (CMX-154).
     'minus': '<path d="M5 12h14"/>',
     // `crown` — the sidebar's orchestrator role badge (nav.js _agentRowHtml,
     // CMX-302), replacing the old "Orchestrator" text pill: that word was wide
     // enough to truncate the session name sitting next to it on a real row.
     'crown': '<path d="M11.562 3.266a.5.5 0 0 1 .876 0L15.39 8.87a1 1 0 0 0 1.516.294L21.183 5.5a.5.5 0 0 1 .798.519l-2.834 10.246a1 1 0 0 1-.956.734H5.81a1 1 0 0 1-.957-.734L2.02 6.02a.5.5 0 0 1 .798-.519l4.276 3.664a1 1 0 0 0 1.516-.294z"/><path d="M5 21h14"/>',
-    // `git-compare` — the wall tile bottom bar's "Files" chip (terminals.js
-    // _ctxBarHTML), opening the per-session changed-files/diff modal
-    // (frontend/src/features/diffmodal, CMX-299).
+    // `git-compare` — was the wall tile bottom bar's "Files" chip (lucide-react's
+    // since CMX-242, features/tilefoot); P35 sweeps this map.
     'git-compare': '<circle cx="18" cy="18" r="3"/><circle cx="6" cy="6" r="3"/><path d="M13 6h3a2 2 0 0 1 2 2v7"/><path d="M11 18H8a2 2 0 0 1-2-2V9"/>',
     // `chevron-down` — the Wall's collapsible layout toolbar (terminals.js
     // _reflectGridRow, CMX-397); rotated a half-turn while the row is open.
@@ -161,7 +145,7 @@ function attrEsc(s) {
 
 // Status dot colour shared by the sidebar list, the agent detail view, and the
 // agents canvas, so one agent reads the same in every view as it does on the
-// wall. Mirrors the wall's term-status-dot (terminals.js _colorTermDots): busy →
+// wall. Mirrors the wall's term-status-dot (features/panehead dotState): busy →
 // green (working), waiting → yellow, idle or no Claude session → grey. These
 // views previously coloured from the server `health` field, which collapses
 // busy+idle+running all into green and so disagreed with the wall's grey "idle"

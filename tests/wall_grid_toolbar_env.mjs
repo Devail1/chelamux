@@ -1,8 +1,8 @@
 // CMX-397 — boots the REAL terminals.js against the terminals panel cut from the
 // REAL templates/index.html, for the collapsible-toolbar suites.
 //
-// terminals.js reads the toolbar's resting state ONCE, the first time it builds
-// the picker, so one Node process can only ever observe ONE stored
+// The toolbar (features/walltoolbar) reads its resting state ONCE, the first time it
+// draws, so one Node process can only ever observe ONE stored
 // expand/collapse choice. Each suite that needs a different starting
 // localStorage is its own *.test.mjs (its own process) calling bootWall().
 import { JSDOM } from 'jsdom';   // needs `pnpm install` — tests/test_js_suites.py enforces it
@@ -37,9 +37,9 @@ function fakeGridStack() {
 // storage: the localStorage the page loads with (null value = key absent).
 export async function bootWall(storage) {
     const dom = new JSDOM(`<!doctype html><html><body>${PANEL}</body></html>`,
-        // runScripts so the template's INLINE onclick attributes really fire — a
-        // preset click must reach chela.applyGridLayout the way a browser's does.
-        // The panel carries no <script>, so nothing else is evaluated.
+        // runScripts so the panel's remaining INLINE onclick attributes really fire,
+        // the way a browser's do. The panel carries no <script>, so nothing else is
+        // evaluated. (The toolbar itself is React since CMX-242.)
         { url: 'http://localhost:5005/', pretendToBeVisual: true, runScripts: 'dangerously' });
     for (const k of ['window', 'document', 'localStorage', 'navigator', 'HTMLElement',
         'Element', 'Node', 'Event', 'MouseEvent', 'KeyboardEvent', 'CustomEvent',

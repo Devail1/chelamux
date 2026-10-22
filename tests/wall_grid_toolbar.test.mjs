@@ -4,8 +4,8 @@
 // lock/auto/focus was mostly noise. It is not removed: it folds into ONE button
 // showing the CURRENT layout/mode glyph and a chevron, and expands inline on a
 // click. This runs the REAL terminals.js (like tests/walldock.test.mjs) against
-// the terminals panel cut from the REAL templates/index.html, so the ids and the
-// inline onclick wiring asserted on are the ones a browser gets.
+// the terminals panel cut from the REAL templates/index.html, with the toolbar the
+// walltoolbar island draws into its slot there (CMX-242), clicked for real.
 //
 // Run: pnpm exec vitest run tests/wall_grid_toolbar.test.mjs (pytest runs it via
 // tests/test_js_suites.py; it needs `pnpm install` for jsdom).
@@ -33,6 +33,13 @@ const row = () => $('#term-grid-row');
 const shown = el => !el.closest('[hidden]') && !el.closest('[style*="display: none"], [style*="display:none"]');
 const shownControls = () => [...$('#term-wall-grid').querySelectorAll('button')].filter(shown);
 const storedPreset = () => JSON.parse(localStorage.getItem('pc_wall_preset'));
+// React commits a click's update after the event: let it land.
+const tick = () => new Promise(r => setTimeout(r, 0));
+const click = async el => { el.click(); await tick(); };
+const escape = async () => {
+    document.dispatchEvent(new window.KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+    await tick();
+};
 
 beforeAll(async () => {
     // Liav's default: Focus ON, and NO stored expand/collapse choice.
@@ -55,8 +62,8 @@ describe('the collapsible Wall layout toolbar', () => {
         assert.ok(toggle().querySelector('.grid-chevron svg'), 'plus a chevron');
     });
 
-    test('expanding shows every preset, lock, auto and Focus', () => {
-        window.chela.toggleGridRow();
+    test('expanding shows every preset, lock, auto and Focus', async () => {
+        await click(toggle());
         assert.equal(toggle().getAttribute('aria-expanded'), 'true');
         assert.ok(!row().hidden);
         const presets = [...document.querySelectorAll('#term-grid-presets .gl-btn')].filter(shown);
@@ -68,9 +75,9 @@ describe('the collapsible Wall layout toolbar', () => {
             'an explicit expand is remembered');
     });
 
-    test('choosing a preset APPLIES it (its real handler) and collapses the row', () => {
+    test('choosing a preset APPLIES it (its real handler) and collapses the row', async () => {
         const btn = document.querySelector('#term-grid-presets .gl-btn[data-preset="5"]');
-        btn.click();   // the inline onclick → chela.applyGridLayout(3, 2, this)
+        await click(btn);
         assert.deepEqual(storedPreset(), { cols: 3, rows: 2 }, 'the preset handler ran');
         assert.ok(btn.classList.contains('active'), 'and marked that preset active');
         assert.ok(row().hidden, 'choosing a preset collapses the row');
@@ -79,29 +86,29 @@ describe('the collapsible Wall layout toolbar', () => {
             'a preset choice is a transient collapse — the stored choice is untouched');
     });
 
-    test('every preset still works from the expanded row', () => {
-        for (const btn of document.querySelectorAll('#term-grid-presets .gl-btn')) {
-            window.chela.toggleGridRow();
+    test('every preset still works from the expanded row', async () => {
+        for (const [i, btn] of [...document.querySelectorAll('#term-grid-presets .gl-btn')].entries()) {
+            await click(toggle());
             assert.ok(!row().hidden);
-            btn.click();
-            const [, cols, rows] = btn.getAttribute('onclick').match(/applyGridLayout\((\d+), (\d+)/);
+            await click(document.querySelector(`#term-grid-presets .gl-btn[data-preset="${i}"]`));
+            const { cols, rows } = btn.dataset;
             assert.deepEqual(storedPreset(), { cols: +cols, rows: +rows }, `${btn.title} applied`);
             assert.ok(row().hidden, `${btn.title} collapsed the row`);
         }
     });
 
-    test('Focus off: the collapsed control shows the active PRESET\'s glyph', () => {
-        window.chela.toggleGridRow();
-        window.chela.toggleWallFocus($('#term-focus-btn'));   // off
+    test('Focus off: the collapsed control shows the active PRESET\'s glyph', async () => {
+        await click(toggle());
+        await click($('#term-focus-btn'));   // off
         assert.ok(row().hidden, 'choosing a mode collapses the row too');
         const active = document.querySelector('#term-grid-presets .gl-btn.active svg');
         assert.equal(toggle().querySelector('svg').outerHTML, active.outerHTML);
     });
 
-    test('choosing Auto-arrange collapses the row, and the control shows the AUTO glyph', () => {
-        window.chela.toggleGridRow();
+    test('choosing Auto-arrange collapses the row, and the control shows the AUTO glyph', async () => {
+        await click(toggle());
         assert.ok(!row().hidden);
-        window.chela.toggleWallAuto($('#term-auto-btn'));   // on
+        await click($('#term-auto-btn'));   // on
         assert.ok(row().hidden, 'choosing Auto-arrange collapses the row');
         assert.equal(toggle().getAttribute('aria-expanded'), 'false');
         const auto = $('#term-auto-btn').querySelector('svg').outerHTML;
@@ -110,39 +117,41 @@ describe('the collapsible Wall layout toolbar', () => {
         // Not vacuous: the preset glyph it would otherwise fall back to differs.
         const preset = document.querySelector('#term-grid-presets .gl-btn.active svg');
         assert.notEqual(preset.outerHTML, auto);
-        window.chela.toggleWallAuto($('#term-auto-btn'));   // off again
+        await click($('#term-auto-btn'));   // off again
         assert.equal(toggle().querySelector('svg').outerHTML, preset.outerHTML);
     });
 
-    test('Esc hands keyboard focus back to the toggle, not a now-hidden preset', () => {
-        window.chela.toggleGridRow();
+    test('Esc hands keyboard focus back to the toggle, not a now-hidden preset', async () => {
+        await click(toggle());
         const preset = document.querySelector('#term-grid-presets .gl-btn');
         preset.focus();
         assert.equal(document.activeElement, preset, 'focus starts inside the expanded row');
-        document.dispatchEvent(new window.KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+        await escape();
         assert.ok(row().hidden);
         assert.equal(document.activeElement, toggle(), 'Esc returns focus to the toggle');
     });
 
-    test('Esc collapses an expanded row', () => {
-        window.chela.toggleGridRow();
+    test('Esc collapses an expanded row', async () => {
+        await click(toggle());
         assert.ok(!row().hidden);
-        document.dispatchEvent(new window.KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+        await escape();
         assert.ok(row().hidden, 'Esc collapses');
         assert.equal(toggle().getAttribute('aria-expanded'), 'false');
     });
 
-    test('a click outside collapses it; a click inside the toolbar does not', () => {
-        window.chela.toggleGridRow();
+    test('a click outside collapses it; a click inside the toolbar does not', async () => {
+        await click(toggle());
         $('#term-grid-presets').dispatchEvent(new window.Event('pointerdown', { bubbles: true }));
+        await tick();
         assert.ok(!row().hidden, 'a pointerdown inside the toolbar keeps it open');
         $('#term-stage').dispatchEvent(new window.Event('pointerdown', { bubbles: true }));
+        await tick();
         assert.ok(row().hidden, 'a pointerdown outside collapses it');
     });
 
-    test('an explicit collapse is remembered', () => {
-        window.chela.toggleGridRow();   // open
-        window.chela.toggleGridRow();   // explicit close
+    test('an explicit collapse is remembered', async () => {
+        await click(toggle());   // open
+        await click(toggle());   // explicit close
         assert.equal(localStorage.getItem('pc_wall_grid_collapsed'), '1');
     });
 });

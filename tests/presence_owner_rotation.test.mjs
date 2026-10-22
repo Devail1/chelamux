@@ -74,7 +74,7 @@ function fakeGridStack() {
     return { init: () => grid };
 }
 
-let terminals, util, owner;
+let terminals, util, owner, shareSession;
 const settle = async () => { for (let i = 0; i < 20; i++) await new Promise(r => setTimeout(r, 0)); };
 
 beforeAll(async () => {
@@ -101,6 +101,7 @@ beforeAll(async () => {
     util = await import('../chela/dashboard/static/js/util.js');
     terminals = await import('../chela/dashboard/static/js/terminals.js');
     owner = await import(dashDir + '/static/collab/presence-owner.js');
+    ({ shareSession } = await import('../chela/dashboard/frontend/src/features/share/index.ts'));
     util.setCurrentTab('terminals');
     util.setAgentsCache([{ ...AGENT }]);
     await terminals.renderTerminals();
@@ -127,9 +128,9 @@ const avatars = () => [...document.querySelectorAll('.gs-presence[data-presence-
 test('a share re-created elsewhere re-keys owner presence; the new guest renders; steady polls do not churn; stop clears it', async () => {
     assert.ok(document.querySelector('.gs-presence[data-presence-for="@1"]'), 'pane header must carry a presence slot');
 
-    // 1) First share, adopted by this page (shareBtnClick reads /share-info).
+    // 1) First share, adopted by this page (shareSession reads /share-info).
     const codeA = await shareFromElsewhere(1);
-    await terminals.shareBtnClick(null, '@1');
+    await shareSession('@1');   // the pane header's Share row
     await settle();
     window.chela.closeSharesSheet && window.chela.closeSharesSheet();
     assert.equal(open().length, 1, 'one owner-presence socket for the share');
@@ -147,7 +148,7 @@ test('a share re-created elsewhere re-keys owner presence; the new guest renders
     assert.equal(shareInfoFetches, fetchesBefore, 'an unchanged share_epoch must not refetch /share-info');
     // Clicking Share on the live share re-adopts it (startOwnerPresence with the SAME
     // code) — that must reuse the session, not reconnect.
-    await terminals.shareBtnClick(null, '@1');
+    await shareSession('@1');   // the pane header's Share row
     await settle();
     window.chela.closeSharesSheet && window.chela.closeSharesSheet();
     assert.equal(sockets.length, socketsBefore, 're-adopting the same share must not reconnect');

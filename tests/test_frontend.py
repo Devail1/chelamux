@@ -48,7 +48,9 @@ def test_frontend_vitest_suite():
     env.pop("NODE_CHANNEL_FD", None)    # CMX-252: a leaked IPC fd can abort node
     env.pop("NODE_CHANNEL_SERIALIZATION_MODE", None)
     proc = run_contained(
-        [str(node), str(VITEST), "run"], timeout=120, cwd=str(FRONTEND), env=env,
+        # 300: the suite is ~4 CPU-minutes (CMX-221's Settings tests alone ~50s), and CI runs it
+        # beside xdist's workers on 4 cores; 120 timed out on dev itself at 3d8e78d9.
+        [str(node), str(VITEST), "run"], timeout=300, cwd=str(FRONTEND), env=env,
         watch=os.getppid() if os.environ.get("PYTEST_XDIST_WORKER") else None,
     )
     if proc.returncode != 0:
@@ -100,7 +102,7 @@ def test_vitest_runs_contained_with_its_full_call_pinned(monkeypatch, code, work
     [(argv, kw)] = calls
     assert argv == ["/opt/node", str(SAMPLE), "run"]
     assert set(kw) == {"timeout", "cwd", "env", "watch"}
-    assert (kw["timeout"], kw["cwd"]) == (120, str(FRONTEND))
+    assert (kw["timeout"], kw["cwd"]) == (300, str(FRONTEND))
     assert kw["watch"] == (4242 if worker else None)
     assert not {"NODE_CHANNEL_FD", "NODE_CHANNEL_SERIALIZATION_MODE"} & set(kw["env"])
     assert "PATH" in kw["env"]
@@ -222,7 +224,7 @@ def test_test_fails_on_a_failing_spec_and_still_runs_the_real_ones(tmp_path):
     code, out, _ = _pnpm(_violating_copy(tmp_path, "test"), "test")
     assert code != 0, _shown(out, 4000)
     plain = re.sub(r"\x1b\[[0-9;]*m", "", out.decode())   # CI colours vitest's summary
-    assert re.search(r"Tests\s+1 failed \| 930 passed \(931\)", plain), _shown(out, 4000)
+    assert re.search(r"Tests\s+1 failed \| 1331 passed \(1332\)", plain), _shown(out, 4000)
 
 
 def test_the_frontend_is_a_pnpm_workspace_member_with_exact_pins():

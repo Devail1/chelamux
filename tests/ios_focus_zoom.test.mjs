@@ -47,7 +47,7 @@ const MIN_PX = 16;
 const CONTROLS = 'input, textarea, select';
 
 // Controls built by JS outside the Settings drawer, in the markup shape the
-// modules emit (terminals.js renamePane). The share dialog, its copy rows and the Active
+// modules emit (the pane header's rename field, features/panehead). The share dialog, its copy rows and the Active
 // shares sheet are React since CMX-239/240, the Decisions inbox since CMX-228: their inputs
 // are the kit's .s-input, which the drawer's rows already cover. Also the UI kit's dialog
 // fields as the Work view's islands draw them (Init a repo, New task, Add schedule, CMX-231).
@@ -90,7 +90,9 @@ beforeAll(async () => {
     win = dom.window;
     doc = win.document;
     win.chela.toggleSettings();
-    for (let i = 0; i < 4; i++) await flush();   // _loadTimingSettings/_loadDispatchSettings are async
+    win.chela.openPalette();   // CMX-221: both React dialogs, open over each other
+    // the Timing and Dispatch knobs load async
+    for (let i = 0; i < 200 && !(doc.querySelector('#timing-rows .s-input') && doc.querySelector('#dispatch-rows .s-input')); i++) await flush();
     sheet = doc.createElement('style');
     doc.head.appendChild(sheet);
 });
@@ -113,10 +115,12 @@ function controls() {
     // Vacuity guard: the shell + drawer + JS-built set must actually be here.
     for (const sel of ['#settings-search', '#palette-input', '#sidebar-jump-input', '[list="init-suggestions"]',
         '.s-textarea', '.s-multi', '.s-input', '.s-select',
-        '.s-timing-input', '.s-dispatch-input', '.pane-title-edit']) {
+        '#timing-rows .s-input', '#dispatch-rows .s-input', '.pane-title-edit']) {
         assert.ok(doc.querySelector(sel), `fixture lost ${sel} — the guard would pass vacuously`);
     }
-    assert.ok(all.length >= 25, `only ${all.length} controls mounted — the settings drawer did not render`);
+    // CMX-221: the kit draws Settings' selects and switches as Radix buttons (no <select> or
+    // checkbox, so nothing iOS zooms on): 14 real fields remain with Settings and the palette open.
+    assert.ok(all.length >= 14, `only ${all.length} controls mounted — the settings drawer did not render`);
     return all;
 }
 

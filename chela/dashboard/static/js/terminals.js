@@ -1,17 +1,21 @@
 // --- Stage 0: ES-module imports ---
-import { $, BASE_PATH, TERMINALS_ON, WALL_TILE_DISPATCHED, _agentsCache, api, attrEsc, currentTab, escHtml, icon, lucideIcon, setAgentsCache, updateTabSignal, wantsHuman } from './util';
-import { openPalette, selectView } from './nav';
-import { altSwitchKeydown, renderSidebarAgents, setAltHeld, sidebarOrder, updateCtxCache } from '../../frontend/src/features/sidebar/controller';
-import { orderByList, windowRunDot } from '../../frontend/src/features/sidebar/model';
-import { applyRoomAccents, bezierPath, resolveDrop } from './wire';
-import { onOrchestratorChange, orchestratorRelease, orchestratorState, orchestratorSubscribe } from '../../frontend/src/shared/orchestrator';
-import { actionBarKind, costView, ctxLevel, focusLayout, gridRowCollapsed, prChip, rankOrder, recapView, stateTitle, tileState } from './wallmodel';
-import { openDiffModal } from '../../frontend/src/features/diffmodal';
+import { $, BASE_PATH, TERMINALS_ON, WALL_TILE_DISPATCHED, _agentsCache, api, attrEsc, currentTab, escHtml, setAgentsCache, updateTabSignal, wantsHuman } from './util';
+import { selectView } from './nav';
+import { openPalette } from '../../frontend/src/features/palette';
+import { renderSidebarAgents, sidebarOrder, updateCtxCache } from '../../frontend/src/features/sidebar/controller';
+import { orderByList } from '../../frontend/src/features/sidebar/model';
+import { focusLayout, rankOrder } from './wallmodel';
 import { pinKeybar } from '../../frontend/src/features/keybar';
-import { termMode } from '../../frontend/src/shared/store/wall';
-import { windowIdQuery } from './windowid';
+import { minimizedPanes, paneOrderKey, pinnedPanes, setMinimized, termMode, wallLayout } from '../../frontend/src/shared/store/wall';
+import { context, loadContext } from '../../frontend/src/shared/store/context';
 import { onEvent } from '../../frontend/src/shared/events';
-import { SHARE_MODE_UI, configureShareHost, followAgents, paneToast as _termShareToast, shareMode, shareSession, shares, stopOwnerPresence, unsafeBannerText } from '../../frontend/src/features/share';
+import { configureShareHost, followAgents, shareSession, stopOwnerPresence } from '../../frontend/src/features/share';
+import { configurePaneHeads, displayLabel, mountPaneHeads, refreshPaneHeads } from '../../frontend/src/features/panehead';
+import { mountTileFoots, refreshTileFoots } from '../../frontend/src/features/tilefoot';
+import { configureDock, forgetAutoDock, mountDock, refreshDock, runLazyDock } from '../../frontend/src/features/walldock';
+import { mountWallToolbar } from '../../frontend/src/features/walltoolbar';
+import { leaveRoom, refreshRooms, replayRoomAccents, startWire } from '../../frontend/src/features/wire';
+import { configurePaneFrames, focusedPane, focusFrame, forgetReady, framesOf, isSuspended, mountPaneFrames, resolveReady } from '../../frontend/src/features/paneframe';
 
 // ---------------------------------------------------------------------------
 // Terminals (embedded ttyd via the gateway: /term/<wid>/)
@@ -30,26 +34,17 @@ let _termMode = localStorage.getItem('pc_term_mode') || 'wall';   // default vie
 let _termSig = '';
 let _grid = null;                 // Gridstack instance (wall mode only)
 let _renderedWids = [];           // pane wids currently in the DOM (live render order)
-let _termTimer = null;            // fast reactive poll while the terminals tab is open
-let _wallPreset = _loadWallPreset();   // active {cols, rows} fill preset; default 2 columns
-let _wallLocked = localStorage.getItem('pc_wall_locked') === '1';   // lock = swap-on-drag, no resize
-// Wall redesign slice 2: auto-arrange toggle (default OFF). Manual layout
-// (pc_wall_layout) stays SACRED — auto mode only ever computes a live grid
-// fill from rankOrder() and applies it via GridStack; it never writes
-// pc_wall_layout, so toggling off always restores exactly what the user left.
-let _wallAuto = localStorage.getItem('pc_wall_auto') === '1';
+// The layout the toolbar sets (features/walltoolbar → shared/store/wall.ts `wallLayout`):
+// {preset: {cols, rows}, locked, auto, focus}. Manual layout (pc_wall_layout) stays SACRED:
+// auto-arrange and Focus only ever compute a live fill and never write it, so turning either
+// off restores exactly what the user left. The two are mutually exclusive (the store's own
+// setters turn the other off). This module applies every change (_onLayoutChange below).
+const _layout = () => wallLayout.get();
 // Comma-joined wid sequence last applied by auto-arrange, so the 4s poll only
 // touches GridStack when the ranked order actually changed (no per-tick thrash).
 // Reset to '' to force the next _applyAutoArrange to (re)apply unconditionally
 // (toggle-on, preset change while auto, or a fresh buildWall).
 let _autoOrderSig = '';
-// Focus layout toggle (default OFF): one pane large, the rest a right-side
-// strip (wallmodel.ts's focusLayout). Mutually exclusive with auto-arrange —
-// both toggles OWN the layout, so turning one on turns the other off (see
-// toggleWallFocus / toggleWallAuto). Manual layout (pc_wall_layout) is just
-// as sacred here as it is for auto: this mode never writes it, and toggling
-// off restores it verbatim via the SAME _restoreManualLayout auto-arrange uses.
-let _wallFocus = localStorage.getItem('pc_wall_focus') === '1';
 // Which pane is currently the large "focus" pane. Chosen when Focus turns on
 // (_pickFocusWid) and updated by clicking a strip pane's header (promote).
 let _focusWid = null;
@@ -57,46 +52,15 @@ let _focusWid = null;
 // the 4s poll only touches GridStack when the focus target or the tiled pane
 // set actually changed, never on every tick.
 let _focusOrderSig = '';
-let _paneActivity = {};           // wid -> epoch ms a pane last STARTED being busy; drives the taskbar MRU sort
-let _paneStatus = {};             // wid -> last seen session_status, for rising-edge (idle→busy) detection
-
-// Wall redesign slice 1: which panes have their recap PINNED OPEN (click the
-// one-line recap to expand it to the full text). Persisted per-wid so the 4s
-// repaint and a reload keep it open, like the layout/minimized state above.
-const RECAP_OPEN_KEY = 'pc_wall_recap_open';
-function _loadRecapOpen() { try { return new Set(JSON.parse(localStorage.getItem(RECAP_OPEN_KEY) || '[]')); } catch (e) { return new Set(); } }
-function _saveRecapOpen() { try { localStorage.setItem(RECAP_OPEN_KEY, JSON.stringify([..._recapOpen])); } catch (e) { /* ignore */ } }
-let _recapOpen = _loadRecapOpen();
-// Toggle from the recap line's inline onclick. Attribute survives the repaint's
-// textContent= (which only replaces child text, never attributes).
-function toggleRecap(el) {
-    const wid = el && el.dataset && el.dataset.recapFor;
-    if (!wid) return;
-    if (_recapOpen.has(wid)) _recapOpen.delete(wid); else _recapOpen.add(wid);
-    _saveRecapOpen();
-    el.classList.toggle('recap-open', _recapOpen.has(wid));
-}
-let _dockOrderSig = '';           // last rendered chip order, so a status poll only rebuilds on a real reorder
-
-// Active wall preset persists across reloads (and drives the resize re-fit).
-// Default = 2 columns, the standard terminal layout.
-function _loadWallPreset() {
-    try {
-        const p = JSON.parse(localStorage.getItem('pc_wall_preset') || 'null');
-        if (p && Number.isInteger(p.cols) && Number.isInteger(p.rows)) return p;
-    } catch (e) { /* noop */ }
-    return { cols: 2, rows: 1 };
-}
 let _wallResizeTimer = null;      // debounce for the resize re-fit
-const TERM_REFRESH_MS = 4000;     // diff the live agent set every few seconds
 
 // The fill is viewport-relative, so a window/screen resize changes how many
 // rows fit. Re-apply the active preset (debounced) so the wall keeps filling
-// the height on any screen size. No-op unless a preset is active in wall mode.
+// the height on any screen size. No-op unless in wall mode.
 window.addEventListener('resize', () => {
-    if (!TERMINALS_ON || _termMode !== 'wall' || !_wallPreset || !_grid) return;
+    if (!TERMINALS_ON || _termMode !== 'wall' || !_grid) return;
     clearTimeout(_wallResizeTimer);
-    _wallResizeTimer = setTimeout(() => applyGridLayout(_wallPreset.cols, _wallPreset.rows), 200);
+    _wallResizeTimer = setTimeout(applyGridLayout, 200);
 });
 
 // ---- wid <-> agent helpers -------------------------------------------------
@@ -105,111 +69,9 @@ window.addEventListener('resize', () => {
 function _agentByWid(wid) {
     return (_agentsCache || []).find(a => a.window_id === wid);
 }
-function _nameOfWid(wid) {
-    const a = _agentByWid(wid);
-    return a ? a.name : wid;
-}
-
-// ---- New-terminal readiness ------------------------------------------------
-// A freshly-spawned pane's /term/<wid>/ iframe 404s ("Unknown terminal") until
-// agent-terminals.sh assigns it a ttyd port (~12s). So a pane whose terminal is
-// not yet ready renders a placeholder + spinner instead of the iframe, and polls
-// GET /api/term/ready?agent=<wid> every TERM_READY_POLL_MS (capped) until ready,
-// then swaps the placeholder for the real iframe in place (no stage rebuild, so
-// already-live iframes are never reloaded). Agents already in the port map render
-// the iframe immediately — no placeholder flash for existing / managed panes.
-const _termReady = new Set();     // wids confirmed terminal-ready (port assigned)
-const _readyPollers = new Map();  // wid -> interval handle for the readiness poll
-const TERM_READY_POLL_MS = 1500;
-const TERM_READY_MAX_TRIES = 20;  // ~30s, then offer a manual retry
 
 function _cssEsc(s) {
     return (window.CSS && CSS.escape) ? CSS.escape(s) : String(s).replace(/["\\]/g, '\\$&');
-}
-
-async function _checkReady(wid) {
-    try {
-        const r = await api('/api/term/ready?agent=' + encodeURIComponent(wid));
-        return !!(r && r.ready);
-    } catch (e) { return false; }
-}
-
-// Placeholder tile shown in place of the iframe while the terminal spins up.
-// Carries data-pending=<wid> so _swapToFrame can find and replace exactly this
-// tile; the visible text uses the friendly label.
-function _termPlaceholder(wid) {
-    return `<div class="term-frame term-pending" data-pending="${attrEsc(wid)}">
-      <div class="term-pending-inner"><span class="term-spinner"></span> starting ${escHtml(_paneTitle(wid))}…</div>
-    </div>`;
-}
-
-// Replace a pending placeholder with the real ttyd iframe, in place — never
-// rebuilds the stage, so sibling iframes are untouched.
-function _swapToFrame(wid) {
-    const stage = $('#term-stage');
-    const ph = stage.querySelector('.term-pending[data-pending="' + _cssEsc(wid) + '"]');
-    if (!ph) return;
-    const ifr = document.createElement('iframe');
-    ifr.className = 'term-frame';
-    // Delegate the Clipboard API into the same-origin ttyd frame so the injected
-    // Ctrl+V shim can read the clipboard (the paste event path works without it,
-    // but clipboard.read()/readText() is blocked in a subframe lacking this).
-    ifr.setAttribute('allow', 'clipboard-read; clipboard-write');
-    ifr.src = _termFrameSrc(wid);
-    ifr.title = _paneTitle(wid);
-    ph.replaceWith(ifr);
-}
-
-function _stopReadyPoll(wid) {
-    const h = _readyPollers.get(wid);
-    if (h) { clearInterval(h); _readyPollers.delete(wid); }
-}
-
-function _stopAllReadyPolls() {
-    _readyPollers.forEach(h => clearInterval(h));
-    _readyPollers.clear();
-}
-
-function _startReadyPoll(wid) {
-    _stopReadyPoll(wid);
-    let tries = 0;
-    const tick = async () => {
-        tries += 1;
-        if (await _checkReady(wid)) {
-            _stopReadyPoll(wid);
-            _termReady.add(wid);
-            _swapToFrame(wid);
-        } else if (tries >= TERM_READY_MAX_TRIES) {
-            _stopReadyPoll(wid);
-            _showReadyRetry(wid);
-        }
-    };
-    _readyPollers.set(wid, setInterval(tick, TERM_READY_POLL_MS));
-}
-
-// After the cap, swap the spinner for a click-to-retry affordance that re-polls.
-function _showReadyRetry(wid) {
-    const stage = $('#term-stage');
-    const ph = stage.querySelector('.term-pending[data-pending="' + _cssEsc(wid) + '"]');
-    if (!ph) return;
-    ph.innerHTML = `<div class="term-pending-inner">still starting.
-      <a href="#" class="term-retry" onclick="chela.retryReady('${_jsStr(wid)}');return false;">click to retry</a></div>`;
-}
-
-function retryReady(wid) {
-    const stage = $('#term-stage');
-    const ph = stage.querySelector('.term-pending[data-pending="' + _cssEsc(wid) + '"]');
-    if (ph) {
-        ph.innerHTML = `<div class="term-pending-inner"><span class="term-spinner"></span> starting ${escHtml(_paneTitle(wid))}…</div>`;
-    }
-    _startReadyPoll(wid);
-}
-
-// Kick off readiness pollers for every pending placeholder currently on stage.
-function _startPlaceholderPolls() {
-    $('#term-stage').querySelectorAll('.term-pending[data-pending]').forEach(el => {
-        _startReadyPoll(el.getAttribute('data-pending'));
-    });
 }
 
 function setTermMode(m) {
@@ -230,709 +92,88 @@ function isWallVisible() {
     return currentTab === 'terminals' && _termMode === 'wall';
 }
 
-async function termKeyFor(wid, key) {
-    if (!wid) return;
-    try {
-        await api('/api/term/key', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ agent: wid, key }),
-        });
-    } catch (e) { console.error('termKey', e); }
-}
-
-// Single mode: target the selector's value (a wid). Wall mode passes the tile's
-// own wid.
-async function termKey(key) { return termKeyFor($('#term-agent').value, key); }
-
-// Paste the device clipboard into the active pane. xterm.js can't surface iOS's
-// native "Paste" callout inside its hidden textarea, so phones had no reliable
-// paste path; this reads the clipboard on tap (the gesture unlocks the read on
-// iOS) and ships it to /api/term/paste, which delivers a bracketed paste at the
-// tmux layer.
-//
-// CMX-423: ONE clipboard.read() where it exists, like the in-pane Ctrl/Cmd+V shim. An
-// image (a screenshot is the usual phone clipboard) takes the image path
-// (/api/term/paste-image, then its path typed) so Claude attaches it. Every no-op says
-// why on the button.
-//
-// CMX-428: exactly ONE clipboard call per tap — read() if it exists, else readText(),
-// never both. On iOS WebKit the tap's user activation covers a single read, so a
-// readText() after an awaited read() came back '' (or threw) and the button said
-// "Empty" over a full clipboard. iOS also often hands copied text over as
-// text/uri-list or text/html with no text/plain entry, so those are accepted too.
-function _pasteFlash(btn, label) {
-    if (!btn) return;
-    const orig = btn.dataset.label || btn.textContent;
-    btn.dataset.label = orig;
-    btn.textContent = label;
-    clearTimeout(btn._pasteFlash);
-    btn._pasteFlash = setTimeout(() => { btn.textContent = orig; }, 1500);
-}
-
-async function _pasteTextTo(wid, text, btn) {
-    if (!text) { _pasteFlash(btn, 'Empty'); return; }
-    await api('/api/term/paste', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ agent: wid, text }),
-    });
-}
-
-async function _pasteImageTo(wid, blob, btn) {
-    const fd = new FormData();
-    fd.append('agent', wid);
-    fd.append('image', blob, blob.name || 'paste');
-    const j = await api('/api/term/paste-image', { method: 'POST', body: fd, credentials: 'same-origin' });
-    if (!j || !j.path) { _pasteFlash(btn, 'Failed'); return; }
-    await _pasteTextTo(wid, j.path, btn);
-}
-
-// Plain text from a text/html clipboard entry: drop script/style, fold source
-// whitespace (HTML newlines are just spaces), break lines at <br> and block ends, strip tags, decode entities (a <textarea>'s innerHTML parses as RCDATA, so no
-// markup is ever instantiated), then collapse whitespace.
-function _htmlToText(html) {
-    const stripped = String(html)
-        .replace(/<(script|style)\b[\s\S]*?<\/\1\s*>/gi, '')
-        .replace(/\s+/g, ' ')
-        .replace(/<br\b[^>]*>|<\/(p|div|li|tr|h[1-6]|pre|blockquote)\s*>/gi, '\n')
-        .replace(/<[^>]*>/g, '');
-    const ta = document.createElement('textarea');
-    ta.innerHTML = stripped;
-    return ta.value.split('\n')
-        .map(l => l.replace(/\s+/g, ' ').trim())
-        .filter(Boolean)
-        .join('\n');
-}
-
-// text/uri-list: first line that is neither blank nor a '#' comment (RFC 2483).
-function _uriListToText(list) {
-    return String(list).split(/\r?\n/).map(l => l.trim()).find(l => l && l[0] !== '#') || '';
-}
-
-const _PASTE_TEXT_TYPES = [
-    ['text/plain', t => t],
-    ['text/uri-list', _uriListToText],
-    ['text/html', _htmlToText],
-];
-
-// Best text out of clipboard.read()'s items: text/plain, then text/uri-list, then
-// text/html. '' when none of them yields anything.
-async function _clipboardItemsText(items) {
-    for (const [type, conv] of _PASTE_TEXT_TYPES) {
-        for (const it of items) {
-            if ((it.types || []).indexOf(type) < 0) continue;
-            const text = conv(await (await it.getType(type)).text());
-            if (text) return text;
-        }
-    }
-    return '';
-}
-
-async function termPaste(btn) {
-    const wid = $('#term-agent').value;
-    const cb = navigator.clipboard;
-    if (!wid) return;
-    if (!cb || (!cb.read && !cb.readText)) { _pasteFlash(btn, 'No clipboard'); return; }
-    try {
-        if (!cb.read) {
-            let text = '';
-            try { text = await cb.readText(); } catch (e) { _pasteFlash(btn, 'Denied'); return; }
-            await _pasteTextTo(wid, text, btn);
-            return;
-        }
-        let items;
-        try { items = await cb.read(); } catch (e) { _pasteFlash(btn, 'Denied'); return; }
-        for (const it of items || []) {
-            const t = (it.types || []).find(x => x.indexOf('image/') === 0);
-            if (t) { await _pasteImageTo(wid, await it.getType(t), btn); return; }
-        }
-        await _pasteTextTo(wid, await _clipboardItemsText(items || []), btn);
-    } catch (e) { console.error('termPaste', e); _pasteFlash(btn, 'Failed'); }
-}
-
-// Per-tile copy-mode toggle for wall mode (each button tracks its own state).
-function termScrollFor(btn, wid) {
-    const on = btn.classList.toggle('btn-accent');
-    termKeyFor(wid, on ? 'scroll' : 'scroll-exit');
-    btn.title = on ? 'Exit scroll (tmux copy-mode)' : 'Scroll (tmux copy-mode)';
-}
-
-// Shared pane header: agent label + quick keys. draggable=true for wall
-// tiles (label is the Gridstack drag handle); false for the single view.
-function _jsStr(s) { return String(s).replace(/\\/g, '\\\\').replace(/'/g, "\\'"); }
-// chela has no managed-agent roster — every pane is a peer session, so the ×
-// kill control is available on all of them (matches the dashboard kill route,
-// which has no managed guard). Kept as a function so the call sites read the
-// same and a future deployment could pin specific windows here.
-function _isManaged(wid) {
-    return false;
-}
-
 // ---- Display labels. THE TMUX WINDOW NAME IS THE SOURCE OF TRUTH: a rename goes
-// to the server (renamePane -> POST /api/agents/<wid>/rename -> tmux rename-window)
-// and comes back to every client through /api/agents. There is deliberately NO
-// local label store. The old one (localStorage `pc_pane_titles`) was per-browser:
-// a rename on the laptop was invisible on the phone, never reached tmux or the
-// bound Telegram topic, and died with the browser's data. Drop any leftovers so
-// the two layers can't disagree.
+// to the server (the pane header, features/panehead -> POST /api/agents/<wid>/rename ->
+// tmux rename-window) and comes back to every client through /api/agents. There is
+// deliberately NO local label store. The old one (localStorage `pc_pane_titles`) was
+// per-browser: a rename on the laptop was invisible on the phone, never reached tmux or the
+// bound Telegram topic, and died with the browser's data. Drop any leftovers so the two
+// layers can't disagree.
 try { localStorage.removeItem('pc_pane_titles'); } catch (e) { /* private mode */ }
 
-// Claude's session title for a window — its auto-generated `ai_title` (CMX-146),
-// else the live session's name. '' until the first exchange has produced one.
-function _claudeTitle(a) {
-    return (a && (a.ai_title || a.session_name)) || '';
+// A window's label for what legacy still draws (dock chips, the dropdown, the iframe title):
+// the model the pane header and the sidebar share (CMX-62, features/panehead).
+function _displayLabel(wid) { return displayLabel(_agentByWid(wid), wid); }
+function _paneTitle(wid) { return _displayLabel(wid); }
+
+// The pane's terminal (its iframe) is React since CMX-246: features/paneframe, portaled into
+// each tile's `[data-frame-for]` slot (_frameSlot). The share feature reaches it through framesOf.
+configureShareHost({ paneTitle: wid => _paneTitle(wid), paneFrames: wid => framesOf(wid) });
+configurePaneFrames({
+    activeWid: () => ($('#term-agent') || {}).value || '',
+    tick: () => termTick(),
+    frameLoaded: () => pinKeybar(),   // CMX-154: a pane's terminal (first view, tile switch) fits the box it landed in
+});
+
+// The pane header is React since CMX-241 (features/panehead): one root, portaled into each
+// tile's `[data-head-for]` slot, which _wallTileHTML and the single pane draw and
+// mountPaneHeads fills. It reads the agents, share, orchestrator and pin stores itself; what
+// it asks of the Wall comes through here.
+configurePaneHeads({
+    minimize: wid => minimizePane(wid),
+    dropPane: wid => dropTerminalPane(wid),
+    wireDragStart: (e, from, wid) => startWire(e, from, wid),
+    leaveRoom: (badge, wid) => leaveRoom(badge, wid),
+    labelsChanged: () => _refreshPaneLabels(),
+});
+// The slot a header portals into: `display: contents`, so the head and its kill confirm lay
+// out as the pane's own children.
+function _paneHeadSlot(wid, wall) {
+    return `<div class="island-slot pane-head-slot" data-head-for="${attrEsc(wid)}"${wall ? ' data-head-wall="1"' : ''}></div>`;
 }
-
-// Display label for a window, shared by the sidebar row + the pane header so the
-// two stay aligned (CMX-62, Liav's order): a MANUAL name (renamed by a human —
-// the server's `manual_name` flag, never guessed from the string) > Claude's
-// session title > the window name. The window name itself is a short stable KEY
-// that never changes to follow the title; it rides along as the secondary label
-// (_paneKeyLabel) whenever the title leads.
-//
-// NB: this only changes what a label RESOLVES to. It must never leak into the
-// wall's `_termSig`, which is keyed on window ids alone — else buildWall reloads
-// every live iframe on a relabel (CMX-67/71).
-function _displayLabel(wid) {
-    const a = (_agentsCache || []).find(x => x.window_id === wid);
-    if (!a) return wid;
-    if (a.manual_name) return a.name;
-    return _claudeTitle(a) || a.name || 'claude window';
+// The footer (the context bar and, on the wall, the action bar) is React since CMX-242
+// (features/tilefoot), portaled like the header into a slot under the terminal; the recap line
+// into one under the header (wall tiles only). mountTileFoots fills them.
+function _footSlot(wid, wall) {
+    return `<div class="island-slot" data-foot-for="${attrEsc(wid)}"${wall ? ' data-foot-wall="1"' : ''}></div>`;
 }
-
-// The window name, when the label is NOT already showing it (i.e. the title leads)
-// — '' otherwise, so the secondary slot never repeats the primary.
-function _paneKeyLabel(wid) {
-    const a = _agentByWid(wid);
-    if (!a || !a.name) return '';
-    return _displayLabel(wid) === a.name ? '' : a.name;
+function _recapSlot(wid) {
+    return `<div class="island-slot" data-recap-slot="${attrEsc(wid)}"></div>`;
 }
-
-function _paneTitle(wid) {
-    return _displayLabel(wid);
+function _frameSlot(wid) {
+    return `<div class="island-slot" data-frame-for="${attrEsc(wid)}"></div>`;
 }
-
-// The dim subtitle under the pane title. Whatever the title did NOT take: the
-// window name when Claude's title leads (CMX-62), else Claude's own `ai_title`
-// (CMX-146) riding alongside a manual/window name. '' (not shown) when there is
-// nothing distinct to add.
-function _paneAiTitle(wid) {
-    const key = _paneKeyLabel(wid);
-    if (key) return key;
-    const a = _agentByWid(wid);
-    const t = (a && a.ai_title) || '';
-    return t && t !== _displayLabel(wid) ? t : '';
-}
-
-// Rename the WINDOW (not a local label): POST the new name, which renames the tmux
-// window, so it shows up on every client, in tmux, and on the bound Telegram topic.
-// Refetches /api/agents so the wall, cards and nav all relabel from the real name.
-async function _commitRename(wid, name) {
-    const res = await api(`/api/agents/${encodeURIComponent(wid)}/rename`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ name }),
-    });
-    if (!res || !res.ok) throw new Error((res && res.error) || 'rename failed');
-    const agents = await api('/api/agents');
-    setAgentsCache(agents);
-    _refreshPaneLabels();
-}
-
-// Swap a pane title span for an inline input. Enter saves, Esc cancels. The name is
-// the window's real name, so an unchanged (or empty) value is simply not submitted.
-function renamePane(ev, span, wid) {
-    ev.stopPropagation();
-    const input = document.createElement('input');
-    input.className = 'pane-title-edit';
-    input.value = _nameOfWid(wid);   // edit the REAL name, not the prettified label
-    input.title = 'Enter to save · Esc to cancel';
-    span.replaceWith(input);
-    input.focus();
-    input.select();
-    let done = false;
-    const restore = () => {
-        const fresh = document.createElement('span');
-        fresh.className = 'pane-title';
-        fresh.title = 'double-click to rename';
-        fresh.textContent = _paneTitle(wid);
-        fresh.addEventListener('dblclick', e2 => renamePane(e2, fresh, wid));
-        input.replaceWith(fresh);
-        return fresh;
-    };
-    const commit = async (save) => {
-        if (done) return;
-        done = true;
-        const name = input.value.trim();
-        const unchanged = !name || name === _nameOfWid(wid);
-        restore();
-        if (!save || unchanged) return;
-        try {
-            await _commitRename(wid, name);
-        } catch (e) {
-            console.error('renamePane', e);
-            alert('Rename failed: ' + e.message);
-        }
-    };
-    input.addEventListener('keydown', e2 => {
-        e2.stopPropagation();
-        if (e2.key === 'Enter') { e2.preventDefault(); commit(true); }
-        else if (e2.key === 'Escape') { e2.preventDefault(); commit(false); }
-    });
-    input.addEventListener('blur', () => commit(true));
-    input.addEventListener('mousedown', e2 => e2.stopPropagation());  // don't start a grid drag
-}
-
-// --- collab sharing (presence-only) ----------------------------------------
-// The shared "link" is just the clean /term/<wid>/ URL — NO ?collab magic;
-// sharing is a server-side per-wid flag (POST /api/term/<wid>/share) so the host
-// can actually revoke. One src helper keeps frame()/_wallTileHTML/_swapToFrame
-// in agreement.
-function _termSrc(wid) { return '/term/' + encodeURIComponent(wid) + '/'; }
-function _termLink(wid) { return location.origin + BASE_PATH + _termSrc(wid); }
-
-// iframe-only src: same clean path, plus a per-connection `cid` (CMX-175). ttyd's
-// bundled client JS builds its WebSocket URL from `location.search` verbatim, so
-// this round-trips onto the /term/<wid>/ws upgrade request and lets the backend
-// (term_ws in app.py) match THIS iframe's connection to its own tmux client tty —
-// see the ignore-size watch reporting below. NEVER use this for the copyable
-// share link (_termLink) — that must stay the clean URL a joiner reuses verbatim.
-function _newCid() {
-    if (window.crypto && typeof window.crypto.randomUUID === 'function') return window.crypto.randomUUID();
-    return 'c' + Math.random().toString(36).slice(2) + Math.random().toString(36).slice(2);
-}
-function _termFrameSrc(wid) { return _termSrc(wid) + '?cid=' + _newCid(); }
-
-// Share state lives in the share feature since CMX-240 (frontend/src/features/share: the
-// store, the active-shares pill, the Active shares sheet and owner presence). The pane header
-// below still reads it: the share pill, the red UNSANDBOXED banner and the web chip.
-// Per-wid sandbox network mode (CMX-418), from /api/agents .share_net: 'web' shows the
-// "🌐 web" chip on the pane header. Display only — the host's live check is the gate.
-const _netModes = new Map();
-function _updateNetBadges(wid) {
-    const web = _netModes.get(wid) === 'web';
-    document.querySelectorAll('.gs-net-badge[data-net-for="' + _cssEsc(wid) + '"]').forEach(b => { b.hidden = !web; });
-}
-function _unsafeBannerText(wid) {
-    return '⚠ ' + unsafeBannerText(shares.get().get(wid)?.expiresAt, Date.now());
-}
-
-// The agents poll: the share feature follows each row's share flag (and owner presence with
-// it); the web chip is the header's own.
-function _seedSharedFromAgents(agents) {
-    followAgents(agents || []);
-    (agents || []).forEach(a => {
-        if (!a.window_id) return;
-        if (a.share_net) _netModes.set(a.window_id, a.share_net); else _netModes.delete(a.window_id);
-        _updateNetBadges(a.window_id);
-    });
-}
-
-// The pane's own frames, for the share feature's reload and mint-time size (CMX-240).
-function _paneFrames(wid) {
-    return Array.from(document.querySelectorAll('#term-stage iframe.term-frame')).filter(ifr => _widOfFrame(ifr) === wid);
-}
-configureShareHost({ paneTitle: wid => _paneTitle(wid), paneFrames: _paneFrames });
-// Every change to a share repaints the pane pills and banners that show it.
-shares.subscribe(() => _renderedWids.forEach(_updateShareBtns));
-
-// Share button: adopt the live share, or open the share dialog to mint one (CMX-152/403).
-function shareBtnClick(_btn, wid) { return shareSession(wid); }
-
-function _updateShareBtns(wid) {
-    const mode = shareMode(wid);
-    // The red UNSANDBOXED banner on the pane itself (CMX-403) — shown exactly while a
-    // trusted-peer override is armed on this window.
-    const unsafe = mode === 'unsandboxed';
-    document.querySelectorAll('.gs-unsafe-banner[data-banner-for="' + _cssEsc(wid) + '"]').forEach(b => {
-        b.hidden = !unsafe;
-        if (unsafe) b.textContent = _unsafeBannerText(wid);
-    });
-    document.querySelectorAll('.gs-share-btn[data-wid="' + _cssEsc(wid) + '"]').forEach(btn => {
-        btn.classList.toggle('on', !!mode);
-        btn.setAttribute('aria-pressed', mode ? 'true' : 'false');
-        // The pane's share pill carries the share's mode (CMX-421), like the dialog.
-        btn.dataset.mode = mode || '';
-        const glyph = btn.querySelector('.gs-share-mode');
-        if (glyph) {
-            glyph.textContent = mode ? SHARE_MODE_GLYPH[mode] : '';
-            glyph.hidden = !mode;
-            glyph.title = mode ? _shareModeTitle(mode) : '';
-        }
-        // The peer-count badge is owned by the owner-presence client (setBadge in
-        // presence-owner.js), which alone knows the live joiner count; clearing the
-        // share flag hides it there on stopOwnerPresence.
-    });
-}
-
-const SHARE_MODE_GLYPH = { view: '👁', typing: '⌨', unsandboxed: '⚠' };
-const _shareModeTitle = mode => SHARE_MODE_GLYPH[mode] + ' ' + SHARE_MODE_UI[mode].label;
-
-function _shareBtnHTML(wid) {
-    const mode = shareMode(wid);
-    const on = !!mode;
-    return `<button class="gs-share-btn popover-item ov-item${on ? ' on' : ''}" data-wid="${attrEsc(wid)}"
-      onclick="chela.shareBtnClick(this,'${_jsStr(wid)}')" aria-pressed="${on ? 'true' : 'false'}" data-mode="${mode || ''}"
-      title="Share this session"><span class="ov-ic">${lucideIcon('share-2', 14)}</span><span>Share current session</span><span class="gs-share-mode"${mode ? ` title="${attrEsc(_shareModeTitle(mode))}"` : ' hidden'}>${mode ? SHARE_MODE_GLYPH[mode] : ''}</span><span class="gs-share-count" hidden></span></button>`;
-}
-
-// The pane-title toggle: "⊙ Orchestrator" — one click registers THIS pane's
-// session as the decisions-inbox recipient (an atomic take-over of the single
-// slot, chela/inbox.py::register via /api/orchestrator/subscribe), one click
-// releases it (falls back to the decisions panel — chela/dashboard/static/js/
-// decisions.js). `.on` reflects the LIVE owner, kept current across every pane
-// via onOrchestratorChange (fired on our own clicks, other panes' clicks, and
-// the SSE `orchestrator` delta, orchestrator.js).
-function _orchBtnHTML(wid) {
-    const on = orchestratorState().wid === wid;
-    const title = on
-        ? 'This pane receives the decisions inbox, click to release'
-        : 'Click to receive the decisions inbox in this pane';
-    return `<button class="gs-orch-btn popover-item ov-item${on ? ' on' : ''}" data-wid="${attrEsc(wid)}"
-      onclick="chela.orchestratorBtnClick(this,'${_jsStr(wid)}')" aria-pressed="${on ? 'true' : 'false'}"
-      title="${attrEsc(title)}"><span class="ov-ic">${lucideIcon('circle-dot', 14)}</span><span>Orchestrator</span></button>`;
-}
-
-function _updateOrchBtns() {
-    const owner = orchestratorState().wid;
-    document.querySelectorAll('.gs-orch-btn').forEach(btn => {
-        const wid = btn.getAttribute('data-wid');
-        const on = owner === wid;
-        btn.classList.toggle('on', on);
-        btn.setAttribute('aria-pressed', on ? 'true' : 'false');
-        btn.title = on
-            ? 'This pane receives the decisions inbox, click to release'
-            : 'Click to receive the decisions inbox in this pane';
-    });
-    // CMX-119: the pane's status dot (paneHead) carries a non-hue ring while
-    // it owns the decisions inbox — driven off this SAME signal as the menu
-    // row above, so the ring and the row's `.on` state can never disagree.
-    // CMX-32: the ring goes on the dot's unclipped WRAPPER (.gs-dot-ring), not
-    // the dot — the dot's done/waiting shapes are clip-paths that clip it away.
-    document.querySelectorAll('.gs-dot-ring[data-wid]').forEach(ring => {
-        ring.classList.toggle('gs-dot-orch', ring.getAttribute('data-wid') === owner);
-    });
-}
-
-// Fires on our own clicks, every other pane's clicks (subscribe is a global
-// take-over) and the SSE `orchestrator` delta — one state, every button in sync.
-onOrchestratorChange(_updateOrchBtns);
-
-async function orchestratorBtnClick(btn, wid) {
-    const on = orchestratorState().wid === wid;
-    btn.disabled = true;
-    try {
-        const result = on ? await orchestratorRelease(wid) : await orchestratorSubscribe(wid);
-        if (!result || !result.ok) {
-            console.error('orchestrator toggle failed', result && result.error);
-        }
-    } finally {
-        btn.disabled = false;
-    }
-}
-
-function paneHead(wid, draggable) {
-    const j = _jsStr(wid);
-    const title = `<span class="pane-title" title="double-click to rename" ondblclick="chela.renamePane(event, this, '${j}')">${escHtml(_paneTitle(wid))}</span>`;
-    // CMX-146: Claude's own auto-generated session title, dim under the name —
-    // hidden entirely until a first `ai-title` record exists for the session.
-    const aiTitle = _paneAiTitle(wid);
-    const subtitle = aiTitle ? `<span class="pane-subtitle" title="${attrEsc(aiTitle)}">${escHtml(aiTitle)}</span>` : '';
-    // The NAME is the drag handle (CMX-117 drops the old "☰" glyph) — `.gs-grip`
-    // stays the class GridStack's `handle`/`draggable.handle` option targets
-    // (buildWall), so dragging still works; only the glyph is gone.
-    const label = draggable
-        ? `<span class="gs-grip" title="drag to move">${title}${subtitle}</span>`
-        : `<span class="gs-label">${title}${subtitle}</span>`;
-    // × kill: rendered ONLY for non-managed agents (spawned shells / ad-hoc
-    // sessions). Managed personas (anything in agents.yaml) get no × so they
-    // can't be torn down from the wall by accident; the backend also refuses.
-    const kill = _isManaged(wid) ? '' :
-        `<button class="gs-kill-btn" onclick="chela.termKillClick(this,'${j}')" title="Kill this session">&#10005;</button>`;
-    // Minimize-to-dock is a wall-only concept (single view shows one pane, with
-    // nothing to dock it beside) — only render it for draggable wall tiles.
-    const min = draggable
-        ? `<button class="gs-min-btn" onclick="chela.termMinFor(this)" title="Minimize to dock">${lucideIcon('minus', 14)}</button>` : '';
-    // Mobile single-pane fullscreen toggle (2026-07-25, Liav's call): the ONE
-    // mobile equivalent of desktop's min/max window controls, neither of
-    // which apply to a forced single pane (no dock, no other tiles to
-    // overlay). !draggable already means single mode, which in practice only
-    // happens on mobile — desktop's Single/Wall toggle buttons are
-    // permanently hidden (index.html) so wall never renders draggable=false —
-    // but _isMobileTerm() is still checked explicitly so a stale render can
-    // never leak this into a desktop header.
-    const mobileFull = (!draggable && _isMobileTerm())
-        ? `<button class="gs-mobile-full-btn" onclick="chela.termMobileFull(this)" title="Fill screen">${lucideIcon('maximize-2', 14)}</button>` : '';
-    // Pin is also wall-only: it exempts this tile from applyGridLayout's
-    // auto-reflow (grid presets), so single mode (no reflow to opt out of) gets
-    // no button either.
-    const pin = draggable ? _pinBtnHTML(wid) : '';
-    // No PgUp/PgDn/scroll/Esc/^C here: with focus in the pane those keys reach the
-    // terminal natively (wheel/keys scroll, Esc and Ctrl-C pass through), so the
-    // header carries only the window controls (minimize / maximize / kill).
-    // The wire's port + the room badge are WALL chrome: single-pane mode has a
-    // header but no gs-id (nothing to wire to, nothing to resolve a drop against),
-    // so it simply gets neither — degrade, don't crash.
-    const port = draggable
-        ? `<button class="gs-port popover-item ov-item" onmousedown="chela.wireDragStart(event, this, '${j}')"
-             title="Wire this agent to another: drag onto a peer"
-             aria-label="Wire this agent to another"><span class="ov-ic">${lucideIcon('link-2', 14)}</span><span>Wire to…</span></button>` : '';
-    const roomBadge = draggable
-        ? `<button class="gs-room" onclick="chela.wireRoomClick(this, '${j}')" hidden>${icon('wired', 11)}<span class="gs-room-name"></span></button>` : '';
-    // CMX-119: pane header v2 — split the CMX-117 combined badge back apart
-    // now that every pane has a bottom bar to hold its numbers. `.gs-dot` is a
-    // plain status-by-SHAPE indicator (filled = working, hollow = idle, filled
-    // + glow ring = waiting/wants-human — Liav is red-weak, so shape carries
-    // the signal, not hue alone) — `_colorTermDots` (this file) targets
-    // `.term-status-dot`, which this dot also wears, so the same
-    // working/waiting/idle classes paint it same as everywhere else (see the
-    // .gs-dot rules in style.css). The orchestrator ring (_updateOrchBtns,
-    // below) is a SEPARATE non-hue outline on the dot's `.gs-dot-ring` wrapper
-    // — never the dot itself, whose done/waiting clip-paths would clip it away
-    // (CMX-32). The "⋯" trigger
-    // (lucide `more-vertical`) opens the same Wire/Share/Orchestrator/Pin menu
-    // the old combined badge used to — same togglePaneOverflow, same `menu =
-    // btn.nextElementSibling` contract, so the menu's rows and all their live
-    // state wiring (_updateShareBtns/_updateOrchBtns/the pin toggle) are
-    // untouched, just anchored at a plain button instead of the pill. The
-    // pane № moved OUT of the header (CMX-119), and is gone since CMX-85 —
-    // the sidebar rows carry the Alt+N numbers.
-    // CMX-139: born with the ring when this pane ALREADY owns the slot — a pane
-    // (re)built after the status landed must not wait for the next change to show it.
-    const orchRing = orchestratorState().wid === wid ? ' gs-dot-orch' : '';
-    const dot = `<span class="gs-dot-ring${orchRing}" data-wid="${attrEsc(wid)}"><span class="gs-dot term-status-dot" data-status-for="${attrEsc(wid)}" data-wid="${attrEsc(wid)}" title="…"></span></span>`;
-    // Wall redesign slice 1 (docs/wall-redesign.md): the header's state pill.
-    // CMX-393: the WORD only — the SHAPE is `.gs-dot` at the head's far left,
-    // and a glyph in here drew every state twice (`● ● working`). Shape + word
-    // still carry the state together (Liav is red-weak; colour is decoration
-    // on top, see .gs-state-* in style.css). Wall-only, like the
-    // min/pin buttons above — single mode renders nothing here at all, so
-    // mobile's forced single mode (< 768px) is untouched by construction.
-    // Rendered idle/neutral here (mirrors .gs-dot's own "starts neutral" build
-    // pattern); _applyWallTileFrame (called synchronously right after the
-    // wall is built — see renderTerminals) fills the real state before the
-    // browser ever paints it.
-    const state = draggable
-        ? `<span class="gs-state gs-state-idle" data-state-for="${attrEsc(wid)}" title="idle"><span class="gs-state-word">idle</span></span>` : '';
-    const menu = `<span class="gs-menu-wrap">
-        <button class="gs-menu-btn" onclick="chela.togglePaneOverflow(event, this)"
-                aria-haspopup="true" aria-expanded="false" title="Session actions">${lucideIcon('more-vertical', 14)}</button>
-        <div class="popover pane-overflow-menu overflow-menu" hidden>
-          ${port}
-          ${_shareBtnHTML(wid)}
-          ${_orchBtnHTML(wid)}
-          ${pin}
-        </div>
-      </span>`;
-    // CMX-393: the approved mockup's order — shape · title · dim subtitle ·
-    // soft word pill · icon buttons. The label flex-grows, so the pill and
-    // everything after it sit at the right.
-    return `<div class="gs-head">
-      ${dot}
-      ${label}
-      ${roomBadge}
-      <span class="gs-presence" data-presence-for="${attrEsc(wid)}"></span>
-      <span class="gs-net-badge" data-net-for="${attrEsc(wid)}" title="Sandboxed session with web access: public hosts only, rate-limited, every request logged"${_netModes.get(wid) === 'web' ? '' : ' hidden'}>🌐 web</span>
-      <span class="gs-unsafe-banner" data-banner-for="${attrEsc(wid)}" role="status"${shareMode(wid) === 'unsandboxed' ? '' : ' hidden'}>${escHtml(_unsafeBannerText(wid))}</span>
-      ${state}
-      ${menu}
-      <span class="gs-keys">
-        <span class="gs-win-ctl">
-          ${min}
-          <button class="gs-max-btn" onclick="chela.termMaxFor(this)" aria-pressed="false" title="Maximize pane">${lucideIcon('maximize-2', 14)}</button>
-          ${mobileFull}
-          ${kill}
-        </span>
-      </span>
-    </div>`;
-}
-
-// Toggle this pane's "⋯" overflow menu (Wire/Share/Orchestrator/Pin). Only one
-// open at a time — opening a second closes the first — and light-dismisses on
-// the next outside click.
-function togglePaneOverflow(ev, btn) {
-    if (ev) ev.stopPropagation();
-    const menu = btn.nextElementSibling;
-    if (!menu) return;
-    const opening = menu.hidden;
-    _closeAllPaneOverflows();
-    if (!opening) return;
-    menu.hidden = false;
-    btn.setAttribute('aria-expanded', 'true');
-    const r = btn.getBoundingClientRect();
-    menu.style.top = (r.bottom + 6) + 'px';
-    // CMX-119: LEFT-anchored to the trigger (not right-anchored off it) — the
-    // trigger sits near the pane's left edge, between the dot and the name, so
-    // anchoring the menu's right edge to the trigger's right edge (the old
-    // math) could park it far from the pane on a wide wall. Opening rightward
-    // from the trigger's own left edge keeps it over the pane it belongs to.
-    menu.style.left = Math.max(8, Math.min(r.left, window.innerWidth - menu.offsetWidth - 8)) + 'px';
-    setTimeout(() => document.addEventListener('click', _closeAllPaneOverflows, { once: true }), 0);
-}
-
-function _closeAllPaneOverflows() {
-    document.querySelectorAll('.pane-overflow-menu:not([hidden])').forEach(m => {
-        m.hidden = true;
-        const btn = m.previousElementSibling;
-        if (btn) btn.setAttribute('aria-expanded', 'false');
-    });
-}
-
-// Inline kill-confirm — same plain-DOM affordance as the kanban delete button
-// (kanbanDeleteClick), NOT window.confirm. The confirm bar overlays the top of
-// the pane; Kill calls POST /api/agents/kill and, on success, drops the tile
-// immediately (see dropTerminalPane) rather than waiting for the next poll.
-function termKillClick(btn, wid) {
-    const pane = btn.closest('.term-pane, .grid-stack-item-content');
-    if (!pane || pane.querySelector('.pane-kill-confirm')) return;
-    const confirmEl = document.createElement('div');
-    confirmEl.className = 'kanban-confirm pane-kill-confirm';
-    confirmEl.dataset.agent = wid;
-    confirmEl.innerHTML = `
-        <span class="kanban-confirm-msg">Kill ${escHtml(_paneTitle(wid))}?</span>
-        <button class="btn-confirm" type="button" onclick="chela.termKillConfirm(this, true)">Kill</button>
-        <button type="button" onclick="chela.termKillConfirm(this, false)">Cancel</button>`;
-    pane.appendChild(confirmEl);
-    btn.style.visibility = 'hidden';
-}
-
-async function termKillConfirm(actionBtn, ok) {
-    const confirmEl = actionBtn.closest('.pane-kill-confirm');
-    if (!confirmEl) return;
-    const pane = confirmEl.closest('.term-pane, .grid-stack-item-content');
-    const killBtn = pane ? pane.querySelector('.gs-kill-btn') : null;
-    const wid = confirmEl.dataset.agent;
-    if (!ok) {
-        confirmEl.remove();
-        if (killBtn) killBtn.style.visibility = '';
-        return;
-    }
-    confirmEl.innerHTML = '<span class="kanban-confirm-msg">Killing…</span>';
-    let resp, data = {};
-    try {
-        resp = await fetch(BASE_PATH + '/api/agents/kill', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ agent: wid }),
-        });
-        try { data = await resp.json(); } catch (_) { data = {}; }
-    } catch (e) {
-        _termKillShowError(confirmEl, killBtn, String(e));
-        return;
-    }
-    if (!resp.ok || !data.ok) {
-        _termKillShowError(confirmEl, killBtn, data.error || `HTTP ${resp.status}`);
-        return;
-    }
-    // Reactivity: drop the tile now so the wall reflects the kill instantly.
-    // The next termTick would catch it too, but waiting leaves a dead iframe.
-    dropTerminalPane(wid);
-}
-
-function _termKillShowError(confirmEl, killBtn, msg) {
-    confirmEl.innerHTML = `
-        <span class="kanban-confirm-msg" style="color:var(--red);">${escHtml(msg)}</span>
-        <button type="button" onclick="chela.termKillConfirm(this, false)">Close</button>`;
-    if (killBtn) killBtn.style.visibility = '';
-}
-
-// Maximize/restore toggle for the shared pane header. The pane is lifted to a
-// full-viewport overlay (fixed inset:0 over the header AND sidebar — see the CSS
-// at .pane-maximized) and a body class hides the other Gridstack tiles. We
-// deliberately do NOT touch Gridstack's saved layout, so restore is a true
-// inverse — the tile snaps back to its exact prior x/y/w/h with no recompute.
-// There is no separate banner or ESC binding (ESC is the agent's interrupt key):
-// the way out is the same button, which goes accent-filled while maximized so
-// it reads as the obvious exit. Icon flips between maximize-2 and minimize-2
-// (CMX-154: SVG, not emoji — the old 🗖/🗗 glyphs were tofu on macOS) to match state.
-function termMaxFor(btn) {
-    if (!btn) return;
-    const pane = btn.closest('.term-pane, .grid-stack-item-content');
-    if (!pane) return;
-    const isMax = pane.classList.toggle('pane-maximized');
-    document.body.classList.toggle('pane-is-maximized', isMax);
-    btn.innerHTML = isMax ? lucideIcon('minimize-2', 14) : lucideIcon('maximize-2', 14);
-    btn.title = isMax ? 'Restore pane' : 'Maximize pane';
-    btn.setAttribute('aria-pressed', isMax ? 'true' : 'false');
-}
-
-// ---- Mobile single-pane fullscreen toggle (2026-07-25) ---------------------
-//
-// Desktop's min/max window controls don't apply to a forced single pane (no
-// dock, no other tiles to overlay) — this is the ONE mobile equivalent: grow
-// the pane to the full 100dvh and hide the surrounding chrome (keybar,
-// context bar) so the terminal gets the whole screen. A
-// transient body class, not persisted (pc_wall_* is layout state; this is a
-// per-visit view toggle, and it's cheap to rebuild the same way every time) —
-// style.css (.term-mobile-full) does the actual hiding/resizing, scoped
-// inside the same @media (max-width: 768px) block as everything else mobile,
-// so desktop is untouched by construction. The compact .gs-head — and its ×
-// kill button — stays visible in both states: this same toggle button is the
-// only way out, and it never disappears (it's part of .gs-head).
-function termMobileFull(btn) {
-    if (!btn) return;
-    const on = document.body.classList.toggle('term-mobile-full');
-    btn.innerHTML = on ? lucideIcon('minimize-2', 14) : lucideIcon('maximize-2', 14);
-    btn.title = on ? 'Exit fullscreen' : 'Fill screen';
-    btn.setAttribute('aria-pressed', on ? 'true' : 'false');
+// Draw the React parts of every tile under `scope`: BEFORE Gridstack adopts them (it finds each
+// tile's `.gs-grip` drag handle, in the header, as it inits).
+function _mountTileParts(scope) {
+    mountPaneHeads(scope);
+    mountTileFoots(scope);
+    mountPaneFrames(scope);
 }
 
 // ---- Minimize-to-dock (wall mode) -----------------------------------------
 //
 // Minimizing a tile removes it from the Gridstack engine (freeing its cells)
 // but LEAVES the element in the DOM, hidden — so the live ttyd iframe is never
-// detached and never reloads. A chip lands in #term-min-dock; clicking it
-// re-adopts the same element via makeWidget at its saved coords. The set of
-// minimized wids is persisted to pc_wall_minimized so the dock survives a
-// reload (buildWall re-applies it after rebuilding the wall).
-let _minimized = _loadMinimized();
-
-function _loadMinimized() {
-    try { return new Set(JSON.parse(localStorage.getItem('pc_wall_minimized') || '[]')); }
-    catch (e) { return new Set(); }
-}
-function _saveMinimized() {
-    localStorage.setItem('pc_wall_minimized', JSON.stringify([..._minimized]));
-}
+// detached and never reloads. Its chip lands in the dock (features/walldock, CMX-242);
+// clicking it re-adopts the same element via makeWidget at its saved coords. The set of
+// minimized wids is shared/store/wall.ts `minimizedPanes` (persisted to pc_wall_minimized,
+// so the dock survives a reload: buildWall re-applies it after rebuilding the wall).
+const _isMinimized = wid => minimizedPanes.get().has(wid);
+configureDock({ restore: wid => restoreFromDock(wid) });
 
 // ---- Per-pane layout pin ----------------------------------------------------
 // A pinned pane sits out of applyGridLayout's auto-reflow (grid presets): its
 // x/y/w/h are left exactly as the user placed them while every other pane
-// rearranges around it. Persisted by wid so a pin survives a wall rebuild.
-let _pinned = _loadPinned();
-
-function _loadPinned() {
-    try { return new Set(JSON.parse(localStorage.getItem('pc_wall_pinned') || '[]')); }
-    catch (e) { return new Set(); }
-}
-function _savePinned() {
-    localStorage.setItem('pc_wall_pinned', JSON.stringify([..._pinned]));
-}
-
-function _pinBtnHTML(wid) {
-    const on = _pinned.has(wid);
-    const title = on
-        ? "Pinned: this pane keeps its spot when a grid layout is applied. Click to unpin"
-        : "Pin: keep this pane's position when a grid layout is applied";
-    return `<button class="gs-pin-btn popover-item ov-item${on ? ' on' : ''}" onclick="chela.termPinToggle(this,'${_jsStr(wid)}')"
-      aria-pressed="${on ? 'true' : 'false'}" title="${attrEsc(title)}"><span class="ov-ic">${lucideIcon('pin', 14)}</span><span>Pin</span></button>`;
-}
-
-// Toggle a pane's pin state. applyGridLayout reads _pinned directly (no
-// rebuild needed here) — this only flips the button + tile visuals and persists.
-function termPinToggle(btn, wid) {
-    if (_pinned.has(wid)) _pinned.delete(wid); else _pinned.add(wid);
-    _savePinned();
-    const on = _pinned.has(wid);
-    btn.classList.toggle('on', on);
-    btn.setAttribute('aria-pressed', on ? 'true' : 'false');
-    btn.title = on
-        ? "Pinned: this pane keeps its spot when a grid layout is applied. Click to unpin"
-        : "Pin: keep this pane's position when a grid layout is applied";
-    const item = btn.closest('.grid-stack-item');
-    if (item) item.classList.toggle('pane-pinned', on);
-}
+// rearranges around it. The set is shared/store/wall.ts `pinnedPanes` (persisted
+// by wid, so a pin survives a wall rebuild); the header's Pin row writes it, and
+// the tile's dashed outline follows it here.
+const _isPinned = wid => pinnedPanes.get().has(wid);
+pinnedPanes.subscribe(() => {
+    document.querySelectorAll('#term-stage .grid-stack-item[gs-id]').forEach(item => {
+        item.classList.toggle('pane-pinned', _isPinned(item.getAttribute('gs-id')));
+    });
+});
 
 // Hide a tile element + pull it out of the grid engine. Idempotent.
 function _minimizeItem(item) {
@@ -950,147 +191,33 @@ function minimizePane(wid) {
         .find(it => it.getAttribute('gs-id') === wid);
     if (!item) return;
     _minimizeItem(item);
-    _minimized.add(wid);
-    _saveMinimized();
-    renderMinDock();
+    setMinimized(wid, true);    // the dock repaints synchronously, at its final height
     _refitWallForDock();        // wall re-packs above the (taller) dock
-    _reportWatchForWid(wid);    // docked tile stops dictating the shared window's size (CMX-175)
 }
 
-function termMinFor(btn) {
-    const item = btn && btn.closest('.grid-stack-item');
-    if (item) minimizePane(item.getAttribute('gs-id'));
-}
-
-// Dock chip click: the dock holds only minimized panes now, so a click always
-// restores. (minimizePane is invoked from the tile header's minimize button.)
-function toggleDockChip(wid) {
-    if (_minimized.has(wid)) restoreFromDock(wid);
-    else minimizePane(wid);
-}
-
-// ---- Lazy tiles: a DISPATCHED worker opens MINIMIZED, and POPS OUT when it blocks --
-//
-// ⛔ THE RULE, and it is one rule across two surfaces: a dispatched worker must not
-// occupy human attention surface — a Telegram topic (CMX-73) OR a Wall tile (this) —
-// until it needs a human. The wall is where you WATCH the fleet; five workers grinding
-// through a backlog tile it edge to edge and crowd out the one session you are in, and
-// none of them wanted watching. So a worker the dispatcher owns opens as a chip in the
-// dock (its ttyd iframe live and scrollable the whole time — minimize never detaches
-// it) and takes a tile the moment it BLOCKS on you. The wall stops being a wall of
-// noise and becomes what the topic list already is: the agents that want a human.
-//
-// The two facts come from /api/agents, both server-derived (see app.py):
-//   `dispatched`  — the RUN ROW owns the window id (never a guess from the name);
-//   `needs_human` — blocked on a human NOW: claude's own `waiting`, OR the hook log,
-//                   OR the pane (a Bash/Edit PERMISSION gate lives only as pixels).
-//
-// Per-wid state is a persisted 3-value machine — absent → 'docked' → 'popped' — and
-// the reason it exists rather than "just re-read the flags each tick" is that this must
-// NEVER FIGHT THE HUMAN. Re-deriving would re-minimize a pane the moment you pulled it
-// out of the dock, forever. So each decision is taken exactly ONCE per window:
-//   * absent  — never decided. Working → dock it ('docked'). Already blocked → leave it
-//               on the wall ('popped'): it was born wanting you.
-//   * 'docked'— we hid it, and we are the only one who may un-hide it: when it blocks,
-//               pop it out. Then 'popped', permanently.
-//   * 'popped'— hands off. Minimize it, restore it, ignore it — the wall never touches
-//               that window again, whatever it does next.
-// It is keyed by wid and persisted for the same reason `pc_wall_minimized` is: a reload
-// must not re-litigate a decision (which, mid-gate, would re-dock the very pane you were
-// answering). It is pruned in dropTerminalPane when the window dies, and disowned below
-// the moment a wid stops being dispatched — tmux recycles `@N` after a server restart,
-// and a stale 'docked' must never leave a HUMAN's window hidden.
-let _autoDock = _loadAutoDock();
-
-function _loadAutoDock() {
-    try { return JSON.parse(localStorage.getItem('pc_wall_autodock') || '{}') || {}; }
-    catch (e) { return {}; }
-}
-function _saveAutoDock() {
-    localStorage.setItem('pc_wall_autodock', JSON.stringify(_autoDock));
-}
-function _forgetAutoDock(wid) {
-    if (!(wid in _autoDock)) return;
-    delete _autoDock[wid];
-    _saveAutoDock();
-}
-
-// Run the machine over one poll's worth of agents. Called from _applyTermStatus, which
-// runs AFTER the tiles exist on both paths in (renderTerminals → buildWall, and
-// termTick → _absorbFreshTerminals) — a tile we cannot see yet is simply decided on the
-// next tick (4s), never dropped.
+// A DISPATCHED worker opens MINIMIZED and POPS OUT when it blocks on a human (CMX-76; the
+// machine is features/walldock's). Called from _applyTermStatus, which runs AFTER the tiles
+// exist on both paths in (renderTerminals → buildWall, and termTick → _absorbFreshTerminals):
+// a tile we cannot see yet is simply decided on the next tick (4s), never dropped.
 function _lazyDock(agents) {
     if (WALL_TILE_DISPATCHED) return;              // opt-out: tile every worker like a human's
     if (!Array.isArray(agents)) return;
     if (_termMode !== 'wall' || !_grid) return;    // the dock is a wall affordance
-    let dirty = false;
-    for (const a of agents) {
-        const wid = a && a.window_id;
-        if (!wid) continue;
-        const state = _autoDock[wid];
-
-        // Not (or no longer) the dispatcher's. A tile we docked on a worker's behalf
-        // must not stay hidden once that wid is someone else's — tmux hands `@N` out
-        // afresh after a server restart, and hiding a human's terminal is the one
-        // failure this feature is not allowed to have.
-        if (!a.dispatched) {
-            if (state === 'docked' && _minimized.has(wid)) restoreFromDock(wid);
-            if (state) { delete _autoDock[wid]; dirty = true; }
-            continue;
-        }
-
-        if (!state) {
-            if (wantsHuman(a)) {
-                _autoDock[wid] = 'popped';         // born blocked — it keeps its tile
-            } else if (_renderedWids.includes(wid)) {
-                minimizePane(wid);                 // working quietly — off the attention surface
-                _autoDock[wid] = 'docked';
-            } else {
-                continue;                          // no tile yet — decide on the next tick
-            }
-            dirty = true;
-        } else if (state === 'docked' && wantsHuman(a)) {
-            // 🗜️ THE POP-OUT. It wants a human, so it has earned the wall.
-            if (_minimized.has(wid)) restoreFromDock(wid);
-            _autoDock[wid] = 'popped';             // one pop, ever — from here it is yours
-            dirty = true;
-        }
-    }
-    if (dirty) _saveAutoDock();
-}
-
-// ---- Taskbar drag-reorder (order drives the wall layout) -------------------
-// pc_pane_order is the user's manual ordering (list of wids); _orderedWids
-// sorts the live panes by it (unknowns keep discovery order at the end), and
-// applyGridLayout lays tiles out in the same order — so dragging a chip
-// re-sorts the grid.
-function _paneOrderList() {
-    try { return JSON.parse(localStorage.getItem('pc_pane_order') || '[]'); } catch (e) { return []; }
-}
-function _orderIndex(wid) {
-    const i = _paneOrderList().indexOf(wid);
-    return i === -1 ? 1e9 : i;
-}
-function _orderedWids(wids) {
-    return wids.slice().sort((a, b) =>
-        (_orderIndex(a) - _orderIndex(b)) || (wids.indexOf(a) - wids.indexOf(b)));
+    runLazyDock(agents, { onWall: wid => _renderedWids.includes(wid), minimize: minimizePane, restore: restoreFromDock });
 }
 
 // The dock sits below the stage and changes the wall's available height, so
 // after it shows/hides we re-apply the active fill preset to re-fit the wall
-// (the remaining tiles re-pack to fill the space above the dock). Guarded on a
-// preset being active — a manual drag-layout is left exactly as the user set it.
+// (the remaining tiles re-pack to fill the space above the dock).
 function _refitWallForDock() {
-    if (_termMode !== 'wall' || !_wallPreset || !_grid) return;
-    applyGridLayout(_wallPreset.cols, _wallPreset.rows);
+    if (_termMode !== 'wall' || !_grid) return;
+    applyGridLayout();
 }
 
 function restoreFromDock(wid) {
     const stage = $('#term-stage');
     const item = Array.from(stage.querySelectorAll('.grid-stack-item'))
         .find(it => it.getAttribute('gs-id') === wid);
-    _minimized.delete(wid);
-    _saveMinimized();
     if (item && _grid) {
         let c = {};
         try { c = JSON.parse(item.dataset.gsCoords || '{}'); } catch (e) { /* noop */ }
@@ -1102,229 +229,26 @@ function restoreFromDock(wid) {
         delete item.dataset.minimized;
         try { _grid.makeWidget(item); } catch (e) { /* noop */ }
     }
-    renderMinDock();
+    setMinimized(wid, false);   // the dock repaints synchronously (it may have emptied)
     _refitWallForDock();        // dock may have emptied → grow the wall back
-    _reportWatchForWid(wid);    // back on screen → resumes counting toward the shared window's size (CMX-175)
 }
 
-// Live busy/idle/waiting indicator. The dot starts neutral and is coloured by
-// _applyTermStatus from /api/agents (status from `claude agents --json`):
-// busy -> green pulse, waiting -> amber (needs input), idle/unknown -> dim.
-function _statusDot(wid) {
-    return `<span class="term-status-dot" data-status-for="${attrEsc(wid)}" title="…"></span>`;
-}
-
-// CMX-377: the dot's class vocabulary is working/waiting/idle/done — tileState()'s
-// own cls names ('needs-you'/'pr-open'/'unknown') are remapped onto it so the pane header's
-// dot and the taskbar dock chips share the EXACT
-// same shape/colour rules as the sidebar row (style.css's `.term-status-dot.*`) —
-// 'unknown' (claude_running but no resolved session_status) reads as the idle
-// shape rather than inventing a fifth silhouette the brief never asked for.
-// CMX-40: a running judge battery is work (working); a battery that died without
-// a verdict wants a human (waiting).
-const _TILE_CLS_TO_DOT = { 'needs-you': 'waiting', working: 'working', 'pr-open': 'done', unknown: 'idle', idle: 'idle',
-                           testing: 'working', died: 'waiting' };
-
-// Colour the live status marks (pane headers + taskbar chips) from /api/agents.
-// Reuses tileState() (wallmodel.ts) — the SAME source _applyWallTileFrame's
-// `.gs-state` word pill draws from — so a pane's dot and its state pill can
-// never disagree about which of the four states it's in.
-function _colorTermDots(agents) {
-    if (!agents) return;
-    const by = {};
-    agents.forEach(a => { if (a.window_id) by[a.window_id] = a; });
-    document.querySelectorAll('#panel-terminals .term-status-dot').forEach(dot => {
-        const a = by[dot.dataset.statusFor];
-        const wants = wantsHuman(a);
-        const s = tileState(a, wants);
-        // CMX-137: in the minimized bar a dispatched run's window wears the run's own
-        // progress icon (the sidebar row's runDot), never a human session's dot. A chip
-        // is rebuilt on every dock render, so it never carries a stale run mark.
-        const run = dot.closest('.min-chip') ? windowRunDot(a, wants) : null;
-        dot.classList.remove('working', 'waiting', 'idle', 'done');
-        dot.classList.add(...(run ? run.cls.split(' ') : [_TILE_CLS_TO_DOT[s.cls] || 'idle']));
-        dot.title = run ? run.label : stateTitle(a, s);
-        if (run) { dot.setAttribute('role', 'img'); dot.setAttribute('aria-label', run.label); }
-        // Flag the host surface (live pane OR taskbar chip) so a "waiting for
-        // input" pane gets a yellow border even when minimized to the dock.
-        const host = dot.closest('.grid-stack-item-content, .term-pane, .min-chip');
-        if (host) host.classList.toggle('term-waiting', wants);
-    });
-}
-
-// Status tick: stamp last-busy times (drives the MRU sort), recolour the dots,
-// and — if the new activity changed the chip order — re-render the taskbar.
+// Status tick: the share flags, the headers, the dock and the footers repaint from this
+// poll (they read the agents store, and repaint here too when the rows are the same array),
+// then the lazy dock and the layouts that rank by attention.
 function _applyTermStatus(agents) {
     if (!agents) return;
-    _seedSharedFromAgents(agents);            // keep share-button state authoritative
-    _renderedWids.forEach(_updateShareBtns);  // refresh accent/badge after each poll
-    const now = Date.now();
-    agents.forEach(a => {
-        if (!a.window_id) return;
-        const st = a.session_status;
-        if (st === 'busy' && _paneStatus[a.window_id] !== 'busy') _paneActivity[a.window_id] = now;  // rising edge
-        _paneStatus[a.window_id] = st;
-    });
+    followAgents(agents);                     // each row's share flag (and owner presence with it)
+    refreshPaneHeads();
+    refreshTileFoots();
+    refreshDock();
     _lazyDock(agents);   // dock the dispatcher's quiet workers; pop out the ones that block
-    _colorTermDots(agents);
-    _applyWallTileFrame(agents);   // wall redesign slice 1: state pill / recap / PR chip / action bar
     _applyAutoArrange(agents);     // wall redesign slice 2: re-rank the wall — no-op unless auto is on and the order changed
     _applyWallFocus(agents);       // wall redesign (Focus toggle): re-fit the one-large + strip layout — no-op unless focus is on and the target/pane-set changed
     // Wall tick is the fast path (4s) — refresh the tab signal here too so the
     // title/favicon update promptly on the flagship view, not just on the 30s
     // sidebar refresh. updateTabSignal is idempotent, so the two callers agree.
     updateTabSignal(agents);
-    if (_termMode === 'wall' && _renderedWids.length
-        && _taskbarOrder(_renderedWids).join(',') !== _dockOrderSig) {
-        renderMinDock();   // a pane's recency changed → reflow the chips
-    }
-}
-
-// Fill the per-tile context bars from /api/agents/context, keyed by window_id.
-// statusline source = exact; transcript source = estimate (dimmed fill, "~"/est).
-let _ctxCache = [];
-function _applyTermContext(ctx) {
-    if (!Array.isArray(ctx)) return;
-    _ctxCache = ctx;
-    const by = {};
-    ctx.forEach(c => { if (c.window_id) by[c.window_id] = c; });
-    document.querySelectorAll('#panel-terminals .term-ctx-bar').forEach(bar => {
-        const c = by[bar.dataset.ctxFor];
-        const fill = bar.querySelector('.term-ctx-fill');
-        if (!fill) return;
-        // CMX-117: branch + context chips moved OUT of the top .gs-head into this
-        // same subtle bottom bar (_ctxBarHTML) — read/write them from `bar` itself
-        // now, not the header.
-        const head = bar.parentElement && bar.parentElement.querySelector('.gs-head');
-        const ctxChip = bar.querySelector('.gs-ctx');
-        const branchChip = bar.querySelector('.gs-branch');
-        // Wall redesign slice 1: model + cost chips are wall-only (_ctxBarHTML
-        // only renders them when draggable) — null on single mode's bar, so
-        // every write below is guarded the same way ctxChip/branchChip are.
-        const modelChip = bar.querySelector('.gs-model');
-        const costChip = bar.querySelector('.gs-cost');
-        if (!c || c.used_pct == null) {
-            fill.style.width = '0';
-            fill.className = 'term-ctx-fill';
-            bar.title = 'Context: —';
-            if (ctxChip) ctxChip.hidden = true;
-            if (branchChip) branchChip.hidden = true;
-            if (modelChip) modelChip.hidden = true;
-            if (costChip) costChip.hidden = true;
-            return;
-        }
-        const pct = c.used_pct;
-        fill.style.width = Math.min(100, pct) + '%';
-        // Routed through wallmodel.ts's ctxLevel — the SAME thresholds this
-        // slice's guard tests pin (tests/wall_tile.test.mjs), so the pure
-        // logic under test is what actually drives the rendered fill/chip,
-        // not a second copy of the 60/80 thresholds living only here.
-        const lvl = ctxLevel(pct);
-        const sev = lvl === 'bad' ? ' ctx-danger' : lvl === 'warn' ? ' ctx-warn' : '';
-        fill.className = 'term-ctx-fill' + sev + (c.estimated ? ' est' : '');
-        const bits = [`Context: ${c.used}/${c.total} (${pct}%${c.estimated ? '~' : ''})`];
-        if (c.model) bits.push(c.model);
-        if (c.cost_usd != null) bits.push(`$${c.cost_usd}`);
-        if (c.estimated) bits.push('estimate; run `chela install-statusline` for exact');
-        const tip = bits.join(' · ');
-        bar.title = tip;
-        // The bar is pointer-events:none (so it can't block resize), so mirror
-        // the tooltip onto the tile header — a safe, hoverable surface.
-        if (head) head.title = tip;
-        // Visible header chips: branch + "74% · 147.5K/1M". The bottom bar gives
-        // the at-a-glance color; these give the exact numbers without hovering.
-        if (ctxChip) {
-            const counter = (c.used && c.total) ? ` · ${c.used}/${c.total}` : '';
-            ctxChip.textContent = `${pct}%${c.estimated ? '~' : ''}${counter}`;
-            ctxChip.className = 'gs-ctx' + (sev ? ' ' + sev.trim() : '');
-            ctxChip.hidden = false;
-        }
-        if (branchChip) {
-            if (c.branch) {
-                branchChip.textContent = '⎇ ' + c.branch;
-                branchChip.title = 'branch: ' + c.branch;
-                branchChip.hidden = false;
-            } else {
-                branchChip.hidden = true;
-            }
-        }
-        if (modelChip) {
-            if (c.model) { modelChip.textContent = c.model; modelChip.hidden = false; }
-            else modelChip.hidden = true;
-        }
-        if (costChip) {
-            const cost = costView(c.cost_usd);
-            if (cost) { costChip.textContent = cost; costChip.title = 'session cost'; costChip.hidden = false; }
-            else costChip.hidden = true;
-        }
-    });
-}
-
-// Taskbar order: most-recently-busy first (MRU), with the manual order as a
-// stable tiebreak for panes with equal/zero activity. Decoupled from the wall
-// grid — a chip moving never disturbs a pane's seat on the wall.
-function _taskbarOrder(wids) {
-    const base = _orderedWids(wids);
-    const waiting = w => (_paneStatus[w] === 'waiting' ? 0 : 1);   // needs-your-input panes jump to the front
-    const ts = w => _paneActivity[w] || 0;
-    return base.slice().sort((a, b) =>
-        (waiting(a) - waiting(b)) || (ts(b) - ts(a)) || (base.indexOf(a) - base.indexOf(b)));
-}
-
-// FLIP animation: measure chip rects before a rebuild, then slide each surviving
-// chip from its old spot to its new one so MRU reshuffles glide instead of snap.
-// Matched by data-wid; chips with no prior position (just appeared) don't animate.
-function _flipDock(dock, mutate) {
-    const first = {};
-    dock.querySelectorAll('.min-chip').forEach(c => { first[c.dataset.wid] = c.getBoundingClientRect(); });
-    mutate();
-    dock.querySelectorAll('.min-chip').forEach(c => {
-        const f = first[c.dataset.wid];
-        if (!f) return;
-        const l = c.getBoundingClientRect();
-        const dx = f.left - l.left, dy = f.top - l.top;
-        if (!dx && !dy) return;
-        c.style.transition = 'none';
-        c.style.transform = `translate(${dx}px, ${dy}px)`;
-        requestAnimationFrame(() => {
-            c.style.transition = 'transform 160ms ease';
-            c.style.transform = '';
-        });
-    });
-}
-
-// Always-on taskbar: one chip per pane (wall mode). Visible panes get an accent
-// border; minimized panes are dimmed. Each chip carries the busy/idle/waiting
-// status dot and toggles min/restore on click. Hidden only in single mode or
-// when there are no panes. Order is MRU (see _taskbarOrder); chips are click-only.
-function renderMinDock() {
-    const dock = $('#term-min-dock');
-    if (!dock) return;
-    // A TRUE taskbar: only MINIMIZED panes dock here. The sidebar already lists
-    // every agent, so mirroring all panes in the dock was redundant (two lists
-    // of the same thing). Now the dock is "things I've tucked away" and is empty
-    // (hidden) until you minimize a tile; visible tiles are reordered on the wall.
-    const wids = _termMode === 'wall'
-        ? _taskbarOrder(_renderedWids).filter(w => _minimized.has(w)) : [];
-    if (!wids.length) { dock.style.display = 'none'; dock.innerHTML = ''; _dockOrderSig = ''; return; }
-    dock.style.display = 'flex';
-    _flipDock(dock, () => {
-        dock.innerHTML = '<span class="min-dock-label">Minimized:</span>' + wids.map(wid => {
-            const j = _jsStr(wid);
-            const min = _minimized.has(wid);
-            const cls = min ? 'min-chip min-chip-minimized' : 'min-chip min-chip-active';
-            // CMX-154: SVG, not emoji — the old 🗗/🗕 glyphs were tofu on macOS.
-            const icon = min ? lucideIcon('maximize-2', 12) : lucideIcon('minus', 12);
-            return `<button class="${cls}" data-wid="${attrEsc(wid)}"
-              onclick="chela.toggleDockChip('${j}')" title="Click to ${min ? 'restore' : 'minimize'} ${attrEsc(_paneTitle(wid))}">
-              ${_statusDot(wid)}
-              <span class="min-chip-title">${escHtml(_paneTitle(wid))}</span>
-              <span class="min-chip-icon" aria-hidden="true">${icon}</span>
-            </button>`;
-        }).join('');
-    });
-    _dockOrderSig = wids.join(',');
-    _colorTermDots(_agentsCache);   // colour the just-built chips (no re-sort → no recursion)
 }
 
 // CMX-169: the single-mode pane a load opens. The last pane viewed on THIS device
@@ -1398,9 +322,9 @@ async function renderTerminals(ctxRead) {   // ctxRead: refresh()'s context read
 
     const sel = $('#term-agent');
     sel.style.display = _termMode === 'single' ? '' : 'none';
-    termMode.set(_termMode);   // the keybar island shows its desktop bar in single mode
-    $('#term-wall-grid').style.display = _termMode === 'wall' ? 'inline-flex' : 'none';
-    _buildGridPicker();
+    termMode.set(_termMode);   // the keybar island shows its desktop bar in single mode, the toolbar and dock show on the wall
+    mountWallToolbar($('#wall-toolbar-island'));
+    mountDock($('#term-min-dock'));
     if (sel.options.length !== wids.length) {
         const prev = sel.value;
         sel.innerHTML = wids.map(w => `<option value="${attrEsc(w)}">${escHtml(_paneTitle(w))}</option>`).join('');
@@ -1416,27 +340,17 @@ async function renderTerminals(ctxRead) {   // ctxRead: refresh()'s context read
     _termSig = sig;
 
     // Resolve readiness BEFORE building the stage so agents already in the port
-    // map render their iframe with no placeholder flash. Already-ready wids
-    // short-circuit (no fetch); only not-yet-ready agents incur a cheap probe.
-    await Promise.all(wids.map(async w => {
-        if (!_termReady.has(w) && await _checkReady(w)) _termReady.add(w);
-    }));
+    // map render their iframe with no placeholder flash.
+    await resolveReady(wids);
 
-    // A full stage rebuild is imminent — cancel any in-flight readiness pollers
-    // (they're re-seeded from the fresh DOM below) and drop the maximized-state
-    // body class so it doesn't outlive the element it was tracking.
-    _stopAllReadyPolls();
+    // A full stage rebuild is imminent: drop the maximized-state body class so it
+    // doesn't outlive the element it was tracking.
     document.body.classList.remove('pane-is-maximized');
     // A fresh single-pane header is about to render at its default (non-full)
     // icon/title — don't leave a stale term-mobile-full body class hiding
     // chrome the new header no longer claims to control.
     document.body.classList.remove('term-mobile-full');
 
-    // Ready -> real iframe; not ready -> spinner placeholder (polled into an
-    // iframe by _startPlaceholderPolls once the ttyd port lands).
-    const frame = w => _termReady.has(w)
-        ? `<iframe class="term-frame" allow="clipboard-read; clipboard-write" src="${_termFrameSrc(w)}" title="${escHtml(_paneTitle(w))}"></iframe>`
-        : _termPlaceholder(w);
     const stage = $('#term-stage');
     if (!wids.length) {
         destroyGrid();
@@ -1444,7 +358,7 @@ async function renderTerminals(ctxRead) {   // ctxRead: refresh()'s context read
         stage.innerHTML = '<div style="padding:20px; text-align:center; color:var(--text-dim);">No active agents</div>';
         _renderedWids = [];
     } else if (_termMode === 'wall') {
-        _renderedWids = wids.slice();   // set before buildWall so renderMinDock sees current wids
+        _renderedWids = wids.slice();   // set before buildWall so the lazy dock sees current wids
         buildWall(wids);
         // Fit happens at the end, AFTER the taskbar renders — see _refitWallForDock below.
     } else {
@@ -1452,15 +366,12 @@ async function renderTerminals(ctxRead) {   // ctxRead: refresh()'s context read
         stage.className = 'term-single';
         const sw = sel.value || wids[0];
         _rememberPane(sw, agents);   // every single-mode switch lands here: sidebar tap, swipe, dropdown, focus
-        stage.innerHTML = `<div class="term-pane">${paneHead(sw, false)}${frame(sw)}${_ctxBarHTML(sw, false)}</div>`;
+        stage.innerHTML = `<div class="term-pane">${_paneHeadSlot(sw, false)}${_frameSlot(sw)}${_footSlot(sw, false)}</div>`;
+        _mountTileParts(stage);
         _renderedWids = [sw];
     }
-    // Seed readiness pollers for whatever placeholders we just rendered.
-    _startPlaceholderPolls();
-    renderMinDock();   // single / no-agents → hides the dock; wall already rebuilt it
-    _applyTermStatus(_agentsCache);   // colour pane dots (single + wall) from cached state
-    _applyTermContext(_ctxCache);     // repaint ctx bars from cache instantly…
-    (ctxRead || api('/api/agents/context')).then(_applyTermContext).catch(() => {});  // …then refresh
+    _applyTermStatus(_agentsCache);   // paint the panes and the dock from cached state
+    loadContext(ctxRead).catch(() => {});   // the footers drew the last context; this refreshes it
 
     // Fit the wall AFTER the taskbar is at its final rendered height, so the grid
     // leaves exactly the right room above it (dock height feeds _wallFill).
@@ -1469,85 +380,20 @@ async function renderTerminals(ctxRead) {   // ctxRead: refresh()'s context read
     pinKeybar();              // CMX-102: a freshly built pane re-fits to the keybar if the keyboard is up
     _bindHeaderSwipe();       // header swipe → prev/next agent (idempotent)
     _bindFocusPromote();      // click a strip pane's header to promote it while Focus is on (idempotent)
-    _refreshRooms();          // paint room accents on the first render, not 4s later
+    refreshRooms();           // paint room accents on the first render, not 4s later
 }
 
 // ---- Reactive pane lifecycle ----------------------------------------------
 //
 // A dead ttyd iframe (window killed / `claude` exited / killed elsewhere) would
-// otherwise sit blank until the 30s renderTerminals cycle. Instead we poll the
-// live agent set every TERM_REFRESH_MS while the terminals tab is open, and:
+// otherwise sit blank until the 30s renderTerminals cycle. Instead features/paneframe's
+// 4s timer runs termTick while the terminals tab is open, which polls the live agent set and:
 //   - drop tiles for wids that vanished (no flicker for survivors), and
 //   - in WALL mode, rebuild when a NEW wid appears (layout genuinely changed);
 //     in SINGLE mode, only refresh the dropdown so the new shell is selectable —
 //     the displayed pane's iframe is never reloaded.
 // Panes whose windows still exist are left completely untouched. Because the
 // diff is by wid, a window rename never reads as a drop+add.
-
-// ---- Focus ring -----------------------------------------------------------
-//
-// Highlight the pane whose embedded terminal currently holds browser focus.
-// The terminals are same-origin iframes, so a clicked one becomes
-// document.activeElement. We POLL for that rather than relying on window
-// 'blur': blur fires when focus first leaves the parent into an iframe, but
-// clicking straight from one iframe to another never refocuses the parent, so
-// blur alone would leave the ring stuck on the first pane. The poll is a cheap
-// activeElement read and only touches the DOM when the focused pane changes.
-// Pure parent-frame — the iframe needs no cooperation — and it tracks the SAME
-// focus that drives tmux's focus-events to Claude Code.
-//
-// CMX-104: the parent's activeElement is NOT the authority. Live, after
-// CMX-90, Liav typed into one pane (its xterm drew the solid, focused cursor)
-// while the ring sat on the OTHER pane (hollow, blurred cursor) — the parent's
-// activeElement still named the frame he had left. The authority is each
-// frame's OWN document.hasFocus(): it is the focus xterm's cursor and tmux's
-// focus-events follow, so the ring now asks every term frame that question
-// first and only falls back to activeElement when no frame can answer (an
-// opaque frame) or the whole browser window is unfocused (keep marking the
-// pane focus will return to — a screenshot tool steals OS focus). And every
-// tick re-asserts the invariant on the DOM itself — exactly one .term-focused,
-// on that pane — instead of trusting the remembered _focusedPane: a ring left
-// on any pane the tracker no longer remembers is cleared, not kept forever.
-let _focusPoll = null;
-let _focusedPane = null;
-
-function _frameDocHasFocus(frame) {
-    let doc = null;
-    try { doc = frame.contentDocument; } catch (e) { /* cross-doc guard */ }
-    if (!doc || typeof doc.hasFocus !== 'function') return null;   // can't tell
-    try { return doc.hasFocus(); } catch (e) { return null; }
-}
-
-function _focusedTermFrame() {
-    const frames = Array.from(document.querySelectorAll('iframe.term-frame'));
-    const owner = frames.find(f => _frameDocHasFocus(f) === true);
-    if (owner) return owner;
-    const ae = document.activeElement;
-    const aeFrame = (ae && ae.classList && ae.classList.contains('term-frame')) ? ae : null;
-    if (!aeFrame) return null;
-    let pageFocused = true;
-    try { pageFocused = document.hasFocus(); } catch (e) { /* assume focused */ }
-    // The page has focus but this frame's own document says it doesn't: the
-    // keyboard is NOT there, whatever activeElement claims (the CMX-104 bug).
-    if (pageFocused && _frameDocHasFocus(aeFrame) === false) return null;
-    return aeFrame;
-}
-
-function _applyTermFocus() {
-    const frame = _focusedTermFrame();
-    const pane = frame ? frame.closest('.grid-stack-item-content, .term-pane') : null;
-    document.querySelectorAll('.term-focused').forEach(el => {
-        if (el !== pane) el.classList.remove('term-focused');
-    });
-    if (pane && !pane.classList.contains('term-focused')) pane.classList.add('term-focused');
-    _focusedPane = pane;
-}
-
-function startTermFocusTracking() {
-    if (_focusPoll) return;                        // idempotent
-    _focusPoll = setInterval(_applyTermFocus, 250);
-    window.addEventListener('focus', _applyTermFocus);   // returning to the parent clears it promptly
-}
 
 // Bring an existing pane to the user's attention: switch to the wall, restore it
 // if minimized, scroll it into view, focus its iframe (which lights the focus
@@ -1568,178 +414,21 @@ function focusPaneByWid(wid) {
     }
     // Defer so selectView's render settles before we hunt for the tile.
     setTimeout(() => {
-        if (_minimized.has(wid)) restoreFromDock(wid);
+        if (_isMinimized(wid)) restoreFromDock(wid);
         const item = Array.from($('#term-stage').querySelectorAll('.grid-stack-item'))
             .find(it => it.getAttribute('gs-id') === wid);
         if (!item) return;
         item.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
         const ifr = item.querySelector('iframe.term-frame');
-        if (ifr) {
-            try { ifr.contentWindow.focus(); } catch (e) { /* cross-doc guard */ }
-            // CMX-114 (live-broken in the real browser, cmx-112's jsdom guard was
-            // green while the feature was dead): contentWindow.focus() alone does
-            // NOT reliably move the browser's actual keyboard focus into this frame
-            // when switching FROM another focused pane — the border moves but
-            // typing doesn't follow. Focus the iframe ELEMENT itself too, and route
-            // focus into the terminal's own textarea (exposed as `term` by ttyd's
-            // page, the same global the share dialog reads the pane size from) so typing lands
-            // in the pane, not just highlights it. Both are called unconditionally
-            // (not one-as-fallback-for-the-other) — that's what actually moves live
-            // browser focus.
-            try { ifr.focus(); } catch (e) { /* cross-doc guard */ }
-            try {
-                const t = ifr.contentWindow.term;
-                if (t && typeof t.focus === 'function') t.focus();
-            } catch (e) { /* cross-doc guard */ }
-        }
+        if (ifr) focusFrame(ifr);   // lights the focus ring (features/paneframe)
         const content = item.querySelector('.grid-stack-item-content') || item;
         content.classList.add('pane-flash');
         setTimeout(() => content.classList.remove('pane-flash'), 1100);
     }, 60);
 }
 
-function startTermTimer() {
-    if (!TERMINALS_ON) return;
-    stopTermTimer();
-    _termTimer = setInterval(termTick, TERM_REFRESH_MS);
-    startTermFocusTracking();
-}
-
-function stopTermTimer() {
-    if (_termTimer) { clearInterval(_termTimer); _termTimer = null; }
-}
-
-// ---- Background-tab teardown ----------------------------------------------
-//
-// Grouped tmux sessions SHARE one real window, and a tmux window has exactly one
-// size. With `window-size largest` (scripts/agent-terminals.sh), a wall left open
-// in a backgrounded tab keeps its ttyd WebSocket alive indefinitely — the
-// keepalive pings auto-pong even while hidden — and pins every shared window to
-// that ghost's dimensions, so the wall you're actively viewing gets its rows/cols
-// CROPPED to the stale tab's size. Terminal activity can't tell a quiet-but-
-// watched pane from an abandoned one (that's what the old server-side reaper got
-// wrong, and why it disconnected live panes). The browser CAN: Page Visibility
-// reports when THIS tab is hidden. So when the tab goes hidden past a short grace,
-// blank its ttyd iframes — closing their sockets, which drops the backing tmux
-// clients so they stop distorting window-size — and reconnect when it's shown
-// again. A quick tab flip stays under the grace, so there's no needless reload.
-//
-// CONTENTION GATE: a pane is only torn down when its window has >1 viewer
-// (/api/term/clients). With a single viewer there's no size contention to resolve
-// — a tmux window has one size shared by all its clients, so a lone client always
-// fits — and tearing it down would just churn the connection for nothing. So a
-// backgrounded wall that's the only thing watching its agents keeps its terminals;
-// teardown only fires for panes a second tab/device is also viewing.
-const TERM_HIDE_GRACE_MS = 45000;   // hidden this long → release contended ttyd clients
-let _termSuspended = false;
-let _termHideTimer = null;
-
-// /term/<wid>/ → wid. Reads the live src (or the stashed one once blanked).
-function _widOfFrame(ifr) {
-    const src = ifr.dataset.suspendedSrc || ifr.getAttribute('src') || '';
-    const m = src.match(/\/term\/([^/]+)\//);
-    return m ? decodeURIComponent(m[1]) : null;
-}
-
-async function _teardownTermFrames() {
-    let counts;
-    try { counts = await api('/api/term/clients'); }
-    catch (e) { return; }                              // can't tell contention → disturb nothing
-    if (document.visibilityState !== 'hidden') return; // became visible mid-fetch → abort
-    let released = 0;
-    document.querySelectorAll('#term-stage iframe.term-frame').forEach(ifr => {
-        const src = ifr.getAttribute('src') || '';
-        if (!src || src === 'about:blank') return;      // nothing live to release
-        const wid = _widOfFrame(ifr);
-        if (!wid || (counts[wid] || 0) <= 1) return;    // sole viewer → leave it connected
-        ifr.dataset.suspendedSrc = src;                 // stash for restore
-        ifr.src = 'about:blank';                         // unload → WS close → tmux client drops
-        released++;
-    });
-    if (released) _termSuspended = true;   // only suspend reactive ticks if we actually released
-}
-
-function _restoreTermFrames() {
-    _termSuspended = false;
-    document.querySelectorAll('#term-stage iframe.term-frame[data-suspended-src]').forEach(ifr => {
-        ifr.src = ifr.dataset.suspendedSrc;             // reconnect, freshly sized to the now-visible tile
-        delete ifr.dataset.suspendedSrc;
-    });
-    // Reconcile any agent adds/drops we skipped while suspended (guarded below).
-    if (TERMINALS_ON && currentTab === 'terminals') termTick();
-}
-
-// ---- Per-client ignore-size (CMX-175) ---------------------------------------
-//
-// The teardown above resolves size contention by DISCONNECTING a backgrounded
-// tab's ttyd clients after TERM_HIDE_GRACE_MS — effective, but it kills the
-// socket (a visible reconnect) and only fires once a tab has been hidden a
-// while. tmux's per-client `ignore-size` flag gets the SAME outcome — THIS tab's
-// clients stop dragging the shared window to their own geometry — instantly and
-// non-destructively, so report it the moment a tile stops (or starts) being
-// watched: tab backgrounded/foregrounded, or pane minimized/restored. Both
-// mechanisms coexist: this one fixes the acute sizing fight; the teardown still
-// exists to reclaim --max-clients slots from a genuinely abandoned tab.
-//
-// A tile only counts as "watched" while the browser tab is visible AND it isn't
-// collapsed into the dock — a minimized tile is still a live tmux client (just
-// CSS-hidden), so left alone it would go on dictating the shared window's size
-// from inside the dock.
-function _isWatched(wid) {
-    return document.visibilityState !== 'hidden' && !_minimized.has(wid);
-}
-
-// /term/<wid>/?cid=... → cid. Mirrors _widOfFrame's src-parsing (including the
-// suspended-src fallback so a torn-down tile's last-known cid is still visible).
-function _cidOfFrame(ifr) {
-    const src = ifr.dataset.suspendedSrc || ifr.getAttribute('src') || '';
-    const m = src.match(/[?&]cid=([^&]+)/);
-    return m ? decodeURIComponent(m[1]) : null;
-}
-
-// Report one iframe's current watched state to the ONE tmux client app.py's
-// term_ws matched to its cid — never the whole session, so a sibling tab/device
-// watching the same wid is untouched. Best-effort: a missed flip just leaves
-// tmux's default (`largest` fights over every attached client, today's behavior).
-function _reportWatch(ifr) {
-    const src = ifr.getAttribute('src') || '';
-    if (!src || src === 'about:blank') return;      // torn down — nothing to flag
-    const wid = _widOfFrame(ifr);
-    const cid = _cidOfFrame(ifr);
-    if (!wid || !cid) return;
-    api('/api/term/' + encodeURIComponent(wid) + '/watch', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ cid, watching: _isWatched(wid) }),
-    }).catch(() => {});
-}
-
-function _reportAllWatch() {
-    document.querySelectorAll('#term-stage iframe.term-frame').forEach(_reportWatch);
-}
-
-function _reportWatchForWid(wid) {
-    const ifr = Array.from(document.querySelectorAll('#term-stage iframe.term-frame'))
-        .find(f => _widOfFrame(f) === wid);
-    if (ifr) _reportWatch(ifr);
-}
-
-// Single registration at module load. TERMINALS_ON is checked at fire time (it
-// may not be resolved yet here), mirroring the window 'resize' handler above.
-document.addEventListener('visibilitychange', () => {
-    if (!TERMINALS_ON) return;
-    clearTimeout(_termHideTimer);
-    _reportAllWatch();
-    if (document.hidden) {
-        _termHideTimer = setTimeout(_teardownTermFrames, TERM_HIDE_GRACE_MS);
-    } else if (_termSuspended) {
-        _restoreTermFrames();
-    }
-});
-
 async function termTick() {
     if (!TERMINALS_ON || currentTab !== 'terminals') return;
-    if (_termSuspended) return;   // tab hidden: don't add/reconnect iframes we just released
     let agents;
     try { agents = await api('/api/agents'); } catch (e) { return; }   // transient — try again next tick
     setAgentsCache(agents);
@@ -1763,10 +452,11 @@ async function termTick() {
     // in case a rename changed a pane's friendly name.
     _applyTermStatus(agents);
     _refreshPaneLabels();
-    _refreshRooms();   // rooms can also be made from the CLI/hooks — the wall follows
+    refreshRooms();   // rooms can also be made from the CLI/hooks — the wall follows
     try {
         const ctx = await api('/api/agents/context');
-        _applyTermContext(ctx);
+        if (Array.isArray(ctx)) context.set(ctx);   // the footers repaint from it
+        refreshTileFoots();                          // …even when it is the same array
         updateCtxCache(ctx);
     } catch (e) { /* keep prior fills */ }
     // Full sidebar re-render off the same poll: keeps the dots in lockstep with
@@ -1776,123 +466,23 @@ async function termTick() {
     renderSidebarAgents(agents);
 }
 
-// Update the visible label + ai-title subtitle of every on-screen pane + chip
-// from current state, WITHOUT touching the iframe. A window rename only
-// changes display text, so this keeps the header/chip/dropdown in sync with
-// zero reload. `wrap` is the `.gs-grip`/`.gs-label` header cell (name +
-// subtitle together, not just the name span) so both can be refreshed as one.
-// During an inline rename the `.pane-title` span is swapped for an input of a
-// different class, so the title-text query below never clobbers an
-// in-progress edit; the subtitle (a sibling, untouched by rename) still
-// refreshes normally.
-function _setSpanLabel(wrap, wid) {
-    if (!wrap || !wid) return;
-    const titleSpan = wrap.querySelector('.pane-title');
-    if (titleSpan) {
-        const lbl = _paneTitle(wid);
-        if (titleSpan.textContent !== lbl) titleSpan.textContent = lbl;
-    }
-    const aiTitle = _paneAiTitle(wid);
-    let subSpan = wrap.querySelector('.pane-subtitle');
-    if (aiTitle) {
-        if (!subSpan) {
-            subSpan = document.createElement('span');
-            subSpan.className = 'pane-subtitle';
-            wrap.appendChild(subSpan);
-        }
-        if (subSpan.textContent !== aiTitle) subSpan.textContent = aiTitle;
-        if (subSpan.title !== aiTitle) subSpan.title = aiTitle;
-    } else if (subSpan) {
-        subSpan.remove();
-    }
-}
+// Relabel everything that shows a window's label, WITHOUT touching an iframe: a rename
+// only changes display text. The headers and the dock's chips repaint from the agents store
+// (an inline rename in progress is the header's own state, never clobbered); legacy redraws
+// the single-mode dropdown.
 function _refreshPaneLabels() {
     if (!TERMINALS_ON) return;
+    refreshPaneHeads();
     if (_termMode === 'wall') {
-        $('#term-stage').querySelectorAll('.grid-stack-item').forEach(item => {
-            _setSpanLabel(item.querySelector('.gs-grip, .gs-label'), item.getAttribute('gs-id'));
-        });
-        renderMinDock();   // chips carry labels too
+        refreshDock();   // chips carry labels too
     } else {
         const sel = $('#term-agent');
-        const pane = $('#term-stage') && $('#term-stage').querySelector('.term-pane');
-        if (sel && pane) _setSpanLabel(pane.querySelector('.gs-grip, .gs-label'), sel.value);
         if (sel) Array.from(sel.options).forEach(o => {
             const lbl = _paneTitle(o.value);
             if (o.textContent !== lbl) o.textContent = lbl;
         });
     }
 }
-
-// ---- Fast switch (Alt+1..9) + palette-first (Ctrl/⌘+K) ---------------------
-// CMX-85: Alt+N opens the Nth visible SIDEBAR row, and holding Alt shows those
-// numbers on the rows (nav.js `altSwitchKeydown`) — the sidebar is the one
-// numbering; the panes carry none. CMX-116: the palette is the primary,
-// discoverable switcher — Alt+N is the power-user fallback.
-
-// Ctrl/⌘+K — the same combo the parent chrome's palette shortcut uses
-// (nav.js). Matched the same way here so a pane's own keydown can trigger it.
-function _isPaletteKey(e) {
-    return (e.ctrlKey || e.metaKey) && !e.altKey && !e.shiftKey && (e.key === 'k' || e.key === 'K');
-}
-
-// Once Alt+N focuses a pane, keystrokes land in that ttyd iframe's OWN
-// document — a same-origin iframe's keydown never bubbles to the parent, so
-// nav.js's document listener goes deaf to the next Alt+N (or Ctrl/⌘+K) until focus
-// manually returns to the parent. Wire the same shortcuts inside each pane's
-// document too, as soon as it (re)loads. Unlike the parent, no INPUT/TEXTAREA
-// guard is needed: ttyd's DOM holds nothing but the terminal, and its own
-// input IS a textarea (the xterm helper) — excluding it would defeat the
-// whole point.
-//
-// CMX-114 (live-broken in the real browser, cmx-112's jsdom guard was green
-// while the feature was dead): a real keydown targets xterm's helper textarea
-// and xterm handles/consumes it FIRST, so it never reliably reaches a
-// bubble-phase listener on `doc` — only a synthetic `dispatchEvent` does,
-// which is exactly why the old jsdom guard passed on a dead feature. Register
-// in the CAPTURE phase with `stopImmediatePropagation` so this fires BEFORE
-// xterm's own handler, both switching panes/opening the palette AND stopping
-// the stray Alt-digit or Ctrl+K from reaching the shell (xterm otherwise
-// treats Ctrl+K as readline's kill-to-end-of-line).
-//
-// CMX-116: a SET of shortcuts, not a second bespoke injector — Ctrl/⌘+K is
-// the primary, discoverable pane switcher (the palette floats open panes to
-// the top, see nav.js `_openPaneItems`); Alt+1..9 stays as the direct-jump
-// power-user fallback. Was `_wireIframeAltSwitch`, generalized in place so
-// "what shortcuts reach a focused pane" can't drift between the two.
-function _wireIframeShortcuts(ifr) {
-    let doc;
-    try { doc = ifr.contentDocument; } catch (e) { return; }   // cross-doc guard
-    if (!doc) return;
-    doc.addEventListener('keydown', e => {
-        if (altSwitchKeydown(e)) {
-            e.preventDefault();
-            e.stopImmediatePropagation();
-            return;
-        }
-        if (_isPaletteKey(e)) {
-            e.preventDefault();
-            e.stopImmediatePropagation();
-            if (typeof openPalette === 'function') openPalette();
-        }
-    }, true);
-    // Releasing Alt inside a pane hides the sidebar numbers (CMX-85).
-    doc.addEventListener('keyup', e => { if (e.key === 'Alt') setAltHeld(false); }, true);
-}
-
-// 'load' doesn't bubble, but it still traverses ancestors during the CAPTURE
-// phase, so a single capturing listener on `document` catches every
-// `.term-frame` iframe's load — including future ones — with no per-tile
-// wiring needed at creation time. Re-running on every load (not just the
-// first) is required: each navigation swaps in a brand-new Document, which
-// discards whatever listener was attached to the one before it.
-document.addEventListener('load', e => {
-    const ifr = e.target;
-    if (!ifr || ifr.tagName !== 'IFRAME' || !ifr.classList.contains('term-frame')) return;
-    _wireIframeShortcuts(ifr);
-    _reportWatch(ifr);   // register this fresh connection's watched state (CMX-175)
-    pinKeybar();         // CMX-154: a pane's terminal (first view, tile switch) fits the box it landed in
-}, true);
 
 // Rebuild the single-mode agent dropdown's <option> list in place, preserving
 // the current selection. Options carry the wid as value + the friendly label as
@@ -1915,8 +505,6 @@ function _syncTermSig() {
 }
 
 function dropTerminalPane(wid) {
-    _stopReadyPoll(wid);   // pane is going away — kill any in-flight readiness poll
-    _termReady.delete(wid);  // a re-spawn under the same wid must re-probe its port
     stopOwnerPresence(wid);  // tear down its presence session
     const stage = $('#term-stage');
     if (_termMode === 'wall' && _grid) {
@@ -1931,7 +519,7 @@ function dropTerminalPane(wid) {
         // brief "session ended" overlay rather than leaving a blank frame.
         const pane = stage.querySelector('.term-pane');
         if (pane) {
-            const fr = pane.querySelector('.term-frame');
+            const fr = pane.querySelector('[data-frame-for]');   // the slot: React drops its frame on the next paint
             if (fr) fr.remove();
             if (!pane.querySelector('.pane-ended')) {
                 const ov = document.createElement('div');
@@ -1942,10 +530,10 @@ function dropTerminalPane(wid) {
         }
     }
     _renderedWids = _renderedWids.filter(w => w !== wid);
-    if (_minimized.has(wid)) { _minimized.delete(wid); _saveMinimized(); }
-    _forgetAutoDock(wid);   // the window is gone: its lazy-dock decision dies with it
-    renderMinDock();        // taskbar lists every pane → refresh whenever one drops
-    _refitWallForDock();    // taskbar may have shrunk a row → re-fit the wall above it
+    forgetReady(wid);           // AFTER its slot left the page (no poll restarts): a re-spawn re-probes its port
+    setMinimized(wid, false);   // its chip leaves the dock
+    forgetAutoDock(wid);        // the window is gone: its lazy-dock decision dies with it
+    _refitWallForDock();        // the dock may have emptied → re-fit the wall above it
     _syncTermSig();
 }
 
@@ -1955,225 +543,18 @@ function destroyGrid() {
     if (_grid) { try { _grid.destroy(false); } catch (e) { /* noop */ } _grid = null; }
 }
 
-// One wall tile's HTML (a .grid-stack-item). Ready agents get the live iframe;
-// not-yet-ready ones get the spinner placeholder (swapped in place by the
-// readiness poll). Shared by the full buildWall and the surgical addWallTiles.
-// gs-id is the stable wid so a rename never re-keys the tile.
+// One wall tile's HTML (a .grid-stack-item), shared by the full buildWall and the surgical
+// addWallTiles. gs-id is the stable wid so a rename never re-keys the tile.
 function _wallTileHTML(wid, x, y, w, h) {
-    const body = _termReady.has(wid)
-        ? `<iframe class="term-frame" allow="clipboard-read; clipboard-write" src="${_termFrameSrc(wid)}" title="${escHtml(_paneTitle(wid))}"></iframe>`
-        : _termPlaceholder(wid);
-    const pinnedCls = _pinned.has(wid) ? ' pane-pinned' : '';
+    const pinnedCls = _isPinned(wid) ? ' pane-pinned' : '';
     return `<div class="grid-stack-item${pinnedCls}" gs-id="${escHtml(wid)}" gs-x="${x}" gs-y="${y}" gs-w="${w}" gs-h="${h}">
   <div class="grid-stack-item-content">
-    ${paneHead(wid, true)}
-    ${_recapLineHTML(wid)}
-    ${body}
-    ${_ctxBarHTML(wid, true)}
-    ${_actionBarHTML(wid)}
+    ${_paneHeadSlot(wid, true)}
+    ${_recapSlot(wid)}
+    ${_frameSlot(wid)}
+    ${_footSlot(wid, true)}
   </div>
 </div>`;
-}
-
-// Wall redesign slice 1: the away-summary line, Claude's own "what happened
-// while you were away" — never shown on the Wall before this. Dim, one line,
-// recap_ts in the tooltip. Rendered hidden by default (mirrors the ctx bar's
-// chips); _applyWallTileFrame fills it synchronously right after the wall is
-// built (renderTerminals calls _applyTermStatus(_agentsCache) immediately
-// after buildWall), so there is no visible flash of "hidden then shown".
-function _recapLineHTML(wid) {
-    return `<div class="pane-recap" data-recap-for="${attrEsc(wid)}" hidden onclick="chela.toggleRecap(this)"></div>`;
-}
-
-// Wall redesign slice 1: the amber Approve/Answer bar (wantsHuman) or blue
-// Review bar (finished, PR up) — sends its key via the EXISTING
-// /api/term/key path (termKeyFor -> chela.termActionClick below), no new
-// endpoint. Always rendered (hidden by default) so _applyWallTileFrame can
-// find it by data-action-for on every poll, same pattern as the ctx bar.
-function _actionBarHTML(wid) {
-    return `<div class="term-action-bar" data-action-for="${attrEsc(wid)}" hidden></div>`;
-}
-
-// The action bar's inner markup for a given {kind, label} (wallmodel.ts
-// actionBarKind). 'review' links straight to the PR (no key to send);
-// 'answer'/'approve' send Enter via the existing /api/term/key path — Enter
-// accepts Claude's own highlighted default choice at a permission gate and
-// submits a typed reply, which is the one safe, universal action available
-// through the whitelisted key set (app.py::_TERM_KEYS) without a new endpoint.
-function _actionBarContent(wid, kind) {
-    if (kind.kind === 'review') {
-        const chip = prChip((_agentByWid(wid) || {}).pr);
-        const url = chip ? chip.url : '#';
-        return `<span class="term-action-label">✓ PR ready for review</span>
-          <a class="term-action-btn" href="${attrEsc(url)}" target="_blank" rel="noopener noreferrer">Review</a>`;
-    }
-    const label = kind.label === 'Answer' ? '◆ Needs an answer' : '◆ Needs approval';
-    return `<span class="term-action-label">${escHtml(label)}</span>
-      <button type="button" class="term-action-btn" onclick="chela.termActionClick(this,'${_jsStr(wid)}')">${escHtml(kind.label)}</button>`;
-}
-
-// Send the action bar's key (Enter) via the existing /api/term/key path.
-async function termActionClick(btn, wid) {
-    if (!btn) return;
-    btn.disabled = true;
-    try {
-        await termKeyFor(wid, 'Enter');
-    } finally {
-        btn.disabled = false;
-    }
-}
-
-// Wall redesign slice 1: repaint every wall tile's new frame elements (state
-// pill, recap line, PR chip, action bar) from a fresh /api/agents poll — the
-// SAME agents array _applyTermStatus already has, so this runs as one more
-// step of that existing 4s tick rather than a second poll. Model/cost/branch
-// (ctx-poll-driven) are repainted separately by _applyTermContext, which
-// already owns that bar's other chips.
-function _applyWallTileFrame(agents) {
-    if (!agents) return;
-    const by = {};
-    agents.forEach(a => { if (a.window_id) by[a.window_id] = a; });
-
-    document.querySelectorAll('#panel-terminals .gs-state[data-state-for]').forEach(el => {
-        const a = by[el.dataset.stateFor];
-        const s = tileState(a, wantsHuman(a));
-        el.className = 'gs-state gs-state-' + s.cls;
-        el.title = stateTitle(a, s);
-        // CMX-393: no glyph in the pill — `.gs-dot` carries the shape.
-        const w = el.querySelector('.gs-state-word');
-        if (w) w.textContent = s.word;
-    });
-
-    document.querySelectorAll('#panel-terminals .pane-recap[data-recap-for]').forEach(el => {
-        const r = recapView(by[el.dataset.recapFor]);
-        el.hidden = !r;
-        el.textContent = r ? r.text : '';
-        // The line clamps to one row; the tooltip reveals the FULL recap (plus
-        // its as-of time), so nothing is lost to truncation on a glance.
-        el.title = r ? (r.text + (r.tsTitle ? '\n\n(as of ' + r.tsTitle + ')' : '')) : '';
-        el.classList.toggle('recap-open', !!r && _recapOpen.has(el.dataset.recapFor));
-    });
-
-    document.querySelectorAll('#panel-terminals .gs-pr[data-pr-for]').forEach(el => {
-        const a = by[el.dataset.prFor];
-        const chip = prChip(a && a.pr);
-        if (!chip) { el.hidden = true; el.removeAttribute('href'); el.textContent = ''; return; }
-        el.hidden = false;
-        el.href = chip.url;
-        // CMX-41: the ⚑ is earned by a confirmed open PR only; merged/closed/
-        // draft read dim with their state word, unknown is a bare `#N` link.
-        el.textContent = (chip.flag ? '⚑ ' : '') + chip.label;
-        el.classList.toggle('gs-pr-dim', chip.dim);
-        el.title = 'Open PR ' + chip.label + (chip.repository ? ' (' + chip.repository + ')' : '')
-            + (chip.state === 'unknown' ? ' (state unknown)' : '');
-    });
-
-    document.querySelectorAll('#panel-terminals .term-action-bar[data-action-for]').forEach(el => {
-        const wid = el.dataset.actionFor;
-        const a = by[wid];
-        const kind = actionBarKind(a, wantsHuman(a));
-        const host = el.closest('.grid-stack-item-content');
-        if (!kind) {
-            if (!el.hidden) { el.hidden = true; el.className = 'term-action-bar'; el.innerHTML = ''; }
-            if (host) host.classList.remove('has-term-action');
-            return;
-        }
-        el.hidden = false;
-        el.className = 'term-action-bar action-' + kind.kind;
-        el.innerHTML = _actionBarContent(wid, kind);
-        if (host) host.classList.add('has-term-action');
-    });
-}
-
-// Per-tile context-window bar pinned to the tile bottom edge (CMX-117: now the
-// subtle home for branch + context, folded together with the ambient fill strip
-// — previously two top-header chips PLUS this bar). Filled/coloured by
-// _applyTermContext from /api/agents/context, keyed by window_id. CMX-85
-// dropped the pane № chip that rode here: the sidebar rows carry the only
-// Alt+N numbering now.
-function _ctxBarHTML(wid, draggable) {
-    // The model chip rides in the bar on EVERY surface — wall tiles AND the
-    // mobile single pane (Liav, 2026-07-25). It's context-poll-driven
-    // (_applyTermContext fills it from c.model, guarded by `if (modelChip)`),
-    // so it just needed to exist in the single-pane bar to light up.
-    const modelChip = `<span class="gs-model" hidden></span>`;
-    // PR + cost stay wall-only: PR is agents-driven
-    // (_applyWallTileFrame) and both add width the compact mobile bar doesn't
-    // need. _applyTermContext writes cost, _applyWallTileFrame writes PR — never
-    // both to the same field, so there is exactly one writer per chip.
-    const meta = draggable
-        ? `<a class="gs-pr" data-pr-for="${attrEsc(wid)}" hidden target="_blank" rel="noopener noreferrer"></a>
-           <span class="gs-cost" hidden></span>` : '';
-    // Files (CMX-299): opens the per-session changed-files/diff modal
-    // (frontend/src/features/diffmodal). Unlike every other chip in this bar it needs no poll to
-    // populate — the modal fetches fresh on open — so it's just always
-    // present, `pointer-events: auto` punched through the bar's own
-    // `pointer-events: none` the same way `.gs-pr` already does.
-    // `wid` is a tmux window id (`@<n>`, never quote-bearing) in practice, but
-    // this mirrors kanban.js's own onclick-arg escaping (escHtml then `'`→`\'`)
-    // rather than assuming that format, same as any other value spliced into a
-    // single-quoted JS string literal inside an HTML attribute.
-    const widArg = escHtml(wid).replace(/'/g, "\\'");
-    const filesChip = `<button type="button" class="gs-files" title="Changed files"
-      onclick="event.stopPropagation(); chela.openDiffModal('${widArg}')">${lucideIcon('git-compare', 12)}</button>`;
-    // CMX-417: the pane's tmux window id (`@N`) — the address the orchestrator,
-    // `chela peek @N` and peer messages use — leads the bar on EVERY surface.
-    // Static, like the Files chip: the bar is built per wid, so no poll writes
-    // it. A <button> so it punches through the bar's `pointer-events: none`
-    // (see .gs-wid) and takes a click: copy to the clipboard + a "copied" toast.
-    const widChip = windowIdQuery(wid)
-        ? `<button type="button" class="gs-wid" data-wid="${attrEsc(wid)}" title="tmux window ${attrEsc(wid)}, click to copy"
-      onclick="event.stopPropagation(); chela.copyWindowId(this)">${escHtml(wid)}</button>` : '';
-    return `<div class="term-ctx-bar" data-ctx-for="${attrEsc(wid)}" title="Context: —">
-      ${widChip}
-      ${modelChip}
-      ${meta}
-      <span class="gs-branch" hidden></span>
-      <span class="gs-ctx" hidden></span>
-      ${filesChip}
-      <i class="term-ctx-fill"></i>
-    </div>`;
-}
-
-// CMX-417: click on a footer's `@N` chip. The clipboard API needs a secure
-// context; on a plain-http dashboard fall back to a selected <textarea> +
-// execCommand('copy'), so the click still copies rather than silently not.
-function copyWindowId(btn) {
-    const wid = btn && btn.dataset.wid;
-    if (!wid) return;
-    const done = ok => _widToast(btn, ok ? `Copied ${wid}` : `Copy failed: ${wid}`);
-    const legacy = () => {
-        const ta = document.createElement('textarea');
-        ta.value = wid;
-        ta.setAttribute('readonly', '');
-        ta.style.cssText = 'position:fixed;top:0;left:0;opacity:0;';
-        document.body.appendChild(ta);
-        ta.select();
-        let ok = false;
-        try { ok = document.execCommand('copy'); } catch (e) { /* unsupported */ }
-        ta.remove();
-        done(ok);
-    };
-    if (navigator.clipboard && navigator.clipboard.writeText) {
-        navigator.clipboard.writeText(wid).then(() => done(true), legacy);
-    } else {
-        legacy();
-    }
-}
-
-// The brief "copied" bubble, anchored just ABOVE the footer chip (the footer
-// sits on the pane's bottom edge, so .term-share-toast's below-the-anchor
-// placement would fall off the tile).
-function _widToast(btn, msg) {
-    const bar = btn.closest('.term-ctx-bar');
-    if (!bar) return;
-    bar.querySelectorAll('.gs-wid-toast').forEach(t => t.remove());
-    const t = document.createElement('div');
-    t.className = 'gs-wid-toast';
-    t.setAttribute('role', 'status');
-    t.textContent = msg;
-    bar.appendChild(t);
-    setTimeout(() => t.remove(), 1500);
 }
 
 function buildWall(wids) {
@@ -2186,7 +567,7 @@ function buildWall(wids) {
     let saved = {};
     try { saved = JSON.parse(localStorage.getItem('pc_wall_layout') || '{}'); } catch (e) { /* noop */ }
 
-    // renderTerminals pre-resolved _termReady before calling buildWall, so
+    // renderTerminals resolved readiness before calling buildWall, so
     // existing panes never flash a placeholder.
     gsEl.innerHTML = wids.map((wid, i) => {
         const s = saved[wid] || {};
@@ -2195,6 +576,7 @@ function buildWall(wids) {
         const w = s.w || 6, h = s.h || 5;
         return _wallTileHTML(wid, x, y, w, h);
     }).join('');
+    _mountTileParts(gsEl);   // before GridStack.init: each tile's `.gs-grip` handle must exist
 
     _grid = GridStack.init({
         column: 12,
@@ -2236,26 +618,25 @@ function buildWall(wids) {
         else gsEl.style.maxHeight = '';
         gsEl.classList.toggle('term-lock-drag', on);
     };
-    _grid.on('dragstart', (e, el) => { guard(true); dragMode(true); if (_wallLocked) { _snapshotForSwap(); lockDragBox(true); } });
+    _grid.on('dragstart', (e, el) => { guard(true); dragMode(true); if (_layout().locked) { _snapshotForSwap(); lockDragBox(true); } });
     _grid.on('resizestart', () => guard(true));
     _grid.on('drag', (e, el) => _swapDragHover(el));   // live highlight of the swap target
     // Locked mode turns a drag into a pure swap: exchange the dragged pane's full
     // geometry with whatever pane it was dropped on (revert if dropped on empty).
-    _grid.on('dragstop', (e, el) => { guard(false); dragMode(false); if (_wallLocked) _doSwap(el); lockDragBox(false); persist(); });
+    _grid.on('dragstop', (e, el) => { guard(false); dragMode(false); if (_layout().locked) _doSwap(el); lockDragBox(false); persist(); });
     _grid.on('resizestop', () => { guard(false); persist(); });
 
     // Re-apply persisted minimized state: pull those tiles back out of the grid
-    // (their iframes still loaded, just hidden) and rebuild the dock chips.
+    // (their iframes still loaded, just hidden); the dock draws their chips.
     wids.forEach(wid => {
-        if (!_minimized.has(wid)) return;
+        if (!_isMinimized(wid)) return;
         const item = gsEl.querySelector(`.grid-stack-item[gs-id="${_cssEsc(wid)}"]`);
         if (item) _minimizeItem(item);
     });
     _autoOrderSig = '';    // fresh tile set: force the next auto-arrange apply, don't trust a stale sig
     _focusOrderSig = '';   // same, for Focus: force the next _applyWallFocus apply on a fresh tile set
     _applyWallInteractivity();   // restore the locked (swap-on-drag) / auto-arrange / focus feel across reloads
-    renderMinDock();
-    _replayRoomAccents();   // rebuilt tiles: repaint room accents from the last poll
+    replayRoomAccents();   // rebuilt tiles: repaint room accents from the last poll
 }
 
 // Surgically append new tiles to an existing wall WITHOUT touching the live
@@ -2269,9 +650,7 @@ async function addWallTiles(wids) {
 
     // Pre-resolve readiness so an already-ready agent renders its iframe with
     // no placeholder flash (mirrors renderTerminals()).
-    await Promise.all(wids.map(async w => {
-        if (!_termReady.has(w) && await _checkReady(w)) _termReady.add(w);
-    }));
+    await resolveReady(wids);
 
     let saved = {};
     try { saved = JSON.parse(localStorage.getItem('pc_wall_layout') || '{}'); } catch (e) { /* noop */ }
@@ -2291,14 +670,13 @@ async function addWallTiles(wids) {
         tmp.innerHTML = _wallTileHTML(wid, x, y, w, h);
         const el = tmp.firstElementChild;
         gsEl.appendChild(el);
+        _mountTileParts(el);    // its header (and `.gs-grip` handle) before Gridstack adopts it
         _grid.makeWidget(el);   // v10: adopt an already-appended element as a widget
         if (!_renderedWids.includes(wid)) _renderedWids.push(wid);
     });
-    _startPlaceholderPolls();   // seed readiness polls for any placeholders we just added
     _applyWallInteractivity();  // a tile added while locked/auto must inherit no-resize / no-move
-    renderMinDock();            // taskbar lists every pane → add the new chip(s)
-    _refitWallForDock();        // taskbar may have grown a row → re-fit the wall above it
-    _replayRoomAccents();       // a fresh tile already in a room wears its accent at once
+    _refitWallForDock();        // re-fit the wall to the stage
+    replayRoomAccents();        // a fresh tile already in a room wears its accent at once
     _syncTermSig();
     return true;
 }
@@ -2308,7 +686,7 @@ async function addWallTiles(wids) {
 // only refreshes the dropdown so a new shell is selectable (the displayed
 // iframe is never touched). Shared by the 4s termTick and the SSE windows event.
 async function _absorbFreshTerminals(live) {
-    if (_termSuspended) return;   // tab hidden: defer new tiles until _restoreTermFrames re-ticks
+    if (isSuspended()) return;   // tab hidden: defer new tiles until the frames reconnect (features/paneframe re-ticks)
     const fresh = live.filter(w => !_renderedWids.includes(w));
     if (!fresh.length) return;
     if (_termMode === 'wall') {
@@ -2317,20 +695,6 @@ async function _absorbFreshTerminals(live) {
         _refreshTermOptions(live);
     }
 }
-
-// Inline split-glyph layout picker (editor-style). Each preset is a column
-// count + a target row count that fills the viewport height; the glyph depicts
-// cols×rows so the shape is obvious at a glance. "N columns" (rows:1) makes
-// each pane full viewport height; the ×grids stack `rows` of panes to fill the
-// same height. Extra panes beyond cols×rows wrap below and scroll.
-const WALL_PRESETS = [
-    { cols: 1, rows: 1, label: '1 column (stack)' },
-    { cols: 2, rows: 1, label: '2 columns' },
-    { cols: 3, rows: 1, label: '3 columns' },
-    { cols: 4, rows: 1, label: '4 columns' },
-    { cols: 2, rows: 2, label: '2 × 2 grid' },
-    { cols: 3, rows: 2, label: '3 × 2 grid' },
-];
 
 // GridStack.init params (must stay in sync with buildWall) — needed to convert
 // the visible stage height into grid rows so a layout fills the viewport.
@@ -2363,7 +727,7 @@ function _wallFill() {
     // numbers. Phones force single mode (no wall, no dock), so skip it there.
     const dock = $('#term-min-dock');
     let dockH = 0;
-    if (!_isMobileTerm() && dock && dock.style.display !== 'none') {
+    if (!_isMobileTerm() && dock && !dock.hidden) {
         const ds = getComputedStyle(dock);
         dockH = dock.getBoundingClientRect().height
             + (parseFloat(ds.marginTop) || 0) + (parseFloat(ds.marginBottom) || 0);
@@ -2377,144 +741,6 @@ function _wallFill() {
     return { rows, cellPx };
 }
 
-// Build a cols×rows grid glyph as an SVG of rounded rects on a 18×14 canvas.
-function _gridGlyph(cols, rows) {
-    const W = 18, H = 14, m = 1, g = 1.5;
-    const cw = (W - 2 * m - (cols - 1) * g) / cols;
-    const ch = (H - 2 * m - (rows - 1) * g) / rows;
-    let rects = '';
-    for (let r = 0; r < rows; r++) {
-        for (let c = 0; c < cols; c++) {
-            const x = (m + c * (cw + g)).toFixed(2);
-            const y = (m + r * (ch + g)).toFixed(2);
-            rects += `<rect x="${x}" y="${y}" width="${cw.toFixed(2)}" height="${ch.toFixed(2)}" rx="1"/>`;
-        }
-    }
-    return `<svg viewBox="0 0 ${W} ${H}" width="18" height="14" fill="currentColor" aria-hidden="true">${rects}</svg>`;
-}
-
-// Lucide lock / lock-open (https://lucide.dev/icons/lock), 14px to match the
-// preset glyphs. Stroke-based, so it inherits .gl-btn's currentColor.
-function _lockGlyph(locked) {
-    const shackle = locked ? 'M7 11V7a5 5 0 0 1 10 0v4' : 'M7 11V7a5 5 0 0 1 9.9-1';
-    return `<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor"
-        stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-        <rect width="18" height="11" x="3" y="11" rx="2" ry="2"/><path d="${shackle}"/></svg>`;
-}
-
-// Lucide target (https://lucide.dev/icons/target), 14px to match the lock
-// glyph — deliberately a DIFFERENT shape from the lock/preset icons so the
-// auto-arrange toggle reads as its own control at a glance. Static (unlike
-// the lock glyph it doesn't swap shape on/off — .gl-btn.active carries the
-// on/off signal, same as the preset picker's buttons).
-function _autoGlyph() {
-    return `<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor"
-        stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-        <circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="5"/><circle cx="12" cy="12" r="1"/></svg>`;
-}
-
-// Focus layout glyph: a big rect (the focus pane) beside two stacked small
-// rects (the strip) — deliberately a DIFFERENT shape from lock/auto/preset
-// icons (echoes _gridGlyph's rounded-rect idiom, sized to match) so Focus
-// reads as its own control, not a preset variant. Static, same reasoning as
-// _autoGlyph — .gl-btn.active carries the on/off signal.
-function _focusGlyph() {
-    return `<svg viewBox="0 0 18 14" width="18" height="14" fill="currentColor" aria-hidden="true">
-        <rect x="1" y="1" width="10" height="12" rx="1"/>
-        <rect x="13" y="1" width="4" height="5" rx="1"/>
-        <rect x="13" y="8" width="4" height="5" rx="1"/>
-    </svg>`;
-}
-
-// Populate the toolbar's glyph picker once. Idempotent (dataset guard) so the
-// per-render renderTerminals() call is cheap.
-function _buildGridPicker() {
-    const host = $('#term-grid-presets');
-    if (!host) return;
-    if (!host.dataset.built) {
-        host.innerHTML = WALL_PRESETS.map((p, i) =>
-            `<button class="gl-btn" data-preset="${i}" title="${escHtml(p.label)}" aria-label="${escHtml(p.label)}"
-                     onclick="chela.applyGridLayout(${p.cols}, ${p.rows}, this)">${_gridGlyph(p.cols, p.rows)}</button>`
-        ).join('');
-        host.dataset.built = '1';
-    }
-    // Reflect the active preset (default/persisted, or last clicked) on the buttons.
-    host.querySelectorAll('.gl-btn').forEach((b, i) => {
-        const p = WALL_PRESETS[i];
-        b.classList.toggle('active', !!(_wallPreset && p.cols === _wallPreset.cols && p.rows === _wallPreset.rows));
-    });
-    _reflectLockBtn();
-    _reflectAutoBtn();
-    _reflectFocusBtn();
-    if (_gridRowOpen === null) {
-        let stored = null;
-        try { stored = localStorage.getItem(GRID_ROW_KEY); } catch (e) { /* storage unavailable */ }
-        _gridRowOpen = !gridRowCollapsed(stored, _wallFocus);
-    }
-    _reflectGridRow();
-}
-
-// ---- Collapsible layout toolbar (CMX-397) ----------------------------------
-// The row of presets + lock/auto/focus collapses to ONE control: the glyph of
-// the CURRENT layout or mode plus a chevron. It rests collapsed while Focus is
-// on (wallmodel.ts's gridRowCollapsed), unless the user's explicit choice —
-// a click on that control — is on record in GRID_ROW_KEY. Choosing a preset or
-// mode, clicking outside, or Esc collapses it again WITHOUT rewriting that
-// choice: those are transient, only the toggle is a stated preference.
-const GRID_ROW_KEY = 'pc_wall_grid_collapsed';
-let _gridRowOpen = null;          // null until first built: the rest state is read once
-
-// The glyph of what currently owns the layout: Focus, then auto-arrange, then
-// the active preset (the default 2-column one if none is recorded).
-function _currentLayoutGlyph() {
-    if (_wallFocus) return { glyph: _focusGlyph(), label: 'Focus' };
-    if (_wallAuto) return { glyph: _autoGlyph(), label: 'Auto-arrange' };
-    const p = WALL_PRESETS.find(q => _wallPreset && q.cols === _wallPreset.cols && q.rows === _wallPreset.rows)
-        || WALL_PRESETS[1];
-    return { glyph: _gridGlyph(p.cols, p.rows), label: p.label };
-}
-
-function _reflectGridRow() {
-    const row = $('#term-grid-row'), tog = $('#term-grid-toggle');
-    if (!row || !tog) return;
-    const open = !!_gridRowOpen;
-    row.hidden = !open;
-    tog.classList.toggle('grid-open', open);
-    tog.setAttribute('aria-expanded', String(open));
-    const { glyph, label } = _currentLayoutGlyph();
-    tog.innerHTML = `${glyph}<span class="grid-chevron" aria-hidden="true">${lucideIcon('chevron-down', 12)}</span>`;
-    tog.title = open ? `Layout: ${label}, hide the layout toolbar` : `Layout: ${label}, show the layout toolbar`;
-    tog.setAttribute('aria-label', tog.title);
-}
-
-// The toggle itself: an explicit choice, so it is remembered per browser.
-function toggleGridRow() {
-    _gridRowOpen = !_gridRowOpen;
-    try { localStorage.setItem(GRID_ROW_KEY, _gridRowOpen ? '0' : '1'); } catch (e) { /* storage unavailable */ }
-    _reflectGridRow();
-}
-
-// A transient collapse (a preset/mode was chosen, a click landed outside, Esc).
-function _collapseGridRow() {
-    if (!_gridRowOpen) return;
-    _gridRowOpen = false;
-    _reflectGridRow();
-}
-
-document.addEventListener('pointerdown', e => {
-    if (!_gridRowOpen) return;
-    const bar = $('#term-wall-grid');
-    if (bar && !bar.contains(e.target)) _collapseGridRow();
-});
-document.addEventListener('keydown', e => {
-    if (e.key !== 'Escape' || !_gridRowOpen) return;
-    const bar = $('#term-wall-grid');
-    if (!bar || bar.style.display === 'none') return;   // single mode: no toolbar
-    _collapseGridRow();
-    const tog = $('#term-grid-toggle');
-    if (tog && bar.contains(document.activeElement)) tog.focus();
-});
-
 // ---- Layout lock (swap-on-drop) --------------------------------------------
 // GridStack's native swap only fires for equal-sized, touching tiles, so it
 // can't "swap and resize" different-sized panes. Instead, lock just turns
@@ -2526,42 +752,6 @@ document.addEventListener('keydown', e => {
 let _swapSnapshot = null;          // wid -> {x,y,w,h} captured at dragstart while locked
 let _swapHoverWid = null;          // pane currently outlined as the swap target during a locked drag
 
-function _reflectLockBtn() {
-    const b = $('#term-lock-btn');
-    if (!b) return;
-    b.classList.toggle('active', _wallLocked);
-    b.innerHTML = _lockGlyph(_wallLocked);   // lucide lock / lock-open
-    b.title = _wallLocked
-        ? 'Layout locked: drag a pane onto another to swap them. Click to unlock (free move + resize).'
-        : 'Lock layout: drag swaps panes, resize off';
-}
-
-// Wall redesign slice 2: reflect the auto-arrange toggle's on/off state on its
-// toolbar button — same pattern as _reflectLockBtn (static icon here, since
-// unlike lock there's no second shape to swap to; .gl-btn.active carries the
-// state, same as the preset picker's buttons).
-function _reflectAutoBtn() {
-    const b = $('#term-auto-btn');
-    if (!b) return;
-    b.classList.toggle('active', _wallAuto);
-    b.innerHTML = _autoGlyph();
-    b.title = _wallAuto
-        ? 'Auto-arrange ON: panes rank by attention (needs you → working → idle → done). Click to restore your manual layout.'
-        : 'Auto-arrange: rank panes by attention (needs you → working → idle → done)';
-}
-
-// Focus layout: reflect the toggle's on/off state on its toolbar button —
-// same pattern as _reflectAutoBtn (static icon; .gl-btn.active carries state).
-function _reflectFocusBtn() {
-    const b = $('#term-focus-btn');
-    if (!b) return;
-    b.classList.toggle('active', _wallFocus);
-    b.innerHTML = _focusGlyph();
-    b.title = _wallFocus
-        ? 'Focus ON: one pane large, the rest a strip. Click a strip pane’s header to promote it. Click to restore your manual layout.'
-        : 'Focus: one pane large, the rest a strip';
-}
-
 // Push the current lock + auto-arrange + focus state onto the live grid. Safe
 // to call any time _grid exists (e.g. right after buildWall, so a reload
 // restores the locked/auto/focus feel). Auto-arrange and Focus both COMPUTE
@@ -2572,65 +762,41 @@ function _reflectFocusBtn() {
 // it), so at most one of them is ever true here.
 function _applyWallInteractivity() {
     if (!_grid) return;
-    _grid.enableMove(!_wallAuto && !_wallFocus);
-    _grid.enableResize(!_wallLocked && !_wallAuto && !_wallFocus);
-    _reflectLockBtn();
-    _reflectAutoBtn();
-    _reflectFocusBtn();
+    const { locked, auto, focus } = _layout();
+    _grid.enableMove(!auto && !focus);
+    _grid.enableResize(!locked && !auto && !focus);
 }
 
-function toggleWallLock(btn) {
-    _wallLocked = !_wallLocked;
-    localStorage.setItem('pc_wall_locked', _wallLocked ? '1' : '0');
+// The toolbar changed the layout (shared/store/wall.ts `wallLayout`): apply it now, never
+// waiting for the next 4s poll. Turning Auto or Focus ON computes and applies its layout at
+// once (Focus picks its large pane first: the click-focused one, else the first that wants a
+// human, else the first tiled). Turning one OFF restores pc_wall_layout verbatim via
+// _restoreManualLayout: neither mode ever wrote that key, so it is a pure restore. A new
+// preset refits (applyGridLayout). Lock only changes what a drag may do.
+let _layoutSeen = wallLayout.get();
+function _onLayoutChange() {
+    const prev = _layoutSeen, next = wallLayout.get();
+    _layoutSeen = next;
+    if (!TERMINALS_ON) return;
+    if (prev.focus && !next.focus) { _focusWid = null; _focusOrderSig = ''; _clearFocusClasses(); }
+    if (prev.auto !== next.auto) _autoOrderSig = '';   // stale from a previous auto session
+    if (prev.focus !== next.focus) _focusOrderSig = '';
     _applyWallInteractivity();
-    if (btn) btn.blur();
-}
-
-// Wall redesign slice 2: flip the auto-arrange toggle. Turning ON immediately
-// ranks the current fleet and applies it (no waiting for the next 4s poll);
-// turning OFF re-applies the saved pc_wall_layout verbatim — auto mode never
-// wrote to that key, so this is a pure restore, never a reconstruction.
-// Auto-arrange and Focus both own the layout, so turning Auto on turns Focus
-// off first (see toggleWallFocus for the mirror case).
-function toggleWallAuto(btn) {
-    _wallAuto = !_wallAuto;
-    localStorage.setItem('pc_wall_auto', _wallAuto ? '1' : '0');
-    if (_wallAuto && _wallFocus) { _wallFocus = false; localStorage.setItem('pc_wall_focus', '0'); _focusWid = null; _focusOrderSig = ''; _clearFocusClasses(); }
-    _autoOrderSig = '';   // stale from a previous auto session — force a fresh apply either way
-    _applyWallInteractivity();
-    if (_wallAuto) _applyAutoArrange(_agentsCache);
-    else _restoreManualLayout();
-    if (btn) btn.blur();
-    _collapseGridRow();
-    _reflectGridRow();
-}
-
-// Focus layout toggle: one pane large (_focusWid), the rest a right-side
-// strip (wallmodel.ts's focusLayout). Turning ON picks a focus pane
-// (_pickFocusWid: the user's click-focused pane, else the first wantsHuman
-// pane, else the first tiled pane) and applies immediately, same "don't wait
-// for the next poll" contract as auto-arrange. Turning OFF restores
-// pc_wall_layout verbatim via the SAME _restoreManualLayout auto-arrange
-// uses — Focus never wrote that key either. Mutually exclusive with
-// auto-arrange: turning Focus on turns Auto off first.
-function toggleWallFocus(btn) {
-    _wallFocus = !_wallFocus;
-    localStorage.setItem('pc_wall_focus', _wallFocus ? '1' : '0');
-    if (_wallFocus && _wallAuto) { _wallAuto = false; localStorage.setItem('pc_wall_auto', '0'); _autoOrderSig = ''; }
-    _focusOrderSig = '';   // stale from a previous focus session — force a fresh apply either way
-    _applyWallInteractivity();
-    if (_wallFocus) {
+    // A preset is a NEW object on every choice, the same one choosing again included: a click on
+    // the active preset re-tidies a wall the user has dragged about.
+    const presetChosen = prev.preset !== next.preset;
+    if (!prev.focus && next.focus) {
         _pickFocusWid();
         _applyWallFocus(_agentsCache);
-    } else {
-        _focusWid = null;
-        _clearFocusClasses();
+    } else if (!prev.auto && next.auto) {
+        _applyAutoArrange(_agentsCache);
+    } else if ((prev.auto || prev.focus) && !next.auto && !next.focus) {
         _restoreManualLayout();
+    } else if (presetChosen) {
+        applyGridLayout();
     }
-    if (btn) btn.blur();
-    _collapseGridRow();
-    _reflectGridRow();
 }
+wallLayout.subscribe(_onLayoutChange);
 
 // Capture each live tile's pre-drag geometry, keyed by wid.
 function _snapshotForSwap() {
@@ -2675,7 +841,7 @@ function _setSwapHover(wid) {
     }
 }
 
-function _swapDragHover(el) { if (_wallLocked) _setSwapHover(_swapTargetWid(el)); }
+function _swapDragHover(el) { if (_layout().locked) _setSwapHover(_swapTargetWid(el)); }
 
 // On drop: swap the dragged tile with the pane under its centre, exchanging full
 // geometry; restore only the tiles the drag actually nudged so the rest of the
@@ -2715,183 +881,6 @@ function _doSwap(el) {
     }
 }
 
-// ---- THE WIRE: drag a line between two tiles to put their agents in a room ---
-//
-// The relationship is chela/rooms.py's (typed ledger, active dispatch, loop
-// guards); this is the gesture that CREATES one, and nothing more.
-//
-// Three things make it work on a wall of live iframes:
-//
-//   1. THE IFRAMES MUST NOT EAT THE MOUSE. Same idiom the tile drag already uses:
-//      `.gs-dragging` on the grid → CSS drops `pointer-events` on every
-//      `.term-frame`, so mousemove/elementFromPoint see the TILES. (NOT
-//      `.term-dragging`, which HIDES the terminals — watching them is the point.)
-//   2. THE PORT MUST STEAL THE MOUSEDOWN, or gridstack starts a tile drag under
-//      us (`renamePane` does exactly this).
-//   3. EVERY OTHER TILE SPROUTS A SOCKET while a wire is in flight (`.wire-live`
-//      on the stage). Without that nobody discovers the gesture exists.
-//
-// Room state NEVER reaches `_termSig` — the accent is patched per tile
-// (applyRoomAccents), so wiring two agents together reloads no terminal.
-
-const SVG_NS = 'http://www.w3.org/2000/svg';
-let _wire = null;         // in-flight drag: {fromWid, svg, path, stage, gsEl, hoverWid, x1, y1}
-let _roomsCache = null;   // last /api/rooms payload, replayed onto freshly built tiles
-
-function _wireCleanup() {
-    if (!_wire) return;
-    const { svg, stage, gsEl, hoverWid } = _wire;
-    document.removeEventListener('mousemove', _wireMove);
-    document.removeEventListener('mouseup', _wireDrop);
-    document.removeEventListener('keydown', _wireKey);
-    document.removeEventListener('pointercancel', _wireCleanup);
-    window.removeEventListener('blur', _wireCleanup);
-    if (svg) svg.remove();
-    if (stage) stage.classList.remove('wire-live');
-    if (gsEl) gsEl.classList.remove('gs-dragging');
-    if (hoverWid) { const el = _gridItemEl(hoverWid); if (el) el.classList.remove('wire-target'); }
-    const src = _gridItemEl(_wire.fromWid);
-    if (src) src.classList.remove('wire-source');
-    _wire = null;
-}
-
-// Where the pointer is, in #term-stage coordinates (the SVG overlay's box).
-function _wirePoint(e) {
-    const r = _wire.stage.getBoundingClientRect();
-    return { x: e.clientX - r.left, y: e.clientY - r.top };
-}
-
-function wireDragStart(e, btn, wid) {
-    e.preventDefault();
-    e.stopPropagation();          // or gridstack takes the gesture as a tile drag
-    if (!TERMINALS_ON || _termMode !== 'wall') return;
-    const stage = $('#term-stage');
-    const gsEl = stage && stage.querySelector('.grid-stack');
-    if (!stage || !gsEl) return;
-    _wireCleanup();               // never two wires at once
-    // CMX-117: Wire now lives inside the badge-anchored popover — close it the
-    // instant the drag starts so a `position:fixed` menu never sits open (and
-    // floating on top of the wall) for the whole gesture; it would otherwise
-    // outlive the drag until the next document click.
-    _closeAllPaneOverflows();
-
-    gsEl.classList.add('gs-dragging');   // iframes stop swallowing the mouse
-    stage.classList.add('wire-live');    // every tile sprouts a drop socket
-    const src = _gridItemEl(wid);
-    if (src) src.classList.add('wire-source');
-
-    const svg = document.createElementNS(SVG_NS, 'svg');
-    svg.setAttribute('class', 'wire-overlay');
-    const path = document.createElementNS(SVG_NS, 'path');
-    svg.appendChild(path);
-    stage.appendChild(svg);
-
-    // CMX-123: origin from the SOURCE PANE's top-center, not `btn` — `btn` is the
-    // "Wire to…" row inside the badge/⋮ overflow menu, a `position:fixed` portal, so
-    // anchoring there made the wire visibly start from the floating menu instead of
-    // the pane it's wiring from.
-    const b = (src || btn).getBoundingClientRect(), s = stage.getBoundingClientRect();
-    _wire = {
-        fromWid: wid, svg, path, stage, gsEl, hoverWid: null,
-        x1: b.left + b.width / 2 - s.left, y1: b.top - s.top,
-    };
-    _wireMove(e);
-    document.addEventListener('mousemove', _wireMove);
-    document.addEventListener('mouseup', _wireDrop);
-    document.addEventListener('keydown', _wireKey);
-    // A HELD gesture can end where `document` cannot see it: release the button over
-    // devtools, a second monitor, or the OS desktop and the mouseup never arrives —
-    // `.gs-dragging` would then outlive the drag, and it is what puts
-    // `pointer-events: none` on EVERY .term-frame (style.css). The wall would go dead
-    // to clicks for the whole fleet, with nothing to heal it (buildWall runs only when
-    // the fleet changes). So every way out is wired to the same cleanup.
-    document.addEventListener('pointercancel', _wireCleanup);   // touch stolen, devtools
-    window.addEventListener('blur', _wireCleanup);               // dragged off the window
-}
-
-// The wid of the tile under the pointer (or null — empty stage, or a tile with
-// no gs-id, both of which are a CANCEL, not a room).
-function _wireHit(e) {
-    const el = document.elementFromPoint(e.clientX, e.clientY);
-    const item = el && el.closest && el.closest('#term-stage .grid-stack-item');
-    return (item && item.getAttribute('gs-id')) || null;
-}
-
-function _wireMove(e) {
-    if (!_wire) return;
-    // The primary button is no longer down, and we never saw it come up: it was
-    // released off-window (blur can lag, or never fire if the window kept focus while
-    // the cursor left it). The gesture is OVER — and it ended on nothing we saw, so it
-    // is a CANCEL, not a drop: a room the user did not aim at is worse than no room.
-    if (e.buttons !== undefined && !(e.buttons & 1)) return _wireCleanup();
-    const p = _wirePoint(e);
-    _wire.path.setAttribute('d', bezierPath(_wire.x1, _wire.y1, p.x, p.y));
-    const hit = _wireHit(e);
-    const next = resolveDrop(_wire.fromWid, hit).ok ? hit : null;
-    if (next === _wire.hoverWid) return;
-    if (_wire.hoverWid) { const prev = _gridItemEl(_wire.hoverWid); if (prev) prev.classList.remove('wire-target'); }
-    _wire.hoverWid = next;
-    if (next) { const el = _gridItemEl(next); if (el) el.classList.add('wire-target'); }
-}
-
-function _wireKey(e) { if (e.key === 'Escape') _wireCleanup(); }
-
-async function _wireDrop(e) {
-    if (!_wire) return;
-    const fromWid = _wire.fromWid;
-    const drop = resolveDrop(fromWid, _wireHit(e));
-    const anchor = _gridItemEl(fromWid);
-    _wireCleanup();
-    if (!drop.ok) return;         // self / empty stage / no wid → nothing created
-    const head = anchor && anchor.querySelector('.gs-head');
-    try {
-        const res = await api('/api/rooms/join', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ wids: drop.wids }),
-        });
-        if (!res || res.error) { _termShareToast(head, res && res.error ? res.error : 'wire failed'); return; }
-        _termShareToast(head, `🔌 ${_displayLabel(_nameOfWid(drop.wids[1]))} joined ${res.room}`);
-    } catch (err) {
-        _termShareToast(head, 'wire failed, could not reach the dashboard');
-        return;
-    }
-    await _refreshRooms();
-}
-
-// Click a tile's room badge → leave that room. (The only room *un*-wiring in the
-// UI; the ledger itself is untouched — leaving is a membership edit, not a purge.)
-async function wireRoomClick(btn, wid) {
-    const room = btn && btn.getAttribute('data-room');
-    if (!room) return;
-    try {
-        await api('/api/rooms/leave', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ wid, room }),
-        });
-    } catch (e) { /* transient — the next poll re-reads the truth */ }
-    await _refreshRooms();
-}
-
-// Read the rooms (the SAME dict `chela room status` prints) and PATCH the tiles.
-// Never re-renders the wall: `_termSig` is not consulted and not touched, so no
-// iframe is recreated when membership changes.
-async function _refreshRooms() {
-    if (!TERMINALS_ON || _termMode !== 'wall') return;
-    let status;
-    try { status = await api('/api/rooms'); } catch (e) { return; }   // transient — next tick
-    _roomsCache = status;
-    applyRoomAccents($('#term-stage'), status);
-}
-
-// Repaint accents from cache onto tiles that were just (re)built — a full
-// buildWall or a surgical addWallTiles produces bare tiles, and the room state is
-// already known, so there's no reason to make them wait for the next poll.
-function _replayRoomAccents() {
-    if (_roomsCache) applyRoomAccents($('#term-stage'), _roomsCache);
-}
-
 // Lay the current (non-pinned) wall tiles out to fill the viewport height with
 // NO bottom gap, ordered by `keyFn(wid)` (ascending; ties broken by current
 // x/y so an un-reordered wall keeps its existing positions). This is the
@@ -2917,7 +906,7 @@ function _fillNodesByOrder(keyFn, cols, rows) {
     // around them, leaving a pinned tile's x/y/w/h exactly where the user put
     // it (per-pane layout pin, CMX-108).
     const nodes = _grid.engine.nodes.slice()
-        .filter(n => !_pinned.has(n.id))
+        .filter(n => !_isPinned(n.id))
         .sort((a, b) => (keyFn(a.id) - keyFn(b.id)) || (a.x - b.x) || (a.y - b.y));
     const N = nodes.length;
     if (!N) return false;
@@ -2960,44 +949,29 @@ function _fillNodesByOrder(keyFn, cols, rows) {
     return true;
 }
 
-// Apply a preset layout to the current wall panes (taskbar order, pc_pane_order
-// — see _orderIndex). Persists the result to pc_wall_layout, the SAME manual-
-// layout key a drag/resize writes to, so a preset click is itself a manual
-// arrangement. While auto-arrange is on, positions are computed from
-// rankOrder() instead (never taskbar order) and NEVER persisted here — a
-// preset click while auto is on only changes the column/row count auto fills
-// into, per the auto-arrange contract (manual layout is sacred; auto must
-// never be able to clobber it, including via this button).
-function applyGridLayout(cols, rows, btn) {
-    const host = $('#term-grid-presets');
-    if (btn) {
-        host.querySelectorAll('.gl-btn').forEach(b => b.classList.remove('active'));
-        btn.classList.add('active');
-    }
-    // Remember the active preset so a viewport resize can re-fit it (the fill
-    // is viewport-relative, so a different screen / window size needs a recompute).
-    _wallPreset = { cols, rows };
-    localStorage.setItem('pc_wall_preset', JSON.stringify(_wallPreset));   // persist for reloads + resize re-fit
-    // A preset CLICK (btn) is a choice made from the expanded toolbar: fold it
-    // back to the one glyph, now showing that preset. A resize re-fit is not.
-    if (btn) _collapseGridRow();
-    _reflectGridRow();
+// Apply the active preset (shared/store/wall.ts `wallLayout`, set by the toolbar) to the
+// current wall panes, in pc_pane_order (shared/store/wall.ts `paneOrderKey`). Persists the result to
+// pc_wall_layout, the SAME manual-layout key a drag/resize writes to, so a preset is itself a
+// manual arrangement. Also the re-fit after a viewport resize or a dock change: the fill is
+// viewport-relative. While auto-arrange is on, positions come from rankOrder() instead and are
+// NEVER persisted (manual layout is sacred; auto must never be able to clobber it).
+function applyGridLayout() {
     if (!_grid) return;
+    const { preset, auto, focus } = _layout();
     // Focus owns the layout while it's on (fixed 8/4 split, not a column
-    // count) — a preset click or a viewport resize (this fn's other caller)
-    // just refits the SAME focus layout to the new viewport, it never falls
-    // through to the column/row fill below.
-    if (_wallFocus) {
+    // count) — a preset or a viewport resize just refits the SAME focus
+    // layout to the new viewport, it never falls through to the fill below.
+    if (focus) {
         _focusOrderSig = '';
         _applyWallFocus(_agentsCache);
         return;
     }
-    if (_wallAuto) {
+    if (auto) {
         _autoOrderSig = '';   // force a re-apply at the new column/row count
         _applyAutoArrange(_agentsCache);
         return;
     }
-    if (!_fillNodesByOrder(_orderIndex, cols, rows)) return;
+    if (!_fillNodesByOrder(paneOrderKey(), preset.cols, preset.rows)) return;
     const out = {};
     _grid.save(false).forEach(nd => {
         if (nd.id != null) out[nd.id] = { x: nd.x, y: nd.y, w: nd.w, h: nd.h };
@@ -3013,7 +987,7 @@ function applyGridLayout(cols, rows, btn) {
 // NEVER writes pc_wall_layout: that key is the sacred manual arrangement,
 // restored verbatim by _restoreManualLayout on toggle-off.
 function _applyAutoArrange(agents) {
-    if (!_wallAuto || _termMode !== 'wall' || !_grid) return;
+    if (!_layout().auto || _termMode !== 'wall' || !_grid) return;
     const tiled = new Set(_grid.engine.nodes.map(n => n.id));
     const relevant = (agents || []).filter(a => a && a.window_id && tiled.has(a.window_id));
     const wantsByWid = {};
@@ -3026,7 +1000,8 @@ function _applyAutoArrange(agents) {
     order.forEach((wid, i) => { idx[wid] = i; });
     // A tile GridStack knows about but that fell out of the fresh agents poll
     // (a transient gap, not yet dropped) sorts last rather than throwing.
-    _fillNodesByOrder(wid => (wid in idx ? idx[wid] : Number.MAX_SAFE_INTEGER), _wallPreset.cols, _wallPreset.rows);
+    const { preset } = _layout();
+    _fillNodesByOrder(wid => (wid in idx ? idx[wid] : Number.MAX_SAFE_INTEGER), preset.cols, preset.rows);
 }
 
 // Wall redesign slice 2: restore the user's manual arrangement (pc_wall_layout)
@@ -3039,7 +1014,7 @@ function _restoreManualLayout() {
     let saved = {};
     try { saved = JSON.parse(localStorage.getItem('pc_wall_layout') || '{}'); } catch (e) { /* noop */ }
     const valid = s => s && Number.isInteger(s.x) && Number.isInteger(s.y) && s.w > 0 && s.h > 0;
-    const nodes = _grid.engine.nodes.filter(n => !_pinned.has(n.id) && valid(saved[n.id]));
+    const nodes = _grid.engine.nodes.filter(n => !_isPinned(n.id) && valid(saved[n.id]));
     if (!nodes.length) return;
     _grid.batchUpdate();
     try {
@@ -3065,7 +1040,7 @@ function _restoreManualLayout() {
 //
 // Choose which pane becomes the large focus pane the moment Focus turns on
 // (or its current target falls off the wall — killed, minimized out, pinned):
-// the user's own click-focused pane (._focusedPane — the SAME signal that
+// the user's own click-focused pane (focusedPane() — the SAME signal that
 // paints the .term-focused ring, docs/wall-redesign.md's focus tracking)
 // first, else the first pane that wantsHuman (the attention signal the whole
 // redesign is built on), else the first tiled pane. Pinned panes are never
@@ -3075,11 +1050,12 @@ function _pickFocusWid() {
     if (!_grid) return;
     const tiled = _grid.engine.nodes
         .map(n => n.id)
-        .filter(id => id != null && !_pinned.has(id));
+        .filter(id => id != null && !_isPinned(id));
     if (!tiled.length) return;
     const tiledSet = new Set(tiled);
-    if (_focusedPane) {
-        const item = _focusedPane.closest('.grid-stack-item');
+    const ringed = focusedPane();
+    if (ringed) {
+        const item = ringed.closest('.grid-stack-item');
         const wid = item && item.getAttribute('gs-id');
         if (wid && tiledSet.has(wid)) { _focusWid = wid; return; }
     }
@@ -3107,10 +1083,10 @@ function _clearFocusClasses() {
 // focusLayout, PURE) and applies it in one batch, same GridStack idiom every
 // other fill here uses.
 function _applyWallFocus(agents) {
-    if (!_wallFocus || _termMode !== 'wall' || !_grid) return;
+    if (!_layout().focus || _termMode !== 'wall' || !_grid) return;
     const tiled = _grid.engine.nodes
         .map(n => n.id)
-        .filter(id => id != null && !_pinned.has(id));
+        .filter(id => id != null && !_isPinned(id));
     if (!tiled.length) return;
     const tiledSet = new Set(tiled);
     // The current target fell off the wall (killed/minimized/pinned since it
@@ -3181,13 +1157,13 @@ function _mobileWids() {
 
 // Share the CURRENT terminal session (the active agent, #term-agent's value — the
 // same handle termKey uses). Invoked from the topbar overflow menu; reuses the
-// full share flow (shareBtnClick), so on mobile it opens the bottom-sheet and the
+// full share flow (shareSession), so on mobile it opens the bottom-sheet and the
 // global "N sharing" indicator lights. No current session (e.g. a non-terminals
 // view) → fall back to the command palette's per-session Share list.
 function shareCurrentAgent() {
     const sel = document.getElementById('term-agent');
     const wid = sel && sel.value;
-    if (wid) { shareBtnClick(null, wid); return; }
+    if (wid) { shareSession(wid); return; }
     if (typeof openPalette === 'function') openPalette();
 }
 
@@ -3238,22 +1214,21 @@ function _bindHeaderSwipe() {
 // innerHTML rebuilds, bound once). Only the header promotes: the iframe stays
 // fully interactive (click-to-focus-and-type is untouched), and only while
 // Focus mode is actually on. Buttons/links inside the header (kill/min/max/
-// menu/pin/wire) keep doing their own thing rather than ALSO promoting — the
-// menu button already stopPropagation()s its click (togglePaneOverflow), and
-// this skips any other button/link/popover explicitly.
+// menu) keep doing their own thing rather than ALSO promoting: this skips any
+// button/link/popover explicitly (the ⋯ menu itself is portaled to <body>).
 let _focusPromoteBound = false;
 function _bindFocusPromote() {
     if (_focusPromoteBound) return;
     const stage = document.getElementById('term-stage');
     if (!stage) return;
     stage.addEventListener('click', e => {
-        if (!_wallFocus || _termMode !== 'wall') return;
+        if (!_layout().focus || _termMode !== 'wall') return;
         if (e.target.closest('button, a, .popover')) return;   // let their own handlers act alone
         const head = e.target.closest('.gs-head');
         if (!head) return;
         const item = head.closest('.grid-stack-item');
         const wid = item && item.getAttribute('gs-id');
-        if (!wid || wid === _focusWid || _pinned.has(wid)) return;
+        if (!wid || wid === _focusWid || _isPinned(wid)) return;
         _focusWid = wid;
         _focusOrderSig = '';   // target changed — force a re-apply
         _applyWallFocus(_agentsCache);
@@ -3261,7 +1236,7 @@ function _bindFocusPromote() {
     _focusPromoteBound = true;
 }
 
-// --- SSE: the window set and terminal readiness (CMX-217: moved here from sse.js) ----------
+// --- SSE: the window set (CMX-217: moved here from sse.js; `term-ready` is features/paneframe's) ----------
 // The window set changed (util.js has already invalidated the agent cache). Reconcile by
 // stable window id, not the payload names: refetch the live agent set, drop tiles for
 // vanished wids, and absorb new ones surgically (wall appends a tile, single refreshes the
@@ -3280,24 +1255,9 @@ onEvent('windows', () => {
     }).catch(() => { /* transient: the 4s termTick will catch up */ });
 });
 
-// A terminal just got its ttyd port: swap its placeholder for the iframe now. The ~1.5s
-// ready poll stays the reliable default, so this is purely an accelerator. d.ready carries
-// window ids (@N), the same value as each placeholder's data-pending.
-onEvent('term-ready', d => {
-    if (!TERMINALS_ON || currentTab !== 'terminals') return;
-    const stage = $('#term-stage');
-    (d && d.ready || []).forEach(wid => {
-        if (stage.querySelector('.term-pending[data-pending="' + _cssEsc(wid) + '"]')) {
-            _stopReadyPoll(wid);
-            _termReady.add(wid);
-            _swapToFrame(wid);
-        }
-    });
-});
-
 // --- Stage 0: ES-module exports ---
-export { adoptSidebarDefault, stepAgentMobile, _absorbFreshTerminals, _applyTermFocus, _cssEsc, _displayLabel, _paneKeyLabel, _jsStr, _minimized, paneHead, _orderedWids, _refreshPaneLabels, _renderedWids, _shareBtnHTML, _stopReadyPoll, _updateShareBtns, _swapToFrame, _termReady, dropTerminalPane, focusPaneByWid, isWallVisible, minimizePane, renderTerminals, setTermMode, termTick, shareBtnClick, startTermTimer, stopTermTimer };
+export { adoptSidebarDefault, stepAgentMobile, _absorbFreshTerminals, _displayLabel, _refreshPaneLabels, _renderedWids, dropTerminalPane, focusPaneByWid, isWallVisible, minimizePane, renderTerminals, setTermMode, termTick };
 
 // --- Stage 0: window.chela — surface reachable from inline HTML handlers ---
 window.chela = window.chela || {};
-Object.assign(window.chela, { applyGridLayout, copyWindowId, openDiffModal, orchestratorBtnClick, renamePane, renderTerminals, retryReady, setTermMode, shareBtnClick, shareCurrentAgent, termActionClick, termKey, termKillClick, termKillConfirm, termMaxFor, termMinFor, termMobileFull, termPaste, termPinToggle, toggleDockChip, toggleGridRow, togglePaneOverflow, toggleRecap, toggleWallAuto, toggleWallFocus, toggleWallLock, wireDragStart, wireRoomClick });
+Object.assign(window.chela, { renderTerminals, setTermMode, shareCurrentAgent });

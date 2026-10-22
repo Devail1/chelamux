@@ -330,6 +330,33 @@ def _is_home(cwd: str) -> bool:
         return False
 
 
+def _pane_path(window_id: str) -> str | None:
+    """tmux's ``#{pane_current_path}`` for a window, or None.
+
+    Inside a :func:`chela.probecache.batch` (``/api/agents``) it is read off the shared pane
+    snapshot, so it costs no spawn (CMX-17).
+    """
+    batch = probecache.active()
+    if batch is not None:
+        pane = batch.pane(window_id)
+        return (pane.path or None) if pane is not None else None
+    return discovery.get_window_cwd_by_id(window_id)
+
+
+def _tilde(path: str | None) -> str | None:
+    """``path`` with the home directory written ``~`` (``~``, ``~/src``); others unchanged."""
+    if not path:
+        return None
+    home = os.path.expanduser("~").rstrip("/")
+    if not home:
+        return path
+    if path.rstrip("/") == home:
+        return "~"
+    if path.startswith(home + "/"):
+        return "~" + path[len(home):]
+    return path
+
+
 def _needs_human(wid: str, sess_status: str | None, dispatched: bool) -> bool:
     """Is this window BLOCKED on a human right now — i.e. does it want your attention?
 
@@ -461,6 +488,9 @@ def api_agents():
             "share_epoch": _share_epoch(window_id),
             "window_type": win_type,
             "claude_running": claude_running,
+            # CMX-241: a plain shell's header reads `Shell · <cwd>` until Claude starts in it.
+            # The session's cwd (below) needs a Claude session, so a shell's comes from tmux.
+            "shell_cwd": None if claude_running else _tilde(_pane_path(window_id)),
             "thinking": sess_status == "busy",
             "session_status": sess_status,
             # "sandbox-proxy" when that status came from a sandboxed session's proxy.

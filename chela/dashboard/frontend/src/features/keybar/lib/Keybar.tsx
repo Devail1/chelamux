@@ -1,7 +1,7 @@
 // The on-screen keys under the single pane (CMX-237, FRONTEND_PORT_PLAN.md P29): the
 // collapsible desktop key bar (#term-bar) and the phone's persistent accessory row
 // (#term-keybar, keybar v2, modeled on Moshi's terminal keyboard). Keys go through
-// terminals.js termKey() to /api/term/key; Paste through its termPaste().
+// features/paneframe's termKey() to /api/term/key; Paste through its termPaste().
 import { useEffect, useRef, useState } from 'react';
 import { icons } from '../../../shared/icons/index.ts';
 import { termMode } from '../../../shared/store/wall.ts';

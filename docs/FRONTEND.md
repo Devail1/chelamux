@@ -77,15 +77,29 @@ into `#id` and returns the React root, or `null` when the page has no such eleme
 The page's chrome (CMX-219) mounts from `src/chrome.tsx`, which has no side effect at import so
 the jsdom suites can mount it on a page of their own: the safety float's pills, the sidebar's
 New session, agent count, resources strip and gear menu, the phone "+", the agent detail, and
-`Overlays` (one root for the launch menu, the send-message dialog, the approvals and
-access-request sheets and the update banner). An island that draws one control
+`Overlays` (one root for Settings, the ⌘K palette and the shortcuts sheet, the launch menu, the
+send-message dialog, the approvals and access-request sheets and the update banner). An island that draws one control
 inside a legacy row renders into a `<span class="island-slot">` (`display: contents`), so the
 control lays out as the row's own child.
 
 When a ported surface needs something only legacy knows (the Wall, the view switch, the
 orchestrator slot), legacy hands it in at import, the way `work.js` hands `setWorkPoll` its poll:
-`nav.js` calls `setLauncherHost` and `setAgentDetailHost`. A legacy surface the island only
-opens (the palette, Settings, sharing) is looked up on `window.chela` at call time.
+`nav.js` calls `setLauncherHost`, `setAgentDetailHost` and `setPaletteHost`. A legacy surface
+the island only opens (sharing the current pane) is looked up on `window.chela` at call time.
+
+### Settings, the palette and the iframe contract
+
+Settings (`src/features/settings`, CMX-221) is one `<Dialog>` with every tab rendered while it is
+open, so its search (CMX-396) marks the rendered rows in place: a section card is
+`.settings-section`, a knob is a `FieldRow` (its `keywords` prop is extra words the search
+matches), and the marks are `data-s-hide` / `data-s-hit`, attributes React never renders, so a
+re-render keeps them. A row that lands after the query (a tab's fetch) is marked too.
+
+The ⌘K palette and the shortcuts sheet are `src/features/palette`; its `installPalette()` owns the
+page's global keys (Ctrl/⌘+K, Ctrl/⌘+,). A focused pane's keys never reach the page:
+`app.py`'s `_TERM_PALETTE_KEY_SHIM` calls `window.parent.chela.openPalette()` and
+`.toggleSettings()`, which `src/iframeBridge.ts` registers, exactly those two
+(`iframeBridge.test.ts` fails if one goes missing or another is added).
 
 Islands are a migration path, not the end state: each island is its own root, so context and
 portals do not cross between them. `FRONTEND_PORT_PLAN.md` §2.1 ends in one app shell.
@@ -159,6 +173,48 @@ from `src/shared/icons`, a map from a meaning to a Lucide icon.
 The desktop width (CMX-278) is `--sidebar-w` on the root element, set from the layout's `width`
 (clamped to 264-480 px, default 288; `chela/sidebar_layout.py` clamps the same). The handle sets
 it live while dragging and saves it on release. The phone drawer keeps its own 264 px.
+
+### The pane headers
+
+The Wall's tiles are still built by legacy `terminals.js`; their headers are React
+(`src/features/panehead`, CMX-241, plan P26), the first Wall surface ported inside out. Every
+header on the page is ONE root, portaled into a slot each tile's markup carries
+(`<div class="island-slot" data-head-for="@N" data-head-wall="1">`, `display: contents`).
+`terminals.js` calls `mountPaneHeads(scope)` right after inserting tiles, and BEFORE
+Gridstack adopts them: Gridstack finds each tile's `.gs-grip` drag handle (the title) when it
+inits. A slot that leaves the page is dropped on the next paint.
+
+Paints are synchronous (`flushSync`), on a mount and on every publish of the stores a header
+reads: `agents`, the share state, `orchestrator` and `pinnedPanes` (`shared/store/wall.ts`,
+which the legacy grid code reads too). What a header asks of the Wall (minimize, drop a killed
+tile, start a wire, leave a room, relabel the dock) goes through the host `terminals.js` hands
+`configurePaneHeads()`. Three header elements are still filled by vanilla code, so they
+render with no React children: the facepile `.gs-presence` and the Share row's
+`.gs-share-count` (`collab/presence-owner.js`), and the room badge `.gs-room` (`wire.ts`).
+
+The rest of a tile is React too (CMX-242, plan P27/P28/P30/P32), on the same pattern:
+
+| Module | Draws | Mounted by terminals.js into |
+|---|---|---|
+| `features/tilefoot` | the footer (`.term-ctx-bar`: window id, model, PR, cost, branch, context %, Files) and the wall's action bar; the recap line | each tile's `[data-foot-for]` and `[data-recap-slot]` slots (one root, portals, `flushSync`) |
+| `features/walldock` | the Minimized tray (one row, scrolling sideways) and the lazy dock's decisions for dispatched workers | `#term-min-dock` |
+| `features/walltoolbar` | the layout toolbar (presets, lock, auto-arrange, Focus) | `#wall-toolbar-island` |
+| `features/wire` | the wire gesture and its SVG line; the room accents (`static/js/wire.ts` holds the geometry) | over `#term-stage` while a wire is in flight |
+| `features/paneframe` | the terminal: the ttyd `<iframe>` (its src and per-connection cid), the readiness placeholder and its poll, the focus ring, the keys a pane carries (Alt+N, Ctrl/⌘+K), watch reporting, the background-tab teardown, the 4 s tick; and the keybar's keys and Paste (CMX-246, plan P31) | each tile's `[data-frame-for]` slot |
+
+React renders the pane's `<iframe>` and owns its src, never anything inside it. A frame keeps
+its cid for its mount, so a repaint never reconnects. The teardown blanks a frame by drawing it
+`about:blank` with its src in `data-suspended-src` (`term-reconnect.js` reads both); what else
+crosses the iframe boundary is plan §3's table, one test per row in
+`features/paneframe/tests/boundary.test.tsx`. The 4 s tick's timer is the frame's; the
+reconcile it runs (drop and absorb panes) is still `terminals.js`'s `termTick`, handed in through
+`configurePaneFrames()` with the grid it rebuilds.
+
+The Wall's shared state is `shared/store/wall.ts`: `termMode`, `pinnedPanes`, `minimizedPanes`
+and `wallLayout` (`{preset, locked, auto, focus}`; auto-arrange and Focus exclude each other in
+the setters). The toolbar and the dock write it; `terminals.js` still owns the Gridstack grid
+and applies each change (`_onLayoutChange`, minimize and restore). The footer reads the
+`context` store, which the Wall's 4 s tick publishes.
 
 ### Markdown
 

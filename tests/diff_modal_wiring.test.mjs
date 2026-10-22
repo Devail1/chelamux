@@ -1,12 +1,12 @@
 // PER-SESSION DIFF MODAL WIRING (CMX-299; CMX-237 moved the modal to React): a real click
 // on a real wall tile's "Files" chip opens the diff modal island on the real page.
 //
-// The chip is still legacy (terminals.js `_ctxBarHTML`, an inline
-// `onclick="chela.openDiffModal(...)"`), so this suite drives the boundary a click crosses:
-// the chip is emitted (wall tile AND the single / phone pane, for the SELECTED session), it
-// names itself and draws its glyph, its inline handler escapes the wid, terminals.js
-// registers `chela.openDiffModal` from the island's module, and the island (mounted from the
-// REAL index.html slot) then shows the dialog and fetches THAT session's diff.
+// The chip is the tile footer's (features/tilefoot, CMX-242: React, portaled into the tile
+// terminals.js builds), so this suite drives the boundary a click crosses: the chip is
+// emitted (wall tile AND the single / phone pane, for the SELECTED session), it names itself
+// and draws its glyph, a real click reaches the diff modal with the wid intact, and the
+// island (mounted from the REAL index.html slot) then shows the dialog and fetches THAT
+// session's diff.
 //
 // Everything inside the modal (rows, statuses, the patch drill-down, every dismissal route,
 // the stale-flight guards, HTML escaping, empty and error states) is the island's own:
@@ -58,7 +58,7 @@ function fakeFetch(url) {
     else if (path.endsWith('/api/agents/context')) body = [];
     else if (path.endsWith('/api/rooms')) body = { rooms: {}, pending: [] };
     else if (path.startsWith('/api/term/ready')) body = { ready: true };
-    else if (path.endsWith('/api/agents/%401/diff')) { diffReads.push(path); body = DIFF_STATE; }
+    else if (path.endsWith('/diff')) { diffReads.push(path); body = DIFF_STATE; }
     return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve(body) });
 }
 
@@ -100,27 +100,19 @@ beforeAll(async () => {
 
 const dialog = () => document.querySelector('[role="dialog"].modal-diff');
 
-// jsdom never executes inline `onclick=` attributes on a dispatched click
-// event without `runScripts:"dangerously"` (not set here) — same reasoning
-// as tests/js_helpers/dashboard_dom.mjs's clickOnclick(), extended with an
-// `event` argument since this chip's onclick calls `event.stopPropagation()`
-// before the handler (clickOnclick's own Function ctor only binds `chela`).
+// A real click: the chip's handler is React's (features/tilefoot), not an inline attribute.
 function clickFilesChip(el) {
     if (!el) throw new Error('clickFilesChip: element is missing');
-    const onclick = el.getAttribute('onclick');
-    if (!onclick) throw new Error('clickFilesChip: element has no onclick attribute');
-    return new Function('chela', 'event', onclick).call(el, globalThis.window.chela, { stopPropagation() {} });
+    el.click();
 }
 
 
 test('a real click on the wall tile\'s "Files" chip opens the diff modal island on THAT session\'s diff', async () => {
     assert.equal(dialog(), null, 'the diff modal starts open: the assertions below could not tell a real open from a no-op');
 
-    // 🔴 GUARD (WIRING #1): _ctxBarHTML must emit the chip: the only path into the surface.
+    // 🔴 GUARD (WIRING #1): the footer must emit the chip: the only path into the surface.
     const filesBtn = document.querySelector('.term-ctx-bar[data-ctx-for="@1"] .gs-files');
-    assert.ok(filesBtn, 'the wall tile\'s bottom bar has no .gs-files "Files" chip; _ctxBarHTML dropped it');
-    assert.match(filesBtn.getAttribute('onclick') || '', /chela\.openDiffModal\('@1'\)/,
-        'the Files chip is not wired to chela.openDiffModal');
+    assert.ok(filesBtn, 'the wall tile\'s bottom bar has no .gs-files "Files" chip; the footer dropped it');
     // 🔴 GUARD: the chip is ICON-ONLY: its title is its whole accessible name and tooltip,
     // and an emptied git-compare glyph leaves a button with no visible affordance.
     assert.equal(filesBtn.getAttribute('title'), 'Changed files',
@@ -128,8 +120,7 @@ test('a real click on the wall tile\'s "Files" chip opens the diff modal island 
     assert.ok(/<circle|<path/.test(filesBtn.innerHTML),
         'the Files chip rendered no SVG glyph content: the git-compare icon is empty');
 
-    // 🔴 GUARD (WIRING #2): terminals.js registers chela.openDiffModal from the island's
-    // module; drop it and this throws.
+    // 🔴 GUARD (WIRING #2): the click reaches the island's openDiffModal.
     clickFilesChip(filesBtn);
     await flush();
     // 🔴 GUARD (WIRING #3): the island is mounted from the real slot and shows the dialog.
@@ -145,70 +136,30 @@ test('a real click on the wall tile\'s "Files" chip opens the diff modal island 
     assert.equal(dialog(), null, 'Escape did not close the diff modal');
 });
 
-test('the Files chip escapes a wid containing a single quote so its onclick argument cannot break out of the inline JS string literal', async () => {
-    const evilWid = "@2'x";
-    try {
-        util.setAgentsCache([{ name: 'w2', window_id: evilWid, online: true }]);
-        await terminals.renderTerminals();
-        const filesBtn2 = document.querySelector('.gs-files');
-        assert.ok(filesBtn2, 'no .gs-files chip rendered for the quote-bearing wid');
-        const onclick = filesBtn2.getAttribute('onclick');
-        assert.ok(onclick, 'the chip has no onclick attribute');
-
-        let received;
-        const spyChela = { openDiffModal(wid) { received = wid; } };
-        // 🔴 GUARD (MUTATION #5): `String(wid)` instead of
-        // `escHtml(wid).replace(/'/g, "\\'")` leaves the raw `'` in place —
-        // `chela.openDiffModal('@2'x')` is then a SYNTAX ERROR (the string
-        // literal ends at the second `'`, leaving a bare `x` token), which
-        // `new Function` throws on at compile time, before the handler could
-        // ever run for real.
-        assert.doesNotThrow(() => {
-            new Function('chela', 'event', onclick).call(filesBtn2, spyChela, { stopPropagation() {} });
-        }, 'the onclick attribute is not valid JS — an unescaped quote in the wid broke out of the inline string literal');
-        assert.equal(received, evilWid,
-            "openDiffModal was not called with the wid's full, unescaped-back value");
-    } finally {
-        // restore the single-agent fixture every other test in this file depends on
-        util.setAgentsCache(AGENTS);
-        await terminals.renderTerminals();
-    }
-});
-
-test('the Files chip escapes a wid containing an ampersand so the onclick attribute round-trips it intact', async () => {
-    // 🔴 GUARD: the single-quote test above (MUTATION #5) only exercises the
-    // `.replace(/'/g, ...)` half of the chip's escaping — its evilWid ("@2'x")
-    // carries no character escHtml itself is responsible for, so a mutation
-    // that drops `escHtml(wid)` down to `String(wid)` (keeping the quote
-    // replace) leaves that test green. escHtml encodes a raw "&" to "&amp;";
-    // that's what stops the wid's OWN text from being misread as a second,
-    // unintended HTML entity once it's parsed back out of the onclick
-    // attribute's markup. Pick a wid whose raw text already contains the
-    // literal characters "&amp;" — with escHtml applied first, the raw "&"
-    // gets encoded, so parsing the markup back decodes exactly one entity and
-    // reproduces the original wid. Drop escHtml (`String(wid)`) and the wid's
-    // own "&amp;" text IS a well-formed entity in the emitted markup, so the
-    // HTML parser decodes it too — the wid comes back corrupted to "@3&".
-    const evilWid = '@3&amp;';
-    try {
-        util.setAgentsCache([{ name: 'w3', window_id: evilWid, online: true }]);
-        await terminals.renderTerminals();
-        const filesBtn3 = document.querySelector('.gs-files');
-        assert.ok(filesBtn3, 'no .gs-files chip rendered for the ampersand-bearing wid');
-        const onclick = filesBtn3.getAttribute('onclick');
-        assert.ok(onclick, 'the chip has no onclick attribute');
-
-        let received;
-        const spyChela = { openDiffModal(wid) { received = wid; } };
-        new Function('chela', 'event', onclick).call(filesBtn3, spyChela, { stopPropagation() {} });
-        assert.equal(received, evilWid,
-            "openDiffModal was not called with the wid's full, unescaped-back value — the wid's own \"&amp;\" text was misread as an HTML entity");
-    } finally {
-        // restore the single-agent fixture every other test in this file depends on
-        util.setAgentsCache(AGENTS);
-        await terminals.renderTerminals();
-    }
-});
+// The chip used to be an inline `onclick="chela.openDiffModal('<wid>')"`, so a quote or an
+// ampersand in the wid could break out of the string or be misread as an entity. React passes
+// the wid as a value, never as markup: a quote- or ampersand-bearing wid reaches the modal intact.
+for (const evilWid of ["@2'x", '@3&amp;']) {
+    test(`a real click on the Files chip opens the modal on the exact wid ${JSON.stringify(evilWid)}`, async () => {
+        try {
+            util.setAgentsCache([{ name: 'w', window_id: evilWid, online: true }]);
+            await terminals.renderTerminals();
+            const btn = document.querySelector('.gs-files');
+            assert.ok(btn, `no .gs-files chip rendered for ${evilWid}`);
+            diffReads.length = 0;
+            clickFilesChip(btn);
+            await flush();
+            assert.deepEqual(diffReads, [`/api/agents/${encodeURIComponent(evilWid)}/diff`],
+                'the modal did not read the clicked wid\'s diff, intact');
+            closeDiffModal();
+            await flush();
+        } finally {
+            // restore the single-agent fixture every other test in this file depends on
+            util.setAgentsCache(AGENTS);
+            await terminals.renderTerminals();
+        }
+    });
+}
 
 
 // ---------------------------------------------------------------------------
@@ -357,6 +308,7 @@ test('the Files chip is also emitted (and wired end to end) in single-pane / mob
         globalThis.fetch = url => {
             const path = String(url);
             if (path.endsWith('/api/agents/%402/diff') || path.endsWith('/api/agents/%403/diff')) {
+                diffReads.push(path);
                 return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve(DIFF_STATE) });
             }
             return fakeFetch(url);
@@ -484,9 +436,8 @@ test('the Files chip is also emitted (and wired end to end) in single-pane / mob
             // and is wired, never that it is VISIBLE — a `hidden` attribute
             // gated on `draggable` would leave all of those green while a
             // phone user loses the pane's only entry point into the diff
-            // modal. `hasAttribute` reads the element directly (unlike
-            // clickFilesChip below, which invokes the onclick handler via
-            // `new Function(...)` and would fire on a hidden button too).
+            // modal. `hasAttribute` reads the element directly (a jsdom click
+            // below would fire on a hidden button too).
             assert.equal(filesBtn.hasAttribute('hidden'), false,
                 `${label}: the single-pane Files chip is present but has a "hidden" attribute — a phone/single-pane user cannot see or reach it, even though every wiring assertion below would still pass`);
             // Round 7 (judge): `hasAttribute('hidden')` pins ONE mechanism —
@@ -502,8 +453,6 @@ test('the Files chip is also emitted (and wired end to end) in single-pane / mob
             // mirrors the draggable-gating idiom already in this file).
             assert.notEqual(getComputedStyle(filesBtn).display, 'none',
                 `${label}: the single-pane Files chip is present but computed display:none — a phone/single-pane user cannot see or reach it, even though every wiring assertion below would still pass`);
-            assert.match(filesBtn.getAttribute('onclick') || '', new RegExp(`chela\\.openDiffModal\\('${expectedWid}'\\)`),
-                `${label}: the single-pane Files chip is wired to the wrong session — it must open ${expectedWid} (the DISPLAYED/selected agent), not a positional default`);
             assert.equal(filesBtn.getAttribute('title'), 'Changed files',
                 `${label}: the single-pane Files chip lost its "Changed files" title`);
             assert.ok(/<circle|<path/.test(filesBtn.innerHTML),
@@ -511,8 +460,11 @@ test('the Files chip is also emitted (and wired end to end) in single-pane / mob
 
             assert.equal(dialog(), null,
                 `${label}: the diff modal starts open — the click assertion below could not tell a real open from a no-op`);
+            diffReads.length = 0;
             clickFilesChip(filesBtn);
             await flush();
+            assert.deepEqual(diffReads, [`/api/agents/${encodeURIComponent(expectedWid)}/diff`],
+                `${label}: the single-pane Files chip opened the wrong session: it must open ${expectedWid} (the DISPLAYED/selected agent), not a positional default`);
             assert.ok(dialog(),
                 `${label}: clicking the single-pane Files chip never showed the diff modal — the non-draggable path's chip is present but dead`);
 

@@ -133,7 +133,7 @@ test('popping the dock out flips the cue on — driven by the SAME wall state, l
 
 test('minimizing a wall pane by hand flips the cue back off', () => {
     const tile = document.querySelector(`#term-stage .grid-stack-item[gs-id="${HUMAN}"]`);
-    window.chela.termMinFor(tile.querySelector('.gs-min-btn'));
+    tile.querySelector('.gs-min-btn').click();   // the header's own control (React, CMX-241)
     sidebar.renderSidebarAgents(AGENTS);
     assert.ok(!rowFor(HUMAN).classList.contains('on-wall'),
         'a pane just minimized to the dock must lose the on-wall cue immediately');

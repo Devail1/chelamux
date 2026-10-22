@@ -259,12 +259,10 @@ const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..', 'chela', 'dashb
 const src = p => readFileSync(join(ROOT, p), 'utf8');
 
 const CSS = src('static/style.css');
-const TERMINALS = src('static/js/terminals.js');
-const NAV = src('static/js/nav.js');
 const VIEWS_SRC = src('static/js/views.js');
 
 // --- jsdom fixtures: mount the REAL style.css and a concrete, hand-written
-// fragment of REAL markup (mirroring terminals.js's paneHead()/
+// fragment of REAL markup (mirroring features/panehead's PaneHead and terminals.js's
 // _wallTileHTML()/_ctxBarHTML(), nav.js's _agentRowHtml(), and index.html's
 // sidebar section closely enough to match every selector these guards read —
 // verified against those sources as of round 9) in jsdom, then read jsdom's
@@ -541,8 +539,7 @@ test('full-space Wall (CMX-377): .grid-stack resolves ZERO padding and ZERO marg
 // span (or the text it carries) and leaving only the colour class must fail.
 
 // 3a. The wall's .gs-state pill: tileState() (wallmodel.ts, pure) is the ONE
-// source both the initial paneHead markup and every live repaint
-// (_applyWallTileFrame) draw from — see terminals.js below. The pill draws only
+// source the pane header (features/panehead) draws it from. The pill draws only
 // the WORD (CMX-393: the shape is `.gs-dot`; CMX-236 dropped the never-drawn
 // glyph), so every state must carry a non-empty word, and no two states the same
 // one; blanking or merging any (idle/working/needs-you/done/unknown) fails here.
@@ -562,34 +559,16 @@ test('non-hue cue — wall .gs-state pill: every tileState() result carries its 
     assert.equal(new Set(words).size, cases.length, `two states share a word, so only colour tells them apart: ${words}`);
 });
 
-test('non-hue cue — wall .gs-state pill: both the initial paint AND every live repaint set the word text node', () => {
-    // Initial paint: paneHead's own literal markup (terminals.js), before the
-    // first live repaint ever runs. `[^<]+`-style: the word must be non-empty.
-    // CMX-393: the pill is the WORD only — its shape partner is the header's
-    // `.gs-dot` (a glyph in here drew every state twice); tests/wallnav.test.mjs
-    // 12c guards that the pill stays glyph-free through a live repaint.
-    assert.match(TERMINALS, /<span class="gs-state gs-state-idle"[^>]*><span class="gs-state-word">idle<\/span><\/span>/,
-        'paneHead\'s initial .gs-state markup no longer carries the word "idle" (and only it)');
-    // Live repaint: _applyWallTileFrame must write the word text node from
-    // tileState()'s result, not just recolour the pill via className.
-    const frame = TERMINALS.slice(TERMINALS.indexOf('function _applyWallTileFrame'));
-    const body = frame.slice(0, frame.indexOf('\nfunction ', 10));
-    assert.match(body, /el\.className\s*=\s*'gs-state gs-state-'\s*\+\s*s\.cls/,
-        '_applyWallTileFrame must still recolour the pill from tileState().cls');
-    assert.match(body, /w\.textContent\s*=\s*s\.word/,
-        '_applyWallTileFrame no longer repaints the word text node — a live state change would go hue-only');
-});
+// The pill's paint (first render and every live change writing the word, not just the
+// class) is the React pane header's since CMX-241: features/panehead/tests/PaneHead.test.tsx.
 
-// 3b. The sidebar's .ar-state line: idle/working/waiting, each a real word
-// (nav.js's _AGENT_STATUS_WORD), rendered as the span's TEXT content, not just
-// its class.
-test('non-hue cue — sidebar .ar-state: idle/working/waiting each map to a real word, not blank', () => {
-    const m = NAV.match(/_AGENT_STATUS_WORD\s*=\s*\{([^}]*)\}/);
-    assert.ok(m, '_AGENT_STATUS_WORD not found in nav.js');
-    const map = Object.fromEntries(
-        [...m[1].matchAll(/(\w+):\s*'([^']*)'/g)].map(mm => [mm[1], mm[2]]));
+// 3b. The palette's status words: idle/working/waiting, each a real word on the row's sub-line
+// (features/palette, CMX-221; nav.js's _AGENT_STATUS_WORD before). The sidebar's own row is read
+// rendered below.
+test('non-hue cue — the palette\'s status words: idle/working/waiting each map to a real word, not blank', async () => {
+    const { STATUS_WORD } = await import('../chela/dashboard/frontend/src/features/palette/model.ts');
     for (const [color, want] of [['green', 'working'], ['yellow', 'waiting'], ['grey', 'idle']]) {
-        assert.equal(map[color], want, `_AGENT_STATUS_WORD.${color} must be the word "${want}"`);
+        assert.equal(STATUS_WORD[color], want, `STATUS_WORD.${color} must be the word "${want}"`);
     }
 });
 
@@ -651,34 +630,10 @@ test('context-% threshold non-hue cue — sidebar .ar-ctx renders the numeric pe
     assert.ok(chip.classList.contains('danger'), chip.className);
 });
 
-test('context-% threshold non-hue cue — the wall .gs-ctx chip renders "N% · used/total" as text, class is reinforcement only', () => {
-    const fn = TERMINALS.slice(TERMINALS.indexOf('function _applyTermContext'));
-    const body = fn.slice(0, fn.indexOf('\nfunction ', 10));
-    assert.match(body, /ctxChip\.textContent\s*=\s*`\$\{pct\}%/,
-        '.gs-ctx no longer sets its textContent from the numeric pct — a threshold crossing would be colour-only');
-    assert.match(body, /ctxChip\.className\s*=\s*'gs-ctx'\s*\+\s*\(sev/,
-        '.gs-ctx no longer applies the warn/danger class as a SEPARATE reinforcement on top of the text');
-});
-
-// --- GUARD 5: footer completeness — model, spend, branch, context% and tokens
-// (the exact 5 fields the ticket says "this ticket does NOT trade away") must
-// all still exist in the wall pane footer. Removing any one field's chip must
-// fail here, NAMING the missing field.
-test('wall pane footer completeness: model + spend + branch + context% + tokens all present', () => {
-    const fn = TERMINALS.slice(TERMINALS.indexOf('function _ctxBarHTML'));
-    const body = fn.slice(0, fn.indexOf('\nfunction ', 10));
-    const FIELDS = {
-        'model': /class="gs-model"/,
-        'spend (cost)': /class="gs-cost"/,
-        'branch': /class="gs-branch"/,
-        // context% AND tokens both render inside the SAME .gs-ctx chip — see
-        // _applyTermContext's `${pct}%...${counter}` template, asserted above.
-        'context% / tokens (gs-ctx)': /class="gs-ctx"/,
-    };
-    for (const [name, re] of Object.entries(FIELDS)) {
-        assert.match(body, re, `the wall pane footer is missing its ${name} field`);
-    }
-});
+// The wall .gs-ctx chip's "N% · used/total" text (the class only reinforces it) and the wall
+// footer's completeness (model, spend, branch, context % and tokens) are the tile footer's
+// own (CMX-242): frontend/src/features/tilefoot/tests/TileFoot.test.tsx renders the real
+// component instead of grepping terminals.js for the markup it no longer holds.
 
 // --- GUARD 7: nav inventory — CMX-279 (measured, not assumed: asked which of
 // the seven views he actually opens, Liav named exactly two) supersedes
