@@ -8,7 +8,8 @@ const escape = () => act(async () => document.activeElement?.dispatchEvent(new K
 // A close commits through Radix's Presence, which can land a turn later on a loaded machine
 // (the full pytest run): wait for it, so the next test's reset never orphans a live portal.
 afterEach(async () => {
-  await vi.waitFor(() => expect(document.querySelector('[role="dialog"]')).toBeNull());
+  // up to the test timeout, not waitFor's 1 s: under the full run that turn can take longer
+  await vi.waitFor(() => expect(document.querySelector('[role="dialog"]')).toBeNull(), { timeout: 4500 });
 });
 
 test('boot installs the bridge, the saved theme, the panes\' window.chela contract and the page keys', async () => {
