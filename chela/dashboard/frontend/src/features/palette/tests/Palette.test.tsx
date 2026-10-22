@@ -143,6 +143,29 @@ test('the arrows move the selection (wrapping), the pointer moves it too, Enter 
   expect(palette.get().open).toBe(false);
 });
 
+test('a row whose target went away closes the palette without a throw', () => {
+  host.selectView.mockImplementation(() => { throw new Error('view gone'); });
+  open();
+  typeQ('work');
+  expect(() => fireEvent.click(row('Work'))).not.toThrow();
+  expect(palette.get().open).toBe(false);
+  host.selectView.mockReset();
+});
+
+test('the rows redraw when the agents change while open, and Enter runs the row on screen', () => {
+  open();
+  expect(titles()[0]).toBe('bravo');
+  act(() => agents.set([{ name: 'alpha', window_id: '@1', title: 'Alpha', s: 'yellow' }, { name: 'bravo', window_id: '@2' }]));
+  expect(titles().slice(0, 2)).toEqual(['Alpha', 'bravo']); // alpha now waits on you
+  // the wall's own state is not a store: a pane closing does not redraw, and Enter still runs
+  // the row that is drawn, not a fresh read's first row
+  const rendered = host.wall.rendered;
+  host.wall.rendered = () => ['@2'];
+  key({ key: 'Enter' });
+  host.wall.rendered = rendered;
+  expect(host.wall.focus.mock.calls).toEqual([['@1']]);
+});
+
 test('Ctrl+K toggles the palette (⌘K too), and Escape closes it', () => {
   const ev = key({ key: 'k', ctrlKey: true }, document);
   expect([palette.get().open, ev.defaultPrevented]).toEqual([true, true]);

@@ -174,3 +174,16 @@ test('Approval requests: off by default; on asks the browser and stores it; a re
   await pick('approval-notify-select', 'Browser notification');
   expect([localStorage.getItem('chela_approval_notify'), sel().textContent]).toEqual([null, 'Off']);
 });
+
+test('storage that throws (a private window, blocked site data): Settings still renders and a pick still applies', async () => {
+  const boom = () => { throw new DOMException('blocked', 'SecurityError'); };
+  vi.spyOn(Storage.prototype, 'getItem').mockImplementation(boom);
+  vi.spyOn(Storage.prototype, 'setItem').mockImplementation(boom);
+  vi.spyOn(Storage.prototype, 'removeItem').mockImplementation(boom);
+  await openOn('appearance');
+  expect(must(document.getElementById('theme-select')).textContent).toBe('Dark');
+  await pick('theme-select', 'Nord');
+  expect(document.body.dataset.theme).toBe('nord');
+  await pick('term-size-select', '16px');
+  expect(must(document.getElementById('term-size-select')).textContent).toBe('16px');
+});

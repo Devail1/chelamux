@@ -416,3 +416,19 @@ test('the projects folder: stored value in the field, the effective dir as place
   expect(src('cfg-projects-msg')).toBe('Saved · scanning /home/u/work');
   expect(calls.some((c) => c.path === '/api/launcher')).toBe(true); // the launch menu re-reads its suggestions
 });
+
+test('before /api/config lands the folder field is not the stored one: Save and Enter are off and post nothing', async () => {
+  let release: (v: unknown) => void = () => {};
+  routes['GET /api/config'] = () => new Promise((r) => { release = r; });
+  await openOn();
+  const input = must(document.getElementById('cfg-projects-dir')) as HTMLInputElement;
+  const save = must([...document.querySelectorAll<HTMLButtonElement>('button')].find((b) => b.textContent === 'Save' && b.closest('.settings-section')?.querySelector('#cfg-projects-dir')));
+  expect([input.disabled, save.disabled]).toEqual([true, true]);
+  fireEvent.keyDown(input, { key: 'Enter' });
+  fireEvent.click(save);
+  await settle();
+  expect(posts('/api/config')).toEqual([]);
+  release({ projects_dir: '~/code' });
+  await settle();
+  expect([input.disabled, save.disabled, input.value]).toEqual([false, false, '~/code']);
+});

@@ -96,7 +96,9 @@ export function Settings() {
     mo.observe(el, { childList: true, subtree: true, characterData: true });
     return () => mo.disconnect();
   }, [s.query, s.open, searching]);
-  const status = count === null ? '' : countText(count, s.query);
+  // Only while searching: a count left from a closed modal's query never shows on a reopen.
+  const shown = searching ? count : null;
+  const status = shown === null ? '' : countText(shown, s.query);
   return (
     <Dialog open={s.open} onOpenChange={(o) => { if (!o) closeSettings(); }} title="Settings" variant="settings" id="settings-drawer"
       className={searching ? 'searching' : undefined}
@@ -109,7 +111,7 @@ export function Settings() {
       }}>
       <div className="settings-search">
         <TextInput search plain id="settings-search" label="Search settings" placeholder="Search settings" value={s.query} onChange={setSettingsQuery} autoFocus={!coarse()} />
-        <p className="settings-search-empty" id="settings-search-empty" hidden={count !== 0}>{count === 0 ? status : ''}</p>
+        <p className="settings-search-empty" id="settings-search-empty" hidden={shown !== 0}>{shown === 0 ? status : ''}</p>
         <span className="sr-only" id="settings-search-status" role="status" aria-live="polite">{status}</span>
       </div>
       <div className="settings-modal-body">

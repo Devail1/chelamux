@@ -255,3 +255,15 @@ test('picking a tab mid-search drops the query and goes to that tab', async () =
   expect(activeTab()).toEqual(['timing']);
   expect(modal().classList.contains('searching')).toBe(false);
 });
+
+test('a reopen after a missed query shows no stale empty state (the query is gone, so is its count)', async () => {
+  await openOn();
+  await query('zzqqxx');
+  expect(visible(must(document.getElementById('settings-search-empty')))).toBe(true);
+  fireEvent.click(screen.getByRole('button', { name: 'Close' }));
+  await settle(1);
+  act(() => openSettings());
+  await settle(1);
+  const empty = must(document.getElementById('settings-search-empty'));
+  expect([visible(empty), empty.textContent, status()]).toEqual([false, '', '']);
+});

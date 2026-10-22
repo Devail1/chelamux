@@ -135,6 +135,14 @@ export function paletteRows(q: string): { items: PaletteItem[]; panes: number } 
   return { items: panes.concat(baseItems(host, new Set(panes.map((p) => p.wid as string)))), panes: panes.length };
 }
 
+// The rows the palette last drew. The keys and a click run THESE, never a fresh read: an agent
+// turning to waiting, or a share starting, reorders the rows, and Enter must run what was on screen.
+let drawn: PaletteItem[] | null = null;
+export function setDrawnRows(items: PaletteItem[] | null): void {
+  drawn = items;
+}
+const rowsNow = () => (palette.get().open && drawn ? drawn : paletteRows(palette.get().query).items);
+
 export function openPalette(): void {
   patch({ open: true, query: '', sel: 0, fromSidebar: false });
 }
@@ -163,7 +171,7 @@ export function sidebarJumpInput(el: HTMLInputElement): void {
 }
 
 export function movePalette(d: number): void {
-  const n = paletteRows(palette.get().query).items.length;
+  const n = rowsNow().length;
   if (!n) return;
   patch({ sel: (palette.get().sel + d + n) % n });
 }
@@ -174,7 +182,7 @@ export function hoverPalette(i: number): void {
 
 /** Run row `i` (the selected one by default): the palette closes first. */
 export function runPalette(i = palette.get().sel): void {
-  const it = paletteRows(palette.get().query).items[i];
+  const it = rowsNow()[i];
   if (!it) return;
   closePalette();
   try {

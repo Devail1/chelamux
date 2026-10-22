@@ -152,7 +152,10 @@ function Projects() {
   const [draft, setDraft] = useState<string | null>(null);
   const [msg, setMsg] = useState<Msg>(null);
   const value = draft ?? cfg?.projects_dir ?? '';
+  // Until /api/config lands the field is not the stored folder: a Save would clear it.
+  const ready = !!cfg && !cfg.error;
   const save = async () => {
+    if (!ready) return;
     setMsg({ cls: '', text: 'Saving…' });
     const r = await postConfig({ projects_dir: value.trim() });
     if (r.failed) {
@@ -168,9 +171,9 @@ function Projects() {
       <p className="s-desc">Scanned for git repos to suggest in the <strong>+</strong> launch menu. Defaults to{' '}
         <code>~/projects</code> (or the <code>CHELA_PROJECTS_DIR</code> env var). Takes effect immediately, no restart.</p>
       <FieldRow id="cfg-projects-dir" label="Folder">
-        <TextInput plain value={value} onChange={setDraft} placeholder={cfg?.projects_dir_effective || '~/projects'} onEnter={() => void save()} />
+        <TextInput plain value={value} onChange={setDraft} placeholder={cfg?.projects_dir_effective || '~/projects'} onEnter={() => void save()} disabled={!ready} />
       </FieldRow>
-      <div className="s-row"><Button variant="primary" onClick={() => void save()}>Save</Button></div>
+      <div className="s-row"><Button variant="primary" disabled={!ready} onClick={() => void save()}>Save</Button></div>
       <SaveMsg id="cfg-projects-msg" msg={msg} />
     </Section>
   );

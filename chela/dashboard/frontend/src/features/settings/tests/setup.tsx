@@ -3,7 +3,7 @@
 import { act, cleanup, fireEvent, render, screen } from '@testing-library/react';
 import STYLE_CSS from '../../../../../static/style.css?raw';
 import { afterAll, afterEach, beforeAll, beforeEach, vi } from 'vitest';
-import { Settings, closeSettings, openSettings, selectSettingsTab } from '../index.ts';
+import { Settings, closeSettings, config, openSettings, selectSettingsTab } from '../index.ts';
 
 // Each test opens the whole modal (every tab renders, for the search): under a loaded machine
 // (pytest -n auto runs this beside everything else) that outlasts Vitest's 5 s default.
@@ -56,6 +56,7 @@ beforeEach(() => {
 afterEach(() => {
   act(() => closeSettings());
   act(() => selectSettingsTab('general'));
+  config.set(null); // each test's page starts with no config read yet
   cleanup();
   vi.unstubAllGlobals();
   vi.restoreAllMocks();

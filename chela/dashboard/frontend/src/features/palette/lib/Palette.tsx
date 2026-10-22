@@ -2,15 +2,25 @@
 // nav.js and index.html's #palette / #shortcuts-overlay.
 import { Fragment, useLayoutEffect, useRef } from 'react';
 import { icons } from '../../../shared/icons/index.ts';
+import { agents } from '../../../shared/store/agents.ts';
+import { launcher } from '../../../shared/store/launcher.ts';
 import { useStore } from '../../../shared/store/index.ts';
+import { shares } from '../../share/index.ts';
 import { Dialog, TextButton, TextInput } from '../../../shared/ui/index.ts';
-import { closePalette, closeShortcuts, hoverPalette, palette, paletteRows, runPalette, setPaletteQuery, shortcuts } from './state.ts';
+import { closePalette, closeShortcuts, hoverPalette, palette, paletteRows, runPalette, setDrawnRows, setPaletteQuery, shortcuts } from './state.ts';
 
 export function Palette() {
   const s = useStore(palette);
+  // the rows read these: a change redraws them while the palette is open
+  useStore(agents);
+  useStore(launcher);
+  useStore(shares);
   const list = useRef<HTMLDivElement>(null);
   const { items, panes } = s.open ? paletteRows(s.query) : { items: [], panes: 0 };
   const sel = s.sel < items.length ? s.sel : 0;
+  useLayoutEffect(() => {
+    setDrawnRows(s.open ? items : null);
+  });
   useLayoutEffect(() => {
     list.current?.querySelector('.palette-item.sel')?.scrollIntoView?.({ block: 'nearest' });
   }, [sel, s.open]);
