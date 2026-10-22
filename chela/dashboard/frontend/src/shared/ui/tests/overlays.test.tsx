@@ -446,6 +446,13 @@ describe.each(SURFACES)('CMX-306: the %s overlay', (_name, draw, closeClass) => 
     expect(onOpenChange).not.toHaveBeenCalled();
   });
 
+  test('a backdrop press that never clicked there, then a click inside it (it bubbles up), leaves it open', () => {
+    const { onOpenChange, overlay } = mount();
+    fireEvent.pointerDown(overlay()); // released outside the window: no click on the backdrop
+    fireEvent.click(screen.getByRole('dialog')); // a click that lands inside it and bubbles up
+    expect(onOpenChange).not.toHaveBeenCalled();
+  });
+
   test('a backdrop tap while a floating layer is open above it leaves the dialog open', () => {
     const { onOpenChange, overlay } = mount();
     const wrapper = document.createElement('div');
