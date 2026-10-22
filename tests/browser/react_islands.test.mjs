@@ -72,7 +72,7 @@ test('the version island renders the real version in the Settings modal beside t
     // (CMX-221: the modal is a React dialog, drawn only while open).
     await page.waitForFunction(() => typeof window.chela?.toggleSettings === 'function', null, { timeout: 15_000 });
     await page.evaluate(() => window.chela.toggleSettings());
-    await page.waitForFunction(() => getComputedStyle(document.getElementById('settings-drawer')).opacity === '1',
+    await page.waitForFunction(() => { const m = document.getElementById('settings-drawer'); return !!m && getComputedStyle(m).opacity === '1'; },
         null, { timeout: 5_000 });
     await badge.waitFor({ timeout: 15_000 });
     assert.equal(await badge.textContent(), `build ${version}`);

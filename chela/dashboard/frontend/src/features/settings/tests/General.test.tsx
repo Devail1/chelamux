@@ -1,7 +1,7 @@
 // CMX-221: Settings > General, ported from tests/settings_update.test.mjs (the Update card,
 // CMX-199 / CMX-56 / CMX-95), settings_remote_control, settings_file_drop and
 // settings_telegram_topics (CMX-204), plus the agent mode and model and the projects folder.
-import { act, fireEvent, screen } from '@testing-library/react';
+import { fireEvent, screen } from '@testing-library/react';
 import { beforeEach, expect, test, vi } from 'vitest';
 import { updateDeps } from '../index.ts';
 import { calls, must, openOn, pick, posts, routes, settle, type } from './setup.tsx';
@@ -96,14 +96,9 @@ test.each([
   expect([...code.querySelectorAll('.s-cmd-arg')].map((a) => a.textContent)).toEqual(stale);
 });
 
-test('a service whose freshness is unknown is named as such, on every readable state', async () => {
-  for (const extra of [{ behind: 2 }, { stale_services: ['chela-daemon'] }, {}]) {
-    routes['/api/settings'] = { sections: [], update: { ok: true, behind: 0, branch: 'dev', stale_services: [], unknown_services: ['chela-agent-terminals'], ...extra } };
-    await openOn();
-    expect(row()).toMatch(/freshness unknown for chela-agent-terminals/);
-    act(() => document.querySelector<HTMLButtonElement>('[aria-label="Close"]')?.click());
-    await settle(1);
-  }
+test.each([[{ behind: 2 }], [{ stale_services: ['chela-daemon'] }], [{}]])('a service whose freshness is unknown is named as such (%j)', async (extra) => {
+  await openWith({ ok: true, behind: 0, branch: 'dev', stale_services: [], unknown_services: ['chela-agent-terminals'], ...extra });
+  expect(row()).toMatch(/freshness unknown for chela-agent-terminals/);
 });
 
 test('Restart says what it is restarting, follows the poll, then states the outcome', async () => {

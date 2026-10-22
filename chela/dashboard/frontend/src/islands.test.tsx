@@ -11,23 +11,28 @@ afterEach(async () => {
   await vi.waitFor(() => expect(document.querySelector('[role="dialog"]')).toBeNull());
 });
 
-test('boot installs the bridge, the saved theme and the panes\' window.chela contract; Settings shows the build', async () => {
-  vi.stubGlobal('fetch', () => Promise.resolve({ ok: true, json: () => Promise.resolve({ version: 'v9' }) }));
+test('boot installs the bridge, the saved theme, the panes\' window.chela contract and the page keys', async () => {
+  // No overlays slot: a second Overlays root would stay subscribed to the dialogs' stores after
+  // this test's body is reset, and draw (then fail to remove) a later test's portals.
+  document.body.innerHTML = '';
   localStorage.setItem('chela_theme', 'nord');
-  document.body.innerHTML = '<div id="overlays-island"></div>';
   Reflect.deleteProperty(window, 'chelaBridge');
   await act(async () => boot(window));
   expect(window.chelaBridge?.agents.get()).toEqual([]);
   expect(document.body.dataset.theme).toBe('nord');
+  const { settings, toggleSettings } = await import('./features/settings/index.ts');
+  const { closePalette, palette } = await import('./features/palette/index.ts');
   const chela = (window as unknown as { chela: { toggleSettings(): void; openPalette(): void } }).chela;
-  await act(async () => chela.toggleSettings());
-  expect(document.querySelector('#settings-drawer #version-island')?.textContent).toBe('build v9');
-  await escape();
-  await act(async () => chela.openPalette());
-  expect(document.getElementById('palette-input')).not.toBeNull();
-  await escape();
+  chela.toggleSettings();
+  expect(settings.get().open).toBe(true);
+  toggleSettings();
+  document.dispatchEvent(new KeyboardEvent('keydown', { key: 'k', ctrlKey: true, bubbles: true }));
+  expect(palette.get().open).toBe(true);
+  closePalette();
+  chela.openPalette();
+  expect(palette.get().open).toBe(true);
+  closePalette();
   localStorage.clear();
-  vi.unstubAllGlobals();
 });
 
 test('boot mounts the keybar and diff modal islands into their slots (CMX-237)', async () => {

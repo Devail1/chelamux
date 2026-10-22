@@ -93,7 +93,7 @@ describe('CMX-291 desktop 1440×900: the build string is in Settings, not the si
         await page.evaluate(() => window.chela.toggleSettings());
         await page.waitForFunction(() => {
             const m = document.getElementById('settings-drawer');
-            return m.classList.contains('open') && getComputedStyle(m).opacity === '1';
+            return !!m && m.classList.contains('open') && getComputedStyle(m).opacity === '1';   // CMX-221: drawn once open
         }, null, { timeout: 5000 });
         const badge = page.locator('#settings-drawer #version-island .version-badge');
         // CMX-221: the badge mounts with the modal and reads /api/version then.

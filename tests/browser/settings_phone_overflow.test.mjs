@@ -299,7 +299,7 @@ for (const [width, height] of [[390, 844], [360, 740]]) {
                 await page.evaluate(() => window.chela.toggleSettings());
                 await page.waitForFunction(() => {
                     const m = document.getElementById('settings-drawer');
-                    return m.classList.contains('open') && getComputedStyle(m).opacity === '1';
+                    return !!m && m.classList.contains('open') && getComputedStyle(m).opacity === '1';   // CMX-221: drawn once open
                 }, null, { timeout: 5000 });
                 // The Update card's stale-services detail is what Liav saw break.
                 await page.waitForFunction(() => /pm2 restart/.test(document.getElementById('update-status-row').textContent),

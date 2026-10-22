@@ -222,7 +222,7 @@ def test_test_fails_on_a_failing_spec_and_still_runs_the_real_ones(tmp_path):
     code, out, _ = _pnpm(_violating_copy(tmp_path, "test"), "test")
     assert code != 0, _shown(out, 4000)
     plain = re.sub(r"\x1b\[[0-9;]*m", "", out.decode())   # CI colours vitest's summary
-    assert re.search(r"Tests\s+1 failed \| 1154 passed \(1155\)", plain), _shown(out, 4000)
+    assert re.search(r"Tests\s+1 failed \| 1156 passed \(1157\)", plain), _shown(out, 4000)
 
 
 def test_the_frontend_is_a_pnpm_workspace_member_with_exact_pins():

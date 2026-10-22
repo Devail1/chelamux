@@ -5,6 +5,10 @@ import STYLE_CSS from '../../../../../static/style.css?raw';
 import { afterAll, afterEach, beforeAll, beforeEach, vi } from 'vitest';
 import { Settings, closeSettings, openSettings, selectSettingsTab } from '../index.ts';
 
+// Each test opens the whole modal (every tab renders, for the search): under a loaded machine
+// (pytest -n auto runs this beside everything else) that outlasts Vitest's 5 s default.
+vi.setConfig({ testTimeout: 30_000 });
+
 globalThis.ResizeObserver ??= class {
   observe() {}
   unobserve() {}

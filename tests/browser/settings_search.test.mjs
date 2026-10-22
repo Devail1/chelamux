@@ -52,7 +52,7 @@ for (const [width, height] of [[1440, 900], [390, 844]]) {
             await page.keyboard.press('Control+Comma');
             await page.waitForFunction(() => {
                 const m = document.getElementById('settings-drawer');
-                return m.classList.contains('open') && getComputedStyle(m).opacity === '1';
+                return !!m && m.classList.contains('open') && getComputedStyle(m).opacity === '1';   // CMX-221: drawn once open
             }, null, { timeout: 5000 });
             const input = await box(page, '#settings-search');
             inside(input, view, '#settings-search');
