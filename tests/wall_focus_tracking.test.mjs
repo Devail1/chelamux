@@ -1,7 +1,7 @@
 // CMX-104: THE FOCUS RING MARKS THE PANE THAT HOLDS THE KEYBOARD — AND ONLY IT.
 // Live after CMX-90 (two-pane Wall, Focus layout): Liav typed into @2 (its xterm drew
 // the solid, focused cursor) while the .term-focused ring sat on @3 (hollow, blurred
-// cursor). _applyTermFocus trusted the PARENT's document.activeElement and only ever
+// cursor). the ring (now features/paneframe's applyTermFocus) trusted the PARENT's document.activeElement and only ever
 // un-ringed the one pane it remembered. It now asks each term frame's OWN
 // document.hasFocus() — the focus xterm's cursor follows — and re-asserts "exactly
 // one .term-focused, on that pane" on the DOM every tick.
@@ -60,7 +60,7 @@ function fakeGridStack() {
     };
 }
 
-let terminals;
+let terminals, paneframe;
 
 beforeAll(async () => {
     const dom = new JSDOM(`<!doctype html><html><body>${PANEL}</body></html>`,
@@ -86,6 +86,7 @@ beforeAll(async () => {
     await import('../chela/dashboard/frontend/src/boot.ts');
     const util = await import('../chela/dashboard/static/js/util.js');
     terminals = await import('../chela/dashboard/static/js/terminals.js');
+    paneframe = await import('../chela/dashboard/frontend/src/features/paneframe/index.ts');
     util.setCurrentTab('terminals');
     util.setAgentsCache(AGENTS);
     await terminals.renderTerminals();
@@ -110,7 +111,7 @@ function browserSays({ active = null, pageFocused = true, frameWithFocus = null 
 
 beforeEach(() => {
     browserSays({});
-    terminals._applyTermFocus();
+    paneframe.applyTermFocus();
     assert.deepEqual(ringed(), [], 'precondition: no pane ringed before the case');
 });
 
@@ -123,51 +124,51 @@ test('the real wall rendered both panes with real term frames (or every case bel
 
 test('clicking from pane A\'s frame straight into pane B\'s moves .term-focused to B and off A', () => {
     browserSays({ active: '@3', frameWithFocus: '@3' });
-    terminals._applyTermFocus();
+    paneframe.applyTermFocus();
     assert.deepEqual(ringed(), ['@3']);
     browserSays({ active: '@2', frameWithFocus: '@2' });
-    terminals._applyTermFocus();
+    paneframe.applyTermFocus();
     assert.deepEqual(ringed(), ['@2'], 'the ring must follow the click into @2 and leave @3');
 });
 
 test('CMX-104: the frame whose OWN document holds focus gets the ring, even when the parent\'s activeElement still names the other pane', () => {
     browserSays({ active: '@3', frameWithFocus: '@3' });
-    terminals._applyTermFocus();
+    paneframe.applyTermFocus();
     // The live state: the keyboard (and xterm's solid cursor) is in @2, but the
     // parent document still reports @3's iframe as active.
     browserSays({ active: '@3', frameWithFocus: '@2' });
-    terminals._applyTermFocus();
+    paneframe.applyTermFocus();
     assert.deepEqual(ringed(), ['@2'], 'the ring must mark the pane the keyboard is in, not the stale activeElement');
 });
 
 test('CMX-104: a ring left on a pane the tracker no longer remembers is cleared on the next tick', () => {
     browserSays({ active: '@2', frameWithFocus: '@2' });
-    terminals._applyTermFocus();
+    paneframe.applyTermFocus();
     content('@3').classList.add('term-focused');   // a stray ring, from anywhere
-    terminals._applyTermFocus();
+    paneframe.applyTermFocus();
     assert.deepEqual(ringed(), ['@2'], 'exactly one pane may carry .term-focused');
 });
 
 test('CMX-104: activeElement naming a pane whose own document does NOT hold focus rings nothing', () => {
     browserSays({ active: '@3', frameWithFocus: '@3' });
-    terminals._applyTermFocus();
+    paneframe.applyTermFocus();
     browserSays({ active: '@3', frameWithFocus: null });   // the page has focus, no frame does
-    terminals._applyTermFocus();
+    paneframe.applyTermFocus();
     assert.deepEqual(ringed(), [], 'a stale activeElement must not keep the ring on a pane the keyboard left');
 });
 
 test('focus back in the dashboard itself clears every ring', () => {
     browserSays({ active: '@2', frameWithFocus: '@2' });
-    terminals._applyTermFocus();
+    paneframe.applyTermFocus();
     browserSays({ active: null, frameWithFocus: null });
-    terminals._applyTermFocus();
+    paneframe.applyTermFocus();
     assert.deepEqual(ringed(), []);
 });
 
 test('the browser window losing OS focus keeps the ring on the pane focus will return to', () => {
     browserSays({ active: '@3', frameWithFocus: '@3' });
-    terminals._applyTermFocus();
+    paneframe.applyTermFocus();
     browserSays({ active: '@3', pageFocused: false, frameWithFocus: null });
-    terminals._applyTermFocus();
+    paneframe.applyTermFocus();
     assert.deepEqual(ringed(), ['@3']);
 });

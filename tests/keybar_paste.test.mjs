@@ -1,6 +1,6 @@
 // MOBILE KEYBAR "Paste" — real-DOM guard for CMX-423.
 //
-// The keybar's Paste button (the keybar island, CMX-237 → chela.termPaste) reads the DEVICE clipboard in
+// The keybar's Paste button (the keybar island, CMX-237 → features/paneframe termPaste, CMX-246) reads the DEVICE clipboard in
 // the parent page and POSTs it to /api/term/paste for the active pane (#term-agent). After
 // CMX-412 it "stopped working": every early exit was silent, and a phone clipboard holding
 // a screenshot came back empty from readText(), so the tap did nothing visible.
@@ -68,6 +68,8 @@ function setClipboard(value) {
     Object.defineProperty(globalThis.navigator, 'clipboard', { configurable: true, value });
 }
 
+let paneframe;
+
 beforeAll(async () => {
     const dom = new JSDOM(`<!doctype html><html><body>${PANEL}</body></html>`,
         { url: 'http://localhost:5005/', pretendToBeVisual: true });
@@ -89,6 +91,7 @@ beforeAll(async () => {
     await import('../chela/dashboard/frontend/src/boot.ts');
     const util = await import('../chela/dashboard/static/js/util.js');
     const terminals = await import('../chela/dashboard/static/js/terminals.js');
+    paneframe = await import('../chela/dashboard/frontend/src/features/paneframe/index.ts');
     util.setCurrentTab('terminals');
     util.setAgentsCache(AGENTS);
     await terminals.renderTerminals();
@@ -105,7 +108,7 @@ beforeEach(() => {
 const btn = () => [...document.querySelectorAll('#term-keybar button')].find(b => b.title === 'Paste from clipboard');
 const pastes = () => calls.filter(c => c.path === '/api/term/paste').map(c => JSON.parse(c.opts.body));
 
-test('⭐ a real tap on the keybar island\'s Paste button reaches termPaste and pastes', async () => {
+test('⭐ a real tap on the keybar island\'s Paste button reaches the frame\'s termPaste and pastes', async () => {
     setClipboard({ readText: async () => 'tapped' });
     btn().dispatchEvent(new window.MouseEvent('click', { bubbles: true, cancelable: true }));
     await flush();
@@ -114,7 +117,7 @@ test('⭐ a real tap on the keybar island\'s Paste button reaches termPaste and 
 
 test('⭐ tapping Paste with text (readText-only clipboard) delivers it to /api/term/paste for the active pane', async () => {
     setClipboard({ readText: async () => 'hello from the phone' });
-    await window.chela.termPaste(btn());
+    await paneframe.termPaste(btn());
     assert.deepEqual(pastes(), [{ agent: '@1', text: 'hello from the phone' }]);
 });
 
@@ -123,7 +126,7 @@ test('⭐ tapping Paste with text via clipboard.read() delivers it to /api/term/
         read: async () => [{ types: ['text/plain'], getType: async () => new Blob(['ls -la'], { type: 'text/plain' }) }],
         readText: async () => { throw new Error('read() should have answered'); },
     });
-    await window.chela.termPaste(btn());
+    await paneframe.termPaste(btn());
     assert.deepEqual(pastes(), [{ agent: '@1', text: 'ls -la' }]);
 });
 
@@ -150,7 +153,7 @@ test('a refused clipboard.read() says Denied and never retries via readText()', 
         read: async () => { throw new Error('NotAllowedError'); },
         readText: async () => { readTextCalls++; return 'second read'; },
     });
-    await window.chela.termPaste(btn());
+    await paneframe.termPaste(btn());
     assert.deepEqual(calls, []);
     assert.equal(readTextCalls, 0);
     assert.equal(btn().textContent, 'Denied');
@@ -158,27 +161,27 @@ test('a refused clipboard.read() says Denied and never retries via readText()', 
 
 test('ONE clipboard call per tap: read()\'s items paste, readText() is never touched', async () => {
     const state = oneReadClipboard([item('text/uri-list', 'https://example.com/one-read')]);
-    await window.chela.termPaste(btn());
+    await paneframe.termPaste(btn());
     assert.deepEqual(pastes(), [{ agent: '@1', text: 'https://example.com/one-read' }]);
     assert.equal(state.readTextCalls, 0);
 });
 
 test('a text/html-only clipboard delivers its plain text', async () => {
     oneReadClipboard([item('text/html', '<b>hi</b>')]);
-    await window.chela.termPaste(btn());
+    await paneframe.termPaste(btn());
     assert.deepEqual(pastes(), [{ agent: '@1', text: 'hi' }]);
 });
 
 test('text/html is stripped, entity-decoded and whitespace-collapsed', async () => {
     oneReadClipboard([item('text/html',
         '<meta charset="utf-8"><style>p{color:red}</style><p>a  &amp;\n b</p><div>c&lt;d&gt;&nbsp;</div>')]);
-    await window.chela.termPaste(btn());
+    await paneframe.termPaste(btn());
     assert.deepEqual(pastes(), [{ agent: '@1', text: 'a & b\nc<d>' }]);
 });
 
 test('a text/uri-list clipboard delivers its first URL, skipping comments', async () => {
     oneReadClipboard([item('text/uri-list', '# copied link\r\nhttps://example.com/a\r\nhttps://example.com/b')]);
-    await window.chela.termPaste(btn());
+    await paneframe.termPaste(btn());
     assert.deepEqual(pastes(), [{ agent: '@1', text: 'https://example.com/a' }]);
 });
 
@@ -187,13 +190,13 @@ test('text/plain wins over text/html and text/uri-list', async () => {
         types: ['text/html', 'text/uri-list', 'text/plain'],
         getType: async t => new Blob([{ 'text/html': '<i>rich</i>', 'text/uri-list': 'https://x', 'text/plain': 'plain' }[t]], { type: t }),
     }]);
-    await window.chela.termPaste(btn());
+    await paneframe.termPaste(btn());
     assert.deepEqual(pastes(), [{ agent: '@1', text: 'plain' }]);
 });
 
 test('a read() with no usable entry says Empty and posts nothing', async () => {
     oneReadClipboard([item('application/x-unknown', 'zzz'), item('text/html', '<img src=x>')]);
-    await window.chela.termPaste(btn());
+    await paneframe.termPaste(btn());
     assert.deepEqual(calls, []);
     assert.equal(btn().textContent, 'Empty');
 });
@@ -203,7 +206,7 @@ test('an image on the clipboard takes the image path and types its path', async 
         read: async () => [{ types: ['image/png'], getType: async () => new Blob(['png'], { type: 'image/png' }) }],
         readText: async () => '',
     });
-    await window.chela.termPaste(btn());
+    await paneframe.termPaste(btn());
     assert.deepEqual(calls.map(c => c.path), ['/api/term/paste-image', '/api/term/paste']);
     assert.equal(calls[0].opts.body.get('agent'), '@1');
     assert.deepEqual(pastes(), [{ agent: '@1', text: '/tmp/chela-paste-images/abc.png' }]);
@@ -211,7 +214,7 @@ test('an image on the clipboard takes the image path and types its path', async 
 
 test('an empty clipboard posts nothing and says so on the button', async () => {
     setClipboard({ readText: async () => '' });
-    await window.chela.termPaste(btn());
+    await paneframe.termPaste(btn());
     assert.deepEqual(calls, []);
     assert.equal(btn().textContent, 'Empty');
 });

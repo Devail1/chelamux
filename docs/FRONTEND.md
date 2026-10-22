@@ -200,6 +200,15 @@ The rest of a tile is React too (CMX-242, plan P27/P28/P30/P32), on the same pat
 | `features/walldock` | the Minimized tray (one row, scrolling sideways) and the lazy dock's decisions for dispatched workers | `#term-min-dock` |
 | `features/walltoolbar` | the layout toolbar (presets, lock, auto-arrange, Focus) | `#wall-toolbar-island` |
 | `features/wire` | the wire gesture and its SVG line; the room accents (`static/js/wire.ts` holds the geometry) | over `#term-stage` while a wire is in flight |
+| `features/paneframe` | the terminal: the ttyd `<iframe>` (its src and per-connection cid), the readiness placeholder and its poll, the focus ring, the keys a pane carries (Alt+N, Ctrl/⌘+K), watch reporting, the background-tab teardown, the 4 s tick; and the keybar's keys and Paste (CMX-246, plan P31) | each tile's `[data-frame-for]` slot |
+
+React renders the pane's `<iframe>` and owns its src, never anything inside it. A frame keeps
+its cid for its mount, so a repaint never reconnects. The teardown blanks a frame by drawing it
+`about:blank` with its src in `data-suspended-src` (`term-reconnect.js` reads both); what else
+crosses the iframe boundary is plan §3's table, one test per row in
+`features/paneframe/tests/boundary.test.tsx`. The 4 s tick's timer is the frame's; the
+reconcile it runs (drop and absorb panes) is still `terminals.js`'s `termTick`, handed in through
+`configurePaneFrames()` with the grid it rebuilds.
 
 The Wall's shared state is `shared/store/wall.ts`: `termMode`, `pinnedPanes`, `minimizedPanes`
 and `wallLayout` (`{preset, locked, auto, focus}`; auto-arrange and Focus exclude each other in
