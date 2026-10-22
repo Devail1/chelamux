@@ -102,7 +102,7 @@ beforeAll(async () => {
 
     await import('../chela/dashboard/frontend/src/boot.ts');
     util = await import('../chela/dashboard/static/js/util.js');
-    terminals = await import('../chela/dashboard/static/js/terminals.js');
+    terminals = await import('../chela/dashboard/frontend/src/features/wall/index.ts');
     nav = await import('../chela/dashboard/static/js/nav.js');
     wall = await import('../chela/dashboard/frontend/src/shared/store/wall.ts');
     util.setAgentsCache(AGENTS);
@@ -112,7 +112,7 @@ beforeAll(async () => {
 // tab, in wall mode — the baseline "on-wall" state each case then deviates from.
 beforeEach(async () => {
     util.setCurrentTab('terminals');
-    window.chela.setTermMode('wall');
+    terminals.setTermMode('wall');
     await terminals.renderTerminals();
     [HUMAN, WORKER].forEach(wid => wall.setMinimized(wid, false));
     await terminals.renderTerminals();
@@ -150,7 +150,7 @@ test('3. not on the wall (another tab) -> click switches to the wall AND focuses
 });
 
 test('4. single-terminal mode -> click switches to wall mode, not just the tab', async () => {
-    window.chela.setTermMode('single');
+    terminals.setTermMode('single');
     assert.ok(!terminals.isWallVisible(), 'setup: single-terminal mode must not read as wall-visible');
     window.chela.selectAgent('orchestrator');
     assert.ok(terminals.isWallVisible(),

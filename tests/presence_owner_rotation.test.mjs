@@ -99,7 +99,7 @@ beforeAll(async () => {
     globalThis.setInterval = () => 0;   // no heartbeat / prune timers: the test drives it
     await import('../chela/dashboard/frontend/src/boot.ts');
     util = await import('../chela/dashboard/static/js/util.js');
-    terminals = await import('../chela/dashboard/static/js/terminals.js');
+    terminals = await import('../chela/dashboard/frontend/src/features/wall/index.ts');
     owner = await import(dashDir + '/static/collab/presence-owner.js');
     ({ shareSession } = await import('../chela/dashboard/frontend/src/features/share/index.ts'));
     util.setCurrentTab('terminals');

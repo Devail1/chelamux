@@ -1,6 +1,6 @@
 // CMX-240 (CMX-212 P25): what changes a share from this page: adopt-or-mint, Stop (the kill
 // switch), a live mode change, and opening the Active shares sheet. The pane itself (its title,
-// its ttyd iframe) is still legacy, so terminals.js hands those in through configureShareHost.
+// its ttyd iframe, the open pane) is the Wall's (features/wall), handed in through configureShareHost.
 import { api, BOOT } from '../../../shared/api/index.ts';
 import { createStore } from '../../../shared/store/index.ts';
 import type { MintResponse } from './api.ts';
@@ -14,6 +14,8 @@ export type ShareHost = {
   paneTitle: (wid: string) => string;
   /** The pane's live ttyd iframes (the wall and single mode may both hold one). */
   paneFrames: (wid: string) => HTMLIFrameElement[];
+  /** The open single pane ('' when none). */
+  activeWid?: () => string;
 };
 
 let host: ShareHost = { paneTitle: (wid) => wid, paneFrames: () => [] };
@@ -23,6 +25,13 @@ export function configureShareHost(h: ShareHost) {
 }
 
 export const paneTitle = (wid: string) => host.paneTitle(wid);
+
+/** Share the open pane (the gear menu's row). False when no pane is open. */
+export function shareActivePane(): boolean {
+  const wid = host.activeWid?.() ?? '';
+  if (wid) void shareSession(wid);
+  return wid !== '';
+}
 
 /** Re-serve the pane's ttyd page, so term_http injects the new "shared" flag. */
 function reloadPane(wid: string) {

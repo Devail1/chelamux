@@ -249,7 +249,7 @@ beforeAll(async () => {
     await mountIslands(dom.window);   // CMX-276: the sidebar island draws #sidebar-agents
     await import('../chela/dashboard/frontend/src/boot.ts');
     util = await import('../chela/dashboard/static/js/util.js');
-    terminals = await import('../chela/dashboard/static/js/terminals.js');
+    terminals = await import('../chela/dashboard/frontend/src/features/wall/index.ts');
     wall = await import('../chela/dashboard/frontend/src/shared/store/wall.ts');
     util.setCurrentTab('terminals');
     util.setAgentsCache(AGENTS);
@@ -553,7 +553,7 @@ test('holding Alt inside a pane\'s own document shows the sidebar numbers; relea
 test('Alt+N from the single-terminal view switches to the wall and focuses that row\'s pane', async () => {
     const flashed = wid => tile(wid) && tile(wid).querySelector('.grid-stack-item-content').classList.contains('pane-flash');
     try {
-        window.chela.setTermMode('single');
+        terminals.setTermMode('single');
         await new Promise(r => setTimeout(r, 120));   // let the in-flight renderTerminals settle
         assert.equal(document.getElementById('term-stage').className, 'term-single',
             'fixture: setTermMode("single") must actually leave the wall, or this test is vacuous');
@@ -565,7 +565,7 @@ test('Alt+N from the single-terminal view switches to the wall and focuses that 
         assert.equal(terminals.isWallVisible(), true, 'Alt+N from the single view must bring the wall back');
         assert.ok(flashed(rowWid(2)), 'Alt+2 from the single view must focus the 2nd sidebar row\'s pane on the wall');
     } finally {
-        window.chela.setTermMode('wall');
+        terminals.setTermMode('wall');
         await new Promise(r => setTimeout(r, 120));
     }
 });
@@ -1737,7 +1737,7 @@ test('CMX-133: the single-pane header includes the × kill button on an ACTUAL p
         addListener() {}, removeListener() {},
     });
     try {
-        window.chela.setTermMode('single');
+        terminals.setTermMode('single');
         await new Promise((r) => setTimeout(r, 120));   // let the in-flight renderTerminals settle
         const stage = document.querySelector('#term-stage');
         assert.equal(stage.className, 'term-single',
@@ -1754,7 +1754,7 @@ test('CMX-133: the single-pane header includes the × kill button on an ACTUAL p
         // Restore the desktop-width stub and wall mode so any test appended after
         // this one sees the same environment every other test in this file expects.
         window.matchMedia = origMatchMedia;
-        window.chela.setTermMode('wall');
+        terminals.setTermMode('wall');
         await new Promise((r) => setTimeout(r, 120));
     }
 });
@@ -1852,7 +1852,7 @@ test('CMX-146: a pane\'s ai_title renders as a dim subtitle under the name, and 
     const withTitle = AGENTS.map(a => a.window_id === '@1' ? { ...a, ai_title: 'Fix the flaky wall test' } : a);
     util.setAgentsCache(withTitle);
     try {
-        terminals._refreshPaneLabels();
+        terminals.refreshPaneLabels();
         const sub1 = tile('@1').querySelector('.gs-grip .pane-subtitle');
         assert.ok(sub1, '@1 carries an ai_title — its pane header must show a .pane-subtitle');
         assert.equal(paneTitle('@1'), 'Fix the flaky wall test', 'Claude\'s title leads the header');
@@ -1865,7 +1865,7 @@ test('CMX-146: a pane\'s ai_title renders as a dim subtitle under the name, and 
             'a pane with no ai_title must render NO .pane-subtitle element');
     } finally {
         util.setAgentsCache(AGENTS);
-        terminals._refreshPaneLabels();
+        terminals.refreshPaneLabels();
     }
 });
 
@@ -1900,7 +1900,7 @@ test('CMX-62: pane header — manual name beats the title, the title beats the w
         util.setAgentsCache(AGENTS.map(a =>
             a.window_id === '@1' ? { ...a, manual_name: true, ai_title: 'Review the auth PR' }
                 : a.window_id === '@2' ? { ...a, ai_title: 'Open-MMO game on Windows PC' } : a));
-        terminals._refreshPaneLabels();
+        terminals.refreshPaneLabels();
         assert.equal(paneTitle('@1'), 'alpha', 'a manual name must beat Claude\'s title on the header');
         assert.equal(tile('@1').querySelector('.gs-grip .pane-subtitle').textContent, 'Review the auth PR',
             'with a manual name leading, Claude\'s title is the dim subtitle');
@@ -1915,14 +1915,14 @@ test('CMX-62: pane header — manual name beats the title, the title beats the w
         util.setAgentsCache(AGENTS.map(a =>
             a.window_id === '@1' ? { ...a, manual_name: true, ai_title: 'alpha' }
                 : a.window_id === '@2' ? { ...a, ai_title: 'Open-MMO game', session_name: 'stale session' } : a));
-        terminals._refreshPaneLabels();
+        terminals.refreshPaneLabels();
         assert.equal(paneTitle('@1'), 'alpha');
         assert.equal(tile('@1').querySelector('.gs-grip .pane-subtitle'), null,
             'a subtitle that only repeats the header must not render');
         assert.equal(paneTitle('@2'), 'Open-MMO game', 'ai_title must outrank the live session name');
     } finally {
         util.setAgentsCache(AGENTS);
-        terminals._refreshPaneLabels();
+        terminals.refreshPaneLabels();
     }
 });
 
@@ -1932,7 +1932,7 @@ test('CMX-146: _refreshPaneLabels tracks ai_title live — added, changed, and r
         assert.equal(tile('@3').querySelector('.gs-grip .pane-subtitle'), null);
 
         util.setAgentsCache(AGENTS.map(a => a.window_id === '@3' ? { ...a, ai_title: 'Investigate flaky CI' } : a));
-        terminals._refreshPaneLabels();
+        terminals.refreshPaneLabels();
         let sub = tile('@3').querySelector('.gs-grip .pane-subtitle');
         assert.ok(sub, 'a fresh ai_title must appear on the next refresh, no full rebuild required');
         assert.equal(paneTitle('@3'), 'Investigate flaky CI');
@@ -1940,7 +1940,7 @@ test('CMX-146: _refreshPaneLabels tracks ai_title live — added, changed, and r
 
         // a revised title (Claude re-titles as the conversation evolves) must replace it in place
         util.setAgentsCache(AGENTS.map(a => a.window_id === '@3' ? { ...a, ai_title: 'Investigate and fix flaky CI' } : a));
-        terminals._refreshPaneLabels();
+        terminals.refreshPaneLabels();
         sub = tile('@3').querySelector('.gs-grip .pane-subtitle');
         assert.ok(sub, 'the subtitle element must still be there after a revision');
         assert.equal(paneTitle('@3'), 'Investigate and fix flaky CI');
@@ -1949,13 +1949,13 @@ test('CMX-146: _refreshPaneLabels tracks ai_title live — added, changed, and r
         // and it must be removed again once the field goes back to empty/absent — not left
         // stale, which would read as a title Claude never actually confirmed.
         util.setAgentsCache(AGENTS);
-        terminals._refreshPaneLabels();
+        terminals.refreshPaneLabels();
         assert.equal(tile('@3').querySelector('.gs-grip .pane-subtitle'), null,
             'the subtitle must be REMOVED once ai_title is gone, not left stale from the prior refresh');
         assert.equal(paneTitle('@3'), 'charlie', 'no title ⇒ the window name is the header again');
     } finally {
         util.setAgentsCache(AGENTS);
-        terminals._refreshPaneLabels();
+        terminals.refreshPaneLabels();
     }
 });
 

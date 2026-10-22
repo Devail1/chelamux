@@ -9,7 +9,7 @@
 // Run: pnpm exec vitest run tests/sse_owners.test.mjs (tests/test_js_suites.py runs it in pytest).
 import { beforeAll, beforeEach, test } from 'vitest';
 import assert from 'node:assert/strict';
-import { bootDashboardDom, flush } from './js_helpers/dashboard_dom.mjs';
+import { bootDashboardDom, flush, WALL } from './js_helpers/dashboard_dom.mjs';
 
 const PANEL = `
 <div class="panel" id="panel-terminals">
@@ -64,7 +64,7 @@ beforeAll(async () => {
     globalThis.GridStack = { init: () => grid };
     ({ modules: { util, terminals } } = await bootDashboardDom({
         body: PANEL, canvasStub: true, fetchImpl: fakeFetch, EventSource: FakeEventSource,
-        extraModules: ['util.js', 'terminals.js'],
+        extraModules: ['util.js', WALL],
     }));
     ({ toasts: toastStore } = await import('../chela/dashboard/frontend/src/features/work/index.ts'));
     await settle();
@@ -121,24 +121,24 @@ test('windows on the Wall: vanished panes drop, new ones are absorbed, by window
     util.setAgentsCache([agent('@1'), agent('@2')]);
     await terminals.renderTerminals();
     await settle();
-    assert.deepEqual([...terminals._renderedWids].sort(), ['@1', '@2']);
+    assert.deepEqual([...terminals.renderedWids].sort(), ['@1', '@2']);
     liveAgents = [agent('@1'), agent('@3')];
     frame('windows', { windows: ['agent-@1', 'agent-@3'] });
     await settle();
     assert.ok(requests.includes('/api/agents'), 'the Wall did not refetch the live agent set');
-    assert.deepEqual([...terminals._renderedWids].sort(), ['@1', '@3']);
+    assert.deepEqual([...terminals.renderedWids].sort(), ['@1', '@3']);
     assert.deepEqual(util._agentsCache.map(a => a.window_id), ['@1', '@3']);
 });
 
 test('windows off the Wall only invalidates the agent cache: no refetch, no tile change', async () => {
     util.setCurrentTab('work');
     util.setAgentsCache([agent('@1')]);
-    const before = [...terminals._renderedWids];
+    const before = [...terminals.renderedWids];
     frame('windows', {});
     await settle();
     assert.deepEqual(util._agentsCache, []);
     assert.ok(!requests.includes('/api/agents'), 'a windows frame off the Wall refetched /api/agents');
-    assert.deepEqual([...terminals._renderedWids], before);
+    assert.deepEqual([...terminals.renderedWids], before);
 });
 
 test('term-ready swaps a pending placeholder for its iframe, only on the Wall', async () => {

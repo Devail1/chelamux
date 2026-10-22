@@ -88,7 +88,7 @@ async function measure(page) {
         const canvas = document.querySelector('.canvas');
         const se = document.scrollingElement;
         return {
-            wid: document.getElementById('term-agent').value,
+            wid: document.querySelector('#term-stage .term-pane [data-head-for]').dataset.headFor,
             rows: rows.length,
             text: Array.from(rows).slice(-7).map(r => r.textContent),
             lastRowBottom: top + last.getBoundingClientRect().bottom,
@@ -140,7 +140,7 @@ async function openPhone(kbAtLoad, kbAtBoot = 0) {
 async function switchViaSidebar(page) {
     await page.click('#btn-menu-mobile');
     const other = await page.evaluate(() => {
-        const open = document.getElementById('term-agent').value;
+        const open = document.querySelector('#term-stage .term-pane [data-head-for]').dataset.headFor;
         const row = [...document.querySelectorAll('#sidebar-agents .agent-row[data-item^="w:"]')]
             .find(r => r.dataset.item !== 'w:' + open);
         return row ? row.dataset.item : null;

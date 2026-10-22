@@ -119,8 +119,9 @@ function controls() {
         assert.ok(doc.querySelector(sel), `fixture lost ${sel} — the guard would pass vacuously`);
     }
     // CMX-221: the kit draws Settings' selects and switches as Radix buttons (no <select> or
-    // checkbox, so nothing iOS zooms on): 14 real fields remain with Settings and the palette open.
-    assert.ok(all.length >= 14, `only ${all.length} controls mounted — the settings drawer did not render`);
+    // checkbox, so nothing iOS zooms on). CMX-247 dropped the Wall's hidden #term-agent <select>:
+    // 13 real fields remain with Settings and the palette open.
+    assert.ok(all.length >= 13, `only ${all.length} controls mounted — the settings drawer did not render`);
     return all;
 }
 
