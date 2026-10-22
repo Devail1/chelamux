@@ -145,6 +145,23 @@ def bus_stripped(guard_on, monkeypatch, tmp_path):
     return bin_dir / "systemd-run.calls"
 
 
+def test_the_probe_runs_under_the_suite_env_plus_the_bus_not_os_environ(monkeypatch):
+    """The probe's env is exactly what the real ``systemd-run`` gets: the suite's ``env``
+    (its own PATH, none of os.environ's extras) with only the operator's bus vars on top."""
+    calls = []
+    monkeypatch.setattr(suite_guard, "_scope_ok", set())
+    monkeypatch.setattr(suite_guard.memcap, "available", lambda: True)
+    monkeypatch.setattr(suite_guard.subprocess, "run", lambda *a, **k: calls.append(k["env"]))
+    monkeypatch.setenv("XDG_RUNTIME_DIR", "/run/user/4242")
+    monkeypatch.setenv("DBUS_SESSION_BUS_ADDRESS", "unix:path=/run/user/4242/bus")
+    monkeypatch.setenv("CHELA_OPERATOR_ONLY", "x")
+    suite = {"PATH": "/suite/bin", "XDG_RUNTIME_DIR": "/suite/own"}
+    assert suite_guard._scope_works(suite) is True
+    assert calls == [{"PATH": "/suite/bin", "XDG_RUNTIME_DIR": "/run/user/4242",
+                      "DBUS_SESSION_BUS_ADDRESS": "unix:path=/run/user/4242/bus"}]
+    assert suite == {"PATH": "/suite/bin", "XDG_RUNTIME_DIR": "/suite/own"}  # not mutated
+
+
 def test_a_suite_env_without_the_user_bus_still_launches_its_scope(bus_stripped, tmp_path):
     seen = tmp_path / "seen"
     result = judge.run_suite(
