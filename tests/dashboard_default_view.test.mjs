@@ -3,12 +3,13 @@
 // guard at all"): three separate literals encode "the default canvas, on a
 // terminals-off deployment, is Work — not the now-deleted Agents view":
 //
-//   1. util.js's `let currentTab = 'work';` (its module-load default — nothing
-//      sets it when TERMINALS_ON is false, since main.js's own
-//      `selectView('terminals')` call is TERMINALS_ON-gated);
-//   2. index.html's `<div class="panel active" id="panel-work">` — the ONLY
-//      thing that marks a panel visible when terminals are off, since nothing
-//      in JS ever calls selectView('work') to add the class itself;
+//   1. the view store's default `'work'` (shared/store/view.ts: nothing sets it
+//      when TERMINALS_ON is false, since the boot's own `selectView('terminals')`
+//      call is TERMINALS_ON-gated);
+//   2. the shell's panels (features/shell <App>, CMX-248; index.html's
+//      `<div class="panel active" id="panel-work">` until then): the store's view
+//      is what marks a panel visible when terminals are off, since nothing in JS
+//      ever calls selectView('work');
 //   3. nav.js's `_agentDetailBackView()` fallback, which must resolve to
 //      'work' (not the deleted 'agents') so the agent-detail "← Back" link
 //      routes somewhere real.
@@ -19,8 +20,8 @@
 // module graph with the boot block's terminalsEnabled false — a genuine
 // terminals-off deployment (CMX-217: index.html renders the flag both ways; an
 // absent block defaults to terminals ON) — and reads every claim back off
-// the actually running program: the live `currentTab` binding, the real DOM
-// node's classList (mounted from index.html's OWN markup, not a hand copy),
+// the actually running program: the live view store, the real DOM node's
+// classList (the shell's own markup, not a hand copy),
 // and the Work board's first paint, which needs the boot tick to have run the Work poll's
 // lane (features/work, CMX-233).
 //
@@ -28,43 +29,17 @@
 // tests/test_js_suites.py; needs `pnpm install` for jsdom).
 import { beforeAll, test } from 'vitest';
 import assert from 'node:assert/strict';
-import { bootDashboardDom, clickIsland, flush, sliceTemplate } from './js_helpers/dashboard_dom.mjs';
+import { APP_BODY, bootDashboardDom, clickIsland, flush, AGENTS_STORE, VIEW_STORE, NAV } from './js_helpers/dashboard_dom.mjs';
 
-// The REAL agent-detail + Work panels, sliced straight out of index.html — not
-// hand-typed — so a mutation to panel-work's pre-set `active` class (exactly
-// the mutation this round's verdict named) shows up here, not just in a
-// fixture that happens to agree with the file today.
-// CMX-89: `active` is a Jinja conditional now (terminals_enabled picks the
-// first panel), so the slice is rendered for the terminals-off config.
-const CANVAS_HTML = sliceTemplate(
-    '<div class="panel" id="panel-agent-detail">', 'id="panel-work"></div>',
-    { terminals_enabled: false, wall_tile_dispatched: false });
-
-const BODY = `
-<div class="app">
-  <aside class="sidebar">
-    <section class="side-section">
-      <div class="side-list" id="side-nav"></div>
-    </section>
-    <section class="side-section">
-      <span class="side-count" id="hdr-agents">-/-</span>
-      <div class="side-list" id="sidebar-agents"><div class="side-empty">No agents</div></div>
-    </section>
-  </aside>
-  <main class="canvas" id="canvas">
-    ${CANVAS_HTML}
-  </main>
-</div>`;
-
-let util, nav;
+let agentsStore, viewStore, nav;
 
 beforeAll(async () => {
     // The genuine terminals-off boot: the boot block's terminalsEnabled false, what
     // index.html renders for CHELA_TERMINALS_ENABLED=false (CMX-217; before it, the
     // template emitted only `= true` and an off deployment read as on). This is the
     // value that drives TERMINALS_ON to false in JS, the behaviour this file guards.
-    ({ modules: { util, nav } } = await bootDashboardDom({
-        body: BODY,
+    ({ modules: { agents: { agents: agentsStore }, view: { view: viewStore }, nav } } = await bootDashboardDom({
+        body: APP_BODY,
         terminalsEnabled: false,
         canvasStub: true,
         // A blanket {} for everything EXCEPT /api/agents/context, which must resolve
@@ -75,39 +50,32 @@ beforeAll(async () => {
             const body = String(url).includes('/api/agents/context') ? [] : {};
             return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve(body) });
         },
-        extraModules: ['util.js', 'nav.js'],
+        extraModules: [AGENTS_STORE, VIEW_STORE, NAV],
     }));
 
     // Flush the boot tick's Work poll (a scheduler lane): fetch -> json() -> store -> React
     // paint, without advancing any fake timer.
     for (let i = 0; i < 4; i++) await flush();
 
-    // showAgentDetail (driven below via chela.selectAgent) fires an unawaited
-    // refreshSummary(), which reaches for these two header nodes — absent from
-    // this file's minimal BODY (see sidebar.test.mjs's identical note on the
-    // same call). Without them the write lands on `null` in a microtask AFTER
-    // the test that triggered it has already returned, surfacing as an
-    // unhandledRejection against the whole file rather than that test.
-    if (!document.getElementById('hdr-next')) document.body.appendChild(document.createElement('span')).id = 'hdr-next';
-    if (!document.getElementById('hdr-updated')) document.body.appendChild(document.createElement('span')).id = 'hdr-updated';
 });
 
-test('currentTab defaults to work on boot when terminals are off — never the deleted agents view', () => {
+test('the view defaults to work on boot when terminals are off — never the deleted agents view', () => {
     // The live binding the scheduler and the Work view read (shared/store/view.ts),
-    // not a re-parse of util.js's source text: nothing in this boot calls
+    // not a re-parse of source text: nothing in this boot calls
     // selectView('terminals') (TERMINALS_ON is false), so whatever value is here
-    // is util.js's OWN initial default — exactly the literal the judge reverted.
-    assert.equal(util.currentTab, 'work',
-        "currentTab is not 'work' after a terminals-off boot — util.js's `let currentTab = 'work';` " +
-        "default reverted (or something now overwrites it before the first paint)");
+    // is the store's OWN initial default — exactly the literal the judge reverted.
+    assert.equal(viewStore.get(), 'work',
+        "the view is not 'work' after a terminals-off boot: the view store's default " +
+        "reverted (or something now overwrites it before the first paint)");
 });
 
 test('panel-work is the panel that is actually active after a terminals-off boot', () => {
     const panel = document.getElementById('panel-work');
     assert.ok(panel, 'panel-work is missing from the mounted canvas');
     assert.ok(panel.classList.contains('active'),
-        "panel-work lost its pre-set 'active' class (index.html) and nothing in JS ever adds it back " +
-        "when terminals are off (selectView('work') is never called on this boot path) — the canvas would load blank");
+        "panel-work is not active although the view is 'work' (the shell's panels read the view store; " +
+        "selectView('work') is never called on this boot path), so the canvas would load blank");
+    assert.equal(document.getElementById('panel-terminals'), null, 'a terminals-off page drew the Wall');
 });
 
 test('the sidebar nav on a terminals-off boot lists only Work — not Wall, whose enabled predicate is TERMINALS_ON-gated', () => {
@@ -129,12 +97,12 @@ test('the sidebar nav on a terminals-off boot lists only Work — not Wall, whos
     assert.deepEqual(ids, ['work'],
         "the terminals-off sidebar nav is not exactly ['work'] — Wall's enabled predicate " +
         "let a row through it shouldn't have, which would route selectView('terminals') at " +
-        'a panel that does not exist (index.html only emits #panel-terminals when terminals ' +
+        'a panel that does not exist (the shell draws #panel-terminals only when terminals ' +
         'are enabled) and blank the canvas');
 });
 
 test('the boot tick paints the Work board on a terminals-off boot — the canvas is never blank', () => {
-    // The Work view is a React island in index.html's #panel-work; its board draws once the
+    // The Work view is drawn in the shell's #panel-work; its board draws once the
     // boot tick's Work lane has polled /api/dispatcher. The {} stub is a not-configured
     // payload, so what paints is the board's explainer. No paint = the lane never ran on
     // this boot path, and the visible panel would be an empty toolbar.
@@ -154,15 +122,15 @@ async function _assertBackLinkTargetsWork(label) {
     const back = document.querySelector('#agent-detail .detail-back');
     assert.ok(back, `${label}: no .detail-back node rendered into #agent-detail`);
     clickIsland(back);
-    assert.equal(util.currentTab, 'work',
+    assert.equal(viewStore.get(), 'work',
         `${label}: the "← Back" control did not select Work: it points at a view that no longer exists ` +
         '(or was never re-pointed at the new default) on a terminals-off deployment');
 }
 
 test('agent-detail "← Back" (not-found branch) returns to Work, not the deleted Agents view', async () => {
     nav.renderNav();
-    window.chela.selectAgent('cmx279-rework-ghost-agent');   // unresolved -> not-found branch
-    assert.equal(util.currentTab, 'agent-detail');
+    nav.selectAgent('cmx279-rework-ghost-agent');   // unresolved -> not-found branch
+    assert.equal(viewStore.get(), 'agent-detail');
     await _assertBackLinkTargetsWork('not-found branch');
 });
 
@@ -170,9 +138,9 @@ test('agent-detail "← Back" (found branch) also returns to Work, not the delet
     nav.renderNav();
     // A resolvable agent with no window_id: selectAgent's wall-focus branch never applies,
     // so this always falls through to showAgentDetail's FOUND path.
-    util.setAgentsCache([{ name: 'cmx279-rework-known-agent', online: true }]);
-    window.chela.selectAgent('cmx279-rework-known-agent');
-    assert.equal(util.currentTab, 'agent-detail');
+    agentsStore.set([{ name: 'cmx279-rework-known-agent', online: true }]);
+    nav.selectAgent('cmx279-rework-known-agent');
+    assert.equal(viewStore.get(), 'agent-detail');
     await _assertBackLinkTargetsWork('found branch');
 });
 
@@ -190,9 +158,9 @@ test('CMX-41: agent-detail PR badge reads "PR #N · merged/closed" for a dead PR
     ];
     for (const [state, want] of CASES) {
         nav.renderNav();
-        util.setAgentsCache([{ name: 'cmx41-pr-agent', online: true,
+        agentsStore.set([{ name: 'cmx41-pr-agent', online: true,
             pr: { url: URL, number: 613, state } }]);
-        window.chela.selectAgent('cmx41-pr-agent');
+        nav.selectAgent('cmx41-pr-agent');
         await flush();
         const badge = document.querySelector('#agent-detail .pr-badge');
         assert.ok(badge, `state=${state}: no .pr-badge rendered`);

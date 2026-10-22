@@ -18,7 +18,7 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { activateDom, bootDashboardDom, copyDashboard, flush, SIDEBAR } from './js_helpers/dashboard_dom.mjs';
+import { activateDom, bootDashboardDom, copyDashboard, flush, SIDEBAR, AGENTS_STORE, VIEW_STORE, NAV } from './js_helpers/dashboard_dom.mjs';
 import { fakeArchiveServer } from './js_helpers/fake_archive.mjs';
 
 const BODY = `
@@ -61,9 +61,9 @@ async function bootDevice(name) {
     const { dom, modules } = await bootDashboardDom({
         body: BODY, canvasStub: true, terminalsEnabled: false, fetchImpl,
         jsRoot,
-        extraModules: ['util.js', 'nav.js', SIDEBAR],
+        extraModules: [AGENTS_STORE, VIEW_STORE, NAV, SIDEBAR],
     });
-    const dev = { name, dom, nav: modules.nav, sidebar: modules.sidebar, util: modules.util };
+    const dev = { name, dom, nav: modules.nav, sidebar: modules.sidebar, agentsStore: modules.agents.agents, viewStore: modules.view.view };
     await settle();
     return dev;
 }
@@ -232,7 +232,7 @@ test('NO WRITE-BACK before the first load: renders and choices on an unloaded pa
     layoutGate = { promise: new Promise(r => { release = r; }) };
     const fresh = await bootDevice('fresh');
     use(fresh);
-    fresh.util.setAgentsCache(ROWS);
+    fresh.agentsStore.set(ROWS);
     fresh.sidebar.renderSidebarAgents(ROWS);
     fresh.sidebar.groupMenuAction('/srv/code/beta', 'down');
     fresh.sidebar.viewMenuAction('sort:name');

@@ -3,7 +3,7 @@
 // Liav, 2026-10-16 (phone screenshot): the pill strip over the phone's single terminal
 // listed sessions in the pane list's order (/api/agents), not the sidebar's. The sidebar's order
 // (group order, Move up / Move down, custom groups, each group's sort) is the one order;
-// nav.js exposes it (chela.sidebarOrder) and terminals.js steps the header swipe by it.
+// the sidebar controller exposes it (sidebarOrder) and the Wall steps the header swipe by it.
 // CMX-202 removed the pill strip (the sidebar is the phone's switcher), so the order is
 // read off the swipe: from the last session, swipe left once per session and record what
 // opens.
@@ -16,7 +16,7 @@
 // Run: pnpm exec vitest run tests/mobile_swipe_sidebar_order.test.mjs  (pytest runs it via tests/test_js_suites.py)
 import { beforeAll, beforeEach, test } from 'vitest';
 import assert from 'node:assert/strict';
-import { bootDashboardDom, flush, sliceTemplate, SIDEBAR, WALL } from './js_helpers/dashboard_dom.mjs';
+import { APP_BODY, bootDashboardDom, flush, SIDEBAR, WALL, NAV } from './js_helpers/dashboard_dom.mjs';
 import { fakeArchiveServer } from './js_helpers/fake_archive.mjs';
 
 const BASE = [
@@ -39,14 +39,8 @@ let ROWS = BASE;
 const OPTIONS = ['@299', '@205', '@204', '@203', '@202', '@201', '@298'];
 const TAIL = ['@299', '@298'];
 
-// The REAL terminals panel (index.html), so a switch's renderTerminals runs on the shipped
-// markup. Its live panes are re-seeded with OPTIONS before each step.
-const PANEL = sliceTemplate('<div class="panel active" id="panel-terminals">', '    </div>\n    {% endif %}').replace('{% endif %}', '');
-const BODY = `
-<aside class="sidebar"><div class="side-list" id="sidebar-agents"></div></aside>
-<div id="agent-detail"></div>
-<span id="hdr-agents"></span><span id="hdr-next"></span><span id="hdr-updated"></span>
-${PANEL}`;
+// The REAL page (the shell), so a switch's renderTerminals runs on the shipped markup. Its
+// live panes are re-seeded with OPTIONS before each step.
 // The agents store holds a pane for every listed window plus the two undrawn ones, in
 // OPTIONS' order (publishing it does not redraw the sidebar); useRows() swaps the /api/agents
 // answer and re-seeds the store to match, and swipe() puts /api/agents' rows back after.
@@ -71,17 +65,16 @@ function fetchImpl(url, opts) {
     return json(body);
 }
 
-let nav, terminals, chela, sidebar;
+let nav, terminals, sidebar;
 beforeAll(async () => {
     const booted = await bootDashboardDom({
-        body: BODY, phone: true, canvasStub: true, fetchImpl,
+        body: APP_BODY, phone: true, canvasStub: true, fetchImpl,
         seedLocalStorage: { pc_term_mode: 'single' },
-        extraModules: ['nav.js', WALL, SIDEBAR],
+        extraModules: [NAV, WALL, SIDEBAR],
     });
     nav = booted.modules.nav;
     sidebar = booted.modules.sidebar;
     terminals = booted.modules.terminals;
-    chela = booted.chela;
     globalThis.fetch = fetchImpl;
     await settle();   // the boot's own refresh lands before any test seeds the options
 });
@@ -124,7 +117,7 @@ test('custom groups: the swipe goes in the sidebar order, not the options order'
         custom: { groups: [{ id: 'x', name: 'First' }, { id: 'y', name: 'Second' }], assign: { 'w:@202': 'x', 'w:@201': 'y' } },
     });
     // sidebar: First [b], Second [a], Ungrouped [c]
-    assert.deepEqual(chela.sidebarOrder(), ['@202', '@201', '@203']);
+    assert.deepEqual(sidebar.sidebarOrder(), ['@202', '@201', '@203']);
     assert.deepEqual(swipe(), ['@202', '@201', '@203', ...TAIL]);
     assert.notDeepEqual(swipe(), panes(), 'the swipe must not follow the pane list');
 });
@@ -136,13 +129,13 @@ test('a group order saved in the layout orders the swipe', async () => {
 });
 
 test('wids the sidebar has not drawn are appended at the END, in their own order, never dropped', async () => {
-    assert.deepEqual(chela.sidebarOrder(), ['@201', '@202', '@203']);
+    assert.deepEqual(sidebar.sidebarOrder(), ['@201', '@202', '@203']);
     assert.deepEqual(swipe(), ['@201', '@202', '@203', ...TAIL]);
 });
 
 test('Move up in the sidebar re-orders the swipe on the next render, no reload', async () => {
     assert.deepEqual(swipe(), ['@201', '@202', '@203', ...TAIL]);
-    chela.groupMenuAction('/srv/code/gamma', 'up');
+    sidebar.groupMenuAction('/srv/code/gamma', 'up');
     await settle();
     assert.deepEqual(groupKeys(), ['/srv/code/alpha', '/srv/code/gamma', '/srv/code/beta']);
     assert.deepEqual(swipe(), ['@201', '@203', '@202', ...TAIL]);
@@ -150,11 +143,11 @@ test('Move up in the sidebar re-orders the swipe on the next render, no reload',
 
 test('a collapsed group keeps its sessions in the swipe, at the group position', async () => {
     await setLayout({ order: ['/srv/code/beta', '/srv/code/alpha', '/srv/code/gamma'] });
-    chela.toggleGroup('/srv/code/beta');
+    sidebar.toggleGroup('/srv/code/beta');
     await settle();
     assert.ok(document.querySelector('#sidebar-agents .side-group.collapsed'), 'the group is collapsed');
     assert.deepEqual(swipe(), ['@202', '@201', '@203', ...TAIL]);
-    chela.toggleGroup('/srv/code/beta');
+    sidebar.toggleGroup('/srv/code/beta');
 });
 
 test('the header swipe steps through the sessions in the sidebar order', async () => {
@@ -208,7 +201,7 @@ test('a re-order of the sidebar leaves the open session open', async () => {
     void terminals.showPane('@203');
     await setLayout({ order: [] });
     assert.equal(terminals.activePane(), '@203');
-    chela.groupMenuAction('/srv/code/gamma', 'up');
+    sidebar.groupMenuAction('/srv/code/gamma', 'up');
     await settle();
     assert.equal(terminals.activePane(), '@203', 'the re-order did not switch sessions');
     assert.deepEqual(swipe(), ['@201', '@203', '@202', ...TAIL]);

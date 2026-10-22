@@ -3,7 +3,7 @@
 // the time left while an UNSANDBOXED override is armed, and a tap opens the sheet.
 import { act, fireEvent, render } from '@testing-library/react';
 import { beforeEach, expect, test, vi } from 'vitest';
-import { applyShared, closeSharesSheet, mountShares, shares, SharesPill, SharesSheet } from '../index.ts';
+import { applyShared, closeSharesSheet, shares, SharesPill, SharesSheet } from '../index.ts';
 import { settle, serve } from './server.ts';
 import { must } from './setup.ts';
 
@@ -70,22 +70,6 @@ test('a tap opens the Active shares sheet', async () => {
   fireEvent.click(pill());
   await settle();
   expect(document.querySelector('.shares-sheet .ss-row[data-wid="@1"]')).toBeTruthy();
-});
-
-test('mountShares puts each pill copy in its slot, and the sheet in its own', async () => {
-  document.body.innerHTML = '<div class="safety-float"><span id="shares-pill-float"></span></div><span id="shares-pill-row"></span><div id="shares-sheet-island"></div>';
-  let roots: ReturnType<typeof mountShares> = [];
-  act(() => {
-    roots = mountShares(document);
-  });
-  act(() => applyShared({ '@1': { mode: 'view' } }, true));
-  expect(document.querySelector('.safety-float > #shares-pill-float > #btn-shares')).toBeTruthy();
-  expect(document.querySelector('#shares-pill-row > #term-shares')).toBeTruthy();
-  serve({ shared: { '@1': { mode: 'view' } } });
-  fireEvent.click(must(document.getElementById('term-shares')));
-  await settle();
-  expect(document.querySelector('.shares-sheet .ss-row[data-wid="@1"]')).toBeTruthy();
-  act(() => roots.forEach((r) => r?.unmount()));
 });
 
 test('the countdown clock ticks only while an override is on a pill, and stops with the last one', () => {

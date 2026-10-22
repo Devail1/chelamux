@@ -72,7 +72,7 @@ function fakeGridStack() {
     return { init: () => grid };
 }
 
-let terminals, nav, util, wall;
+let terminals, nav, agentsStore, viewStore, wall;
 const minimized = wid => wall.minimizedPanes.get().has(wid);
 
 beforeAll(async () => {
@@ -100,18 +100,19 @@ beforeAll(async () => {
     globalThis.window.chela = globalThis.window.chela || {};
     globalThis.setInterval = () => 0;
 
-    await import('../chela/dashboard/frontend/src/boot.ts');
-    util = await import('../chela/dashboard/static/js/util.js');
+    (await import('../chela/dashboard/frontend/src/boot.ts')).start();
+    ({ agents: agentsStore } = await import('../chela/dashboard/frontend/src/shared/store/agents.ts'));
+    ({ view: viewStore } = await import('../chela/dashboard/frontend/src/shared/store/view.ts'));
     terminals = await import('../chela/dashboard/frontend/src/features/wall/index.ts');
-    nav = await import('../chela/dashboard/static/js/nav.js');
+    nav = await import('../chela/dashboard/frontend/src/features/shell/index.ts');
     wall = await import('../chela/dashboard/frontend/src/shared/store/wall.ts');
-    util.setAgentsCache(AGENTS);
+    agentsStore.set(AGENTS);
 });
 
 // Every test starts wall-visible with both panes open (not docked), on the terminals
 // tab, in wall mode — the baseline "on-wall" state each case then deviates from.
 beforeEach(async () => {
-    util.setCurrentTab('terminals');
+    viewStore.set('terminals');
     terminals.setTermMode('wall');
     await terminals.renderTerminals();
     [HUMAN, WORKER].forEach(wid => wall.setMinimized(wid, false));
@@ -120,7 +121,7 @@ beforeEach(async () => {
 
 test('1. wall visible + pane open on it -> click MINIMIZES it', () => {
     assert.ok(!minimized(HUMAN), 'setup: orchestrator must start open, not docked');
-    window.chela.selectAgent('orchestrator');
+    nav.selectAgent('orchestrator');
     assert.ok(minimized(HUMAN),
         'clicking an already-open pane while the wall is visible must dock it, not just re-focus it');
 });
@@ -133,17 +134,17 @@ const settleFocus = () => new Promise(r => setTimeout(r, 120));
 test('2. wall visible + pane minimized -> click restores + focuses (unchanged)', async () => {
     document.querySelector(`#term-stage .grid-stack-item[gs-id="${WORKER}"] .gs-min-btn`).click();
     assert.ok(minimized(WORKER), 'setup: worker must be docked before the click');
-    window.chela.selectAgent('cmx-139');
+    nav.selectAgent('cmx-139');
     await settleFocus();
     assert.ok(!minimized(WORKER),
         'clicking a docked pane while the wall is visible must restore it');
 });
 
 test('3. not on the wall (another tab) -> click switches to the wall AND focuses, never minimizes', async () => {
-    util.setCurrentTab('agents');   // simulate being on a different tab
+    viewStore.set('agents');   // simulate being on a different tab
     assert.ok(!minimized(HUMAN), 'setup: orchestrator is open on the wall underneath');
-    window.chela.selectAgent('orchestrator');
-    assert.equal(util.currentTab, 'terminals', 'the click must switch back to the wall tab');
+    nav.selectAgent('orchestrator');
+    assert.equal(viewStore.get(), 'terminals', 'the click must switch back to the wall tab');
     await settleFocus();
     assert.ok(!minimized(HUMAN),
         'an open pane must be focused, NOT minimized, when the click is what brings the wall into view');
@@ -152,7 +153,7 @@ test('3. not on the wall (another tab) -> click switches to the wall AND focuses
 test('4. single-terminal mode -> click switches to wall mode, not just the tab', async () => {
     terminals.setTermMode('single');
     assert.ok(!terminals.isWallVisible(), 'setup: single-terminal mode must not read as wall-visible');
-    window.chela.selectAgent('orchestrator');
+    nav.selectAgent('orchestrator');
     assert.ok(terminals.isWallVisible(),
         'clicking a row in single-terminal mode must switch the wall into (grid) wall mode');
     await settleFocus();

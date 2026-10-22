@@ -70,7 +70,7 @@ function fakeGridStack() {
     return { init: () => grid };
 }
 
-let terminals, nav, util, sidebar;
+let terminals, nav, agentsStore, viewStore, sidebar;
 
 beforeAll(async () => {
     const dom = new JSDOM(`<!doctype html><html><body>${PANEL}</body></html>`,
@@ -97,15 +97,16 @@ beforeAll(async () => {
     globalThis.setInterval = () => 0;
 
     await mountIslands(dom.window);   // CMX-276: the sidebar island draws #sidebar-agents
-    await import('../chela/dashboard/frontend/src/boot.ts');
-    util = await import('../chela/dashboard/static/js/util.js');
+    (await import('../chela/dashboard/frontend/src/boot.ts')).start();
+    ({ agents: agentsStore } = await import('../chela/dashboard/frontend/src/shared/store/agents.ts'));
+    ({ view: viewStore } = await import('../chela/dashboard/frontend/src/shared/store/view.ts'));
     terminals = await import('../chela/dashboard/frontend/src/features/wall/index.ts');
-    nav = await import('../chela/dashboard/static/js/nav.js');
+    nav = await import('../chela/dashboard/frontend/src/features/shell/index.ts');
     sidebar = await import('../chela/dashboard/frontend/src/features/sidebar/controller.ts');
-    util.setCurrentTab('terminals');
+    viewStore.set('terminals');
 
     AGENTS = fleet();   // WORKER opens minimized (walldock's property 1)
-    util.setAgentsCache(AGENTS);
+    agentsStore.set(AGENTS);
     await terminals.renderTerminals();
 });
 

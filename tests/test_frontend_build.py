@@ -63,9 +63,9 @@ def _copy_dashboard(tmp_path: Path) -> Path:
 
 @pytest.mark.parametrize("changed,old,new", [
     ("src/features/version/lib/VersionBadge.tsx", "build {version}", "v{version}"),
-    # util.js's live kebab-menu handler: lucideIcon's message is tree-shaken once no legacy
-    # module calls it (CMX-242).
-    ("../static/js/util.js", "closest('.kebab-wrap')", "closest('.kebab-wrapper')"),   # CMX-215
+    # a static/js module the bundle imports (the Wall tile's state word; CMX-248 deleted the
+    # last plain-JS ones, util.js among them)
+    ("../static/js/wallmodel.ts", "word: 'PR open'", "word: 'PR opened'"),   # CMX-215
 ], ids=["island", "legacy"])
 def test_a_source_change_without_a_rebuild_is_stale(tmp_path, changed, old, new):
     """Negative control: the same check over a copy of the frontend is green as copied, and

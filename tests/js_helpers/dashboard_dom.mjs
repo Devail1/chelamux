@@ -41,13 +41,19 @@ const MANIFEST = JSON.parse(readFileSync(join(DASHBOARD_ROOT, 'static', 'app', '
 export const ENTRY_URL = new URL(
     `../../chela/dashboard/frontend/${Object.keys(MANIFEST).find(k => MANIFEST[k].name === 'main')}`, import.meta.url).href;
 const DEFAULT_JS_ROOT = new URL('../../chela/dashboard/static/js/', import.meta.url).href;
-/** CMX-278: the sidebar's state and commands (they left nav.js), for `extraModules`; it is
- * returned as `modules.sidebar`. */
+/** CMX-278: the sidebar's state and commands, for `extraModules`; it is returned as
+ * `modules.sidebar`. */
 export const SIDEBAR = ['sidebar', '../../frontend/src/features/sidebar/controller.ts'];
 /** CMX-247: the Wall (it left static/js/terminals.js), for `extraModules`; returned as
  * `modules.terminals`. */
 export const WALL = ['terminals', '../../frontend/src/features/wall/index.ts'];
 const SRC_URL = new URL('../../chela/dashboard/frontend/src/', import.meta.url).href;
+/** CMX-248: the shell (the view switch, selectAgent, the registry; nav.js until then), for
+ * `extraModules`; returned as `modules.nav`. */
+export const NAV = ['nav', '../../frontend/src/features/shell/index.ts'];
+/** CMX-248: the page's stores (util.js's facade until then): `modules.agents.agents`, ... */
+export const AGENTS_STORE = ['agents', '../../frontend/src/shared/store/agents.ts'];
+export const VIEW_STORE = ['view', '../../frontend/src/shared/store/view.ts'];
 
 /** CMX-217: index.html's boot config block (frontend/src/shared/api readBoot), for a fixture
  * page. Fields left out take readBoot's defaults, as on a page without the block. */
@@ -79,8 +85,9 @@ export const ORCHESTRATOR = ['orchestrator', '../../frontend/src/shared/orchestr
  * quiet empty string — if either marker has moved, exactly like
  * tests/dashboard_default_view.test.mjs's original inline version did. */
 export function sliceTemplate(startMarker, endMarker, ctx) {
-    // CMX-178: a slice never carries the page's <script> tags, so the build's entry is off.
-    const html = ctx ? renderTemplateIfs(TEMPLATE_HTML, { app_src: false, ...ctx }) : TEMPLATE_HTML;
+    // CMX-178: a slice never carries the page's <script> tags, so the build's entry is off
+    // (and, CMX-248, its stylesheet).
+    const html = ctx ? renderTemplateIfs(TEMPLATE_HTML, { app_src: false, app_css: false, ...ctx }) : TEMPLATE_HTML;
     const start = html.indexOf(startMarker);
     if (start < 0) {
         throw new Error(`sliceTemplate: start marker not found in templates/index.html: ${JSON.stringify(startMarker)}`);
@@ -127,72 +134,29 @@ export function exposeDomConstructors(win) {
     }
 }
 
-/** CMX-276: what the page's React islands do before the legacy graph boots (index.html loads
- * them first): a bridge on `win`, the sidebar island drawing its #sidebar-agents, the diff
- * modal and keybar islands (CMX-237), the Work view and its toasts (CMX-233), the Decisions and
- * task modal islands (CMX-228) and the chrome (CMX-219: src/chrome.tsx). From
- * src/, so a mutation of the TypeScript reaches every suite that boots the page. Each page
- * (window) gets its own bridge and root. A suite that hand-rolls its jsdom boot calls this
- * before it imports boot.ts / nav.js. `src` (a URL ending in `/`) is the frontend/src the
- * islands that register lanes are mounted from: a copied page's own (copyDashboard), so their
- * lanes (resources, approvals, the decisions log, ...) run on that page's scheduler. */
+/** CMX-248: what the entry's mountPage() does (frontend/src/boot.ts), for a page the entry did
+ * not mount (a second page in one suite, or a copyDashboard page): the bridge, the saved theme,
+ * the panes' window.chela contract, the page keys, and the one root in `#root`. A fixture of
+ * its own, without `#root`, gets each shell slot it has drawn instead (features/shell
+ * mountSlots: the same table <App> renders). `src` (a URL ending in `/`) is the frontend/src
+ * to mount from: a copied page's own (copyDashboard), so its lanes run on its scheduler. */
 export async function mountIslands(win, src = SRC_URL) {
-    const doc = win.document;
-    // CMX-221: the overlays (Settings, the palette) are Radix dialogs, which reach for the DOM
-    // constructors (MutationObserver, NodeFilter, ...) as globals; a hand-rolled boot has few.
+    // Radix (the kit's dialogs and menus) reaches for the DOM constructors as globals.
     exposeDomConstructors(win);
-    // The page's bridge first: the chrome's stores attach to it (shared/store/agents).
-    const sidebar = !!doc.getElementById('sidebar-agents');
-    if (sidebar) {
-        const { createBridge } = await import('../../chela/dashboard/frontend/src/shared/bridge/index.ts');
-        win.chelaBridge = createBridge();
-    }
-    // CMX-237: the diff modal and keybar islands, where the page has their slots.
-    if (doc.getElementById('diff-modal-island')) {
-        const { DiffModal } = await import('../../chela/dashboard/frontend/src/features/diffmodal/index.ts');
-        const { mountIsland } = await import('../../chela/dashboard/frontend/src/shared/islands/index.tsx');
-        mountIsland('diff-modal-island', DiffModal, {}, doc);
-    }
-    // CMX-233: the Work view (Board, Runs, Schedules) and its toasts; CMX-231: the New-task dialog.
-    for (const [id, feature, name] of [['panel-work', 'work', 'WorkView'], ['work-toasts', 'work', 'WorkToasts'],
-        ['newtask-island', 'newtask', 'NewTask']]) {
-        if (!doc.getElementById(id)) continue;
-        const mod = await import(`../../chela/dashboard/frontend/src/features/${feature}/index.ts`);
-        const { mountIsland } = await import('../../chela/dashboard/frontend/src/shared/islands/index.tsx');
-        mountIsland(id, mod[name], {}, doc);
-    }
-    // CMX-219: the chrome islands (safety pills, gear menu, launcher, agent detail, overlays:
-    // Settings and the palette, CMX-221), into whichever of their slots the page has; and, as
-    // islands.tsx's boot does, the page keys and the panes' window.chela contract.
-    const { mountChrome } = await import(new URL('chrome.tsx', src).href);
-    mountChrome(doc);
-    const { installPalette } = await import(new URL('features/palette/index.ts', src).href);
-    const { installIframeBridge } = await import(new URL('iframeBridge.ts', src).href);
-    installIframeBridge(win);
-    installPalette(win);
-    if (doc.getElementById('keybar-island')) {
-        const { mountKeybar } = await import('../../chela/dashboard/frontend/src/features/keybar/index.ts');
-        mountKeybar(win);
-        await flush();   // React commits the bars (and the keybar binds its pin) on its next turn
-    }
-    // CMX-228: the Decisions inbox (its button's slot) and the task modal islands.
-    if (doc.getElementById('decisions-island')) {
-        // From the page's own source tree (a copyDashboard copy's, for a suite of several pages):
-        // the inbox registers its log lane with THAT tree's scheduler, the one its boot.ts runs.
-        const { mountDecisions } = await import(new URL('features/decisions/index.ts', src).href);
-        mountDecisions(win);
-        await flush();
-    }
-    if (doc.getElementById('task-modal-island')) {
-        const { TaskModal } = await import(new URL('features/taskmodal/index.ts', src).href);
-        const { mountIsland } = await import('../../chela/dashboard/frontend/src/shared/islands/index.tsx');
-        mountIsland('task-modal-island', TaskModal, {}, doc);
-    }
-    // A page with no sidebar has no sidebar island to mount.
-    if (!sidebar) return;
-    const { mountSidebar } = await import('../../chela/dashboard/frontend/src/features/sidebar/index.ts');
-    mountSidebar(win, win.chelaBridge);
+    const { mountPage } = await import(new URL('boot.ts', src).href);
+    if (!mountPage(win)) await mountFixtureSlots(win, src);
+    else await flush();
 }
+
+/** A fixture without `#root`: each shell slot it has, drawn from the shell's own table. */
+async function mountFixtureSlots(win, src = SRC_URL) {
+    const { mountSlots } = await import(new URL('features/shell/index.ts', src).href);
+    mountSlots(win.document);
+    await flush();   // React commits a slot's effects (the keybar binds its pin) on its next turn
+}
+
+/** CMX-248: the page's whole body as Flask serves it: the shell renders into it. */
+export const APP_BODY = '<div id="root"></div>';
 
 /** Flush one microtask turn — e.g. a fetch().then(json).then(render) chain
  * queued by a poll that fires unawaited on boot — without advancing a timer. */
@@ -276,12 +240,14 @@ export async function bootDashboardDom({
 
     if (jsRoot === DEFAULT_JS_ROOT) {
         await import(ENTRY_URL);
-        // A second boot in one suite meets the entry cached: its islands mounted on the FIRST
-        // page only, so this page mounts its own (CMX-276).
+        // A second boot in one suite meets the entry cached: it mounted the FIRST page only, so
+        // this page mounts its own (CMX-276). The entry draws a fixture with no #root nothing.
         if (!dom.window.chelaBridge) await mountIslands(dom.window);
+        else if (!dom.window.document.getElementById('root')) await mountFixtureSlots(dom.window);
+        else await flush();
     } else {
         await mountIslands(dom.window, new URL('../../frontend/src/', jsRoot).href);
-        await import(new URL('../../frontend/src/boot.ts', jsRoot).href);
+        (await import(new URL('../../frontend/src/boot.ts', jsRoot).href)).start();
     }
     const modules = {};
     for (const entry of extraModules) {
@@ -297,40 +263,6 @@ export function clickIsland(el) {
     if (!el) throw new Error('clickIsland: element is missing');
     if (el.disabled) throw new Error('clickIsland: element is DISABLED — a real click would not reach the handler');
     el.dispatchEvent(new el.ownerDocument.defaultView.MouseEvent('click', { bubbles: true, cancelable: true }));
-}
-
-/** Compile a REAL rendered element's `onclick="..."` attribute and run it
- * against the REAL `window.chela` — the same two hops
- * (attribute -> window.chela -> function) a real browser click takes, just
- * compiled by this helper instead of jsdom's HTML parser (jsdom never
- * executes inline `onclick=` attributes on a dispatched click event without
- * `runScripts:"dangerously"`, which this bootstrap deliberately does not set
- * — see tests/decisions.test.mjs's WIRING GUARD note). `this` inside the
- * handler is bound to `el`, matching `_navItemHtml`'s `this.dataset.view`-style
- * attributes. Throws if there is no onclick attribute at all, or if the
- * element is `disabled` (a real click never reaches a disabled control's
- * handler either). */
-export function clickOnclick(el) {
-    if (!el) throw new Error('clickOnclick: element is missing');
-    if (el.disabled) throw new Error('clickOnclick: element is DISABLED — a real click would not reach the handler');
-    const onclick = el.getAttribute('onclick');
-    if (!onclick) throw new Error('clickOnclick: element has no onclick attribute');
-    return new Function('chela', onclick).call(el, globalThis.window.chela);
-}
-
-/** Same idiom as clickOnclick(), for an `oninput=`/`onfocus=`/... attribute —
- * compiles the REAL attribute text off the REAL element and runs it, so a
- * mutation that blanks the attribute (PR #529 round 3, mutation 4: typing
- * into #sidebar-jump-input stayed "wired" only because the test called
- * `chela.sidebarJumpInput(el)` directly, never reading the attribute the
- * browser actually fires) fails here by construction — there is nothing to
- * compile once the attribute is empty. `this`/`event` inside the handler are
- * bound the same way a real DOM event dispatch would bind them. */
-export function fireInlineHandler(el, attr) {
-    if (!el) throw new Error(`fireInlineHandler: element is missing (attr=${attr})`);
-    const code = el.getAttribute(attr);
-    if (!code) throw new Error(`fireInlineHandler: element has no ${attr} attribute`);
-    return new Function('chela', 'event', code).call(el, globalThis.window.chela, { target: el, currentTarget: el });
 }
 
 /** CMX-221: the ⌘K palette is a React dialog in the overlays island (a fixture needs

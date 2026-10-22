@@ -25,7 +25,7 @@ import { closePalette, exposeDomConstructors, searchPalette } from './js_helpers
 
 const PANEL = `
 <span id="shares-pill-float"></span><div id="shares-sheet-island"></div>
-<div id="palette-island"></div>
+<div id="overlays-island"></div>
 <div class="panel" id="panel-terminals">
   <button id="term-mode-single"></button>
   <button id="term-mode-wall"></button>
@@ -71,7 +71,7 @@ function fakeGridStack() {
     return { init: () => grid };
 }
 
-let terminals, util, share;
+let terminals, agentsStore, viewStore, share;
 const flush = () => new Promise(r => setTimeout(r, 0));
 
 beforeAll(async () => {
@@ -90,13 +90,14 @@ beforeAll(async () => {
         addEventListener() {}, removeEventListener() {}, addListener() {}, removeListener() {} });
     globalThis.window.chela = globalThis.window.chela || {};
     globalThis.setInterval = () => 0;
-    await import('../chela/dashboard/frontend/src/boot.ts');
-    util = await import('../chela/dashboard/static/js/util.js');
+    (await import('../chela/dashboard/frontend/src/boot.ts')).start();
+    ({ agents: agentsStore } = await import('../chela/dashboard/frontend/src/shared/store/agents.ts'));
+    ({ view: viewStore } = await import('../chela/dashboard/frontend/src/shared/store/view.ts'));
     terminals = await import('../chela/dashboard/frontend/src/features/wall/index.ts');
     share = await import('../chela/dashboard/frontend/src/features/share/index.ts');
-    share.mountShares(document);
-    util.setCurrentTab('terminals');
-    util.setAgentsCache(AGENTS);
+    (await import('../chela/dashboard/frontend/src/features/shell/index.ts')).mountSlots(document);   // the shares pills and sheet
+    viewStore.set('terminals');
+    agentsStore.set(AGENTS);
     await terminals.renderTerminals();
 });
 
@@ -250,12 +251,7 @@ test('⭐ a change to the share state repaints the live pane\'s banner, and a st
 });
 
 test('the palette offers Stop sharing on a shared session and Share on an unshared one', async () => {
-    // CMX-221: the palette is a React dialog; this page mounts it on its own.
-    if (!document.querySelector('#palette-island > *')) {
-        const { mountIsland } = await import('../chela/dashboard/frontend/src/shared/islands/index.tsx');
-        const { Palette } = await import('../chela/dashboard/frontend/src/features/palette/index.ts');
-        mountIsland('palette-island', Palette, {}, document);
-    }
+    // CMX-221: the palette is a React dialog, in the overlays slot this page mounts.
     const click = r => r.el.dispatchEvent(new window.MouseEvent('click', { bubbles: true }));
     share.noteShare('@1', 'view', null);
     const stop = (await searchPalette('sharing')).find(r => /Stop sharing/.test(r.title));

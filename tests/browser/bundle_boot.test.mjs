@@ -18,7 +18,7 @@ const BUNDLE = `/static/v/${ASSET_VERSION}/app/${MANIFEST['src/main.tsx'].file}`
 // legacy suites load by its fixed name), and nothing else.
 const IMPORTS = (MANIFEST['src/main.tsx'].imports ?? []).map(k => `/static/v/${ASSET_VERSION}/app/${MANIFEST[k].file}`);
 
-test('the bundle is the only module the page loads, and both legacy and the islands boot from it', { skip: why }, async () => {
+test('the bundle is the only module the page loads, and the shell boots from it', { skip: why }, async () => {
     const { context, page, misses, errors } = await openDashboard(browser, { width: 1440, height: 900 });
     try {
         await page.waitForFunction(n => document.querySelectorAll('.agent-row').length >= n, AGENTS.length, { timeout: 15000 });
@@ -29,7 +29,9 @@ test('the bundle is the only module the page loads, and both legacy and the isla
         // the same files the ttyd presence shim loads in each pane.
         assert.deepEqual(scripts.filter(p => p.includes('/app/')).sort(), [BUNDLE, ...IMPORTS].sort());
         assert.deepEqual(scripts.filter(p => p.includes('/js/')), [], 'an unbundled legacy module was fetched');
-        assert.equal(await page.evaluate(() => typeof window.chela?.closeModal), 'function');
+        // CMX-248: one root; window.chela is the panes' contract and nothing else (plan §6.3).
+        assert.deepEqual(await page.evaluate(() => Object.keys(window.chela).sort()), ['openPalette', 'toggleSettings']);
+        assert.equal(await page.locator('#root > .app > aside.sidebar').count(), 1);
         assert.deepEqual(errors, []);
         assert.deepEqual(misses, []);
     } finally {

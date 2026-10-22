@@ -1,7 +1,6 @@
 import { act, cleanup, fireEvent, render } from '@testing-library/react';
 import { afterEach, expect, test } from 'vitest';
-import { createBridge } from '../../../shared/bridge/index.ts';
-import { CONTEXT_SHOWN_FROM, Sidebar, legacyActions, mountSidebar } from '../index.ts';
+import { CONTEXT_SHOWN_FROM, Sidebar } from '../index.ts';
 import { DISPATCHED_KEY, OTHER_KEY, type SidebarState, sidebarOrder } from '../model.ts';
 import { NOW, actions, runWin, state, win } from './fixtures.ts';
 
@@ -384,48 +383,4 @@ test('no rows: "No agents"; rows the view filters all out: "No sessions match th
   cleanup();
   const { el } = draw(state([win('a')], { view: { ...state([]).view, env: ['judge'] } }));
   expect(el.querySelector('.side-empty')?.textContent).toBe('No sessions match this view');
-});
-
-// --- the island ---------------------------------------------------------------------------
-
-test('mountSidebar repaints SYNCHRONOUSLY on every publish (legacy reads the rows right back)', () => {
-  document.body.innerHTML = '<div id="sidebar-agents"><div class="side-empty">stale</div></div>';
-  const bridge = createBridge();
-  const acts = actions();
-  const root = mountSidebar(window, bridge, acts);
-  const host = document.getElementById('sidebar-agents') as HTMLElement;
-  expect(host.textContent).toBe('No agents');
-  bridge.sidebar.set(state([win('one')]));
-  expect(host.querySelector('.agent-row')?.getAttribute('data-agent')).toBe('one');
-  act(() => root?.unmount());
-  document.body.innerHTML = '';
-  expect(mountSidebar(window, bridge, acts)).toBeNull();
-});
-
-test('legacyActions calls window.chela at CALL time (nav.js registers after the island boots)', () => {
-  const w = window as unknown as { chela?: Record<string, (...a: unknown[]) => unknown> };
-  delete w.chela;
-  const acts = legacyActions(window);
-  expect(() => acts.selectAgent('a')).not.toThrow();
-  const calls: unknown[][] = [];
-  const rec = (name: string) => (...a: unknown[]) => { calls.push([name, ...a]); return name; };
-  const names = ['selectAgent', 'toggleGroup', 'groupNewSession', 'toggleArchivedSection', 'unarchiveRow', 'groupMenuAction',
-    'rowMenuAction', 'moveToGroup', 'viewMenuAction', 'newCustomGroup', 'renameCustomGroup', 'deleteCustomGroup'];
-  w.chela = Object.fromEntries(names.map(n => [n, rec(n)]));
-  acts.selectAgent('a');
-  acts.toggleGroup('g');
-  acts.groupNewSession('g');
-  acts.toggleArchivedSection();
-  expect(acts.unarchiveRow(null, 'k')).toBe('unarchiveRow');
-  acts.groupMenuAction('g', 'up');
-  acts.rowMenuAction('r', 'archive');
-  acts.moveToGroup('r', null);
-  acts.viewMenuAction('sort:name');
-  expect(acts.newCustomGroup()).toBe('newCustomGroup');
-  acts.renameCustomGroup('id1');
-  acts.deleteCustomGroup('id2');
-  expect(calls).toEqual([['selectAgent', 'a'], ['toggleGroup', 'g'], ['groupNewSession', 'g'], ['toggleArchivedSection'],
-    ['unarchiveRow', null, 'k'], ['groupMenuAction', 'g', 'up'], ['rowMenuAction', 'r', 'archive'], ['moveToGroup', 'r', null],
-    ['viewMenuAction', 'sort:name'], ['newCustomGroup'], ['renameCustomGroup', 'id1'], ['deleteCustomGroup', 'id2']]);
-  delete w.chela;
 });

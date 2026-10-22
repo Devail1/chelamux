@@ -25,7 +25,7 @@
 // Run: pnpm exec vitest run tests/sidebar_alt_switch.test.mjs  (pytest runs it via tests/test_js_suites.py)
 import { beforeAll, beforeEach, test } from 'vitest';
 import assert from 'node:assert/strict';
-import { bootDashboardDom, SIDEBAR } from './js_helpers/dashboard_dom.mjs';
+import { bootDashboardDom, SIDEBAR, AGENTS_STORE, VIEW_STORE, NAV } from './js_helpers/dashboard_dom.mjs';
 import { fakeArchiveServer } from './js_helpers/fake_archive.mjs';
 
 const BODY = `
@@ -37,11 +37,11 @@ const BODY = `
 <div id="agent-detail"></div>
 <span id="hdr-agents"></span><span id="hdr-next"></span><span id="hdr-updated"></span>`;
 
-let nav, util, sidebar;
-const server = fakeArchiveServer(() => util && util._agentsCache);
+let nav, agentsStore, viewStore, sidebar;
+const server = fakeArchiveServer(() => agentsStore && agentsStore.get());
 
 beforeAll(async () => {
-    ({ modules: { util, nav, sidebar } } = await bootDashboardDom({
+    ({ modules: { agents: { agents: agentsStore }, view: { view: viewStore }, nav, sidebar } } = await bootDashboardDom({
         body: BODY,
         canvasStub: true,
         terminalsEnabled: false,
@@ -51,7 +51,7 @@ beforeAll(async () => {
             const body = /\/api\/(agents|summary)/.test(String(url)) ? [] : {};
             return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve(body) });
         },
-        extraModules: ['util.js', 'nav.js', SIDEBAR],
+        extraModules: [AGENTS_STORE, VIEW_STORE, NAV, SIDEBAR],
     }));
 });
 
@@ -89,7 +89,7 @@ beforeEach(async () => {
     await sidebar.refreshLayout();
     altUp();
     document.getElementById('palette').classList.remove('open');
-    util.setAgentsCache(ROWS);
+    agentsStore.set(ROWS);
     sidebar.renderSidebarAgents(ROWS);
     host().querySelectorAll('.agent-row.active').forEach(r => r.classList.remove('active'));
 });
@@ -129,7 +129,7 @@ test('Alt+2 opens the 2nd visible row\'s session', () => {
 });
 
 test('a collapsed group\'s rows are skipped by the numbers and by Alt+N', () => {
-    window.chela.toggleGroup('/srv/code/beta');   // collapse beta
+    sidebar.toggleGroup('/srv/code/beta');   // collapse beta
     const visible = drawn().filter(r => !inGroup(r, '/srv/code/beta'));
     assert.equal(visible.length, 3, 'fixture: collapsing beta must leave three visible rows');
     assert.ok(drawn().some(r => inGroup(r, '/srv/code/beta')), 'beta\'s rows must still be in the DOM, or the skip is untested');
@@ -151,7 +151,7 @@ test('an OPEN Archived section\'s rows are skipped by the numbers and by Alt+N',
     server.st.hidden.push(`w:${hiddenRow.window_id}`);
     await sidebar.refreshArchive();
     // View ▸ Status ▸ All (the default since CMX-277) draws the section
-    window.chela.toggleArchivedSection();    // …and OPEN, so .side-group.collapsed cannot hide it
+    sidebar.toggleArchivedSection();    // …and OPEN, so .side-group.collapsed cannot hide it
     const sec = host().querySelector('.side-archived');
     assert.ok(sec && !sec.classList.contains('collapsed'), 'fixture: the Archived section must be drawn open');
     const archivedRows = [...sec.querySelectorAll('.agent-row[data-agent]')];
@@ -203,7 +203,7 @@ test('Alt+N past the last visible row does nothing', () => {
 
 test('only the first NINE visible rows are numbered — rows 10 and 11 carry nothing', () => {
     const many = Array.from({ length: 11 }, (_, i) => win(`m-${String(i + 1).padStart(2, '0')}`, '/srv/code/many'));
-    util.setAgentsCache(many);
+    agentsStore.set(many);
     sidebar.renderSidebarAgents(many);
     try {
         assert.equal(drawn().length, 11, 'fixture must draw eleven visible rows, or the cap is untested');
@@ -221,7 +221,7 @@ test('only the first NINE visible rows are numbered — rows 10 and 11 carry not
         assert.equal(activeRow(), drawn()[8].dataset.agent, 'Alt+9 must open the 9th row');
     } finally {
         altUp();
-        util.setAgentsCache(ROWS);
+        agentsStore.set(ROWS);
         sidebar.renderSidebarAgents(ROWS);
     }
 });

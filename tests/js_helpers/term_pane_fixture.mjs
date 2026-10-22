@@ -1,7 +1,7 @@
 // CMX-169's shared fixture: the real dashboard booted in jsdom at phone width, in single
 // mode, over three sessions whose /api/agents order (@201, @202, @203) is never the
 // sidebar order a test saves. One boot per test file (the module graph loads once).
-import { SIDEBAR, bootDashboardDom, flush, sliceTemplate, WALL } from './dashboard_dom.mjs';
+import { APP_BODY, NAV, SIDEBAR, bootDashboardDom, flush, WALL } from './dashboard_dom.mjs';
 import { fakeArchiveServer } from './fake_archive.mjs';
 
 export const KEY = 'pc_term_last_wid';
@@ -11,12 +11,6 @@ export const ROWS = ['a', 'b', 'c'].map((n, i) => ({
 }));
 export const stored = (wid, session_id, name) => JSON.stringify({ wid, session_id, name });
 
-const PANEL = sliceTemplate('<div class="panel active" id="panel-terminals">', '    </div>\n    {% endif %}').replace('{% endif %}', '');
-const BODY = `
-<aside class="sidebar"><div class="side-list" id="sidebar-agents"></div></aside>
-<div id="agent-detail"></div>
-<span id="hdr-agents"></span><span id="hdr-next"></span><span id="hdr-updated"></span>
-${PANEL}`;
 
 export async function settle() { for (let i = 0; i < 8; i++) await flush(); }
 let wall = null;   // the booted page's features/wall
@@ -43,11 +37,11 @@ export async function bootPhone({ order, seed = {}, layoutGate = null }) {
         return layoutGate && /\/api\/sidebar\/layout/.test(u) ? layoutGate.then(() => json(body)) : json(body);
     };
     const booted = await bootDashboardDom({
-        body: BODY, phone: true, canvasStub: true, fetchImpl,
+        body: APP_BODY, phone: true, canvasStub: true, fetchImpl,
         seedLocalStorage: { pc_term_mode: 'single', ...seed },
-        extraModules: ['nav.js', WALL, SIDEBAR],
+        extraModules: [NAV, WALL, SIDEBAR],
     });
     globalThis.fetch = fetchImpl;
     wall = booted.modules.terminals;
-    return { nav: booted.modules.nav, sidebar: booted.modules.sidebar, terminals: booted.modules.terminals, chela: booted.chela };
+    return { nav: booted.modules.nav, sidebar: booted.modules.sidebar, terminals: booted.modules.terminals };
 }

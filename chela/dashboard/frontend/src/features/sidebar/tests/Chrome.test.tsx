@@ -1,9 +1,8 @@
 // CMX-278: the sidebar's nav rows, the width handle, the long press that shows a whole row,
-// and the island roots mountSidebar adds for them.
+// (their slots in the page are the shell's: features/shell's tests).
 import { act, cleanup, fireEvent, render } from '@testing-library/react';
 import { afterEach, expect, test, vi } from 'vitest';
-import { createBridge } from '../../../shared/bridge/index.ts';
-import { LONG_PRESS_MS, Nav, ResizeHandle, Sidebar, mountSidebar } from '../index.ts';
+import { LONG_PRESS_MS, Nav, ResizeHandle, Sidebar } from '../index.ts';
 import { SIDEBAR_WIDTH, clampWidth, type NavState } from '../model.ts';
 import { actions, state, win } from './fixtures.ts';
 
@@ -141,31 +140,4 @@ test('the hover and long-press rule wraps the title instead of truncating it (st
   const sheet = (await import('../../../../../static/style.css?raw')).default;
   expect(sheet).toMatch(/\.agent-row\.rich:hover \.agent-row-name,\s*\.agent-row\.rich\.show-full \.agent-row-name \{ white-space: normal;/);
   expect(sheet).toMatch(/grid-template-columns: var\(--sidebar-w, 288px\) 1fr;/);
-});
-
-// --- the island roots ---------------------------------------------------------------------
-
-test('mountSidebar draws the nav, Recent and the handle in their slots, each repainting on its own store', () => {
-  document.body.innerHTML = '<div id="side-nav"></div><div id="sidebar-agents"></div>'
-    + '<div id="side-recent-island"></div><div id="sidebar-resize"></div>';
-  const bridge = createBridge();
-  const acts = actions();
-  const root = mountSidebar(window, bridge, acts);
-  expect(document.querySelector('#side-nav')?.innerHTML).toBe('');
-  expect(document.querySelector('#side-recent-island')?.innerHTML).toBe('');
-  expect(document.querySelector('.sidebar-resize')?.getAttribute('aria-valuenow')).toBe('288');
-
-  bridge.nav.set(NAV);
-  expect(document.querySelectorAll('#side-nav .side-item')).toHaveLength(2);
-  bridge.recent.set({ rows: [{ store: 's', wid: '@5', session_id: 'sid', label: 'five' }], dispatcher_rows: [], revealed: false, undo: null });
-  expect(document.querySelector('#side-recent-island .agent-row-name')?.textContent).toBe('five');
-  bridge.agents.set([{ window_id: '@9', session_id: 'sid' }]); // that session is live now
-  expect(document.querySelector('#side-recent-island')?.innerHTML).toBe('');
-  bridge.sidebarLayout.set({ order: [], custom: null, view: null, width: 400, loaded: true });
-  const h = document.querySelector('.sidebar-resize') as HTMLElement;
-  expect(h.getAttribute('aria-valuenow')).toBe('400');
-  fireEvent.keyDown(h, { key: 'End' });
-  expect(acts.setSidebarWidth.mock.calls).toEqual([[480]]);
-  act(() => root?.unmount());
-  document.body.innerHTML = '';
 });

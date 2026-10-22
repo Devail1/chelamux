@@ -3,7 +3,8 @@
 // useSyncExternalStore (React's own primitive for an outside store, so no dependency and no
 // tearing). Legacy code reaches the same stores through window.chelaBridge (`.get()` to read,
 // `.set()` to publish) until CMX-212 P03 turns that into imports; it is bundled since P01.
-import { useSyncExternalStore } from 'react';
+import { useCallback, useSyncExternalStore } from 'react';
+import { flushSync } from 'react-dom';
 import type { NavState, RecentState, SidebarState } from '../../features/sidebar/model.ts';
 
 export interface Store<T> {
@@ -33,6 +34,13 @@ export function createStore<T>(initial: T): Store<T> {
 
 export function useStore<T>(store: Store<T>): T {
   return useSyncExternalStore(store.subscribe, store.get);
+}
+
+/** useStore, repainted before `set` returns: for a store whose writer reads the DOM straight
+ * back (the sidebar's rows: Alt+N, jump to the orchestrator). */
+export function useStoreNow<T>(store: Store<T>): T {
+  const subscribe = useCallback((paint: () => void) => store.subscribe(() => flushSync(paint)), [store]);
+  return useSyncExternalStore(subscribe, store.get);
 }
 
 /** One row of /api/agents, as legacy fetched it. Typed loosely until the sidebar port. */

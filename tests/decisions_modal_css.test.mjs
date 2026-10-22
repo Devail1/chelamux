@@ -18,16 +18,15 @@
 import { beforeAll, test } from 'vitest';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
-import { bootDashboardDom, flush, sliceTemplate } from './js_helpers/dashboard_dom.mjs';
+import { APP_BODY, bootDashboardDom, flush } from './js_helpers/dashboard_dom.mjs';
 import { cssForViewport, DESKTOP, PHONE } from './js_helpers/css_viewport.mjs';
 
 const STYLE_CSS = fs.readFileSync(new URL('../chela/dashboard/static/style.css', import.meta.url), 'utf8');
-const SLOT = sliceTemplate('<span class="decisions-island" id="decisions-island"', '</span>');
 
 let decisions;
 
 beforeAll(async () => {
-    await bootDashboardDom({ body: `<div class="sidebar-head-actions">${SLOT}</div>` });
+    await bootDashboardDom({ body: APP_BODY });
     decisions = await import('../chela/dashboard/frontend/src/features/decisions/index.ts');
     decisions.openDecisions();
     await flush();

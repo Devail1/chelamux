@@ -13,10 +13,8 @@
 // Run: pnpm exec vitest run tests/new_task.test.mjs (tests/test_js_suites.py runs it by discovery).
 import { beforeAll, beforeEach, test } from 'vitest';
 import assert from 'node:assert/strict';
-import { bootDashboardDom, clickIsland, flush, searchPalette, sliceTemplate } from './js_helpers/dashboard_dom.mjs';
+import { APP_BODY, bootDashboardDom, clickIsland, flush, searchPalette } from './js_helpers/dashboard_dom.mjs';
 
-const PANEL = sliceTemplate('<div class="panel active" id="panel-work">', '</div>', { terminals_enabled: false });
-const ISLANDS = sliceTemplate('<div id="newtask-island">', '</div>');
 
 const WF = '/repo/WORKFLOW.md';
 function payload(kind = 'linear') {
@@ -70,7 +68,7 @@ const escape = async () => {
 beforeAll(async () => {
     await bootDashboardDom({
         // CMX-219: the New menu is the launcher island's, in the overlays island
-        body: `${PANEL}\n<button id="new-anchor"></button><div id="overlays-island"></div>\n${ISLANDS}`,
+        body: `${APP_BODY}<button id="new-anchor"></button>`,
         fetchImpl, canvasStub: true,
     });
     launcher = await import('../chela/dashboard/frontend/src/features/launcher/index.ts');
@@ -147,7 +145,7 @@ function serverCreates(trackerUrl) {
 }
 
 test('refreshWork() is the Work poll: a created issue shows on the board as CMX-N, linked', async () => {
-    window.chela.selectView('work');
+    clickIsland(document.querySelector('.side-item[data-view="work"]'));
     serverCreates('https://linear.app/acme/issue/CMX-100');
     await refreshWork();
     await settle();
@@ -162,7 +160,7 @@ test('refreshWork() is the Work poll: a created issue shows on the board as CMX-
 });
 
 test('a created issue with no https url is a plain id, never a link', async () => {
-    window.chela.selectView('work');
+    clickIsland(document.querySelector('.side-item[data-view="work"]'));
     for (const url of [null, 'http://linear.app/acme/issue/CMX-100', 'javascript:alert(1)']) {
         serverCreates(url);
         await refreshWork();
