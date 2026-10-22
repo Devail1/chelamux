@@ -825,12 +825,15 @@ test('CMX-377: the REAL sidebar renders a "New session" button and a jump-to-ses
     const { mountIsland } = await import('../chela/dashboard/frontend/src/shared/islands/index.tsx');
     const { NewSessionButton } = await import('../chela/dashboard/frontend/src/features/launcher/index.ts');
     mountIsland('sidebar-new-island', NewSessionButton, {}, document);
-    await flush();
+    // createRoot().render paints on a later scheduler tick: one flush() is not enough on a
+    // loaded CI runner. Wait (up to 1s) for what the asserts below read.
+    const settled = async sel => { for (let i = 0; i < 100 && !document.querySelector(sel); i++) await flush(); };
+    await settled('.sidebar .sidebar-new-btn');
     const newBtn = document.querySelector('.sidebar .sidebar-new-btn');
     assert.ok(newBtn, 'no "New session" button (.sidebar-new-btn) inside the real .sidebar');
     assert.match(newBtn.textContent, /New session/i, '.sidebar-new-btn has no "New session" text');
     clickIsland(newBtn);
-    await flush();
+    await settled('.popover.launch-menu #new-sandbox-item');
     assert.ok(document.querySelector('.popover.launch-menu #new-sandbox-item'),
         '.sidebar-new-btn does not open the launch menu, the ONE launch surface');
     const { closeLaunchMenu } = await import('../chela/dashboard/frontend/src/features/launcher/index.ts');

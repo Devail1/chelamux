@@ -121,6 +121,16 @@ const sidebarRow = name => [...document.querySelectorAll('#sidebar-agents .agent
 const paletteRows = searchPalette;
 const runRow = row => row.el.dispatchEvent(new window.MouseEvent('click', { bubbles: true }));
 const sleep = ms => new Promise(r => setTimeout(r, ms));
+// The footer sets its toast after the copy's await, so React paints it on a later scheduler
+// tick: on a loaded CI runner one sleep(0) can read no toast, or the previous test's. Wait for
+// `text` (up to 1s, under the 1.5s toast life); the assertions after still decide.
+async function settleToast(wid, text) {
+    for (let t = 0; t < 1000; t += 10) {
+        const el = tile(wid).querySelector('.gs-wid-toast');
+        if (el && el.textContent === text) return;
+        await sleep(10);
+    }
+}
 
 // --- the harness itself is not a mock -------------------------------------------
 
@@ -211,7 +221,8 @@ test('running the "@3" row focuses @3\'s pane (and only it) — a jump, not a to
         .filter(it => it.querySelector('.pane-flash, .grid-stack-item-content.pane-flash'))
         .map(it => it.getAttribute('gs-id'));
     assert.deepEqual(flashed, ['@3']);
-    assert.ok(!terminals._minimized.has('@3'), 'the jump minimized the pane it should focus');
+    const { minimizedPanes } = await import('../chela/dashboard/frontend/src/shared/store/wall.ts');
+    assert.ok(!minimizedPanes.get().has('@3'), 'the jump minimized the pane it should focus');
 });
 
 test('a query that is not an open window id gets no window row', async () => {
@@ -224,10 +235,8 @@ test('a query that is not an open window id gets no window row', async () => {
 test('clicking the footer id copies it and shows a "Copied" toast', async () => {
     clipboard = [];
     const chip = tile('@32').querySelector('.gs-wid');
-    // jsdom runs no inline handlers: assert the wiring, then call what it calls.
-    assert.match(chip.getAttribute('onclick'), /chela\.copyWindowId\(this\)/);
-    window.chela.copyWindowId(chip);
-    await sleep(0);
+    chip.click();   // the footer's own handler (features/tilefoot)
+    await settleToast('@32', 'Copied @32');
     assert.deepEqual(clipboard, ['@32']);
     const toast = tile('@32').querySelector('.gs-wid-toast');
     assert.ok(toast, 'no toast after the copy');
@@ -269,8 +278,8 @@ async function withLegacyCopy({ clipboardRejects, execResult }, fn) {
 
 test('no clipboard API: the footer chip copies via a textarea + execCommand, then toasts', async () => {
     await withLegacyCopy({ clipboardRejects: false, execResult: true }, async copied => {
-        window.chela.copyWindowId(tile('@32').querySelector('.gs-wid'));
-        await sleep(0);
+        tile('@32').querySelector('.gs-wid').click();
+        await settleToast('@32', 'Copied @32');
         assert.deepEqual(copied, [{ cmd: 'copy', text: '@32' }]);
         assert.equal(document.querySelectorAll('body > textarea').length, 0, 'the copy textarea was left behind');
         assert.equal(tile('@32').querySelector('.gs-wid-toast').textContent, 'Copied @32');
@@ -279,8 +288,8 @@ test('no clipboard API: the footer chip copies via a textarea + execCommand, the
 
 test('a clipboard that refuses falls back to the legacy copy of the SAME id', async () => {
     await withLegacyCopy({ clipboardRejects: true, execResult: true }, async copied => {
-        window.chela.copyWindowId(tile('@3').querySelector('.gs-wid'));
-        await sleep(0);
+        tile('@3').querySelector('.gs-wid').click();
+        await settleToast('@3', 'Copied @3');
         assert.deepEqual(copied, [{ cmd: 'copy', text: '@3' }]);
         assert.equal(tile('@3').querySelector('.gs-wid-toast').textContent, 'Copied @3');
     });
@@ -288,8 +297,8 @@ test('a clipboard that refuses falls back to the legacy copy of the SAME id', as
 
 test('a legacy copy that fails says so — never a false "Copied"', async () => {
     await withLegacyCopy({ clipboardRejects: false, execResult: false }, async () => {
-        window.chela.copyWindowId(tile('@32').querySelector('.gs-wid'));
-        await sleep(0);
+        tile('@32').querySelector('.gs-wid').click();
+        await settleToast('@32', 'Copy failed: @32');
         const toasts = tile('@32').querySelectorAll('.gs-wid-toast');
         assert.equal(toasts.length, 1, 'a second click must replace, not stack, the toast');
         assert.equal(toasts[0].textContent, 'Copy failed: @32');

@@ -192,6 +192,21 @@ tile, start a wire, leave a room, relabel the dock) goes through the host `termi
 render with no React children: the facepile `.gs-presence` and the Share row's
 `.gs-share-count` (`collab/presence-owner.js`), and the room badge `.gs-room` (`wire.ts`).
 
+The rest of a tile is React too (CMX-242, plan P27/P28/P30/P32), on the same pattern:
+
+| Module | Draws | Mounted by terminals.js into |
+|---|---|---|
+| `features/tilefoot` | the footer (`.term-ctx-bar`: window id, model, PR, cost, branch, context %, Files) and the wall's action bar; the recap line | each tile's `[data-foot-for]` and `[data-recap-slot]` slots (one root, portals, `flushSync`) |
+| `features/walldock` | the Minimized tray (one row, scrolling sideways) and the lazy dock's decisions for dispatched workers | `#term-min-dock` |
+| `features/walltoolbar` | the layout toolbar (presets, lock, auto-arrange, Focus) | `#wall-toolbar-island` |
+| `features/wire` | the wire gesture and its SVG line; the room accents (`static/js/wire.ts` holds the geometry) | over `#term-stage` while a wire is in flight |
+
+The Wall's shared state is `shared/store/wall.ts`: `termMode`, `pinnedPanes`, `minimizedPanes`
+and `wallLayout` (`{preset, locked, auto, focus}`; auto-arrange and Focus exclude each other in
+the setters). The toolbar and the dock write it; `terminals.js` still owns the Gridstack grid
+and applies each change (`_onLayoutChange`, minimize and restore). The footer reads the
+`context` store, which the Wall's 4 s tick publishes.
+
 ### Markdown
 
 `src/shared/markdown` renders the task briefs and judge reports (`markdownHtml`, `inlineHtml`).

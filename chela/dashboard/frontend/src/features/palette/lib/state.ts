@@ -27,7 +27,7 @@ export type PaletteHost = {
   wall: {
     /** Every pane on the wall, and the minimized ones among them. */
     rendered(): string[];
-    minimized(): Set<string>;
+    minimized(): ReadonlySet<string>;
     /** `wids` in the wall's own order. */
     ordered(wids: string[]): string[];
     visible(): boolean;

@@ -1,6 +1,6 @@
 // CMX-397 — the stored expand/collapse choice is honoured when the page LOADS.
 //
-// terminals.js reads pc_wall_grid_collapsed once, the first time it builds the
+// The toolbar (features/walltoolbar) reads pc_wall_grid_collapsed once, the first time it draws the
 // toolbar. tests/wall_grid_toolbar.test.mjs boots with NO stored choice, where
 // ignoring the stored value and using the Focus default give the same answer —
 // so this suite is its own process, booted with a choice that CONTRADICTS the

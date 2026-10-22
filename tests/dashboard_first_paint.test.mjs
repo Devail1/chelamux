@@ -40,7 +40,8 @@ function toolbarDom(vp) {
 
 test('the Wall toolbar renders no "+ New shell" button (CMX-135)', () => {
     const doc = toolbarDom(DESKTOP).window.document;
-    assert.ok(doc.querySelector('.term-toolbar #term-grid-toggle'), 'the toolbar slice is not the real row');
+    // CMX-242: the layout toggle is the walltoolbar island's; its slot marks the real row.
+    assert.ok(doc.querySelector('.term-toolbar #wall-toolbar-island'), 'the toolbar slice is not the real row');
     assert.equal(doc.getElementById('term-new-shell'), null, '#term-new-shell is back in index.html');
     assert.ok(![...doc.querySelectorAll('.term-toolbar button')].some(b => /new shell/i.test(b.textContent)),
         'a "New shell" button is in the Wall toolbar again');

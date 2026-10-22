@@ -3,7 +3,8 @@ import { $$, TERMINALS_ON, _agentsCache, agentDotColor, setCurrentTab, updateTab
 import { onOrchestratorChange, orchestratorState } from '../../frontend/src/shared/orchestrator';
 import { refreshSummary } from '../../frontend/src/features/primarymenu';
 import { detailAgent, redrawAgentDetail, setAgentDetailHost } from '../../frontend/src/features/agentdetail';
-import { _displayLabel, adoptSidebarDefault, _minimized, _orderedWids, _renderedWids, focusPaneByWid, isWallVisible, minimizePane, setTermMode } from './terminals';
+import { _displayLabel, adoptSidebarDefault, _renderedWids, focusPaneByWid, isWallVisible, minimizePane, setTermMode } from './terminals';
+import { minimizedPanes, orderedWids } from '../../frontend/src/shared/store/wall';
 import { launchProject, setLauncherHost } from '../../frontend/src/features/launcher';
 import { setPaletteHost } from '../../frontend/src/features/palette';
 import { VIEWS } from './views';
@@ -34,7 +35,7 @@ import { closeSidebar, configureSidebar, refreshSidebar, renderSidebarAgents, se
 // are controller.ts's. What it needs from the rest of the page, it reaches through this.
 configureSidebar({
     label: _agentLabel,
-    onWall: () => _renderedWids.filter(w => !_minimized.has(w)),
+    onWall: () => _renderedWids.filter(w => !minimizedPanes.get().has(w)),
     orchWid: () => orchestratorState().wid,
     wants: wantsHuman,
     tabSignal: agents => updateTabSignal(agents),
@@ -99,7 +100,7 @@ function selectAgent(name) {
         const a = (_agentsCache || []).find(x => x.name === name);
         if (a && a.window_id) {
             const wid = a.window_id;
-            const openOnWall = _renderedWids.includes(wid) && !_minimized.has(wid);
+            const openOnWall = _renderedWids.includes(wid) && !minimizedPanes.get().has(wid);
             if (isWallVisible() && openOnWall) {
                 minimizePane(wid);
             } else {
@@ -214,8 +215,8 @@ setPaletteHost({
     resolveWid: resolveWindowId,
     wall: {
         rendered: () => _renderedWids,
-        minimized: () => _minimized,
-        ordered: _orderedWids,
+        minimized: () => minimizedPanes.get(),
+        ordered: orderedWids,
         visible: isWallVisible,
         showWall: () => setTermMode('wall'),
         focus: focusPaneByWid,

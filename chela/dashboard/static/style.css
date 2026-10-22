@@ -467,8 +467,11 @@ body {
     background: var(--term-bg);
     pointer-events: none;   /* never intercept gridstack's bottom resize handle */
 }
+/* CMX-242: the strip sits INSIDE the focus ring (the pane's 2px inset ::before ring, z 6,
+   above this bar), never under it: at bottom 0 the ring covered it on exactly the pane you
+   were looking at. The 2px insets are that ring's width. Width is the context %, of the bar. */
 .term-ctx-fill {
-    position: absolute; left: 0; right: 0; bottom: 0; height: 2px; width: 0;
+    position: absolute; left: 2px; right: 2px; bottom: 2px; height: 2px; width: 0; max-width: calc(100% - 4px);
     background: var(--green); transition: width 0.4s ease;
 }
 .term-ctx-fill.ctx-warn { background: var(--yellow); }
@@ -486,14 +489,15 @@ body {
     white-space: nowrap; font-variant-numeric: tabular-nums;
 }
 .gs-branch { flex: 0 1 auto; overflow: hidden; text-overflow: ellipsis; }
+.gs-branch-icon { vertical-align: -1px; margin-right: 3px; }
 .gs-ctx.ctx-warn { color: var(--yellow); }
 .gs-ctx.ctx-danger { color: var(--red); }
 
 /* --- Wall redesign slice 1: the meta row's model + PR + cost chips, folded
    into this SAME bottom bar rather than a separate strip (enrich, don't
    duplicate — .gs-branch/.gs-ctx above already live here). Wall-only
-   (_ctxBarHTML's draggable gate), left-grouped in normal flow same as
-   .gs-branch/.gs-ctx. */
+   (features/tilefoot draws them on a wall tile only), left-grouped in normal
+   flow same as .gs-branch/.gs-ctx. */
 .gs-model, .gs-cost {
     flex: 0 0 auto; font-weight: 500; line-height: 1;
     white-space: nowrap; font-variant-numeric: tabular-nums;
@@ -503,6 +507,7 @@ body {
     color: var(--ok-sky); text-decoration: none; pointer-events: auto;
 }
 .gs-pr:hover { text-decoration: underline; }
+.gs-pr-flag { vertical-align: -1px; margin-right: 3px; }
 /* CMX-41: a merged/closed/draft PR is history, not a call to action. */
 .gs-pr.gs-pr-dim { color: var(--text-dim); font-weight: 500; }
 
@@ -601,8 +606,12 @@ body {
    inline beside it and the chevron turns up. The toggle is as tall as the
    presets' segmented track (32px) so collapsing never changes the toolbar
    row's height — the Wall below does not jump. */
+#term-wall-grid { display: inline-flex; gap: 6px; align-items: center; }
+#term-wall-grid[hidden] { display: none; }
 #term-grid-row { display: inline-flex; gap: 6px; align-items: center; }
 #term-grid-row[hidden] { display: none; }
+#term-grid-row .gl-label { color: var(--text-dim); font-size: 11px; }
+#term-lock-btn, #term-auto-btn, #term-focus-btn { margin-left: 6px; }
 #term-grid-toggle { gap: 4px; padding: 0 7px; height: var(--ctl-h-sm); border-radius: 9px; background: var(--surface); }
 #term-grid-toggle .grid-chevron { display: inline-flex; transition: transform .15s ease; }
 #term-grid-toggle.grid-open .grid-chevron { transform: rotate(180deg); }
@@ -1123,12 +1132,30 @@ body.pane-is-maximized .grid-stack-item:not(:has(.pane-maximized)) {
    top/left/right gutters and the no-dock case are exactly as before. _wallFill
    reads BOTH margins off the computed style, so the panes still end 4px
    (the margin-top) above the dock. */
+/* CMX-242 (Liav 2026-10-19): ONE row whatever the count. It used to wrap to a 2nd and 3rd
+   row as panes were minimized, stealing height from every pane on the wall. The chips scroll
+   sideways instead (a vertical wheel scrolls them too, features/walldock), a fade marks each
+   edge that hides more, and the tray's height never changes with the number of chips. */
 #term-min-dock {
-    display: flex; flex-wrap: wrap; align-items: center; gap: 6px;
+    display: flex; flex-wrap: nowrap; align-items: center; gap: 6px;
+    max-height: 32px; overflow: hidden;
     margin-top: 4px; margin-bottom: -10px; padding: 2px 8px;
     background: var(--surface); border: 1px solid var(--border); border-radius: 6px;
 }
-.min-dock-label { color: var(--text-dim); font-size: 11px; margin-right: 2px; }
+#term-min-dock[hidden] { display: none; }
+.min-dock-label { flex: 0 0 auto; color: var(--text-dim); font-size: 11px; margin-right: 2px; white-space: nowrap; }
+.min-dock-chips {
+    display: flex; flex-wrap: nowrap; align-items: center; gap: 6px;
+    flex: 1 1 auto; min-width: 0;
+    overflow-x: auto; overflow-y: hidden; scrollbar-width: none;
+}
+.min-dock-chips::-webkit-scrollbar { display: none; }
+.min-dock-chips > .min-chip { flex-shrink: 0; }
+.min-dock-chips.fade-start { mask-image: linear-gradient(to right, transparent, #000 24px); }
+.min-dock-chips.fade-end { mask-image: linear-gradient(to left, transparent, #000 24px); }
+.min-dock-chips.fade-start.fade-end {
+    mask-image: linear-gradient(to right, transparent, #000 24px, #000 calc(100% - 24px), transparent);
+}
 
 /* Pin the minimized dock to the bottom of the wall. The panel fills the canvas
    as a flex column and #term-stage grows to take the slack, so the dock sits at
@@ -1147,7 +1174,7 @@ body.pane-is-maximized .grid-stack-item:not(:has(.pane-maximized)) {
    3-state dialect (filled/hollow/glow-ring) and only the sidebar got the new
    4 shapes, AND used the wrong shape per state — see the per-state comments
    below). Every one of these elements wears the SAME `.term-status-dot
-   <state>` pair; _colorTermDots (terminals.js) computes `<state>` from the
+   <state>` pair; features/panehead and the dock's chips compute `<state>` from the
    SAME tileState() (wallmodel.ts) the pane's `.gs-state` word pill already
    used, so the dot and the pill can never disagree, and nav.js's sidebar row
    computes the same four class names off its own status predicates. Exact
@@ -1212,9 +1239,7 @@ body.pane-is-maximized .grid-stack-item:not(:has(.pane-maximized)) {
 .min-chip-title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .min-chip-icon { flex: 0 0 auto; display: inline-flex; align-items: center; opacity: 0.7; }
 .min-chip-icon svg { display: block; }
-/* Visible (active) panes: accent left-border so they read as "on the wall".
-   Minimized panes: dimmed/muted. */
-.min-chip-active { border-left: 3px solid var(--accent); }
+/* A minimized pane's chip: dimmed/muted. */
 .min-chip-minimized { opacity: 0.55; background: var(--surface); }
 .min-chip-minimized .min-chip-title { color: var(--text-dim); }
 /* Waiting on user input: yellow ring on the chip; un-dim if minimized so it
@@ -1231,18 +1256,16 @@ body.pane-is-maximized .grid-stack-item:not(:has(.pane-maximized)) {
 /* Wall redesign slice 1: when the action bar (below) is showing, it stacks
    ABOVE the ctx bar (same absolutely-positioned-footer technique as that bar
    uses against the iframe) — so the iframe needs to reserve that much MORE
-   margin. `.has-term-action` is toggled by _applyWallTileFrame the instant
-   the bar's kind changes, in lockstep with the bar's own [hidden]. */
+   margin. `.has-term-action` is toggled by the footer (features/tilefoot) the
+   instant the bar's kind changes, in lockstep with the bar's own [hidden]. */
 .grid-stack-item-content.has-term-action .term-frame {
     margin-bottom: calc(var(--term-ctx-bar-h) + var(--term-action-bar-h));
 }
 /* --- Wall redesign slice 1: the action bar. Amber (Approve/Answer, a
-   wantsHuman pane) or blue (Review, a finished pane with a PR) — GLYPH + WORD
-   still carry the state here too (◆/✓, matching the header pill), colour is
-   decoration. Sends its action via the EXISTING /api/term/key path
-   (chela.termActionClick -> termKeyFor), no new endpoint. Always rendered,
-   hidden by default — _applyWallTileFrame fills content and un-hides it, the
-   same pattern the ctx bar's chips already use. */
+   wantsHuman pane) or blue (Review, a finished pane with a PR) — ICON + WORD
+   still carry the state here too, colour is decoration. Sends its action via
+   the EXISTING /api/term/key path, no new endpoint. Always rendered on a wall
+   tile, hidden while there is nothing to do (features/tilefoot). */
 :root { --term-action-bar-h: 26px; }
 .term-action-bar {
     position: absolute; left: 0; right: 0; bottom: var(--term-ctx-bar-h); z-index: 5;
@@ -1328,6 +1351,8 @@ body.term-dragging { overflow: hidden; }
 /* The live wire: an SVG over the whole stage. Above the tiles and gridstack's own
    dragged item (z 100), below a maximized pane's own chrome (z 150 → 160 sits over
    it, which is fine: the wire is transient and never intercepts a click). */
+/* each wire's own container (features/wire): no box of its own, so the SVG is placed by the stage */
+.wire-overlay-box { display: contents; }
 .wire-overlay {
     position: absolute; inset: 0; width: 100%; height: 100%;
     pointer-events: none; z-index: 160;
@@ -4439,15 +4464,15 @@ body.sidebar-resizing iframe { pointer-events: none; }
     .gs-min-btn, .gs-max-btn { display: none; }
     .gs-mobile-full-btn { display: inline-flex; }
 
-    /* term-mobile-full: body class toggled by chela.termMobileFull (bound to
-       .gs-mobile-full-btn above). Hides the INFORMATIONAL chrome around the
-       single pane, the pane's own context bar, so the pane's height rule (below) can claim nearly the
-       whole screen. Two things deliberately stay: the compact .gs-head (with
-       its collapse toggle + × kill — the only way back OUT of fullscreen), and
-       the keybar (Liav, 2026-07-25), because it is not clutter but the mobile
-       INPUT METHOD: Esc/Tab/Ctrl/arrows/Paste are unreachable without it, and
-       fullscreen is exactly when you're working in the terminal. */
-    body.term-mobile-full .term-ctx-bar { display: none !important; }
+    /* term-mobile-full: body class toggled by the pane header's fill-screen
+       button (.gs-mobile-full-btn above): the single pane claims nearly the
+       whole screen (the height rule below). Three things deliberately stay:
+       the compact .gs-head (with its collapse toggle + × kill — the only way
+       back OUT of fullscreen), the keybar (Liav, 2026-07-25), because it is
+       not clutter but the mobile INPUT METHOD: Esc/Tab/Ctrl/arrows/Paste are
+       unreachable without it, and the pane's own footer (Liav, 2026-10-19:
+       its window id, model and context % beat the status line, so it shows
+       in every pane mode; CMX-242). */
     /* True overlay, not just a tall box: the pane normally sits inside
        .canvas's own top padding (CMX-377: clearance for the floating
        .mobile-menu-fab/.safety-float, no topbar to measure against any more),
@@ -4471,10 +4496,6 @@ body.sidebar-resizing iframe { pointer-events: none; }
         height: calc(100dvh - var(--term-keybar-h, 0px) - env(safe-area-inset-bottom) - var(--kb-occluded, 0px));
         z-index: 100;
     }
-    /* .term-frame normally reserves --term-ctx-bar-h of bottom margin for the
-       now-hidden context bar (see the base .term-frame rule) — zero it here
-       so that space isn't left as a dead strip under the terminal. */
-    body.term-mobile-full .term-single .term-pane .term-frame { margin-bottom: 0; }
     /* CMX-102: keyboard OPEN → the pane's height is MEASURED by _kbPin/_kbFitPane
        (terminals.js) so its box ends exactly at the keybar's top edge. The calc()
        rules above can't do that: they subtract a fixed list of chrome constants
@@ -4489,7 +4510,7 @@ body.sidebar-resizing iframe { pointer-events: none; }
        Liav's 2026-07-25 call brings them back — the mobile single pane has room
        for the bottom bar now, and branch/context% are worth having. We DON'T
        re-hide them here: they fall through to the desktop `.gs-branch/.gs-ctx`
-       rules + the `hidden` attribute that _applyTermContext toggles by data
+       rules + the `hidden` attribute the footer (features/tilefoot) sets by data
        presence (so an empty/context-less pane still shows nothing). The №
        pane-number chip is gone everywhere since CMX-85. */
 

@@ -200,7 +200,7 @@ describe('CMX-397 1440×900: the layout toolbar collapses without moving the Wal
         await page.click('#term-focus-btn');
         await stable(page);
         const presets = await page.$$eval('#term-grid-presets .gl-btn',
-            bs => bs.map(b => b.getAttribute('onclick').match(/\((\d+), (\d+)/).slice(1).map(Number)));
+            bs => bs.map(b => [Number(b.dataset.cols), Number(b.dataset.rows)]));
         assert.equal(presets.length, 6);
         for (const [i, [cols, rows]] of presets.entries()) {
             if ((await bar()).expanded !== 'true') await page.click('#term-grid-toggle');

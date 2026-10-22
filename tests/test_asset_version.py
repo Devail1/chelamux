@@ -194,7 +194,7 @@ def test_cache_headers(client):
     r = client.get("/" + _prefix() + dash.APP_ENTRY)
     assert r.status_code == 200
     assert r.headers["Cache-Control"] == "public, max-age=31536000, immutable"
-    assert b"lucideIcon: unknown icon" in r.get_data(), "the bundle lacks the legacy graph (util.js)"
+    assert b'closest(".kebab-wrap")' in r.get_data(), "the bundle lacks the legacy graph (util.js)"
     r.close()
     old = client.get("/static/v/000000000000/" + dash.APP_ENTRY)
     assert old.status_code == 200
@@ -211,7 +211,7 @@ def test_the_bundle_installs_the_islands_bridge_before_the_legacy_graph_runs():
     """Rollup lays modules out in evaluation order: the islands (bridge + mounts) must come
     before util.js, the first legacy module, or legacy publishes to no bridge."""
     bundle = (STATIC / dash.APP_ENTRY).read_text(encoding="utf-8")
-    islands, legacy = bundle.find("overlays-island"), bundle.find("lucideIcon: unknown icon")
+    islands, legacy = bundle.find("overlays-island"), bundle.find('closest(".kebab-wrap")')   # util.js
     assert islands >= 0 and legacy >= 0
     assert islands < legacy
 
