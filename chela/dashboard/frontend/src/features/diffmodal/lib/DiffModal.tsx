@@ -4,9 +4,8 @@
 // /api/agents/<wid>/diff and /api/agents/<wid>/diff/patch; no dependency on the dispatcher.
 import { Fragment, useEffect, useRef, useState } from 'react';
 import { api } from '../../../shared/api/index.ts';
-import { icons } from '../../../shared/icons/index.ts';
 import { createStore, useStore } from '../../../shared/store/index.ts';
-import { Dialog, DialogClose } from '../../../shared/ui/index.ts';
+import { Dialog } from '../../../shared/ui/index.ts';
 import { type DiffState, diffFiles, patchLineClass, patchLines, statusMeta, summaryLabel } from '../model.ts';
 
 /** Which session the modal shows; `seq` makes every open a fresh load, even of the same wid. */
@@ -141,11 +140,6 @@ export function DiffModal() {
   const t = useStore(target);
   return (
     <Dialog open={t !== null} onOpenChange={(open) => !open && closeDiffModal()} title="Changed files" className="modal-diff">
-      <DialogClose asChild>
-        <button className="task-modal-close" type="button" aria-label="Close">
-          <icons.close aria-hidden size={18} />
-        </button>
-      </DialogClose>
       {t && <DiffBody key={t.seq} wid={t.wid} />}
     </Dialog>
   );
