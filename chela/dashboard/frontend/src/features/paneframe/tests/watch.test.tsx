@@ -38,6 +38,10 @@ test('docking a pane reports watching:false for THAT pane only; restoring it rep
   calls.length = 0;
   setMinimized('@1', false);
   expect(watches(calls)).toEqual([['@1', true]]);
+  setMinimized('@2', true); // one already docked: docking another reports only the other
+  calls.length = 0;
+  setMinimized('@1', true);
+  expect(watches(calls)).toEqual([['@1', false]]);
 });
 
 test('hidden past the grace, only the frames a second viewer shares are blanked; showing the tab reconnects them and re-ticks', async () => {
