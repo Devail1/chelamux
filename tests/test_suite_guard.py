@@ -258,6 +258,22 @@ def test_reap_pins_its_argv_and_never_raises(monkeypatch, caplog):
     assert "could not reap chela-suite-abc.scope" in caplog.text
 
 
+def test_bounded_reaps_over_the_same_bus_it_launched_on(guard_on, monkeypatch):
+    """The reap reaches the scope over the bus ``systemd-run`` used: the suite's ``env``
+    plus the operator's bus vars. The bare suite env has no bus, so the kill would miss."""
+    reaped = []
+    monkeypatch.setattr(suite_guard, "_scope_works", lambda env=None: True)
+    monkeypatch.setattr(suite_guard, "_reap", lambda unit, env=None: reaped.append(env))
+    monkeypatch.setenv("XDG_RUNTIME_DIR", "/run/user/4242")
+    monkeypatch.setenv("DBUS_SESSION_BUS_ADDRESS", "unix:path=/run/user/4242/bus")
+    monkeypatch.setenv("CHELA_OPERATOR_ONLY", "x")
+    suite = {"PATH": "/suite/bin", "XDG_RUNTIME_DIR": "/suite/own"}
+    with suite_guard.bounded("true", suite) as (cmd, _check):
+        assert cmd.startswith("env XDG_RUNTIME_DIR=/run/user/4242 ")
+    assert reaped == [{"PATH": "/suite/bin", "XDG_RUNTIME_DIR": "/run/user/4242",
+                       "DBUS_SESSION_BUS_ADDRESS": "unix:path=/run/user/4242/bus"}]
+
+
 
 # --- admission control: at most K suites at once, judges AND agents --------------------
 
