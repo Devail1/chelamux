@@ -394,6 +394,28 @@ def test_the_log_is_bounded_by_the_window_start(tmp_path, monkeypatch):
                        "--format=%H%x1f%ct%x1f%P%x1f%s", "HEAD", "--")
 
 
+def test_a_log_line_outside_the_window_or_malformed_is_dropped(tmp_path, monkeypatch):
+    """`--since` is git's filter; the parser checks each line's own committer time too, so a
+    line git returns from before the window (clock skew, a `--since` git ignores) or a line
+    with no time is never swept."""
+    repo = _repo(tmp_path, prs=[({"size.py": WEAK}, "in window (#1)", None)])
+    head = _git(repo, "rev-parse", "HEAD")
+    parent = _git(repo, "rev-parse", "HEAD~1")
+    ct = int(_git(repo, "log", "-1", "--format=%ct", head))
+    old = "b" * 40
+    real = sweep_nightly._git
+
+    def git(cwd, *args, **k):
+        if args[0] == "log":
+            return (f"{head}\x1f{ct}\x1f{parent}\x1fin window (#1)\n"
+                    f"{old}\x1f{ct - 10}\x1f{parent}\x1ftoo old (#0)\n"
+                    f"{'c' * 40}\x1fnot-a-time\x1f{parent}\x1fno time\n")
+        return real(cwd, *args, **k)
+    monkeypatch.setattr(sweep_nightly, "_git", git)
+    got = sweep_nightly.merged_commits(repo, head, ct - 5, load_workflow(repo / "WORKFLOW.md"))
+    assert [c["subject"] for c in got] == ["in window (#1)"]
+
+
 def test_the_window_edge_is_inclusive(tmp_path):
     repo = _repo(tmp_path, prs=[({"size.py": WEAK}, "PR (#1)", "2021-06-01T00:00:00+00:00")])
     wf = load_workflow(repo / "WORKFLOW.md")
