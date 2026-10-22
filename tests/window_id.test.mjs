@@ -223,7 +223,8 @@ test('running the "@3" row focuses @3\'s pane (and only it) — a jump, not a to
         .filter(it => it.querySelector('.pane-flash, .grid-stack-item-content.pane-flash'))
         .map(it => it.getAttribute('gs-id'));
     assert.deepEqual(flashed, ['@3']);
-    assert.ok(!terminals._minimized.has('@3'), 'the jump minimized the pane it should focus');
+    const { minimizedPanes } = await import('../chela/dashboard/frontend/src/shared/store/wall.ts');
+    assert.ok(!minimizedPanes.get().has('@3'), 'the jump minimized the pane it should focus');
 });
 
 test('a query that is not an open window id gets no window row', () => {
@@ -238,9 +239,7 @@ test('a query that is not an open window id gets no window row', () => {
 test('clicking the footer id copies it and shows a "Copied" toast', async () => {
     clipboard = [];
     const chip = tile('@32').querySelector('.gs-wid');
-    // jsdom runs no inline handlers: assert the wiring, then call what it calls.
-    assert.match(chip.getAttribute('onclick'), /chela\.copyWindowId\(this\)/);
-    window.chela.copyWindowId(chip);
+    chip.click();   // the footer's own handler (features/tilefoot)
     await sleep(0);
     assert.deepEqual(clipboard, ['@32']);
     const toast = tile('@32').querySelector('.gs-wid-toast');
@@ -283,7 +282,7 @@ async function withLegacyCopy({ clipboardRejects, execResult }, fn) {
 
 test('no clipboard API: the footer chip copies via a textarea + execCommand, then toasts', async () => {
     await withLegacyCopy({ clipboardRejects: false, execResult: true }, async copied => {
-        window.chela.copyWindowId(tile('@32').querySelector('.gs-wid'));
+        tile('@32').querySelector('.gs-wid').click();
         await sleep(0);
         assert.deepEqual(copied, [{ cmd: 'copy', text: '@32' }]);
         assert.equal(document.querySelectorAll('body > textarea').length, 0, 'the copy textarea was left behind');
@@ -293,7 +292,7 @@ test('no clipboard API: the footer chip copies via a textarea + execCommand, the
 
 test('a clipboard that refuses falls back to the legacy copy of the SAME id', async () => {
     await withLegacyCopy({ clipboardRejects: true, execResult: true }, async copied => {
-        window.chela.copyWindowId(tile('@3').querySelector('.gs-wid'));
+        tile('@3').querySelector('.gs-wid').click();
         await sleep(0);
         assert.deepEqual(copied, [{ cmd: 'copy', text: '@3' }]);
         assert.equal(tile('@3').querySelector('.gs-wid-toast').textContent, 'Copied @3');
@@ -302,7 +301,7 @@ test('a clipboard that refuses falls back to the legacy copy of the SAME id', as
 
 test('a legacy copy that fails says so — never a false "Copied"', async () => {
     await withLegacyCopy({ clipboardRejects: false, execResult: false }, async () => {
-        window.chela.copyWindowId(tile('@32').querySelector('.gs-wid'));
+        tile('@32').querySelector('.gs-wid').click();
         await sleep(0);
         const toasts = tile('@32').querySelectorAll('.gs-wid-toast');
         assert.equal(toasts.length, 1, 'a second click must replace, not stack, the toast');

@@ -4,9 +4,9 @@
 import {
   ArrowUpToLine, Ban, Bell, CalendarClock, Check, ChevronDown, ChevronRight, ChevronUp, Circle,
   CircleDashed, CircleDot, CircleHelp, CircleMinus, Columns3, Crown, Ellipsis, EllipsisVertical, ExternalLink, Eye,
-  FlaskConical, GitMerge, GitPullRequest, Globe, Hand, Inbox, Keyboard, LayoutGrid, Link2, Lock, Maximize2, Menu, Minimize2, Minus,
+  Diamond, Flag, FlaskConical, GitBranch, GitCompare, GitMerge, GitPullRequest, Globe, Hand, Inbox, Keyboard, LayoutGrid, Link2, Lock, LockOpen, Maximize2, Menu, Minimize2, Minus,
   NotebookPen, OctagonX, Pin, Play, Plug, Plus, RefreshCw, RotateCw, Scale, Search, Settings, Share2,
-  SlidersHorizontal, Snowflake, SquareCheck, SquareTerminal, Star, TriangleAlert, Workflow, X,
+  SlidersHorizontal, Snowflake, SquareCheck, SquareTerminal, Star, Target, TriangleAlert, Workflow, X,
 } from 'lucide-react';
 
 export const icons = {
@@ -78,6 +78,14 @@ export const icons = {
   restore: Minimize2,
   kill: X,
   web: Globe,
+  // CMX-242: the tile footer, the action bar and the layout toolbar
+  branch: GitBranch,
+  prFlag: Flag,
+  files: GitCompare,
+  needsAction: Diamond,
+  layoutLocked: Lock,
+  layoutUnlocked: LockOpen,
+  autoArrange: Target,
 } as const;
 
 /** A meaning in the map, for a pure model that names the icon its renderer draws. */

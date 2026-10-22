@@ -114,16 +114,14 @@ const CSS = readFileSync(
     join(dirname(fileURLToPath(import.meta.url)), '..', 'chela', 'dashboard', 'static', 'style.css'), 'utf8');
 
 // The terminals panel, as index.html emits it (only the ids terminals.js / nav.js
-// reach for) — grid presets + lock sit directly on the toolbar, inline (no Layout menu).
+// reach for) — grid presets + lock sit directly on the toolbar, inline (no Layout menu):
+// the walltoolbar island draws them into its slot (CMX-242).
 const PANEL = `
 <div class="panel" id="panel-terminals">
   <button id="term-mode-single"></button>
   <button id="term-mode-wall"></button>
   <select id="term-agent"></select>
-  <span id="term-wall-grid">
-    <span id="term-grid-presets"></span>
-    <button id="term-lock-btn" onclick="chela.toggleWallLock(this)"></button>
-  </span>
+  <span class="island-slot" id="wall-toolbar-island"></span>
   <button id="term-new-shell"></button>
   <div id="term-stage"></div>
   <div id="term-min-dock"></div>
@@ -219,7 +217,7 @@ function fakeGridStack() {
     };
 }
 
-let terminals, util;
+let terminals, util, wall;
 
 beforeAll(async () => {
     const dom = new JSDOM(`<!doctype html><html><body>${PANEL}</body></html>`,
@@ -257,6 +255,7 @@ beforeAll(async () => {
     await import('../chela/dashboard/frontend/src/boot.ts');
     util = await import('../chela/dashboard/static/js/util.js');
     terminals = await import('../chela/dashboard/static/js/terminals.js');
+    wall = await import('../chela/dashboard/frontend/src/shared/store/wall.ts');
     util.setCurrentTab('terminals');
     util.setAgentsCache(AGENTS);
     await terminals.renderTerminals();
@@ -426,7 +425,7 @@ test('a pinned pane keeps its exact geometry through a grid-preset reflow', asyn
         'the pin is persisted so a reload remembers it');
 
     const before = { pinned: geom(PINNED), other: geom(OTHER) };
-    window.chela.applyGridLayout(1, 1);   // single-column stack: guaranteed to move OTHER
+    wall.setWallPreset({ cols: 1, rows: 1 });   // single-column stack: guaranteed to move OTHER
 
     assert.equal(geom(PINNED), before.pinned,
         'a pinned pane must come out of a grid-preset reflow with the SAME x/y/w/h');
@@ -439,7 +438,7 @@ test('a pinned pane keeps its exact geometry through a grid-preset reflow', asyn
     await pickRow(PINNED, '.gs-pin-btn');
     assert.ok(!tile(PINNED).classList.contains('pane-pinned'));
     assert.ok(!JSON.parse(localStorage.getItem('pc_wall_pinned') || '[]').includes(PINNED));
-    window.chela.applyGridLayout(3, 1);
+    wall.setWallPreset({ cols: 3, rows: 1 });
     assert.notEqual(geom(PINNED), before.pinned, 'once unpinned, a reflow may move it again');
 });
 
@@ -463,13 +462,13 @@ test('a pinned pane keeps its exact geometry through a grid-preset reflow', asyn
 // toggle line); re-adding ONLY the toggle line below leaves the CSS-side
 // test green but reddens this one on its own.
 test('CMX-268: a grid-preset click never adds body.wall-density-airy — the density treatment was reverted, not just its CSS', () => {
-    window.chela.applyGridLayout(1, 1);   // 1-up: used to be the airiest density
+    wall.setWallPreset({ cols: 1, rows: 1 });   // 1-up: used to be the airiest density
     assert.ok(!document.body.classList.contains('wall-density-airy'),
-        'applyGridLayout(1,1) added wall-density-airy — the reverted density toggle is back');
+        'the 1-column preset added wall-density-airy — the reverted density toggle is back');
 
-    window.chela.applyGridLayout(2, 1);   // 2-up: the boundary, and the shipped default preset
+    wall.setWallPreset({ cols: 2, rows: 1 });   // 2-up: the boundary, and the shipped default preset
     assert.ok(!document.body.classList.contains('wall-density-airy'),
-        'applyGridLayout(2,1) added wall-density-airy — the reverted density toggle is back');
+        'the 2-column preset added wall-density-airy — the reverted density toggle is back');
 });
 
 // 4 — THE KEYBOARD SWITCHER. Alt+N opens the Nth visible SIDEBAR row's session (CMX-85
@@ -1269,7 +1268,9 @@ test('branch + context render inside the bottom .term-ctx-bar, and the live poll
     assert.equal(ctxChip.hidden, false, 'the live poll must reveal the context chip in its new home');
     assert.equal(ctxChip.textContent, '42% · 84.0K/200K');
     assert.equal(branchChip.hidden, false);
-    assert.equal(branchChip.textContent, '⎇ cmx-117');
+    // CMX-242: the branch glyph is a Lucide icon now (no emoji in the UI), beside the name.
+    assert.equal(branchChip.textContent, 'cmx-117');
+    assert.ok(branchChip.querySelector('svg.gs-branch-icon'), 'the branch chip lost its icon');
 
     CTX = [];   // leave the fixture as other tests expect it (real shape: an array)
     await terminals.termTick();
@@ -1973,7 +1974,7 @@ test('CMX-146: _refreshPaneLabels tracks ai_title live — added, changed, and r
 test('CMX-41: the rendered .gs-pr chip and Review bar claim "ready" only for a confirmed open, non-draft PR', async () => {
     const URL = 'https://github.com/acme/widgets/pull/613';
     const CASES = [
-        { state: 'open', draft: false, text: '⚑ #613', dim: false, review: true },
+        { state: 'open', draft: false, text: '#613', dim: false, review: true },
         { state: 'open', draft: true, text: '#613 draft', dim: true, review: false },
         { state: 'merged', draft: false, text: '#613 merged', dim: true, review: false },
         { state: 'closed', draft: false, text: '#613 closed', dim: true, review: false },
@@ -1995,8 +1996,9 @@ test('CMX-41: the rendered .gs-pr chip and Review bar claim "ready" only for a c
         assert.equal(chip.hidden, false, `${name}: a PR link is always shown as a chip`);
         assert.equal(chip.getAttribute('href'), URL, `${name}: the chip links to the PR`);
         assert.equal(chip.textContent, c.text, `${name}: the chip reads "${chip.textContent}"`);
-        assert.equal(chip.textContent.includes('⚑'), c.review,
-            `${name}: the ⚑ is earned only by a confirmed open, non-draft PR`);
+        // CMX-242: the flag is a Lucide icon (.gs-pr-flag), no longer a ⚑ in the text.
+        assert.equal(!!chip.querySelector('.gs-pr-flag'), c.review,
+            `${name}: the flag is earned only by a confirmed open, non-draft PR`);
         assert.equal(chip.classList.contains('gs-pr-dim'), c.dim, `${name}: dim class`);
         assert.equal(chip.title.includes('(state unknown)'), c.state !== 'open' && c.state !== 'merged' && c.state !== 'closed',
             `${name}: the tooltip says when the state is unknown — "${chip.title}"`);

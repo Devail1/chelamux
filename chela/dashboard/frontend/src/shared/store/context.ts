@@ -14,6 +14,8 @@ export type ContextRow = {
   estimated?: boolean;
   model?: string | null;
   cost_usd?: number | null;
+  /** The pane's git branch (the tile footer shows it). */
+  branch?: string | null;
   session_name?: string | null;
   rate_limit_pct?: number | null;
   rate_limit_resets_at?: number | null;

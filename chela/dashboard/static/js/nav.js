@@ -5,7 +5,8 @@ import { refreshSummary } from '../../frontend/src/features/primarymenu';
 import { detailAgent, redrawAgentDetail, setAgentDetailHost } from '../../frontend/src/features/agentdetail';
 import { showAddSchedule } from '../../frontend/src/features/schedules';
 import { openNewTask } from '../../frontend/src/features/newtask';
-import { _displayLabel, adoptSidebarDefault, _minimized, _orderedWids, _renderedWids, focusPaneByWid, isWallVisible, minimizePane, setTermMode } from './terminals';
+import { _displayLabel, adoptSidebarDefault, _renderedWids, focusPaneByWid, isWallVisible, minimizePane, setTermMode } from './terminals';
+import { minimizedPanes, orderedWids } from '../../frontend/src/shared/store/wall';
 import { launchProject, launcher, newShellWindow, refreshLauncher, setLauncherHost } from '../../frontend/src/features/launcher';
 import { setApprovalNotify } from '../../frontend/src/features/approvals/model';
 import { VIEWS } from './views';
@@ -40,7 +41,7 @@ import { closeSidebar, configureSidebar, refreshSidebar, renderSidebarAgents, se
 // are controller.ts's. What it needs from the rest of the page, it reaches through this.
 configureSidebar({
     label: _agentLabel,
-    onWall: () => _renderedWids.filter(w => !_minimized.has(w)),
+    onWall: () => _renderedWids.filter(w => !minimizedPanes.get().has(w)),
     orchWid: () => orchestratorState().wid,
     wants: wantsHuman,
     tabSignal: agents => updateTabSignal(agents),
@@ -105,7 +106,7 @@ function selectAgent(name) {
         const a = (_agentsCache || []).find(x => x.name === name);
         if (a && a.window_id) {
             const wid = a.window_id;
-            const openOnWall = _renderedWids.includes(wid) && !_minimized.has(wid);
+            const openOnWall = _renderedWids.includes(wid) && !minimizedPanes.get().has(wid);
             if (isWallVisible() && openOnWall) {
                 minimizePane(wid);
             } else {
@@ -1693,7 +1694,7 @@ function _fuzzyScore(q, s) {
 }
 
 // CMX-116: palette-first pane switcher. On an EMPTY query, float every live,
-// unminimized wall pane to the TOP — wall order (`_orderedWids`), with a pane
+// unminimized wall pane to the TOP — wall order (shared/store/wall.ts `orderedWids`), with a pane
 // wanting attention (waiting > working > idle) bubbling ahead of its peers,
 // same status word the sidebar uses — so ⌘K instantly answers "what's open,
 // what needs me". Once the user types, this section is gone: `_paletteItems()`
@@ -1703,9 +1704,9 @@ const _PANE_ATTENTION_RANK = { yellow: 0, green: 1, grey: 2 };
 
 function _openPaneItems() {
     if (!TERMINALS_ON || typeof _renderedWids === 'undefined') return [];
-    const live = _renderedWids.filter(w => !(_minimized && _minimized.has(w)));
+    const live = _renderedWids.filter(w => !minimizedPanes.get().has(w));
     if (!live.length) return [];
-    const wallOrder = _orderedWids(live);
+    const wallOrder = orderedWids(live);
     const rankOf = wid => {
         const a = (_agentsCache || []).find(x => x.window_id === wid);
         return _PANE_ATTENTION_RANK[a ? agentDotColor(a) : 'grey'] ?? 2;

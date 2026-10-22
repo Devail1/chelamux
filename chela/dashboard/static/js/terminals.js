@@ -1,17 +1,19 @@
 // --- Stage 0: ES-module imports ---
-import { $, BASE_PATH, TERMINALS_ON, WALL_TILE_DISPATCHED, _agentsCache, api, attrEsc, currentTab, escHtml, lucideIcon, setAgentsCache, updateTabSignal, wantsHuman } from './util';
+import { $, BASE_PATH, TERMINALS_ON, WALL_TILE_DISPATCHED, _agentsCache, api, attrEsc, currentTab, escHtml, setAgentsCache, updateTabSignal, wantsHuman } from './util';
 import { openPalette, selectView } from './nav';
 import { altSwitchKeydown, renderSidebarAgents, setAltHeld, sidebarOrder, updateCtxCache } from '../../frontend/src/features/sidebar/controller';
-import { orderByList, windowRunDot } from '../../frontend/src/features/sidebar/model';
-import { applyRoomAccents, bezierPath, resolveDrop } from './wire';
-import { actionBarKind, costView, ctxLevel, focusLayout, gridRowCollapsed, prChip, rankOrder, recapView, stateTitle, tileState } from './wallmodel';
-import { openDiffModal } from '../../frontend/src/features/diffmodal';
+import { orderByList } from '../../frontend/src/features/sidebar/model';
+import { focusLayout, rankOrder } from './wallmodel';
 import { pinKeybar } from '../../frontend/src/features/keybar';
-import { pinnedPanes, termMode } from '../../frontend/src/shared/store/wall';
-import { windowIdQuery } from './windowid';
+import { minimizedPanes, paneOrderKey, pinnedPanes, setMinimized, termMode, wallLayout } from '../../frontend/src/shared/store/wall';
+import { context, loadContext } from '../../frontend/src/shared/store/context';
 import { onEvent } from '../../frontend/src/shared/events';
-import { configureShareHost, followAgents, paneToast as _termShareToast, shareSession, stopOwnerPresence } from '../../frontend/src/features/share';
-import { configurePaneHeads, displayLabel, dotState, mountPaneHeads, refreshPaneHeads } from '../../frontend/src/features/panehead';
+import { configureShareHost, followAgents, shareSession, stopOwnerPresence } from '../../frontend/src/features/share';
+import { configurePaneHeads, displayLabel, mountPaneHeads, refreshPaneHeads } from '../../frontend/src/features/panehead';
+import { mountTileFoots, refreshTileFoots } from '../../frontend/src/features/tilefoot';
+import { configureDock, forgetAutoDock, mountDock, refreshDock, runLazyDock } from '../../frontend/src/features/walldock';
+import { mountWallToolbar } from '../../frontend/src/features/walltoolbar';
+import { leaveRoom, refreshRooms, replayRoomAccents, startWire } from '../../frontend/src/features/wire';
 
 // ---------------------------------------------------------------------------
 // Terminals (embedded ttyd via the gateway: /term/<wid>/)
@@ -31,25 +33,17 @@ let _termSig = '';
 let _grid = null;                 // Gridstack instance (wall mode only)
 let _renderedWids = [];           // pane wids currently in the DOM (live render order)
 let _termTimer = null;            // fast reactive poll while the terminals tab is open
-let _wallPreset = _loadWallPreset();   // active {cols, rows} fill preset; default 2 columns
-let _wallLocked = localStorage.getItem('pc_wall_locked') === '1';   // lock = swap-on-drag, no resize
-// Wall redesign slice 2: auto-arrange toggle (default OFF). Manual layout
-// (pc_wall_layout) stays SACRED — auto mode only ever computes a live grid
-// fill from rankOrder() and applies it via GridStack; it never writes
-// pc_wall_layout, so toggling off always restores exactly what the user left.
-let _wallAuto = localStorage.getItem('pc_wall_auto') === '1';
+// The layout the toolbar sets (features/walltoolbar → shared/store/wall.ts `wallLayout`):
+// {preset: {cols, rows}, locked, auto, focus}. Manual layout (pc_wall_layout) stays SACRED:
+// auto-arrange and Focus only ever compute a live fill and never write it, so turning either
+// off restores exactly what the user left. The two are mutually exclusive (the store's own
+// setters turn the other off). This module applies every change (_onLayoutChange below).
+const _layout = () => wallLayout.get();
 // Comma-joined wid sequence last applied by auto-arrange, so the 4s poll only
 // touches GridStack when the ranked order actually changed (no per-tick thrash).
 // Reset to '' to force the next _applyAutoArrange to (re)apply unconditionally
 // (toggle-on, preset change while auto, or a fresh buildWall).
 let _autoOrderSig = '';
-// Focus layout toggle (default OFF): one pane large, the rest a right-side
-// strip (wallmodel.ts's focusLayout). Mutually exclusive with auto-arrange —
-// both toggles OWN the layout, so turning one on turns the other off (see
-// toggleWallFocus / toggleWallAuto). Manual layout (pc_wall_layout) is just
-// as sacred here as it is for auto: this mode never writes it, and toggling
-// off restores it verbatim via the SAME _restoreManualLayout auto-arrange uses.
-let _wallFocus = localStorage.getItem('pc_wall_focus') === '1';
 // Which pane is currently the large "focus" pane. Chosen when Focus turns on
 // (_pickFocusWid) and updated by clicking a strip pane's header (promote).
 let _focusWid = null;
@@ -57,46 +51,16 @@ let _focusWid = null;
 // the 4s poll only touches GridStack when the focus target or the tiled pane
 // set actually changed, never on every tick.
 let _focusOrderSig = '';
-let _paneActivity = {};           // wid -> epoch ms a pane last STARTED being busy; drives the taskbar MRU sort
-let _paneStatus = {};             // wid -> last seen session_status, for rising-edge (idle→busy) detection
-
-// Wall redesign slice 1: which panes have their recap PINNED OPEN (click the
-// one-line recap to expand it to the full text). Persisted per-wid so the 4s
-// repaint and a reload keep it open, like the layout/minimized state above.
-const RECAP_OPEN_KEY = 'pc_wall_recap_open';
-function _loadRecapOpen() { try { return new Set(JSON.parse(localStorage.getItem(RECAP_OPEN_KEY) || '[]')); } catch (e) { return new Set(); } }
-function _saveRecapOpen() { try { localStorage.setItem(RECAP_OPEN_KEY, JSON.stringify([..._recapOpen])); } catch (e) { /* ignore */ } }
-let _recapOpen = _loadRecapOpen();
-// Toggle from the recap line's inline onclick. Attribute survives the repaint's
-// textContent= (which only replaces child text, never attributes).
-function toggleRecap(el) {
-    const wid = el && el.dataset && el.dataset.recapFor;
-    if (!wid) return;
-    if (_recapOpen.has(wid)) _recapOpen.delete(wid); else _recapOpen.add(wid);
-    _saveRecapOpen();
-    el.classList.toggle('recap-open', _recapOpen.has(wid));
-}
-let _dockOrderSig = '';           // last rendered chip order, so a status poll only rebuilds on a real reorder
-
-// Active wall preset persists across reloads (and drives the resize re-fit).
-// Default = 2 columns, the standard terminal layout.
-function _loadWallPreset() {
-    try {
-        const p = JSON.parse(localStorage.getItem('pc_wall_preset') || 'null');
-        if (p && Number.isInteger(p.cols) && Number.isInteger(p.rows)) return p;
-    } catch (e) { /* noop */ }
-    return { cols: 2, rows: 1 };
-}
 let _wallResizeTimer = null;      // debounce for the resize re-fit
 const TERM_REFRESH_MS = 4000;     // diff the live agent set every few seconds
 
 // The fill is viewport-relative, so a window/screen resize changes how many
 // rows fit. Re-apply the active preset (debounced) so the wall keeps filling
-// the height on any screen size. No-op unless a preset is active in wall mode.
+// the height on any screen size. No-op unless in wall mode.
 window.addEventListener('resize', () => {
-    if (!TERMINALS_ON || _termMode !== 'wall' || !_wallPreset || !_grid) return;
+    if (!TERMINALS_ON || _termMode !== 'wall' || !_grid) return;
     clearTimeout(_wallResizeTimer);
-    _wallResizeTimer = setTimeout(() => applyGridLayout(_wallPreset.cols, _wallPreset.rows), 200);
+    _wallResizeTimer = setTimeout(applyGridLayout, 200);
 });
 
 // ---- wid <-> agent helpers -------------------------------------------------
@@ -104,10 +68,6 @@ window.addEventListener('resize', () => {
 // come from the /api/agents cache, looked up by window_id.
 function _agentByWid(wid) {
     return (_agentsCache || []).find(a => a.window_id === wid);
-}
-function _nameOfWid(wid) {
-    const a = _agentByWid(wid);
-    return a ? a.name : wid;
 }
 
 // ---- New-terminal readiness ------------------------------------------------
@@ -408,8 +368,8 @@ configureShareHost({ paneTitle: wid => _paneTitle(wid), paneFrames: _paneFrames 
 configurePaneHeads({
     minimize: wid => minimizePane(wid),
     dropPane: wid => dropTerminalPane(wid),
-    wireDragStart: (e, from, wid) => wireDragStart(e, from, wid),
-    leaveRoom: (badge, wid) => wireRoomClick(badge, wid),
+    wireDragStart: (e, from, wid) => startWire(e, from, wid),
+    leaveRoom: (badge, wid) => leaveRoom(badge, wid),
     labelsChanged: () => _refreshPaneLabels(),
 });
 // The slot a header portals into: `display: contents`, so the head and its kill confirm lay
@@ -417,24 +377,32 @@ configurePaneHeads({
 function _paneHeadSlot(wid, wall) {
     return `<div class="island-slot pane-head-slot" data-head-for="${attrEsc(wid)}"${wall ? ' data-head-wall="1"' : ''}></div>`;
 }
+// The footer (the context bar and, on the wall, the action bar) is React since CMX-242
+// (features/tilefoot), portaled like the header into a slot under the terminal; the recap line
+// into one under the header (wall tiles only). mountTileFoots fills them.
+function _footSlot(wid, wall) {
+    return `<div class="island-slot" data-foot-for="${attrEsc(wid)}"${wall ? ' data-foot-wall="1"' : ''}></div>`;
+}
+function _recapSlot(wid) {
+    return `<div class="island-slot" data-recap-slot="${attrEsc(wid)}"></div>`;
+}
+// Draw the React parts of every tile under `scope`: BEFORE Gridstack adopts them (it finds each
+// tile's `.gs-grip` drag handle, in the header, as it inits).
+function _mountTileParts(scope) {
+    mountPaneHeads(scope);
+    mountTileFoots(scope);
+}
 
 // ---- Minimize-to-dock (wall mode) -----------------------------------------
 //
 // Minimizing a tile removes it from the Gridstack engine (freeing its cells)
 // but LEAVES the element in the DOM, hidden — so the live ttyd iframe is never
-// detached and never reloads. A chip lands in #term-min-dock; clicking it
-// re-adopts the same element via makeWidget at its saved coords. The set of
-// minimized wids is persisted to pc_wall_minimized so the dock survives a
-// reload (buildWall re-applies it after rebuilding the wall).
-let _minimized = _loadMinimized();
-
-function _loadMinimized() {
-    try { return new Set(JSON.parse(localStorage.getItem('pc_wall_minimized') || '[]')); }
-    catch (e) { return new Set(); }
-}
-function _saveMinimized() {
-    localStorage.setItem('pc_wall_minimized', JSON.stringify([..._minimized]));
-}
+// detached and never reloads. Its chip lands in the dock (features/walldock, CMX-242);
+// clicking it re-adopts the same element via makeWidget at its saved coords. The set of
+// minimized wids is shared/store/wall.ts `minimizedPanes` (persisted to pc_wall_minimized,
+// so the dock survives a reload: buildWall re-applies it after rebuilding the wall).
+const _isMinimized = wid => minimizedPanes.get().has(wid);
+configureDock({ restore: wid => restoreFromDock(wid) });
 
 // ---- Per-pane layout pin ----------------------------------------------------
 // A pinned pane sits out of applyGridLayout's auto-reflow (grid presets): its
@@ -465,142 +433,34 @@ function minimizePane(wid) {
         .find(it => it.getAttribute('gs-id') === wid);
     if (!item) return;
     _minimizeItem(item);
-    _minimized.add(wid);
-    _saveMinimized();
-    renderMinDock();
+    setMinimized(wid, true);    // the dock repaints synchronously, at its final height
     _refitWallForDock();        // wall re-packs above the (taller) dock
     _reportWatchForWid(wid);    // docked tile stops dictating the shared window's size (CMX-175)
 }
 
-// Dock chip click: the dock holds only minimized panes now, so a click always
-// restores. (minimizePane is invoked from the tile header's minimize button.)
-function toggleDockChip(wid) {
-    if (_minimized.has(wid)) restoreFromDock(wid);
-    else minimizePane(wid);
-}
-
-// ---- Lazy tiles: a DISPATCHED worker opens MINIMIZED, and POPS OUT when it blocks --
-//
-// ⛔ THE RULE, and it is one rule across two surfaces: a dispatched worker must not
-// occupy human attention surface — a Telegram topic (CMX-73) OR a Wall tile (this) —
-// until it needs a human. The wall is where you WATCH the fleet; five workers grinding
-// through a backlog tile it edge to edge and crowd out the one session you are in, and
-// none of them wanted watching. So a worker the dispatcher owns opens as a chip in the
-// dock (its ttyd iframe live and scrollable the whole time — minimize never detaches
-// it) and takes a tile the moment it BLOCKS on you. The wall stops being a wall of
-// noise and becomes what the topic list already is: the agents that want a human.
-//
-// The two facts come from /api/agents, both server-derived (see app.py):
-//   `dispatched`  — the RUN ROW owns the window id (never a guess from the name);
-//   `needs_human` — blocked on a human NOW: claude's own `waiting`, OR the hook log,
-//                   OR the pane (a Bash/Edit PERMISSION gate lives only as pixels).
-//
-// Per-wid state is a persisted 3-value machine — absent → 'docked' → 'popped' — and
-// the reason it exists rather than "just re-read the flags each tick" is that this must
-// NEVER FIGHT THE HUMAN. Re-deriving would re-minimize a pane the moment you pulled it
-// out of the dock, forever. So each decision is taken exactly ONCE per window:
-//   * absent  — never decided. Working → dock it ('docked'). Already blocked → leave it
-//               on the wall ('popped'): it was born wanting you.
-//   * 'docked'— we hid it, and we are the only one who may un-hide it: when it blocks,
-//               pop it out. Then 'popped', permanently.
-//   * 'popped'— hands off. Minimize it, restore it, ignore it — the wall never touches
-//               that window again, whatever it does next.
-// It is keyed by wid and persisted for the same reason `pc_wall_minimized` is: a reload
-// must not re-litigate a decision (which, mid-gate, would re-dock the very pane you were
-// answering). It is pruned in dropTerminalPane when the window dies, and disowned below
-// the moment a wid stops being dispatched — tmux recycles `@N` after a server restart,
-// and a stale 'docked' must never leave a HUMAN's window hidden.
-let _autoDock = _loadAutoDock();
-
-function _loadAutoDock() {
-    try { return JSON.parse(localStorage.getItem('pc_wall_autodock') || '{}') || {}; }
-    catch (e) { return {}; }
-}
-function _saveAutoDock() {
-    localStorage.setItem('pc_wall_autodock', JSON.stringify(_autoDock));
-}
-function _forgetAutoDock(wid) {
-    if (!(wid in _autoDock)) return;
-    delete _autoDock[wid];
-    _saveAutoDock();
-}
-
-// Run the machine over one poll's worth of agents. Called from _applyTermStatus, which
-// runs AFTER the tiles exist on both paths in (renderTerminals → buildWall, and
-// termTick → _absorbFreshTerminals) — a tile we cannot see yet is simply decided on the
-// next tick (4s), never dropped.
+// A DISPATCHED worker opens MINIMIZED and POPS OUT when it blocks on a human (CMX-76; the
+// machine is features/walldock's). Called from _applyTermStatus, which runs AFTER the tiles
+// exist on both paths in (renderTerminals → buildWall, and termTick → _absorbFreshTerminals):
+// a tile we cannot see yet is simply decided on the next tick (4s), never dropped.
 function _lazyDock(agents) {
     if (WALL_TILE_DISPATCHED) return;              // opt-out: tile every worker like a human's
     if (!Array.isArray(agents)) return;
     if (_termMode !== 'wall' || !_grid) return;    // the dock is a wall affordance
-    let dirty = false;
-    for (const a of agents) {
-        const wid = a && a.window_id;
-        if (!wid) continue;
-        const state = _autoDock[wid];
-
-        // Not (or no longer) the dispatcher's. A tile we docked on a worker's behalf
-        // must not stay hidden once that wid is someone else's — tmux hands `@N` out
-        // afresh after a server restart, and hiding a human's terminal is the one
-        // failure this feature is not allowed to have.
-        if (!a.dispatched) {
-            if (state === 'docked' && _minimized.has(wid)) restoreFromDock(wid);
-            if (state) { delete _autoDock[wid]; dirty = true; }
-            continue;
-        }
-
-        if (!state) {
-            if (wantsHuman(a)) {
-                _autoDock[wid] = 'popped';         // born blocked — it keeps its tile
-            } else if (_renderedWids.includes(wid)) {
-                minimizePane(wid);                 // working quietly — off the attention surface
-                _autoDock[wid] = 'docked';
-            } else {
-                continue;                          // no tile yet — decide on the next tick
-            }
-            dirty = true;
-        } else if (state === 'docked' && wantsHuman(a)) {
-            // 🗜️ THE POP-OUT. It wants a human, so it has earned the wall.
-            if (_minimized.has(wid)) restoreFromDock(wid);
-            _autoDock[wid] = 'popped';             // one pop, ever — from here it is yours
-            dirty = true;
-        }
-    }
-    if (dirty) _saveAutoDock();
-}
-
-// ---- Taskbar drag-reorder (order drives the wall layout) -------------------
-// pc_pane_order is the user's manual ordering (list of wids); _orderedWids
-// sorts the live panes by it (unknowns keep discovery order at the end), and
-// applyGridLayout lays tiles out in the same order — so dragging a chip
-// re-sorts the grid.
-function _paneOrderList() {
-    try { return JSON.parse(localStorage.getItem('pc_pane_order') || '[]'); } catch (e) { return []; }
-}
-function _orderIndex(wid) {
-    const i = _paneOrderList().indexOf(wid);
-    return i === -1 ? 1e9 : i;
-}
-function _orderedWids(wids) {
-    return wids.slice().sort((a, b) =>
-        (_orderIndex(a) - _orderIndex(b)) || (wids.indexOf(a) - wids.indexOf(b)));
+    runLazyDock(agents, { onWall: wid => _renderedWids.includes(wid), minimize: minimizePane, restore: restoreFromDock });
 }
 
 // The dock sits below the stage and changes the wall's available height, so
 // after it shows/hides we re-apply the active fill preset to re-fit the wall
-// (the remaining tiles re-pack to fill the space above the dock). Guarded on a
-// preset being active — a manual drag-layout is left exactly as the user set it.
+// (the remaining tiles re-pack to fill the space above the dock).
 function _refitWallForDock() {
-    if (_termMode !== 'wall' || !_wallPreset || !_grid) return;
-    applyGridLayout(_wallPreset.cols, _wallPreset.rows);
+    if (_termMode !== 'wall' || !_grid) return;
+    applyGridLayout();
 }
 
 function restoreFromDock(wid) {
     const stage = $('#term-stage');
     const item = Array.from(stage.querySelectorAll('.grid-stack-item'))
         .find(it => it.getAttribute('gs-id') === wid);
-    _minimized.delete(wid);
-    _saveMinimized();
     if (item && _grid) {
         let c = {};
         try { c = JSON.parse(item.dataset.gsCoords || '{}'); } catch (e) { /* noop */ }
@@ -612,217 +472,27 @@ function restoreFromDock(wid) {
         delete item.dataset.minimized;
         try { _grid.makeWidget(item); } catch (e) { /* noop */ }
     }
-    renderMinDock();
+    setMinimized(wid, false);   // the dock repaints synchronously (it may have emptied)
     _refitWallForDock();        // dock may have emptied → grow the wall back
     _reportWatchForWid(wid);    // back on screen → resumes counting toward the shared window's size (CMX-175)
 }
 
-// Live busy/idle/waiting indicator. The dot starts neutral and is coloured by
-// _applyTermStatus from /api/agents (status from `claude agents --json`):
-// busy -> green pulse, waiting -> amber (needs input), idle/unknown -> dim.
-function _statusDot(wid) {
-    return `<span class="term-status-dot" data-status-for="${attrEsc(wid)}" title="…"></span>`;
-}
-
-// Colour the taskbar chips' status dots from /api/agents, and flag each surface (pane or
-// chip) that waits on a human. The pane header's own dot is React's (features/panehead
-// dotState, the SAME tileState the chip reads), so the two never disagree.
-function _colorTermDots(agents) {
-    if (!agents) return;
-    const by = {};
-    agents.forEach(a => { if (a.window_id) by[a.window_id] = a; });
-    document.querySelectorAll('#panel-terminals .min-chip .term-status-dot, #panel-terminals .gs-dot').forEach(dot => {
-        const a = by[dot.dataset.statusFor];
-        const wants = wantsHuman(a);
-        // Flag the host surface (live pane OR taskbar chip) so a "waiting for
-        // input" pane gets a yellow border even when minimized to the dock.
-        const host = dot.closest('.grid-stack-item-content, .term-pane, .min-chip');
-        if (host) host.classList.toggle('term-waiting', wants);
-        if (!dot.closest('.min-chip')) return;
-        // CMX-137: in the minimized bar a dispatched run's window wears the run's own
-        // progress icon (the sidebar row's runDot), never a human session's dot. A chip
-        // is rebuilt on every dock render, so it never carries a stale run mark.
-        const run = windowRunDot(a, wants);
-        dot.classList.remove('working', 'waiting', 'idle', 'done');
-        dot.classList.add(...(run ? run.cls.split(' ') : [dotState(a)]));
-        dot.title = run ? run.label : stateTitle(a, tileState(a, wants));
-        if (run) { dot.setAttribute('role', 'img'); dot.setAttribute('aria-label', run.label); }
-    });
-}
-
-// Status tick: stamp last-busy times (drives the MRU sort), recolour the dots,
-// and — if the new activity changed the chip order — re-render the taskbar.
+// Status tick: the share flags, the headers, the dock and the footers repaint from this
+// poll (they read the agents store, and repaint here too when the rows are the same array),
+// then the lazy dock and the layouts that rank by attention.
 function _applyTermStatus(agents) {
     if (!agents) return;
     followAgents(agents);                     // each row's share flag (and owner presence with it)
-    refreshPaneHeads();                       // headers repaint even when the rows are the same array
-    const now = Date.now();
-    agents.forEach(a => {
-        if (!a.window_id) return;
-        const st = a.session_status;
-        if (st === 'busy' && _paneStatus[a.window_id] !== 'busy') _paneActivity[a.window_id] = now;  // rising edge
-        _paneStatus[a.window_id] = st;
-    });
+    refreshPaneHeads();
+    refreshTileFoots();
+    refreshDock();
     _lazyDock(agents);   // dock the dispatcher's quiet workers; pop out the ones that block
-    _colorTermDots(agents);
-    _applyWallTileFrame(agents);   // wall redesign slice 1: state pill / recap / PR chip / action bar
     _applyAutoArrange(agents);     // wall redesign slice 2: re-rank the wall — no-op unless auto is on and the order changed
     _applyWallFocus(agents);       // wall redesign (Focus toggle): re-fit the one-large + strip layout — no-op unless focus is on and the target/pane-set changed
     // Wall tick is the fast path (4s) — refresh the tab signal here too so the
     // title/favicon update promptly on the flagship view, not just on the 30s
     // sidebar refresh. updateTabSignal is idempotent, so the two callers agree.
     updateTabSignal(agents);
-    if (_termMode === 'wall' && _renderedWids.length
-        && _taskbarOrder(_renderedWids).join(',') !== _dockOrderSig) {
-        renderMinDock();   // a pane's recency changed → reflow the chips
-    }
-}
-
-// Fill the per-tile context bars from /api/agents/context, keyed by window_id.
-// statusline source = exact; transcript source = estimate (dimmed fill, "~"/est).
-let _ctxCache = [];
-function _applyTermContext(ctx) {
-    if (!Array.isArray(ctx)) return;
-    _ctxCache = ctx;
-    const by = {};
-    ctx.forEach(c => { if (c.window_id) by[c.window_id] = c; });
-    document.querySelectorAll('#panel-terminals .term-ctx-bar').forEach(bar => {
-        const c = by[bar.dataset.ctxFor];
-        const fill = bar.querySelector('.term-ctx-fill');
-        if (!fill) return;
-        // CMX-117: branch + context chips moved OUT of the top .gs-head into this
-        // same subtle bottom bar (_ctxBarHTML) — read/write them from `bar` itself
-        // now, not the header.
-        const head = bar.parentElement && bar.parentElement.querySelector('.gs-head');
-        const ctxChip = bar.querySelector('.gs-ctx');
-        const branchChip = bar.querySelector('.gs-branch');
-        // Wall redesign slice 1: model + cost chips are wall-only (_ctxBarHTML
-        // only renders them when draggable) — null on single mode's bar, so
-        // every write below is guarded the same way ctxChip/branchChip are.
-        const modelChip = bar.querySelector('.gs-model');
-        const costChip = bar.querySelector('.gs-cost');
-        if (!c || c.used_pct == null) {
-            fill.style.width = '0';
-            fill.className = 'term-ctx-fill';
-            bar.title = 'Context: —';
-            if (ctxChip) ctxChip.hidden = true;
-            if (branchChip) branchChip.hidden = true;
-            if (modelChip) modelChip.hidden = true;
-            if (costChip) costChip.hidden = true;
-            return;
-        }
-        const pct = c.used_pct;
-        fill.style.width = Math.min(100, pct) + '%';
-        // Routed through wallmodel.ts's ctxLevel — the SAME thresholds this
-        // slice's guard tests pin (tests/wall_tile.test.mjs), so the pure
-        // logic under test is what actually drives the rendered fill/chip,
-        // not a second copy of the 60/80 thresholds living only here.
-        const lvl = ctxLevel(pct);
-        const sev = lvl === 'bad' ? ' ctx-danger' : lvl === 'warn' ? ' ctx-warn' : '';
-        fill.className = 'term-ctx-fill' + sev + (c.estimated ? ' est' : '');
-        const bits = [`Context: ${c.used}/${c.total} (${pct}%${c.estimated ? '~' : ''})`];
-        if (c.model) bits.push(c.model);
-        if (c.cost_usd != null) bits.push(`$${c.cost_usd}`);
-        if (c.estimated) bits.push('estimate; run `chela install-statusline` for exact');
-        const tip = bits.join(' · ');
-        bar.title = tip;
-        // The bar is pointer-events:none (so it can't block resize), so mirror
-        // the tooltip onto the tile header — a safe, hoverable surface.
-        if (head) head.title = tip;
-        // Visible header chips: branch + "74% · 147.5K/1M". The bottom bar gives
-        // the at-a-glance color; these give the exact numbers without hovering.
-        if (ctxChip) {
-            const counter = (c.used && c.total) ? ` · ${c.used}/${c.total}` : '';
-            ctxChip.textContent = `${pct}%${c.estimated ? '~' : ''}${counter}`;
-            ctxChip.className = 'gs-ctx' + (sev ? ' ' + sev.trim() : '');
-            ctxChip.hidden = false;
-        }
-        if (branchChip) {
-            if (c.branch) {
-                branchChip.textContent = '⎇ ' + c.branch;
-                branchChip.title = 'branch: ' + c.branch;
-                branchChip.hidden = false;
-            } else {
-                branchChip.hidden = true;
-            }
-        }
-        if (modelChip) {
-            if (c.model) { modelChip.textContent = c.model; modelChip.hidden = false; }
-            else modelChip.hidden = true;
-        }
-        if (costChip) {
-            const cost = costView(c.cost_usd);
-            if (cost) { costChip.textContent = cost; costChip.title = 'session cost'; costChip.hidden = false; }
-            else costChip.hidden = true;
-        }
-    });
-}
-
-// Taskbar order: most-recently-busy first (MRU), with the manual order as a
-// stable tiebreak for panes with equal/zero activity. Decoupled from the wall
-// grid — a chip moving never disturbs a pane's seat on the wall.
-function _taskbarOrder(wids) {
-    const base = _orderedWids(wids);
-    const waiting = w => (_paneStatus[w] === 'waiting' ? 0 : 1);   // needs-your-input panes jump to the front
-    const ts = w => _paneActivity[w] || 0;
-    return base.slice().sort((a, b) =>
-        (waiting(a) - waiting(b)) || (ts(b) - ts(a)) || (base.indexOf(a) - base.indexOf(b)));
-}
-
-// FLIP animation: measure chip rects before a rebuild, then slide each surviving
-// chip from its old spot to its new one so MRU reshuffles glide instead of snap.
-// Matched by data-wid; chips with no prior position (just appeared) don't animate.
-function _flipDock(dock, mutate) {
-    const first = {};
-    dock.querySelectorAll('.min-chip').forEach(c => { first[c.dataset.wid] = c.getBoundingClientRect(); });
-    mutate();
-    dock.querySelectorAll('.min-chip').forEach(c => {
-        const f = first[c.dataset.wid];
-        if (!f) return;
-        const l = c.getBoundingClientRect();
-        const dx = f.left - l.left, dy = f.top - l.top;
-        if (!dx && !dy) return;
-        c.style.transition = 'none';
-        c.style.transform = `translate(${dx}px, ${dy}px)`;
-        requestAnimationFrame(() => {
-            c.style.transition = 'transform 160ms ease';
-            c.style.transform = '';
-        });
-    });
-}
-
-// Always-on taskbar: one chip per pane (wall mode). Visible panes get an accent
-// border; minimized panes are dimmed. Each chip carries the busy/idle/waiting
-// status dot and toggles min/restore on click. Hidden only in single mode or
-// when there are no panes. Order is MRU (see _taskbarOrder); chips are click-only.
-function renderMinDock() {
-    const dock = $('#term-min-dock');
-    if (!dock) return;
-    // A TRUE taskbar: only MINIMIZED panes dock here. The sidebar already lists
-    // every agent, so mirroring all panes in the dock was redundant (two lists
-    // of the same thing). Now the dock is "things I've tucked away" and is empty
-    // (hidden) until you minimize a tile; visible tiles are reordered on the wall.
-    const wids = _termMode === 'wall'
-        ? _taskbarOrder(_renderedWids).filter(w => _minimized.has(w)) : [];
-    if (!wids.length) { dock.style.display = 'none'; dock.innerHTML = ''; _dockOrderSig = ''; return; }
-    dock.style.display = 'flex';
-    _flipDock(dock, () => {
-        dock.innerHTML = '<span class="min-dock-label">Minimized:</span>' + wids.map(wid => {
-            const j = _jsStr(wid);
-            const min = _minimized.has(wid);
-            const cls = min ? 'min-chip min-chip-minimized' : 'min-chip min-chip-active';
-            // CMX-154: SVG, not emoji — the old 🗗/🗕 glyphs were tofu on macOS.
-            const icon = min ? lucideIcon('maximize-2', 12) : lucideIcon('minus', 12);
-            return `<button class="${cls}" data-wid="${attrEsc(wid)}"
-              onclick="chela.toggleDockChip('${j}')" title="Click to ${min ? 'restore' : 'minimize'} ${attrEsc(_paneTitle(wid))}">
-              ${_statusDot(wid)}
-              <span class="min-chip-title">${escHtml(_paneTitle(wid))}</span>
-              <span class="min-chip-icon" aria-hidden="true">${icon}</span>
-            </button>`;
-        }).join('');
-    });
-    _dockOrderSig = wids.join(',');
-    _colorTermDots(_agentsCache);   // colour the just-built chips (no re-sort → no recursion)
 }
 
 // CMX-169: the single-mode pane a load opens. The last pane viewed on THIS device
@@ -896,9 +566,9 @@ async function renderTerminals(ctxRead) {   // ctxRead: refresh()'s context read
 
     const sel = $('#term-agent');
     sel.style.display = _termMode === 'single' ? '' : 'none';
-    termMode.set(_termMode);   // the keybar island shows its desktop bar in single mode
-    $('#term-wall-grid').style.display = _termMode === 'wall' ? 'inline-flex' : 'none';
-    _buildGridPicker();
+    termMode.set(_termMode);   // the keybar island shows its desktop bar in single mode, the toolbar and dock show on the wall
+    mountWallToolbar($('#wall-toolbar-island'));
+    mountDock($('#term-min-dock'));
     if (sel.options.length !== wids.length) {
         const prev = sel.value;
         sel.innerHTML = wids.map(w => `<option value="${attrEsc(w)}">${escHtml(_paneTitle(w))}</option>`).join('');
@@ -942,7 +612,7 @@ async function renderTerminals(ctxRead) {   // ctxRead: refresh()'s context read
         stage.innerHTML = '<div style="padding:20px; text-align:center; color:var(--text-dim);">No active agents</div>';
         _renderedWids = [];
     } else if (_termMode === 'wall') {
-        _renderedWids = wids.slice();   // set before buildWall so renderMinDock sees current wids
+        _renderedWids = wids.slice();   // set before buildWall so the lazy dock sees current wids
         buildWall(wids);
         // Fit happens at the end, AFTER the taskbar renders — see _refitWallForDock below.
     } else {
@@ -950,16 +620,14 @@ async function renderTerminals(ctxRead) {   // ctxRead: refresh()'s context read
         stage.className = 'term-single';
         const sw = sel.value || wids[0];
         _rememberPane(sw, agents);   // every single-mode switch lands here: sidebar tap, swipe, dropdown, focus
-        stage.innerHTML = `<div class="term-pane">${_paneHeadSlot(sw, false)}${frame(sw)}${_ctxBarHTML(sw, false)}</div>`;
-        mountPaneHeads(stage);
+        stage.innerHTML = `<div class="term-pane">${_paneHeadSlot(sw, false)}${frame(sw)}${_footSlot(sw, false)}</div>`;
+        _mountTileParts(stage);
         _renderedWids = [sw];
     }
     // Seed readiness pollers for whatever placeholders we just rendered.
     _startPlaceholderPolls();
-    renderMinDock();   // single / no-agents → hides the dock; wall already rebuilt it
-    _applyTermStatus(_agentsCache);   // colour pane dots (single + wall) from cached state
-    _applyTermContext(_ctxCache);     // repaint ctx bars from cache instantly…
-    (ctxRead || api('/api/agents/context')).then(_applyTermContext).catch(() => {});  // …then refresh
+    _applyTermStatus(_agentsCache);   // paint the panes and the dock from cached state
+    loadContext(ctxRead).catch(() => {});   // the footers drew the last context; this refreshes it
 
     // Fit the wall AFTER the taskbar is at its final rendered height, so the grid
     // leaves exactly the right room above it (dock height feeds _wallFill).
@@ -968,7 +636,7 @@ async function renderTerminals(ctxRead) {   // ctxRead: refresh()'s context read
     pinKeybar();              // CMX-102: a freshly built pane re-fits to the keybar if the keyboard is up
     _bindHeaderSwipe();       // header swipe → prev/next agent (idempotent)
     _bindFocusPromote();      // click a strip pane's header to promote it while Focus is on (idempotent)
-    _refreshRooms();          // paint room accents on the first render, not 4s later
+    refreshRooms();           // paint room accents on the first render, not 4s later
 }
 
 // ---- Reactive pane lifecycle ----------------------------------------------
@@ -1067,7 +735,7 @@ function focusPaneByWid(wid) {
     }
     // Defer so selectView's render settles before we hunt for the tile.
     setTimeout(() => {
-        if (_minimized.has(wid)) restoreFromDock(wid);
+        if (_isMinimized(wid)) restoreFromDock(wid);
         const item = Array.from($('#term-stage').querySelectorAll('.grid-stack-item'))
             .find(it => it.getAttribute('gs-id') === wid);
         if (!item) return;
@@ -1185,7 +853,7 @@ function _restoreTermFrames() {
 // CSS-hidden), so left alone it would go on dictating the shared window's size
 // from inside the dock.
 function _isWatched(wid) {
-    return document.visibilityState !== 'hidden' && !_minimized.has(wid);
+    return document.visibilityState !== 'hidden' && !_isMinimized(wid);
 }
 
 // /term/<wid>/?cid=... → cid. Mirrors _widOfFrame's src-parsing (including the
@@ -1262,10 +930,11 @@ async function termTick() {
     // in case a rename changed a pane's friendly name.
     _applyTermStatus(agents);
     _refreshPaneLabels();
-    _refreshRooms();   // rooms can also be made from the CLI/hooks — the wall follows
+    refreshRooms();   // rooms can also be made from the CLI/hooks — the wall follows
     try {
         const ctx = await api('/api/agents/context');
-        _applyTermContext(ctx);
+        if (Array.isArray(ctx)) context.set(ctx);   // the footers repaint from it
+        refreshTileFoots();                          // …even when it is the same array
         updateCtxCache(ctx);
     } catch (e) { /* keep prior fills */ }
     // Full sidebar re-render off the same poll: keeps the dots in lockstep with
@@ -1276,14 +945,14 @@ async function termTick() {
 }
 
 // Relabel everything that shows a window's label, WITHOUT touching an iframe: a rename
-// only changes display text. The headers repaint from the agents store (an inline rename
-// in progress is the header's own state, never clobbered); legacy redraws the chips and
+// only changes display text. The headers and the dock's chips repaint from the agents store
+// (an inline rename in progress is the header's own state, never clobbered); legacy redraws
 // the single-mode dropdown.
 function _refreshPaneLabels() {
     if (!TERMINALS_ON) return;
     refreshPaneHeads();
     if (_termMode === 'wall') {
-        renderMinDock();   // chips carry labels too
+        refreshDock();   // chips carry labels too
     } else {
         const sel = $('#term-agent');
         if (sel) Array.from(sel.options).forEach(o => {
@@ -1411,10 +1080,9 @@ function dropTerminalPane(wid) {
         }
     }
     _renderedWids = _renderedWids.filter(w => w !== wid);
-    if (_minimized.has(wid)) { _minimized.delete(wid); _saveMinimized(); }
-    _forgetAutoDock(wid);   // the window is gone: its lazy-dock decision dies with it
-    renderMinDock();        // taskbar lists every pane → refresh whenever one drops
-    _refitWallForDock();    // taskbar may have shrunk a row → re-fit the wall above it
+    setMinimized(wid, false);   // its chip leaves the dock
+    forgetAutoDock(wid);        // the window is gone: its lazy-dock decision dies with it
+    _refitWallForDock();        // the dock may have emptied → re-fit the wall above it
     _syncTermSig();
 }
 
@@ -1436,203 +1104,11 @@ function _wallTileHTML(wid, x, y, w, h) {
     return `<div class="grid-stack-item${pinnedCls}" gs-id="${escHtml(wid)}" gs-x="${x}" gs-y="${y}" gs-w="${w}" gs-h="${h}">
   <div class="grid-stack-item-content">
     ${_paneHeadSlot(wid, true)}
-    ${_recapLineHTML(wid)}
+    ${_recapSlot(wid)}
     ${body}
-    ${_ctxBarHTML(wid, true)}
-    ${_actionBarHTML(wid)}
+    ${_footSlot(wid, true)}
   </div>
 </div>`;
-}
-
-// Wall redesign slice 1: the away-summary line, Claude's own "what happened
-// while you were away" — never shown on the Wall before this. Dim, one line,
-// recap_ts in the tooltip. Rendered hidden by default (mirrors the ctx bar's
-// chips); _applyWallTileFrame fills it synchronously right after the wall is
-// built (renderTerminals calls _applyTermStatus(_agentsCache) immediately
-// after buildWall), so there is no visible flash of "hidden then shown".
-function _recapLineHTML(wid) {
-    return `<div class="pane-recap" data-recap-for="${attrEsc(wid)}" hidden onclick="chela.toggleRecap(this)"></div>`;
-}
-
-// Wall redesign slice 1: the amber Approve/Answer bar (wantsHuman) or blue
-// Review bar (finished, PR up) — sends its key via the EXISTING
-// /api/term/key path (termKeyFor -> chela.termActionClick below), no new
-// endpoint. Always rendered (hidden by default) so _applyWallTileFrame can
-// find it by data-action-for on every poll, same pattern as the ctx bar.
-function _actionBarHTML(wid) {
-    return `<div class="term-action-bar" data-action-for="${attrEsc(wid)}" hidden></div>`;
-}
-
-// The action bar's inner markup for a given {kind, label} (wallmodel.ts
-// actionBarKind). 'review' links straight to the PR (no key to send);
-// 'answer'/'approve' send Enter via the existing /api/term/key path — Enter
-// accepts Claude's own highlighted default choice at a permission gate and
-// submits a typed reply, which is the one safe, universal action available
-// through the whitelisted key set (app.py::_TERM_KEYS) without a new endpoint.
-function _actionBarContent(wid, kind) {
-    if (kind.kind === 'review') {
-        const chip = prChip((_agentByWid(wid) || {}).pr);
-        const url = chip ? chip.url : '#';
-        return `<span class="term-action-label">✓ PR ready for review</span>
-          <a class="term-action-btn" href="${attrEsc(url)}" target="_blank" rel="noopener noreferrer">Review</a>`;
-    }
-    const label = kind.label === 'Answer' ? '◆ Needs an answer' : '◆ Needs approval';
-    return `<span class="term-action-label">${escHtml(label)}</span>
-      <button type="button" class="term-action-btn" onclick="chela.termActionClick(this,'${_jsStr(wid)}')">${escHtml(kind.label)}</button>`;
-}
-
-// Send the action bar's key (Enter) via the existing /api/term/key path.
-async function termActionClick(btn, wid) {
-    if (!btn) return;
-    btn.disabled = true;
-    try {
-        await termKeyFor(wid, 'Enter');
-    } finally {
-        btn.disabled = false;
-    }
-}
-
-// Wall redesign slice 1: repaint every wall tile's frame elements (recap line, PR
-// chip, action bar; the state pill is the React header's since CMX-241) from a fresh /api/agents poll — the
-// SAME agents array _applyTermStatus already has, so this runs as one more
-// step of that existing 4s tick rather than a second poll. Model/cost/branch
-// (ctx-poll-driven) are repainted separately by _applyTermContext, which
-// already owns that bar's other chips.
-function _applyWallTileFrame(agents) {
-    if (!agents) return;
-    const by = {};
-    agents.forEach(a => { if (a.window_id) by[a.window_id] = a; });
-
-    document.querySelectorAll('#panel-terminals .pane-recap[data-recap-for]').forEach(el => {
-        const r = recapView(by[el.dataset.recapFor]);
-        el.hidden = !r;
-        el.textContent = r ? r.text : '';
-        // The line clamps to one row; the tooltip reveals the FULL recap (plus
-        // its as-of time), so nothing is lost to truncation on a glance.
-        el.title = r ? (r.text + (r.tsTitle ? '\n\n(as of ' + r.tsTitle + ')' : '')) : '';
-        el.classList.toggle('recap-open', !!r && _recapOpen.has(el.dataset.recapFor));
-    });
-
-    document.querySelectorAll('#panel-terminals .gs-pr[data-pr-for]').forEach(el => {
-        const a = by[el.dataset.prFor];
-        const chip = prChip(a && a.pr);
-        if (!chip) { el.hidden = true; el.removeAttribute('href'); el.textContent = ''; return; }
-        el.hidden = false;
-        el.href = chip.url;
-        // CMX-41: the ⚑ is earned by a confirmed open PR only; merged/closed/
-        // draft read dim with their state word, unknown is a bare `#N` link.
-        el.textContent = (chip.flag ? '⚑ ' : '') + chip.label;
-        el.classList.toggle('gs-pr-dim', chip.dim);
-        el.title = 'Open PR ' + chip.label + (chip.repository ? ' (' + chip.repository + ')' : '')
-            + (chip.state === 'unknown' ? ' (state unknown)' : '');
-    });
-
-    document.querySelectorAll('#panel-terminals .term-action-bar[data-action-for]').forEach(el => {
-        const wid = el.dataset.actionFor;
-        const a = by[wid];
-        const kind = actionBarKind(a, wantsHuman(a));
-        const host = el.closest('.grid-stack-item-content');
-        if (!kind) {
-            if (!el.hidden) { el.hidden = true; el.className = 'term-action-bar'; el.innerHTML = ''; }
-            if (host) host.classList.remove('has-term-action');
-            return;
-        }
-        el.hidden = false;
-        el.className = 'term-action-bar action-' + kind.kind;
-        el.innerHTML = _actionBarContent(wid, kind);
-        if (host) host.classList.add('has-term-action');
-    });
-}
-
-// Per-tile context-window bar pinned to the tile bottom edge (CMX-117: now the
-// subtle home for branch + context, folded together with the ambient fill strip
-// — previously two top-header chips PLUS this bar). Filled/coloured by
-// _applyTermContext from /api/agents/context, keyed by window_id. CMX-85
-// dropped the pane № chip that rode here: the sidebar rows carry the only
-// Alt+N numbering now.
-function _ctxBarHTML(wid, draggable) {
-    // The model chip rides in the bar on EVERY surface — wall tiles AND the
-    // mobile single pane (Liav, 2026-07-25). It's context-poll-driven
-    // (_applyTermContext fills it from c.model, guarded by `if (modelChip)`),
-    // so it just needed to exist in the single-pane bar to light up.
-    const modelChip = `<span class="gs-model" hidden></span>`;
-    // PR + cost stay wall-only: PR is agents-driven
-    // (_applyWallTileFrame) and both add width the compact mobile bar doesn't
-    // need. _applyTermContext writes cost, _applyWallTileFrame writes PR — never
-    // both to the same field, so there is exactly one writer per chip.
-    const meta = draggable
-        ? `<a class="gs-pr" data-pr-for="${attrEsc(wid)}" hidden target="_blank" rel="noopener noreferrer"></a>
-           <span class="gs-cost" hidden></span>` : '';
-    // Files (CMX-299): opens the per-session changed-files/diff modal
-    // (frontend/src/features/diffmodal). Unlike every other chip in this bar it needs no poll to
-    // populate — the modal fetches fresh on open — so it's just always
-    // present, `pointer-events: auto` punched through the bar's own
-    // `pointer-events: none` the same way `.gs-pr` already does.
-    // `wid` is a tmux window id (`@<n>`, never quote-bearing) in practice, but
-    // this mirrors kanban.js's own onclick-arg escaping (escHtml then `'`→`\'`)
-    // rather than assuming that format, same as any other value spliced into a
-    // single-quoted JS string literal inside an HTML attribute.
-    const widArg = escHtml(wid).replace(/'/g, "\\'");
-    const filesChip = `<button type="button" class="gs-files" title="Changed files"
-      onclick="event.stopPropagation(); chela.openDiffModal('${widArg}')">${lucideIcon('git-compare', 12)}</button>`;
-    // CMX-417: the pane's tmux window id (`@N`) — the address the orchestrator,
-    // `chela peek @N` and peer messages use — leads the bar on EVERY surface.
-    // Static, like the Files chip: the bar is built per wid, so no poll writes
-    // it. A <button> so it punches through the bar's `pointer-events: none`
-    // (see .gs-wid) and takes a click: copy to the clipboard + a "copied" toast.
-    const widChip = windowIdQuery(wid)
-        ? `<button type="button" class="gs-wid" data-wid="${attrEsc(wid)}" title="tmux window ${attrEsc(wid)}, click to copy"
-      onclick="event.stopPropagation(); chela.copyWindowId(this)">${escHtml(wid)}</button>` : '';
-    return `<div class="term-ctx-bar" data-ctx-for="${attrEsc(wid)}" title="Context: —">
-      ${widChip}
-      ${modelChip}
-      ${meta}
-      <span class="gs-branch" hidden></span>
-      <span class="gs-ctx" hidden></span>
-      ${filesChip}
-      <i class="term-ctx-fill"></i>
-    </div>`;
-}
-
-// CMX-417: click on a footer's `@N` chip. The clipboard API needs a secure
-// context; on a plain-http dashboard fall back to a selected <textarea> +
-// execCommand('copy'), so the click still copies rather than silently not.
-function copyWindowId(btn) {
-    const wid = btn && btn.dataset.wid;
-    if (!wid) return;
-    const done = ok => _widToast(btn, ok ? `Copied ${wid}` : `Copy failed: ${wid}`);
-    const legacy = () => {
-        const ta = document.createElement('textarea');
-        ta.value = wid;
-        ta.setAttribute('readonly', '');
-        ta.style.cssText = 'position:fixed;top:0;left:0;opacity:0;';
-        document.body.appendChild(ta);
-        ta.select();
-        let ok = false;
-        try { ok = document.execCommand('copy'); } catch (e) { /* unsupported */ }
-        ta.remove();
-        done(ok);
-    };
-    if (navigator.clipboard && navigator.clipboard.writeText) {
-        navigator.clipboard.writeText(wid).then(() => done(true), legacy);
-    } else {
-        legacy();
-    }
-}
-
-// The brief "copied" bubble, anchored just ABOVE the footer chip (the footer
-// sits on the pane's bottom edge, so .term-share-toast's below-the-anchor
-// placement would fall off the tile).
-function _widToast(btn, msg) {
-    const bar = btn.closest('.term-ctx-bar');
-    if (!bar) return;
-    bar.querySelectorAll('.gs-wid-toast').forEach(t => t.remove());
-    const t = document.createElement('div');
-    t.className = 'gs-wid-toast';
-    t.setAttribute('role', 'status');
-    t.textContent = msg;
-    bar.appendChild(t);
-    setTimeout(() => t.remove(), 1500);
 }
 
 function buildWall(wids) {
@@ -1654,7 +1130,7 @@ function buildWall(wids) {
         const w = s.w || 6, h = s.h || 5;
         return _wallTileHTML(wid, x, y, w, h);
     }).join('');
-    mountPaneHeads(gsEl);   // before GridStack.init: each tile's `.gs-grip` handle must exist
+    _mountTileParts(gsEl);   // before GridStack.init: each tile's `.gs-grip` handle must exist
 
     _grid = GridStack.init({
         column: 12,
@@ -1696,26 +1172,25 @@ function buildWall(wids) {
         else gsEl.style.maxHeight = '';
         gsEl.classList.toggle('term-lock-drag', on);
     };
-    _grid.on('dragstart', (e, el) => { guard(true); dragMode(true); if (_wallLocked) { _snapshotForSwap(); lockDragBox(true); } });
+    _grid.on('dragstart', (e, el) => { guard(true); dragMode(true); if (_layout().locked) { _snapshotForSwap(); lockDragBox(true); } });
     _grid.on('resizestart', () => guard(true));
     _grid.on('drag', (e, el) => _swapDragHover(el));   // live highlight of the swap target
     // Locked mode turns a drag into a pure swap: exchange the dragged pane's full
     // geometry with whatever pane it was dropped on (revert if dropped on empty).
-    _grid.on('dragstop', (e, el) => { guard(false); dragMode(false); if (_wallLocked) _doSwap(el); lockDragBox(false); persist(); });
+    _grid.on('dragstop', (e, el) => { guard(false); dragMode(false); if (_layout().locked) _doSwap(el); lockDragBox(false); persist(); });
     _grid.on('resizestop', () => { guard(false); persist(); });
 
     // Re-apply persisted minimized state: pull those tiles back out of the grid
-    // (their iframes still loaded, just hidden) and rebuild the dock chips.
+    // (their iframes still loaded, just hidden); the dock draws their chips.
     wids.forEach(wid => {
-        if (!_minimized.has(wid)) return;
+        if (!_isMinimized(wid)) return;
         const item = gsEl.querySelector(`.grid-stack-item[gs-id="${_cssEsc(wid)}"]`);
         if (item) _minimizeItem(item);
     });
     _autoOrderSig = '';    // fresh tile set: force the next auto-arrange apply, don't trust a stale sig
     _focusOrderSig = '';   // same, for Focus: force the next _applyWallFocus apply on a fresh tile set
     _applyWallInteractivity();   // restore the locked (swap-on-drag) / auto-arrange / focus feel across reloads
-    renderMinDock();
-    _replayRoomAccents();   // rebuilt tiles: repaint room accents from the last poll
+    replayRoomAccents();   // rebuilt tiles: repaint room accents from the last poll
 }
 
 // Surgically append new tiles to an existing wall WITHOUT touching the live
@@ -1751,15 +1226,14 @@ async function addWallTiles(wids) {
         tmp.innerHTML = _wallTileHTML(wid, x, y, w, h);
         const el = tmp.firstElementChild;
         gsEl.appendChild(el);
-        mountPaneHeads(el);     // its header (and `.gs-grip` handle) before Gridstack adopts it
+        _mountTileParts(el);    // its header (and `.gs-grip` handle) before Gridstack adopts it
         _grid.makeWidget(el);   // v10: adopt an already-appended element as a widget
         if (!_renderedWids.includes(wid)) _renderedWids.push(wid);
     });
     _startPlaceholderPolls();   // seed readiness polls for any placeholders we just added
     _applyWallInteractivity();  // a tile added while locked/auto must inherit no-resize / no-move
-    renderMinDock();            // taskbar lists every pane → add the new chip(s)
-    _refitWallForDock();        // taskbar may have grown a row → re-fit the wall above it
-    _replayRoomAccents();       // a fresh tile already in a room wears its accent at once
+    _refitWallForDock();        // re-fit the wall to the stage
+    replayRoomAccents();        // a fresh tile already in a room wears its accent at once
     _syncTermSig();
     return true;
 }
@@ -1778,20 +1252,6 @@ async function _absorbFreshTerminals(live) {
         _refreshTermOptions(live);
     }
 }
-
-// Inline split-glyph layout picker (editor-style). Each preset is a column
-// count + a target row count that fills the viewport height; the glyph depicts
-// cols×rows so the shape is obvious at a glance. "N columns" (rows:1) makes
-// each pane full viewport height; the ×grids stack `rows` of panes to fill the
-// same height. Extra panes beyond cols×rows wrap below and scroll.
-const WALL_PRESETS = [
-    { cols: 1, rows: 1, label: '1 column (stack)' },
-    { cols: 2, rows: 1, label: '2 columns' },
-    { cols: 3, rows: 1, label: '3 columns' },
-    { cols: 4, rows: 1, label: '4 columns' },
-    { cols: 2, rows: 2, label: '2 × 2 grid' },
-    { cols: 3, rows: 2, label: '3 × 2 grid' },
-];
 
 // GridStack.init params (must stay in sync with buildWall) — needed to convert
 // the visible stage height into grid rows so a layout fills the viewport.
@@ -1824,7 +1284,7 @@ function _wallFill() {
     // numbers. Phones force single mode (no wall, no dock), so skip it there.
     const dock = $('#term-min-dock');
     let dockH = 0;
-    if (!_isMobileTerm() && dock && dock.style.display !== 'none') {
+    if (!_isMobileTerm() && dock && !dock.hidden) {
         const ds = getComputedStyle(dock);
         dockH = dock.getBoundingClientRect().height
             + (parseFloat(ds.marginTop) || 0) + (parseFloat(ds.marginBottom) || 0);
@@ -1838,144 +1298,6 @@ function _wallFill() {
     return { rows, cellPx };
 }
 
-// Build a cols×rows grid glyph as an SVG of rounded rects on a 18×14 canvas.
-function _gridGlyph(cols, rows) {
-    const W = 18, H = 14, m = 1, g = 1.5;
-    const cw = (W - 2 * m - (cols - 1) * g) / cols;
-    const ch = (H - 2 * m - (rows - 1) * g) / rows;
-    let rects = '';
-    for (let r = 0; r < rows; r++) {
-        for (let c = 0; c < cols; c++) {
-            const x = (m + c * (cw + g)).toFixed(2);
-            const y = (m + r * (ch + g)).toFixed(2);
-            rects += `<rect x="${x}" y="${y}" width="${cw.toFixed(2)}" height="${ch.toFixed(2)}" rx="1"/>`;
-        }
-    }
-    return `<svg viewBox="0 0 ${W} ${H}" width="18" height="14" fill="currentColor" aria-hidden="true">${rects}</svg>`;
-}
-
-// Lucide lock / lock-open (https://lucide.dev/icons/lock), 14px to match the
-// preset glyphs. Stroke-based, so it inherits .gl-btn's currentColor.
-function _lockGlyph(locked) {
-    const shackle = locked ? 'M7 11V7a5 5 0 0 1 10 0v4' : 'M7 11V7a5 5 0 0 1 9.9-1';
-    return `<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor"
-        stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-        <rect width="18" height="11" x="3" y="11" rx="2" ry="2"/><path d="${shackle}"/></svg>`;
-}
-
-// Lucide target (https://lucide.dev/icons/target), 14px to match the lock
-// glyph — deliberately a DIFFERENT shape from the lock/preset icons so the
-// auto-arrange toggle reads as its own control at a glance. Static (unlike
-// the lock glyph it doesn't swap shape on/off — .gl-btn.active carries the
-// on/off signal, same as the preset picker's buttons).
-function _autoGlyph() {
-    return `<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor"
-        stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-        <circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="5"/><circle cx="12" cy="12" r="1"/></svg>`;
-}
-
-// Focus layout glyph: a big rect (the focus pane) beside two stacked small
-// rects (the strip) — deliberately a DIFFERENT shape from lock/auto/preset
-// icons (echoes _gridGlyph's rounded-rect idiom, sized to match) so Focus
-// reads as its own control, not a preset variant. Static, same reasoning as
-// _autoGlyph — .gl-btn.active carries the on/off signal.
-function _focusGlyph() {
-    return `<svg viewBox="0 0 18 14" width="18" height="14" fill="currentColor" aria-hidden="true">
-        <rect x="1" y="1" width="10" height="12" rx="1"/>
-        <rect x="13" y="1" width="4" height="5" rx="1"/>
-        <rect x="13" y="8" width="4" height="5" rx="1"/>
-    </svg>`;
-}
-
-// Populate the toolbar's glyph picker once. Idempotent (dataset guard) so the
-// per-render renderTerminals() call is cheap.
-function _buildGridPicker() {
-    const host = $('#term-grid-presets');
-    if (!host) return;
-    if (!host.dataset.built) {
-        host.innerHTML = WALL_PRESETS.map((p, i) =>
-            `<button class="gl-btn" data-preset="${i}" title="${escHtml(p.label)}" aria-label="${escHtml(p.label)}"
-                     onclick="chela.applyGridLayout(${p.cols}, ${p.rows}, this)">${_gridGlyph(p.cols, p.rows)}</button>`
-        ).join('');
-        host.dataset.built = '1';
-    }
-    // Reflect the active preset (default/persisted, or last clicked) on the buttons.
-    host.querySelectorAll('.gl-btn').forEach((b, i) => {
-        const p = WALL_PRESETS[i];
-        b.classList.toggle('active', !!(_wallPreset && p.cols === _wallPreset.cols && p.rows === _wallPreset.rows));
-    });
-    _reflectLockBtn();
-    _reflectAutoBtn();
-    _reflectFocusBtn();
-    if (_gridRowOpen === null) {
-        let stored = null;
-        try { stored = localStorage.getItem(GRID_ROW_KEY); } catch (e) { /* storage unavailable */ }
-        _gridRowOpen = !gridRowCollapsed(stored, _wallFocus);
-    }
-    _reflectGridRow();
-}
-
-// ---- Collapsible layout toolbar (CMX-397) ----------------------------------
-// The row of presets + lock/auto/focus collapses to ONE control: the glyph of
-// the CURRENT layout or mode plus a chevron. It rests collapsed while Focus is
-// on (wallmodel.ts's gridRowCollapsed), unless the user's explicit choice —
-// a click on that control — is on record in GRID_ROW_KEY. Choosing a preset or
-// mode, clicking outside, or Esc collapses it again WITHOUT rewriting that
-// choice: those are transient, only the toggle is a stated preference.
-const GRID_ROW_KEY = 'pc_wall_grid_collapsed';
-let _gridRowOpen = null;          // null until first built: the rest state is read once
-
-// The glyph of what currently owns the layout: Focus, then auto-arrange, then
-// the active preset (the default 2-column one if none is recorded).
-function _currentLayoutGlyph() {
-    if (_wallFocus) return { glyph: _focusGlyph(), label: 'Focus' };
-    if (_wallAuto) return { glyph: _autoGlyph(), label: 'Auto-arrange' };
-    const p = WALL_PRESETS.find(q => _wallPreset && q.cols === _wallPreset.cols && q.rows === _wallPreset.rows)
-        || WALL_PRESETS[1];
-    return { glyph: _gridGlyph(p.cols, p.rows), label: p.label };
-}
-
-function _reflectGridRow() {
-    const row = $('#term-grid-row'), tog = $('#term-grid-toggle');
-    if (!row || !tog) return;
-    const open = !!_gridRowOpen;
-    row.hidden = !open;
-    tog.classList.toggle('grid-open', open);
-    tog.setAttribute('aria-expanded', String(open));
-    const { glyph, label } = _currentLayoutGlyph();
-    tog.innerHTML = `${glyph}<span class="grid-chevron" aria-hidden="true">${lucideIcon('chevron-down', 12)}</span>`;
-    tog.title = open ? `Layout: ${label}, hide the layout toolbar` : `Layout: ${label}, show the layout toolbar`;
-    tog.setAttribute('aria-label', tog.title);
-}
-
-// The toggle itself: an explicit choice, so it is remembered per browser.
-function toggleGridRow() {
-    _gridRowOpen = !_gridRowOpen;
-    try { localStorage.setItem(GRID_ROW_KEY, _gridRowOpen ? '0' : '1'); } catch (e) { /* storage unavailable */ }
-    _reflectGridRow();
-}
-
-// A transient collapse (a preset/mode was chosen, a click landed outside, Esc).
-function _collapseGridRow() {
-    if (!_gridRowOpen) return;
-    _gridRowOpen = false;
-    _reflectGridRow();
-}
-
-document.addEventListener('pointerdown', e => {
-    if (!_gridRowOpen) return;
-    const bar = $('#term-wall-grid');
-    if (bar && !bar.contains(e.target)) _collapseGridRow();
-});
-document.addEventListener('keydown', e => {
-    if (e.key !== 'Escape' || !_gridRowOpen) return;
-    const bar = $('#term-wall-grid');
-    if (!bar || bar.style.display === 'none') return;   // single mode: no toolbar
-    _collapseGridRow();
-    const tog = $('#term-grid-toggle');
-    if (tog && bar.contains(document.activeElement)) tog.focus();
-});
-
 // ---- Layout lock (swap-on-drop) --------------------------------------------
 // GridStack's native swap only fires for equal-sized, touching tiles, so it
 // can't "swap and resize" different-sized panes. Instead, lock just turns
@@ -1987,42 +1309,6 @@ document.addEventListener('keydown', e => {
 let _swapSnapshot = null;          // wid -> {x,y,w,h} captured at dragstart while locked
 let _swapHoverWid = null;          // pane currently outlined as the swap target during a locked drag
 
-function _reflectLockBtn() {
-    const b = $('#term-lock-btn');
-    if (!b) return;
-    b.classList.toggle('active', _wallLocked);
-    b.innerHTML = _lockGlyph(_wallLocked);   // lucide lock / lock-open
-    b.title = _wallLocked
-        ? 'Layout locked: drag a pane onto another to swap them. Click to unlock (free move + resize).'
-        : 'Lock layout: drag swaps panes, resize off';
-}
-
-// Wall redesign slice 2: reflect the auto-arrange toggle's on/off state on its
-// toolbar button — same pattern as _reflectLockBtn (static icon here, since
-// unlike lock there's no second shape to swap to; .gl-btn.active carries the
-// state, same as the preset picker's buttons).
-function _reflectAutoBtn() {
-    const b = $('#term-auto-btn');
-    if (!b) return;
-    b.classList.toggle('active', _wallAuto);
-    b.innerHTML = _autoGlyph();
-    b.title = _wallAuto
-        ? 'Auto-arrange ON: panes rank by attention (needs you → working → idle → done). Click to restore your manual layout.'
-        : 'Auto-arrange: rank panes by attention (needs you → working → idle → done)';
-}
-
-// Focus layout: reflect the toggle's on/off state on its toolbar button —
-// same pattern as _reflectAutoBtn (static icon; .gl-btn.active carries state).
-function _reflectFocusBtn() {
-    const b = $('#term-focus-btn');
-    if (!b) return;
-    b.classList.toggle('active', _wallFocus);
-    b.innerHTML = _focusGlyph();
-    b.title = _wallFocus
-        ? 'Focus ON: one pane large, the rest a strip. Click a strip pane’s header to promote it. Click to restore your manual layout.'
-        : 'Focus: one pane large, the rest a strip';
-}
-
 // Push the current lock + auto-arrange + focus state onto the live grid. Safe
 // to call any time _grid exists (e.g. right after buildWall, so a reload
 // restores the locked/auto/focus feel). Auto-arrange and Focus both COMPUTE
@@ -2033,65 +1319,41 @@ function _reflectFocusBtn() {
 // it), so at most one of them is ever true here.
 function _applyWallInteractivity() {
     if (!_grid) return;
-    _grid.enableMove(!_wallAuto && !_wallFocus);
-    _grid.enableResize(!_wallLocked && !_wallAuto && !_wallFocus);
-    _reflectLockBtn();
-    _reflectAutoBtn();
-    _reflectFocusBtn();
+    const { locked, auto, focus } = _layout();
+    _grid.enableMove(!auto && !focus);
+    _grid.enableResize(!locked && !auto && !focus);
 }
 
-function toggleWallLock(btn) {
-    _wallLocked = !_wallLocked;
-    localStorage.setItem('pc_wall_locked', _wallLocked ? '1' : '0');
+// The toolbar changed the layout (shared/store/wall.ts `wallLayout`): apply it now, never
+// waiting for the next 4s poll. Turning Auto or Focus ON computes and applies its layout at
+// once (Focus picks its large pane first: the click-focused one, else the first that wants a
+// human, else the first tiled). Turning one OFF restores pc_wall_layout verbatim via
+// _restoreManualLayout: neither mode ever wrote that key, so it is a pure restore. A new
+// preset refits (applyGridLayout). Lock only changes what a drag may do.
+let _layoutSeen = wallLayout.get();
+function _onLayoutChange() {
+    const prev = _layoutSeen, next = wallLayout.get();
+    _layoutSeen = next;
+    if (!TERMINALS_ON) return;
+    if (prev.focus && !next.focus) { _focusWid = null; _focusOrderSig = ''; _clearFocusClasses(); }
+    if (prev.auto !== next.auto) _autoOrderSig = '';   // stale from a previous auto session
+    if (prev.focus !== next.focus) _focusOrderSig = '';
     _applyWallInteractivity();
-    if (btn) btn.blur();
-}
-
-// Wall redesign slice 2: flip the auto-arrange toggle. Turning ON immediately
-// ranks the current fleet and applies it (no waiting for the next 4s poll);
-// turning OFF re-applies the saved pc_wall_layout verbatim — auto mode never
-// wrote to that key, so this is a pure restore, never a reconstruction.
-// Auto-arrange and Focus both own the layout, so turning Auto on turns Focus
-// off first (see toggleWallFocus for the mirror case).
-function toggleWallAuto(btn) {
-    _wallAuto = !_wallAuto;
-    localStorage.setItem('pc_wall_auto', _wallAuto ? '1' : '0');
-    if (_wallAuto && _wallFocus) { _wallFocus = false; localStorage.setItem('pc_wall_focus', '0'); _focusWid = null; _focusOrderSig = ''; _clearFocusClasses(); }
-    _autoOrderSig = '';   // stale from a previous auto session — force a fresh apply either way
-    _applyWallInteractivity();
-    if (_wallAuto) _applyAutoArrange(_agentsCache);
-    else _restoreManualLayout();
-    if (btn) btn.blur();
-    _collapseGridRow();
-    _reflectGridRow();
-}
-
-// Focus layout toggle: one pane large (_focusWid), the rest a right-side
-// strip (wallmodel.ts's focusLayout). Turning ON picks a focus pane
-// (_pickFocusWid: the user's click-focused pane, else the first wantsHuman
-// pane, else the first tiled pane) and applies immediately, same "don't wait
-// for the next poll" contract as auto-arrange. Turning OFF restores
-// pc_wall_layout verbatim via the SAME _restoreManualLayout auto-arrange
-// uses — Focus never wrote that key either. Mutually exclusive with
-// auto-arrange: turning Focus on turns Auto off first.
-function toggleWallFocus(btn) {
-    _wallFocus = !_wallFocus;
-    localStorage.setItem('pc_wall_focus', _wallFocus ? '1' : '0');
-    if (_wallFocus && _wallAuto) { _wallAuto = false; localStorage.setItem('pc_wall_auto', '0'); _autoOrderSig = ''; }
-    _focusOrderSig = '';   // stale from a previous focus session — force a fresh apply either way
-    _applyWallInteractivity();
-    if (_wallFocus) {
+    // A preset is a NEW object on every choice, the same one choosing again included: a click on
+    // the active preset re-tidies a wall the user has dragged about.
+    const presetChosen = prev.preset !== next.preset;
+    if (!prev.focus && next.focus) {
         _pickFocusWid();
         _applyWallFocus(_agentsCache);
-    } else {
-        _focusWid = null;
-        _clearFocusClasses();
+    } else if (!prev.auto && next.auto) {
+        _applyAutoArrange(_agentsCache);
+    } else if ((prev.auto || prev.focus) && !next.auto && !next.focus) {
         _restoreManualLayout();
+    } else if (presetChosen) {
+        applyGridLayout();
     }
-    if (btn) btn.blur();
-    _collapseGridRow();
-    _reflectGridRow();
 }
+wallLayout.subscribe(_onLayoutChange);
 
 // Capture each live tile's pre-drag geometry, keyed by wid.
 function _snapshotForSwap() {
@@ -2136,7 +1398,7 @@ function _setSwapHover(wid) {
     }
 }
 
-function _swapDragHover(el) { if (_wallLocked) _setSwapHover(_swapTargetWid(el)); }
+function _swapDragHover(el) { if (_layout().locked) _setSwapHover(_swapTargetWid(el)); }
 
 // On drop: swap the dragged tile with the pane under its centre, exchanging full
 // geometry; restore only the tiles the drag actually nudged so the rest of the
@@ -2174,180 +1436,6 @@ function _doSwap(el) {
     } finally {
         _grid.batchUpdate(false);   // commit (this gridstack has no commit())
     }
-}
-
-// ---- THE WIRE: drag a line between two tiles to put their agents in a room ---
-//
-// The relationship is chela/rooms.py's (typed ledger, active dispatch, loop
-// guards); this is the gesture that CREATES one, and nothing more.
-//
-// Three things make it work on a wall of live iframes:
-//
-//   1. THE IFRAMES MUST NOT EAT THE MOUSE. Same idiom the tile drag already uses:
-//      `.gs-dragging` on the grid → CSS drops `pointer-events` on every
-//      `.term-frame`, so mousemove/elementFromPoint see the TILES. (NOT
-//      `.term-dragging`, which HIDES the terminals — watching them is the point.)
-//   2. THE PORT MUST STEAL THE MOUSEDOWN, or gridstack starts a tile drag under
-//      us (the header's rename field does exactly this).
-//   3. EVERY OTHER TILE SPROUTS A SOCKET while a wire is in flight (`.wire-live`
-//      on the stage). Without that nobody discovers the gesture exists.
-//
-// Room state NEVER reaches `_termSig` — the accent is patched per tile
-// (applyRoomAccents), so wiring two agents together reloads no terminal.
-
-const SVG_NS = 'http://www.w3.org/2000/svg';
-let _wire = null;         // in-flight drag: {fromWid, svg, path, stage, gsEl, hoverWid, x1, y1}
-let _roomsCache = null;   // last /api/rooms payload, replayed onto freshly built tiles
-
-function _wireCleanup() {
-    if (!_wire) return;
-    const { svg, stage, gsEl, hoverWid } = _wire;
-    document.removeEventListener('mousemove', _wireMove);
-    document.removeEventListener('mouseup', _wireDrop);
-    document.removeEventListener('keydown', _wireKey);
-    document.removeEventListener('pointercancel', _wireCleanup);
-    window.removeEventListener('blur', _wireCleanup);
-    if (svg) svg.remove();
-    if (stage) stage.classList.remove('wire-live');
-    if (gsEl) gsEl.classList.remove('gs-dragging');
-    if (hoverWid) { const el = _gridItemEl(hoverWid); if (el) el.classList.remove('wire-target'); }
-    const src = _gridItemEl(_wire.fromWid);
-    if (src) src.classList.remove('wire-source');
-    _wire = null;
-}
-
-// Where the pointer is, in #term-stage coordinates (the SVG overlay's box).
-function _wirePoint(e) {
-    const r = _wire.stage.getBoundingClientRect();
-    return { x: e.clientX - r.left, y: e.clientY - r.top };
-}
-
-function wireDragStart(e, btn, wid) {
-    e.preventDefault();
-    e.stopPropagation();          // or gridstack takes the gesture as a tile drag
-    if (!TERMINALS_ON || _termMode !== 'wall') return;
-    const stage = $('#term-stage');
-    const gsEl = stage && stage.querySelector('.grid-stack');
-    if (!stage || !gsEl) return;
-    _wireCleanup();               // never two wires at once
-    // CMX-117: the header's ⋯ menu closes itself as the press starts the drag
-    // (features/panehead), so it never floats over the wall for the whole gesture.
-
-    gsEl.classList.add('gs-dragging');   // iframes stop swallowing the mouse
-    stage.classList.add('wire-live');    // every tile sprouts a drop socket
-    const src = _gridItemEl(wid);
-    if (src) src.classList.add('wire-source');
-
-    const svg = document.createElementNS(SVG_NS, 'svg');
-    svg.setAttribute('class', 'wire-overlay');
-    const path = document.createElementNS(SVG_NS, 'path');
-    svg.appendChild(path);
-    stage.appendChild(svg);
-
-    // CMX-123: origin from the SOURCE PANE's top-center, not `btn` — `btn` is the
-    // "Wire to…" row inside the badge/⋮ overflow menu, a `position:fixed` portal, so
-    // anchoring there made the wire visibly start from the floating menu instead of
-    // the pane it's wiring from.
-    const b = (src || btn).getBoundingClientRect(), s = stage.getBoundingClientRect();
-    _wire = {
-        fromWid: wid, svg, path, stage, gsEl, hoverWid: null,
-        x1: b.left + b.width / 2 - s.left, y1: b.top - s.top,
-    };
-    _wireMove(e);
-    document.addEventListener('mousemove', _wireMove);
-    document.addEventListener('mouseup', _wireDrop);
-    document.addEventListener('keydown', _wireKey);
-    // A HELD gesture can end where `document` cannot see it: release the button over
-    // devtools, a second monitor, or the OS desktop and the mouseup never arrives —
-    // `.gs-dragging` would then outlive the drag, and it is what puts
-    // `pointer-events: none` on EVERY .term-frame (style.css). The wall would go dead
-    // to clicks for the whole fleet, with nothing to heal it (buildWall runs only when
-    // the fleet changes). So every way out is wired to the same cleanup.
-    document.addEventListener('pointercancel', _wireCleanup);   // touch stolen, devtools
-    window.addEventListener('blur', _wireCleanup);               // dragged off the window
-}
-
-// The wid of the tile under the pointer (or null — empty stage, or a tile with
-// no gs-id, both of which are a CANCEL, not a room).
-function _wireHit(e) {
-    const el = document.elementFromPoint(e.clientX, e.clientY);
-    const item = el && el.closest && el.closest('#term-stage .grid-stack-item');
-    return (item && item.getAttribute('gs-id')) || null;
-}
-
-function _wireMove(e) {
-    if (!_wire) return;
-    // The primary button is no longer down, and we never saw it come up: it was
-    // released off-window (blur can lag, or never fire if the window kept focus while
-    // the cursor left it). The gesture is OVER — and it ended on nothing we saw, so it
-    // is a CANCEL, not a drop: a room the user did not aim at is worse than no room.
-    if (e.buttons !== undefined && !(e.buttons & 1)) return _wireCleanup();
-    const p = _wirePoint(e);
-    _wire.path.setAttribute('d', bezierPath(_wire.x1, _wire.y1, p.x, p.y));
-    const hit = _wireHit(e);
-    const next = resolveDrop(_wire.fromWid, hit).ok ? hit : null;
-    if (next === _wire.hoverWid) return;
-    if (_wire.hoverWid) { const prev = _gridItemEl(_wire.hoverWid); if (prev) prev.classList.remove('wire-target'); }
-    _wire.hoverWid = next;
-    if (next) { const el = _gridItemEl(next); if (el) el.classList.add('wire-target'); }
-}
-
-function _wireKey(e) { if (e.key === 'Escape') _wireCleanup(); }
-
-async function _wireDrop(e) {
-    if (!_wire) return;
-    const fromWid = _wire.fromWid;
-    const drop = resolveDrop(fromWid, _wireHit(e));
-    const anchor = _gridItemEl(fromWid);
-    _wireCleanup();
-    if (!drop.ok) return;         // self / empty stage / no wid → nothing created
-    const head = anchor && anchor.querySelector('.gs-head');
-    try {
-        const res = await api('/api/rooms/join', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ wids: drop.wids }),
-        });
-        if (!res || res.error) { _termShareToast(head, res && res.error ? res.error : 'wire failed'); return; }
-        _termShareToast(head, `🔌 ${_displayLabel(_nameOfWid(drop.wids[1]))} joined ${res.room}`);
-    } catch (err) {
-        _termShareToast(head, 'wire failed, could not reach the dashboard');
-        return;
-    }
-    await _refreshRooms();
-}
-
-// Click a tile's room badge → leave that room. (The only room *un*-wiring in the
-// UI; the ledger itself is untouched — leaving is a membership edit, not a purge.)
-async function wireRoomClick(btn, wid) {
-    const room = btn && btn.getAttribute('data-room');
-    if (!room) return;
-    try {
-        await api('/api/rooms/leave', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ wid, room }),
-        });
-    } catch (e) { /* transient — the next poll re-reads the truth */ }
-    await _refreshRooms();
-}
-
-// Read the rooms (the SAME dict `chela room status` prints) and PATCH the tiles.
-// Never re-renders the wall: `_termSig` is not consulted and not touched, so no
-// iframe is recreated when membership changes.
-async function _refreshRooms() {
-    if (!TERMINALS_ON || _termMode !== 'wall') return;
-    let status;
-    try { status = await api('/api/rooms'); } catch (e) { return; }   // transient — next tick
-    _roomsCache = status;
-    applyRoomAccents($('#term-stage'), status);
-}
-
-// Repaint accents from cache onto tiles that were just (re)built — a full
-// buildWall or a surgical addWallTiles produces bare tiles, and the room state is
-// already known, so there's no reason to make them wait for the next poll.
-function _replayRoomAccents() {
-    if (_roomsCache) applyRoomAccents($('#term-stage'), _roomsCache);
 }
 
 // Lay the current (non-pinned) wall tiles out to fill the viewport height with
@@ -2418,44 +1506,29 @@ function _fillNodesByOrder(keyFn, cols, rows) {
     return true;
 }
 
-// Apply a preset layout to the current wall panes (taskbar order, pc_pane_order
-// — see _orderIndex). Persists the result to pc_wall_layout, the SAME manual-
-// layout key a drag/resize writes to, so a preset click is itself a manual
-// arrangement. While auto-arrange is on, positions are computed from
-// rankOrder() instead (never taskbar order) and NEVER persisted here — a
-// preset click while auto is on only changes the column/row count auto fills
-// into, per the auto-arrange contract (manual layout is sacred; auto must
-// never be able to clobber it, including via this button).
-function applyGridLayout(cols, rows, btn) {
-    const host = $('#term-grid-presets');
-    if (btn) {
-        host.querySelectorAll('.gl-btn').forEach(b => b.classList.remove('active'));
-        btn.classList.add('active');
-    }
-    // Remember the active preset so a viewport resize can re-fit it (the fill
-    // is viewport-relative, so a different screen / window size needs a recompute).
-    _wallPreset = { cols, rows };
-    localStorage.setItem('pc_wall_preset', JSON.stringify(_wallPreset));   // persist for reloads + resize re-fit
-    // A preset CLICK (btn) is a choice made from the expanded toolbar: fold it
-    // back to the one glyph, now showing that preset. A resize re-fit is not.
-    if (btn) _collapseGridRow();
-    _reflectGridRow();
+// Apply the active preset (shared/store/wall.ts `wallLayout`, set by the toolbar) to the
+// current wall panes, in pc_pane_order (shared/store/wall.ts `paneOrderKey`). Persists the result to
+// pc_wall_layout, the SAME manual-layout key a drag/resize writes to, so a preset is itself a
+// manual arrangement. Also the re-fit after a viewport resize or a dock change: the fill is
+// viewport-relative. While auto-arrange is on, positions come from rankOrder() instead and are
+// NEVER persisted (manual layout is sacred; auto must never be able to clobber it).
+function applyGridLayout() {
     if (!_grid) return;
+    const { preset, auto, focus } = _layout();
     // Focus owns the layout while it's on (fixed 8/4 split, not a column
-    // count) — a preset click or a viewport resize (this fn's other caller)
-    // just refits the SAME focus layout to the new viewport, it never falls
-    // through to the column/row fill below.
-    if (_wallFocus) {
+    // count) — a preset or a viewport resize just refits the SAME focus
+    // layout to the new viewport, it never falls through to the fill below.
+    if (focus) {
         _focusOrderSig = '';
         _applyWallFocus(_agentsCache);
         return;
     }
-    if (_wallAuto) {
+    if (auto) {
         _autoOrderSig = '';   // force a re-apply at the new column/row count
         _applyAutoArrange(_agentsCache);
         return;
     }
-    if (!_fillNodesByOrder(_orderIndex, cols, rows)) return;
+    if (!_fillNodesByOrder(paneOrderKey(), preset.cols, preset.rows)) return;
     const out = {};
     _grid.save(false).forEach(nd => {
         if (nd.id != null) out[nd.id] = { x: nd.x, y: nd.y, w: nd.w, h: nd.h };
@@ -2471,7 +1544,7 @@ function applyGridLayout(cols, rows, btn) {
 // NEVER writes pc_wall_layout: that key is the sacred manual arrangement,
 // restored verbatim by _restoreManualLayout on toggle-off.
 function _applyAutoArrange(agents) {
-    if (!_wallAuto || _termMode !== 'wall' || !_grid) return;
+    if (!_layout().auto || _termMode !== 'wall' || !_grid) return;
     const tiled = new Set(_grid.engine.nodes.map(n => n.id));
     const relevant = (agents || []).filter(a => a && a.window_id && tiled.has(a.window_id));
     const wantsByWid = {};
@@ -2484,7 +1557,8 @@ function _applyAutoArrange(agents) {
     order.forEach((wid, i) => { idx[wid] = i; });
     // A tile GridStack knows about but that fell out of the fresh agents poll
     // (a transient gap, not yet dropped) sorts last rather than throwing.
-    _fillNodesByOrder(wid => (wid in idx ? idx[wid] : Number.MAX_SAFE_INTEGER), _wallPreset.cols, _wallPreset.rows);
+    const { preset } = _layout();
+    _fillNodesByOrder(wid => (wid in idx ? idx[wid] : Number.MAX_SAFE_INTEGER), preset.cols, preset.rows);
 }
 
 // Wall redesign slice 2: restore the user's manual arrangement (pc_wall_layout)
@@ -2565,7 +1639,7 @@ function _clearFocusClasses() {
 // focusLayout, PURE) and applies it in one batch, same GridStack idiom every
 // other fill here uses.
 function _applyWallFocus(agents) {
-    if (!_wallFocus || _termMode !== 'wall' || !_grid) return;
+    if (!_layout().focus || _termMode !== 'wall' || !_grid) return;
     const tiled = _grid.engine.nodes
         .map(n => n.id)
         .filter(id => id != null && !_isPinned(id));
@@ -2704,7 +1778,7 @@ function _bindFocusPromote() {
     const stage = document.getElementById('term-stage');
     if (!stage) return;
     stage.addEventListener('click', e => {
-        if (!_wallFocus || _termMode !== 'wall') return;
+        if (!_layout().focus || _termMode !== 'wall') return;
         if (e.target.closest('button, a, .popover')) return;   // let their own handlers act alone
         const head = e.target.closest('.gs-head');
         if (!head) return;
@@ -2753,8 +1827,8 @@ onEvent('term-ready', d => {
 });
 
 // --- Stage 0: ES-module exports ---
-export { adoptSidebarDefault, stepAgentMobile, _absorbFreshTerminals, _applyTermFocus, _cssEsc, _displayLabel, _jsStr, _minimized, _orderedWids, _refreshPaneLabels, _renderedWids, _stopReadyPoll, _swapToFrame, _termReady, dropTerminalPane, focusPaneByWid, isWallVisible, minimizePane, renderTerminals, setTermMode, termTick, startTermTimer, stopTermTimer };
+export { adoptSidebarDefault, stepAgentMobile, _absorbFreshTerminals, _applyTermFocus, _cssEsc, _displayLabel, _jsStr, _refreshPaneLabels, _renderedWids, _stopReadyPoll, _swapToFrame, _termReady, dropTerminalPane, focusPaneByWid, isWallVisible, minimizePane, renderTerminals, setTermMode, termTick, startTermTimer, stopTermTimer };
 
 // --- Stage 0: window.chela — surface reachable from inline HTML handlers ---
 window.chela = window.chela || {};
-Object.assign(window.chela, { applyGridLayout, copyWindowId, openDiffModal, renderTerminals, retryReady, setTermMode, shareCurrentAgent, termActionClick, termKey, termPaste, toggleDockChip, toggleGridRow, toggleRecap, toggleWallAuto, toggleWallFocus, toggleWallLock });
+Object.assign(window.chela, { renderTerminals, retryReady, setTermMode, shareCurrentAgent, termKey, termPaste });

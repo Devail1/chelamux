@@ -44,9 +44,8 @@ const _LUCIDE = {
     // CMX-302), replacing the old "Orchestrator" text pill: that word was wide
     // enough to truncate the session name sitting next to it on a real row.
     'crown': '<path d="M11.562 3.266a.5.5 0 0 1 .876 0L15.39 8.87a1 1 0 0 0 1.516.294L21.183 5.5a.5.5 0 0 1 .798.519l-2.834 10.246a1 1 0 0 1-.956.734H5.81a1 1 0 0 1-.957-.734L2.02 6.02a.5.5 0 0 1 .798-.519l4.276 3.664a1 1 0 0 0 1.516-.294z"/><path d="M5 21h14"/>',
-    // `git-compare` — the wall tile bottom bar's "Files" chip (terminals.js
-    // _ctxBarHTML), opening the per-session changed-files/diff modal
-    // (frontend/src/features/diffmodal, CMX-299).
+    // `git-compare` — was the wall tile bottom bar's "Files" chip (lucide-react's
+    // since CMX-242, features/tilefoot); P35 sweeps this map.
     'git-compare': '<circle cx="18" cy="18" r="3"/><circle cx="6" cy="6" r="3"/><path d="M13 6h3a2 2 0 0 1 2 2v7"/><path d="M11 18H8a2 2 0 0 1-2-2V9"/>',
     // `chevron-down` — the Wall's collapsible layout toolbar (terminals.js
     // _reflectGridRow, CMX-397); rotated a half-turn while the row is open.
@@ -146,7 +145,7 @@ function attrEsc(s) {
 
 // Status dot colour shared by the sidebar list, the agent detail view, and the
 // agents canvas, so one agent reads the same in every view as it does on the
-// wall. Mirrors the wall's term-status-dot (terminals.js _colorTermDots): busy →
+// wall. Mirrors the wall's term-status-dot (features/panehead dotState): busy →
 // green (working), waiting → yellow, idle or no Claude session → grey. These
 // views previously coloured from the server `health` field, which collapses
 // busy+idle+running all into green and so disagreed with the wall's grey "idle"

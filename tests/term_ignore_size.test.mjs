@@ -9,7 +9,7 @@
 //
 // This runs the REAL terminals.js in jsdom (like tests/wall.test.mjs / walldock.test.mjs):
 // the real `renderTerminals`, the real visibilitychange listener, the real `minimizePane`
-// / `toggleDockChip` (via the same `window.chela` surface the pane buttons call). Nothing
+// / the dock chip's restore (a real click on each). Nothing
 // here greps the source — every assertion is on an actual POST the browser would send.
 //
 // Two properties:
@@ -174,7 +174,7 @@ test('restoring a docked tile reports watching:true again', async () => {
     await Promise.resolve();
     watchCalls = [];
 
-    window.chela.toggleDockChip('@1');
+    document.querySelector('#term-min-dock .min-chip[data-wid="@1"]').click();   // the dock's chip
     await Promise.resolve();
 
     const calls = watchCalls.filter(c => c.wid === '@1');
