@@ -55,6 +55,7 @@ from chela import (
     sessionids,
     sidebar_archive,
     spawn,
+    sweep_nightly,
     ticklock,
     update,
     userconfig,
@@ -259,6 +260,7 @@ def cmd_run(args) -> None:
     # CMX-260: the ops scan is a detached child — the loop only ever starts it.
     last_ops_scan = 0.0
     ops_child = None
+    nightly_child = None      # CMX-303: the nightly sweep — one detached child at a time
     # Held in memory, exactly like `waiting_seen`: it is the PREVIOUS status snapshot
     # the inbox edge-triggers against. Starting empty means a fresh daemon baselines
     # silently on its first tick instead of announcing every already-idle agent. (A
@@ -433,6 +435,13 @@ def cmd_run(args) -> None:
                 except Exception:
                     log.exception("Ops scan spawn failed")
                 last_ops_scan = now
+
+            # ⚖️🧹🌙 CMX-303: the nightly sweep of what the standard tier merged unjudged —
+            # spawned detached at `sweep.nightly_at`, one at a time, never waited on.
+            try:
+                nightly_child = sweep_nightly.daemon_tick(DISPATCH_WORKFLOWS, nightly_child)
+            except Exception:
+                log.exception("Nightly sweep spawn failed")
 
             # Self-update: informs by default (CMX-142 part 1) — `chela update` is a
             # human-run act, and `update.check_and_notify` never pulls. `CHELA_AUTO_UPDATE`
@@ -2917,6 +2926,22 @@ def cmd_judge_self_check(args) -> None:
           "safe to commit.")
 
 
+def cmd_judge_nightly_sweep(args) -> None:
+    """⚖️🧹🌙 CMX-303: one nightly sweep of a workflow (see :mod:`chela.sweep_nightly`) — the
+    daemon's detached child, or a hand run. Exit 0 clean/skipped, 1 survivors to file (filed,
+    would file, or refused), 2 CANNOT VERIFY or an unreadable workflow."""
+    try:
+        wf = workflow.load_workflow(args.workflow)
+    except Exception as e:  # noqa: BLE001 — a WORKFLOW.md that does not parse
+        print(f"nightly-sweep: {args.workflow} could not be read: {e}", file=sys.stderr)
+        sys.exit(2)
+    result = sweep_nightly.run(wf)
+    line = f"nightly sweep: {result['status']}" + (f" — {result['why']}" if result.get("why")
+                                                    else "")
+    print(json.dumps(result, indent=2) if args.json else line)
+    sys.exit({sweep_nightly.CANNOT_VERIFY: 2, sweep_nightly.SURVIVORS: 1}.get(result["status"], 0))
+
+
 def cmd_judge_sweep(args) -> None:
     """⚖️🧹 CMX-88: the MECHANICAL pre-hand-in pass — every conditional, comparison and return
     code the branch changed vs ``--base`` is corrupted in turn (``if False and (X)``, ``==`` →
@@ -4105,6 +4130,16 @@ def main() -> None:
         help="Measure at most N mutations (highest priority first); the rest are UNRUN. "
              "Default: judge.sweep_max_mutations, else 60. 0 = the default",
     )
+    p_jnightly = judge_sub.add_parser(
+        "nightly-sweep",
+        help="⚖️🧹🌙 Mutation-sweep the lines STANDARD-tier PRs merged to the base branch in the "
+             "last 24h and hand each surviving guard to the filer once (the daemon runs it at "
+             "sweep.nightly_at)",
+    )
+    p_jnightly.add_argument("--workflow", metavar="PATH", required=True,
+                            help="The WORKFLOW.md whose base branch, judge suite and sweep "
+                                 "settings to use")
+    p_jnightly.add_argument("--json", action="store_true", help="Print the result as JSON")
     from chela.judge_eval import cli as judge_eval_cli
     judge_eval_cli.add_parser(judge_sub)
     p_jshow = judge_sub.add_parser(
@@ -4624,6 +4659,8 @@ def main() -> None:
             cmd_judge_self_check(args)
         elif args.judge_cmd == "sweep":
             cmd_judge_sweep(args)
+        elif args.judge_cmd == "nightly-sweep":
+            cmd_judge_nightly_sweep(args)
         elif args.judge_cmd == "ack-blocked-race":
             cmd_judge_ack_blocked_race(args)
         elif args.judge_cmd == "eval":
