@@ -59,7 +59,7 @@ import time
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
 
-from chela import generated, judge
+from chela import generated, judge, suite_guard
 
 RECOVERY_MARKER = ".chela-sweep-recovery.json"
 PY_SUFFIXES = (".py",)
@@ -920,7 +920,7 @@ def guard(pid: int, worktree: Path, poll: float = GUARD_POLL_SECONDS) -> int:
 
 
 def _now() -> float:
-    return time.monotonic()
+    return suite_guard.busy_clock()     # 🧠 CMX-119: a slot wait is not spent budget
 
 
 def sweep(

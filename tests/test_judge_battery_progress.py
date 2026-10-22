@@ -359,3 +359,64 @@ def test_a_held_out_experiment_running_now_is_named_on_no_surface(
         for where, text in surfaces.items():
             assert secret not in text and hidden_label not in text, (where, status, text)
     assert any(f"guard.py: {visible}" in sf["peek"] for _, sf in snaps), "positive control"
+
+
+def test_a_judge_run_publishes_its_suite_slot_wait(tmp_path, monkeypatch):
+    """🧠 CMX-119 (wiring): `judge_run` hands `run_suite` the hook that writes a slot wait onto
+    its live status — the watchdog holds a run while `slot_waiting_since` is set."""
+    monkeypatch.setattr(dispatcher, "_kill_windows_named", lambda name: None)
+    task_id = "abc123"
+    repo = _workflow_repo(tmp_path, task_id, REAL_GUARD_TEST)
+    with dispatcher._db() as conn:
+        _run_row(conn, repo, task_id)
+    exp_file = tmp_path / "experiments.json"
+    exp_file.write_text(json.dumps({"experiments": [_exp()]}))
+    writes: list[dict] = []
+    real_write = judge._write_run_status
+    monkeypatch.setattr(judge, "_write_run_status", lambda tid, st: (
+        writes.append(json.loads(json.dumps(st))), real_write(tid, st)))
+    real_slot, waited = judge.suite_guard.slot, []
+
+    @contextmanager
+    def queued_once(cwd, on_wait=None, max_wait=None):
+        if not waited:
+            waited.append(1)
+            on_wait(time.time() - 40)
+            on_wait(None)
+        with real_slot(cwd, on_wait=on_wait, max_wait=max_wait):
+            yield
+    monkeypatch.setattr(judge.suite_guard, "slot", queued_once)
+    with patch.object(dispatcher, "_post_pr_comment", return_value=(True, "")):
+        assert judge.judge_run(task_id, exp_file, cleanup=True, detached=True)["ok"]
+    opened = [w for w in writes if w.get("slot_waiting_since") is not None]
+    assert len(opened) == 1
+    closed = writes[writes.index(opened[0]) + 1]
+    assert closed["slot_waiting_since"] is None and 39 < closed["slot_wait_seconds"] < 60
+    assert judge._run_ctx.get("on_slot_wait") is None
+
+
+@pytest.mark.parametrize("before,since,want", [
+    ({}, 100.0, {"slot_waiting_since": 100.0}),
+    ({"slot_waiting_since": 100.0}, None,
+     {"slot_waiting_since": None, "slot_wait_seconds": 50.0, "progress_at": 150.0}),
+    ({"slot_waiting_since": 100.0, "slot_wait_seconds": 7.0}, None,
+     {"slot_waiting_since": None, "slot_wait_seconds": 57.0, "progress_at": 150.0}),
+    ({}, None, {"slot_waiting_since": None, "progress_at": 150.0}),
+])
+def test_slot_wait_status(before, since, want):
+    status = dict(before)
+    judge.slot_wait_status(status, since, 150.0)
+    assert status == want
+
+
+@pytest.mark.parametrize("waiting,tail", [
+    (100.0, " — ⏳ waiting for a suite slot"),
+    (None, " — chela/wall.py: the ring is drawn")])
+def test_peek_shows_a_battery_waiting_for_a_suite_slot(_logs, waiting, tail):
+    """🧠 CMX-119: a queued run says it is queued, in place of the experiment it is not
+    running yet."""
+    _write_status(_logs, slot_waiting_since=waiting)
+    b = judge.battery_for_window(WINDOW)
+    assert b["slot_waiting"] is (waiting is not None)
+    assert judge.format_battery(b) == (
+        "⚖️ testing · 3/6 · 15m (KILLED 2 · SURVIVED 1 · INVALID 0)" + tail)

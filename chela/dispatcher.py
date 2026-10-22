@@ -8800,6 +8800,13 @@ def _judge_watchdog(conn: sqlite3.Connection, wf: WorkflowDef, live_windows: set
                 if status and freeze:
                     status["progress_at"] = max(_num(status.get("progress_at")) or 0.0,
                                                 freeze["intervals"][-1][1])
+                # 🧠 CMX-119: a run queued for a suite slot is waiting, not stuck — held while
+                # it waits, and its wall skips the time it spent queued.
+                if status and _num(status.get("slot_waiting_since")) is not None:
+                    log.info("judge watchdog: %s: waiting for a suite slot — holding",
+                             row["task_id"])
+                    continue
+                elapsed -= _num((status or {}).get("slot_wait_seconds")) or 0.0
                 timeout_reason = judge_overdue(elapsed, status, now.timestamp())
             elif elapsed >= JUDGE_TIMEOUT_SECONDS:
                 timeout_reason = (f"the judge did not finish in {JUDGE_TIMEOUT_SECONDS // 60}"
