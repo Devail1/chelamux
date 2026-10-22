@@ -45,8 +45,8 @@ function show(id: string, agentName: string | null) {
 }
 
 export function selectView(id: string): void {
-  detailAgent.set(null);
   show(id, null);
+  detailAgent.set(null); // after the switch: no moment shows the drill-in with no agent
   findView(VIEWS, id)?.enter?.();
   void refresh();
 }
