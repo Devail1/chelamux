@@ -165,10 +165,6 @@
          main.js's selectView('terminals') re-selects it idempotently. -->
     <div class="panel active" id="panel-terminals">
         <div class="term-toolbar">
-            <!-- mode toggle + single-agent picker kept (terminals.js refs them) but hidden: wall-only -->
-            <button id="term-mode-single" onclick="chela.setTermMode('single')" style="display:none;">Single</button>
-            <button id="term-mode-wall" onclick="chela.setTermMode('wall')" style="display:none;">Wall</button>
-            <select id="term-agent" onchange="chela.renderTerminals()" style="display:none;"></select>
             <!-- The layout toolbar (presets, lock, auto-arrange, Focus), folded to one control
                  showing the current layout (CMX-397): the walltoolbar island
                  (frontend/src/features/walltoolbar, CMX-242). It shows in wall mode only. -->

@@ -110,7 +110,7 @@ beforeAll(async () => {
     // listener onto our FakeEventSource.
     await import('../chela/dashboard/frontend/src/boot.ts');
     const util = await import('../chela/dashboard/static/js/util.js');
-    terminals = await import('../chela/dashboard/static/js/terminals.js');
+    terminals = await import('../chela/dashboard/frontend/src/features/wall/index.ts');
     orchestrator = await import('../chela/dashboard/frontend/src/shared/orchestrator/index.ts');
     util.setCurrentTab('terminals');
     util.setAgentsCache(AGENTS);
@@ -193,7 +193,7 @@ test('a pane added after the owner is known renders with the ring already on', a
     await orchestrator.refreshOrchestratorStatus();   // owner is @3 BEFORE its pane exists
     const util = await import('../chela/dashboard/static/js/util.js');
     util.setAgentsCache([...AGENTS, { name: 'shell', window_id: '@3', online: true }]);
-    terminals._absorbFreshTerminals(['@1', '@2', '@3']);
+    terminals.absorbFreshTerminals(['@1', '@2', '@3']);
     await new Promise(resolve => setTimeout(resolve, 0));
 
     assert.ok(ring('@3'), 'sanity: pane @3 was absorbed into the wall');

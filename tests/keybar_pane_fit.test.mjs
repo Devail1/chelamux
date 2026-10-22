@@ -122,7 +122,7 @@ beforeAll(async () => {
     model = await import('../chela/dashboard/frontend/src/features/keybar/model.ts');
     await import('../chela/dashboard/frontend/src/boot.ts');
     util = await import('../chela/dashboard/static/js/util.js');
-    terminals = await import('../chela/dashboard/static/js/terminals.js');
+    terminals = await import('../chela/dashboard/frontend/src/features/wall/index.ts');
     util.setCurrentTab('terminals');
     util.setAgentsCache(AGENTS);
     await terminals.renderTerminals();
@@ -142,9 +142,7 @@ const fitVar = () => root().style.getPropertyValue('--kb-pane-fit-h');
 beforeEach(() => {
     mobile = true; barH = 47; paneTop = PANE_TOP;
     keyboard(false);
-    const sel = document.getElementById('term-agent');
-    if (![...sel.options].some(o => o.value === '@1')) sel.add(new window.Option('shell', '@1'));
-    sel.value = '@1';
+    void terminals.showPane('@1');   // the active pane
     stubGeometry();
     keybar.pinKeybar();
 });

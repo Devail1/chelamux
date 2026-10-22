@@ -99,7 +99,7 @@ beforeAll(async () => {
     await mountIslands(dom.window);   // CMX-276: the sidebar island draws #sidebar-agents
     await import('../chela/dashboard/frontend/src/boot.ts');
     util = await import('../chela/dashboard/static/js/util.js');
-    terminals = await import('../chela/dashboard/static/js/terminals.js');
+    terminals = await import('../chela/dashboard/frontend/src/features/wall/index.ts');
     nav = await import('../chela/dashboard/static/js/nav.js');
     sidebar = await import('../chela/dashboard/frontend/src/features/sidebar/controller.ts');
     util.setCurrentTab('terminals');

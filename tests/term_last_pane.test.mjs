@@ -1,13 +1,13 @@
 // CMX-169 - THE PHONE OPENS THE PANE THIS DEVICE LAST VIEWED, ELSE THE TOP SIDEBAR ROW.
 //
-// Liav, 2026-10-17: single mode (forced on phones) opened #term-agent's first option, the
+// Liav, 2026-10-17: single mode (forced on phones) opened the pane list's first entry, the
 // first /api/agents row, on every load: neither remembered nor in the sidebar's order. Now
 // a load opens the last pane viewed on this device (localStorage `pc_term_last_wid`) if it
 // is still online, else the first session in the sidebar's order, else the first option.
 //
 // The real dashboard boots in jsdom at phone width with a stored pane (@203, the LAST row
 // of /api/agents and of the sidebar), so the boot itself is the first guard. A "reload" in
-// the other tests empties #term-agent and re-renders: the same path a fresh page takes.
+// the other tests clears the open pane and re-renders: the same path a fresh page takes.
 // The sidebar's order is never /api/agents' order here, so a default that follows the
 // rows fails.
 //
@@ -15,14 +15,13 @@
 import { beforeAll, beforeEach, test } from 'vitest';
 import assert from 'node:assert/strict';
 import { clickIsland } from './js_helpers/dashboard_dom.mjs';
-import { KEY, bootPhone, pane, sel, settle, shown, stored } from './js_helpers/term_pane_fixture.mjs';
+import { KEY, bootPhone, pane, settle, shown, stored } from './js_helpers/term_pane_fixture.mjs';
 
 const SIDEBAR = ['/srv/code/beta', '/srv/code/gamma', '/srv/code/alpha'];   // sidebar rows: @202, @203, @201
 let nav, sidebar, terminals, chela, bootPane;
 const storedWid = () => JSON.parse(localStorage.getItem(KEY)).wid;
 async function reload() {
-    sel().innerHTML = '';
-    await terminals.renderTerminals();
+    await terminals.showPane('');
     await settle();
 }
 
@@ -91,9 +90,8 @@ test('an explicit focus overrides the stored pane and becomes it', async () => {
 
 test('a focus that lands before the pane list (a deep link at boot) is what opens', async () => {
     localStorage.setItem(KEY, stored('@202', 's-b', 'b'));
-    sel().innerHTML = '';
-    terminals.focusPaneByWid('@201');   // no options yet: the select cannot hold it
-    await reload();
+    terminals.focusPaneByWid('@201');
+    await reload();   // a fresh page: the focus was stored, so it is what the load opens
     assert.deepEqual(pane(), { value: '@201', shown: '@201' });
 });
 

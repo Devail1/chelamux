@@ -91,7 +91,7 @@ beforeAll(async () => {
     localStorage.setItem('pc_term_mode', 'wall');
     await import('../chela/dashboard/frontend/src/boot.ts');
     util = await import('../chela/dashboard/static/js/util.js');
-    terminals = await import('../chela/dashboard/static/js/terminals.js');
+    terminals = await import('../chela/dashboard/frontend/src/features/wall/index.ts');
     wall = await import('../chela/dashboard/frontend/src/shared/store/wall.ts');
     util.setCurrentTab('terminals');
     util.setAgentsCache(AGENTS);

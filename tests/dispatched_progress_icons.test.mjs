@@ -5,7 +5,7 @@
 import { beforeAll, test } from 'vitest';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
-import { bootDashboardDom, sliceTemplate, flush, SIDEBAR } from './js_helpers/dashboard_dom.mjs';
+import { bootDashboardDom, sliceTemplate, flush, SIDEBAR, WALL } from './js_helpers/dashboard_dom.mjs';
 import { cssForViewport, resolveVars, shapeSignature, DESKTOP, DESKTOP_DARK } from './js_helpers/css_viewport.mjs';
 
 const CSS = readFileSync(new URL('../chela/dashboard/static/style.css', import.meta.url), 'utf8');
@@ -55,7 +55,7 @@ beforeAll(async () => {
     globalThis.GridStack = fakeGridStack();
     const body = sliceTemplate('<div class="app">', '\n  </main>') + '</div>';
     const { dom, modules } = await bootDashboardDom({ body, fetchImpl: fakeFetch, canvasStub: true,
-        extraModules: ['util.js', 'terminals.js', 'nav.js', SIDEBAR] });
+        extraModules: ['util.js', WALL, 'nav.js', SIDEBAR] });
     win = dom.window; doc = win.document;
     doc.elementFromPoint = () => null;
     ({ util, terminals, nav, sidebar } = modules);
