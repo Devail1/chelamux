@@ -86,7 +86,7 @@ from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
 from typing import NamedTuple
 
-from chela import envutil, generated, judge_select, procguard, risktier, toolconfig
+from chela import envutil, generated, judge_select, procguard, risktier, suite_guard, toolconfig
 
 log = logging.getLogger(__name__)
 
@@ -760,15 +760,21 @@ def run_suite(
     run = {"cmd": test_cmd, "cwd": str(cwd), "env_diff": {}, "started": _iso_now(),
            "output": ""}
     try:
-        with tempfile.TemporaryDirectory(prefix="chela-suite-") as scratch:
+        # 🧠 CMX-119: one of the box's K suite slots, then a memory-capped scope of its own.
+        with (suite_guard.slot(cwd, on_wait=_run_ctx.get("on_slot_wait"),
+                               max_wait=suite_guard.max_wait(timeout)),
+              tempfile.TemporaryDirectory(prefix="chela-suite-") as scratch):
             env = _suite_env(Path(scratch))
             env.update(extra_env or {})
             run["env_diff"] = _env_diff(os.environ, env)
-            # ⛔ CMX-253: the whole tree, not just the shell, dies on a timeout.
-            task = _run_ctx.get("task")
-            out = procguard.run_shell_group(
-                test_cmd, cwd=str(cwd), env=env, timeout=timeout,
-                frozen=(lambda since: frozen_since(task, since)) if task else None)
+            # ⛔ CMX-307: the scope is probed and launched under the suite's OWN env.
+            with suite_guard.bounded(test_cmd, env) as (cmd, check):
+                # ⛔ CMX-253: the whole tree, not just the shell, dies on a timeout.
+                task = _run_ctx.get("task")
+                out = procguard.run_shell_group(
+                    cmd, cwd=str(cwd), env=env, timeout=timeout,
+                    frozen=(lambda since: frozen_since(task, since)) if task else None)
+                breach = check(out.returncode)
     except subprocess.TimeoutExpired as e:
         run.update(ended=_iso_now(), output=_decoded(e.stdout) + _decoded(e.stderr))
         return SuiteResult(False, -1, 0, 0, 0, "", f"the suite did not finish in {timeout:.0f}s; "
@@ -780,6 +786,8 @@ def run_suite(
     passed, failed, errors = _counts(text)
     tail = text[-SUITE_TAIL_CHARS:] if len(text) > SUITE_TAIL_CHARS else text
     run.update(ended=_iso_now(), output=text[-SUITE_LOG_CHARS:])
+    if breach:
+        return SuiteResult(False, out.returncode, passed, failed, errors, tail, breach, run)
     return SuiteResult(True, out.returncode, passed, failed, errors, tail, "", run)
 
 
@@ -2479,7 +2487,7 @@ def self_check(
 
 
 def _now() -> float:
-    return time.monotonic()
+    return suite_guard.busy_clock()     # 🧠 CMX-119: a slot wait is not spent budget
 
 
 def _mark_unrun(report: Report, items: list, why: str) -> None:
@@ -2778,6 +2786,10 @@ def judge_run(
                       phase="battery" if done < total else "finishing")
         _write_run_status(task_id, status)
 
+    def _slot_wait(since: float | None) -> None:
+        slot_wait_status(status, since, time.time())
+        _write_run_status(task_id, status)
+
     def _heartbeat(event: str, **info) -> None:
         status["progress_at"] = time.time()
         if event == "baseline":
@@ -2800,6 +2812,7 @@ def judge_run(
     # leak the directory forever. `finally`, not a happy-path call at the bottom.
     try:
         _run_ctx["task"] = task_id                   # ⏸️ CMX-214: whose freeze run_suite credits
+        _run_ctx["on_slot_wait"] = _slot_wait
         raw, err = load_experiments(experiments_path)
         base_branch = wf.get("workspace", "base_branch", default="master")
         base_branch = base_branch if isinstance(base_branch, str) else ""
@@ -3065,10 +3078,24 @@ def judge_run(
         return result
     finally:
         _run_ctx.pop("task", None)
+        _run_ctx.pop("on_slot_wait", None)
         _release_judge_slot(worktree)
         _clear_run_status(task_id)
         if cleanup:
             _cleanup(wf, task_id, run.get("branch_name") or "", judge_epoch)
+
+
+def slot_wait_status(status: dict, since: float | None, now: float) -> None:
+    """🧠 CMX-119: record a suite-slot wait on a judge run's live status. A run queued for a
+    slot is waiting, not stuck: the watchdog holds it while ``slot_waiting_since`` is set and
+    credits ``slot_wait_seconds`` to its wall. ``since`` is the wait's start; ``None`` ends it."""
+    if since is None:
+        opened = status.get("slot_waiting_since")
+        if opened is not None:
+            status["slot_wait_seconds"] = (float(status.get("slot_wait_seconds") or 0.0)
+                                           + now - float(opened))
+        status["progress_at"] = now
+    status["slot_waiting_since"] = since
 
 
 def _blocked_detail(report: Report) -> str:
@@ -3622,6 +3649,7 @@ def battery_for_window(window_name: str) -> dict | None:
         "killed": best.get("killed") or 0, "survived": best.get("survived") or 0,
         "invalid": best.get("invalid") or 0,
         "phase": best.get("phase"), "current": best.get("current"),
+        "slot_waiting": best.get("slot_waiting_since") is not None,       # 🧠 CMX-119
         "elapsed": (max(0.0, time.time() - started)
                     if alive and isinstance(started, (int, float)) else None),
         "log": best.get("log"),
@@ -3636,7 +3664,9 @@ def format_battery(battery: dict) -> str:
     if battery["state"] == BATTERY_TESTING:
         line += (f" (KILLED {battery['killed']} · SURVIVED {battery['survived']}"
                  f" · INVALID {battery['invalid']})")
-        if battery.get("current"):
+        if battery.get("slot_waiting"):
+            line += " — ⏳ waiting for a suite slot"
+        elif battery.get("current"):
             line += f" — {battery['current']}"
     elif battery.get("log"):
         line += f" — see {battery['log']}"
