@@ -12,12 +12,9 @@ import { closeSettings, selectSettingsTab, settings } from '../../settings/index
 import { PrimaryMenu, SessionsCount, refreshSummary, summary } from '../index.ts';
 import { RL_STALE_MS, agentsCount, readingAge, rlReading, rlResetTooltip, soonest } from '../model.ts';
 
-const legacy = { shareCurrentAgent: vi.fn() };
 const NOW = Date.parse('2026-10-21T12:00:00Z');
 
 beforeEach(() => {
-  for (const f of Object.values(legacy)) f.mockClear();
-  (window as unknown as { chela: object }).chela = legacy;
   context.set([]);
   summary.set(null);
   vi.stubGlobal('fetch', () => Promise.resolve({ json: () => Promise.resolve({}) }));
@@ -58,10 +55,10 @@ test('the safety kill switch is never inside the menu', () => {
   expect(menu()?.textContent).not.toMatch(/sharing/);
 });
 
-test('Share current session calls the legacy shareCurrentAgent and closes the menu', () => {
+test('Share current session with no pane open falls back to the palette and closes the menu', () => {
   open();
   pick('Share current session');
-  expect(legacy.shareCurrentAgent.mock.calls).toEqual([[]]);
+  expect(palette.get()).toMatchObject({ open: true });
   expect(menu()).toBeNull();
 });
 

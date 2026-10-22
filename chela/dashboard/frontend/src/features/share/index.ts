@@ -2,7 +2,7 @@
 // the Active shares sheet (its kill switch), the page's share state, and owner presence. Legacy
 // terminals.js imports this for the pane header (still legacy until P26).
 export { fetchShareOptions, mintShare, type MintResponse, type MintResult } from './lib/api.ts';
-export { closeSharesSheet, configureShareHost, followAgents, openSharesSheet, reconcileShares, setShareMode, shareSession, startShares, stopAllShares, stopShare, type ShareHost } from './lib/actions.ts';
+export { closeSharesSheet, configureShareHost, followAgents, openSharesSheet, reconcileShares, setShareMode, shareActivePane, shareSession, startShares, stopAllShares, stopShare, type ShareHost } from './lib/actions.ts';
 export { closeShareDialog, openShareDialog, type OpenShareDialog } from './lib/mount.tsx';
 export { mountShares } from './lib/mountShares.tsx';
 export { durLabel, fmtShareEnd, isLong, mintBody, pillView, SHARE_MODE_UI, SHARE_NOT_SANDBOXED_REASON, SHARE_TYPING_OFF_REASON, shareOffer, shareTimeLeft, unsafeBannerText, unsafeDurations, upgradeBody, type PillView, type ShareDraft, type ShareMode, type ShareOffer, type ShareOptions } from './lib/model.ts';

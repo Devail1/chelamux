@@ -14,6 +14,7 @@ import { IconButton, Menu, type MenuItem } from '../../../shared/ui/index.ts';
 import { openLaunchMenu } from '../../launcher/index.ts';
 import { openPalette } from '../../palette/index.ts';
 import { toggleSettings } from '../../settings/index.ts';
+import { shareActivePane } from '../../share/index.ts';
 import { agentsCount, rlReading, soonest, type RlReading, type Summary } from '../model.ts';
 
 /** The last /api/summary and when it landed; null until the first. */
@@ -23,10 +24,6 @@ export async function refreshSummary(): Promise<void> {
   const data = (await api('/api/summary')) as Summary | null;
   if (data) summary.set({ data, at: new Date() });
 }
-
-type Legacy = { shareCurrentAgent?: () => void };
-// terminals.js owns sharing the current pane until its slice ports it: looked up at call time.
-const legacy = (): Legacy => (window as unknown as { chela?: Legacy }).chela ?? {};
 
 function Usage({ id, label, title, r }: { id: string; label: string; title: string; r: RlReading | null }) {
   if (!r) return null;
@@ -70,7 +67,7 @@ export function PrimaryMenu() {
         setTimeout(() => gear.current && openLaunchMenu(gear.current), 0);
       } },
     'separator',
-    ...(BOOT.terminalsEnabled ? [{ label: 'Share current session', icon: icons.share, onSelect: () => legacy().shareCurrentAgent?.() }] : []),
+    ...(BOOT.terminalsEnabled ? [{ label: 'Share current session', icon: icons.share, onSelect: () => { if (!shareActivePane()) openPalette(); } }] : []),
     { label: 'Notifications', icon: icons.notifications, onSelect: () => toggleSettings('notify') },
     { label: 'Settings', icon: icons.settings, onSelect: () => toggleSettings() },
   ];

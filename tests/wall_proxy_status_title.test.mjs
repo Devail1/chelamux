@@ -91,10 +91,10 @@ beforeAll(async () => {
 
     await import('../chela/dashboard/frontend/src/boot.ts');
     const util = await import('../chela/dashboard/static/js/util.js');
-    terminals = await import('../chela/dashboard/static/js/terminals.js');
+    terminals = await import('../chela/dashboard/frontend/src/features/wall/index.ts');
     util.setAgentsCache(AGENTS);
     util.setCurrentTab('terminals');
-    window.chela.setTermMode('wall');
+    terminals.setTermMode('wall');
     await terminals.renderTerminals();
     const wall = await import('../chela/dashboard/frontend/src/shared/store/wall.ts');
     [SANDBOXED, ORDINARY].forEach(w => wall.setMinimized(w, false));

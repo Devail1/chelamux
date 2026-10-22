@@ -160,7 +160,7 @@ per-device collapsed groups, the server layout and archive, Recent sessions, the
 and phone drawer, the Alt fast switch, and the width. What it needs from the rest of the page
 (a window's label, the wall, opening a pane, the launcher, the orchestrator slot) it reaches
 through the host `nav.js` gives `configureSidebar()`, so it imports no legacy module; legacy
-(`nav.js`, `terminals.js`, `launcher.js`, `work.js`) imports it. The islands' clicks reach it
+(`nav.js`, `launcher.js`, `work.js`, `features/wall`) imports it. The islands' clicks reach it
 through `window.chela` (`legacyActions`, looked up at call time).
 
 Every root repaints synchronously (`flushSync`) on a publish of its stores, because legacy
@@ -174,27 +174,37 @@ The desktop width (CMX-278) is `--sidebar-w` on the root element, set from the l
 (clamped to 264-480 px, default 288; `chela/sidebar_layout.py` clamps the same). The handle sets
 it live while dragging and saves it on release. The phone drawer keeps its own 264 px.
 
-### The pane headers
+### The Wall
 
-The Wall's tiles are still built by legacy `terminals.js`; their headers are React
-(`src/features/panehead`, CMX-241, plan P26), the first Wall surface ported inside out. Every
+The Wall is `src/features/wall` (CMX-247, plan P33; it was `static/js/terminals.js`): the
+Gridstack grid (`lib/grid.ts`: init, adopt and remove keyed by window id, destroy; the saved
+layout `pc_wall_layout`, the presets, lock's swap-on-drop, auto-arrange and Focus) and the rest
+(`lib/wall.ts`: wall vs single mode, minimize and restore, the last viewed pane, the 4 s
+reconcile and the `windows` event). The vendored Gridstack bundle stays the layout engine, a page
+global read when the wall builds. A tile element is plain DOM, because Gridstack owns it (it
+adopts, moves and removes it); everything inside a tile is React, portaled into the tile's
+slots. Single mode has no picker of its own: the open pane is `activePane()`, switched by
+`showPane(wid)` (a sidebar tap, the header swipe, a focus). `nav.js` hands it the view switch
+and the tab signal through `configureWall()`.
+
+The pane headers are React (`src/features/panehead`, CMX-241, plan P26), the first Wall surface ported inside out. Every
 header on the page is ONE root, portaled into a slot each tile's markup carries
 (`<div class="island-slot" data-head-for="@N" data-head-wall="1">`, `display: contents`).
-`terminals.js` calls `mountPaneHeads(scope)` right after inserting tiles, and BEFORE
+`features/wall` calls `mountPaneHeads(scope)` right after inserting tiles, and BEFORE
 Gridstack adopts them: Gridstack finds each tile's `.gs-grip` drag handle (the title) when it
 inits. A slot that leaves the page is dropped on the next paint.
 
 Paints are synchronous (`flushSync`), on a mount and on every publish of the stores a header
 reads: `agents`, the share state, `orchestrator` and `pinnedPanes` (`shared/store/wall.ts`,
-which the legacy grid code reads too). What a header asks of the Wall (minimize, drop a killed
-tile, start a wire, leave a room, relabel the dock) goes through the host `terminals.js` hands
+which the grid reads too). What a header asks of the Wall (minimize, drop a killed
+tile, start a wire, leave a room, relabel the dock) goes through the host `features/wall` hands
 `configurePaneHeads()`. Three header elements are still filled by vanilla code, so they
 render with no React children: the facepile `.gs-presence` and the Share row's
 `.gs-share-count` (`collab/presence-owner.js`), and the room badge `.gs-room` (`wire.ts`).
 
 The rest of a tile is React too (CMX-242, plan P27/P28/P30/P32), on the same pattern:
 
-| Module | Draws | Mounted by terminals.js into |
+| Module | Draws | Mounted by features/wall into |
 |---|---|---|
 | `features/tilefoot` | the footer (`.term-ctx-bar`: window id, model, PR, cost, branch, context %, Files) and the wall's action bar; the recap line | each tile's `[data-foot-for]` and `[data-recap-slot]` slots (one root, portals, `flushSync`) |
 | `features/walldock` | the Minimized tray (one row, scrolling sideways) and the lazy dock's decisions for dispatched workers | `#term-min-dock` |
@@ -207,12 +217,12 @@ its cid for its mount, so a repaint never reconnects. The teardown blanks a fram
 `about:blank` with its src in `data-suspended-src` (`term-reconnect.js` reads both); what else
 crosses the iframe boundary is plan §3's table, one test per row in
 `features/paneframe/tests/boundary.test.tsx`. The 4 s tick's timer is the frame's; the
-reconcile it runs (drop and absorb panes) is still `terminals.js`'s `termTick`, handed in through
+reconcile it runs (drop and absorb panes) is `features/wall`'s `termTick`, handed in through
 `configurePaneFrames()` with the grid it rebuilds.
 
 The Wall's shared state is `shared/store/wall.ts`: `termMode`, `pinnedPanes`, `minimizedPanes`
 and `wallLayout` (`{preset, locked, auto, focus}`; auto-arrange and Focus exclude each other in
-the setters). The toolbar and the dock write it; `terminals.js` still owns the Gridstack grid
+the setters). The toolbar and the dock write it; `features/wall` owns the Gridstack grid
 and applies each change (`_onLayoutChange`, minimize and restore). The footer reads the
 `context` store, which the Wall's 4 s tick publishes.
 

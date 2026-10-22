@@ -1,7 +1,7 @@
 // CMX-169's shared fixture: the real dashboard booted in jsdom at phone width, in single
 // mode, over three sessions whose /api/agents order (@201, @202, @203) is never the
 // sidebar order a test saves. One boot per test file (the module graph loads once).
-import { SIDEBAR, bootDashboardDom, flush, sliceTemplate } from './dashboard_dom.mjs';
+import { SIDEBAR, bootDashboardDom, flush, sliceTemplate, WALL } from './dashboard_dom.mjs';
 import { fakeArchiveServer } from './fake_archive.mjs';
 
 export const KEY = 'pc_term_last_wid';
@@ -19,13 +19,13 @@ const BODY = `
 ${PANEL}`;
 
 export async function settle() { for (let i = 0; i < 8; i++) await flush(); }
-export const sel = () => document.getElementById('term-agent');
+let wall = null;   // the booted page's features/wall
 // The pane on screen: its frame (a pending placeholder in jsdom) names the wid.
 export const shown = () => {
     const f = document.querySelector('#term-stage .term-pane .term-frame');
     return f ? f.dataset.pending || f.getAttribute('src') : null;
 };
-export const pane = () => ({ value: sel().value, shown: shown() });
+export const pane = () => ({ value: wall.activePane(), shown: shown() });
 
 // `order`: the sidebar's saved group order. `seed`: localStorage before boot. `layoutGate`:
 // a promise the sidebar's layout read waits on, holding the sidebar undrawn until it resolves.
@@ -45,8 +45,9 @@ export async function bootPhone({ order, seed = {}, layoutGate = null }) {
     const booted = await bootDashboardDom({
         body: BODY, phone: true, canvasStub: true, fetchImpl,
         seedLocalStorage: { pc_term_mode: 'single', ...seed },
-        extraModules: ['nav.js', 'terminals.js', SIDEBAR],
+        extraModules: ['nav.js', WALL, SIDEBAR],
     });
     globalThis.fetch = fetchImpl;
+    wall = booted.modules.terminals;
     return { nav: booted.modules.nav, sidebar: booted.modules.sidebar, terminals: booted.modules.terminals, chela: booted.chela };
 }

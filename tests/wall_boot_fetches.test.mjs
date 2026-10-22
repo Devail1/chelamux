@@ -8,7 +8,7 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { bootDashboardDom, copyDashboard, flush, sliceTemplate, SIDEBAR } from './js_helpers/dashboard_dom.mjs';
+import { bootDashboardDom, copyDashboard, flush, sliceTemplate, SIDEBAR, WALL } from './js_helpers/dashboard_dom.mjs';
 
 const END = '<script type="application/json" id="chela-boot">';
 const BODY = sliceTemplate('<div class="app">', END, { terminals_enabled: true, wall_tile_dispatched: false })
@@ -42,7 +42,7 @@ async function boot(fetchOpts = {}) {
     globalThis.GridStack = { init: () => GRID };
     const { modules } = await bootDashboardDom({
         body: BODY, canvasStub: true, fetchImpl: makeFetch(log, fetchOpts),
-        jsRoot, extraModules: ['util.js', 'nav.js', 'terminals.js', SIDEBAR],
+        jsRoot, extraModules: ['util.js', 'nav.js', WALL, SIDEBAR],
     });
     const scheduler = await import(new URL('../../frontend/src/shared/scheduler/index.ts', jsRoot).href);
     for (let i = 0; i < 30; i++) await flush();

@@ -92,7 +92,7 @@ beforeAll(async () => {
     ({ closeDiffModal } = await import('../chela/dashboard/frontend/src/features/diffmodal/index.ts'));
     await import('../chela/dashboard/frontend/src/boot.ts');
     util = await import('../chela/dashboard/static/js/util.js');
-    terminals = await import('../chela/dashboard/static/js/terminals.js');
+    terminals = await import('../chela/dashboard/frontend/src/features/wall/index.ts');
     util.setCurrentTab('terminals');
     util.setAgentsCache(AGENTS);
     await terminals.renderTerminals();
@@ -292,7 +292,7 @@ for (const evilWid of ["@2'x", '@3&amp;']) {
 // ---------------------------------------------------------------------------
 
 test('the Files chip is also emitted (and wired end to end) in single-pane / mobile mode, not just the wall tile — at both desktop and phone widths, and it tracks the live selection rather than any fixed position', async () => {
-    const sel = document.getElementById('term-agent');
+    const sel = { get value() { return terminals.activePane(); } };   // the open single pane
     const originalFetch = globalThis.fetch;
     const originalMatchMedia = window.matchMedia;
     try {
@@ -366,7 +366,7 @@ test('the Files chip is also emitted (and wired end to end) in single-pane / mob
         async function renderAndAssertSinglePane(width, expectedWid, label, { expectRebuild }) {
             const selValueChanged = sel.value !== expectedWid;
             stubViewport(width);
-            sel.value = expectedWid;
+            await terminals.showPane(expectedWid);
             await terminals.renderTerminals();
 
             const stage = document.getElementById('term-stage');
@@ -489,7 +489,7 @@ test('the Files chip is also emitted (and wired end to end) in single-pane / mob
         // (expectRebuild: false) — it's re-asserting the state setTermMode
         // just produced, which is fine.
         stubViewport(DESKTOP_WIDTH);
-        sel.value = '@2';
+        await terminals.showPane('@2');
         terminals.setTermMode('single');
         await flush();
         await renderAndAssertSinglePane(DESKTOP_WIDTH, '@2', 'desktop width, @2 selected', { expectRebuild: false });
