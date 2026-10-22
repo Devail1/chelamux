@@ -108,7 +108,7 @@ import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 import { JSDOM } from 'jsdom';   // needs `pnpm install` — tests/test_js_suites.py enforces it
 import { cssForViewport, shapeSignature, DESKTOP } from './js_helpers/css_viewport.mjs';
-import { mountIslands } from './js_helpers/dashboard_dom.mjs';
+import { closePalette, flush, mountIslands, paletteOpen, searchPalette } from './js_helpers/dashboard_dom.mjs';
 
 const CSS = readFileSync(
     join(dirname(fileURLToPath(import.meta.url)), '..', 'chela', 'dashboard', 'static', 'style.css'), 'utf8');
@@ -130,12 +130,7 @@ const PANEL = `
   <div id="sidebar-agents"></div>
   <div id="term-bar" class="kb-collapsed"><button class="kb-toggle" id="kb-toggle"></button><div class="kb-body" id="kb-body"></div></div>
 </div>
-<div class="palette-overlay" id="palette">
-  <div class="palette">
-    <input id="palette-input">
-    <div id="palette-list"></div>
-  </div>
-</div>`;
+<div id="overlays-island"></div>`;
 
 const AGENTS = [
     { name: 'alpha', window_id: '@1', online: true },
@@ -634,20 +629,20 @@ test('the iframe alt-switch listener is registered in the CAPTURE phase and stop
 // not Alt+N, is now the PRIMARY switcher — it must be reachable no matter where focus
 // is. Same iframe-side injection property 6/8 proved necessary for Alt+N, generalized
 // (not forked) to also carry this shortcut.
-test('Ctrl+K fired inside a focused pane\'s own iframe document opens the command palette', () => {
+test('Ctrl+K fired inside a focused pane\'s own iframe document opens the command palette', async () => {
     const ifr = tile('@1').querySelector('iframe.term-frame');
     assert.ok(ifr, 'the pane must have a real ttyd iframe, or this test is vacuous');
     ifr.dispatchEvent(new window.Event('load'));   // (re)wires the generalized iframe-side listener
 
-    assert.equal(document.getElementById('palette').classList.contains('open'), false,
-        'the palette must start closed, or this test is vacuous');
+    assert.equal(await paletteOpen(), false, 'the palette must start closed, or this test is vacuous');
 
     ifr.contentDocument.dispatchEvent(
         new window.KeyboardEvent('keydown', { key: 'k', ctrlKey: true, bubbles: true }));
+    await flush();
 
-    assert.equal(document.getElementById('palette').classList.contains('open'), true,
-        'Ctrl+K fired inside the pane\'s own document must open the palette');
-    window.chela.closePalette();
+    assert.equal(await paletteOpen(), true, 'Ctrl+K fired inside the pane\'s own document must open the palette');
+    assert.ok(document.getElementById('palette-list'), 'the open palette is not drawn');
+    await closePalette();
 });
 
 // 9b — same wiring discipline as property 8, for the SAME injector (not a duplicate
@@ -688,8 +683,8 @@ test('the iframe listener also registers Ctrl+K in the CAPTURE phase and stops p
 // unminimized wall panes lead the list in wall order, followed by a non-selectable
 // divider, then the normal views/projects/actions — and a pane already shown up top is
 // not ALSO repeated further down as a duplicate "session ·" row.
-test('an empty-query palette floats live wall panes to the top, in wall order, before a divider', () => {
-    window.chela.openPalette();
+test('an empty-query palette floats live wall panes to the top, in wall order, before a divider', async () => {
+    await searchPalette();
     const rows = Array.from(document.getElementById('palette-list').children);
 
     const paneRows = rows.slice(0, 3);
@@ -711,23 +706,23 @@ test('an empty-query palette floats live wall panes to the top, in wall order, b
     assert.equal(titles.filter(t => t === 'alpha').length, 1,
         'a pane already floated to the top must not ALSO repeat as a duplicate "session" row below the divider');
 
-    window.chela.closePalette();
+    await closePalette();
 });
 
 // 10b — ATTENTION-FIRST WITHIN THE PANES SECTION. A pane waiting on the human bubbles
 // ahead of idle peers even though it trails them in wall order — the sidebar's own
 // status word/rank, reused so the two never disagree about what needs you.
-test('a pane that wants the human floats ahead of idle panes, still inside the panes section', () => {
+test('a pane that wants the human floats ahead of idle panes, still inside the panes section', async () => {
     util.setAgentsCache([
         { name: 'alpha', window_id: '@1', online: true },
         { name: 'bravo', window_id: '@2', online: true, session_status: 'waiting' },
         { name: 'charlie', window_id: '@3', online: true },
     ]);
-    window.chela.openPalette();
+    await searchPalette();
     const paneRows = Array.from(document.getElementById('palette-list').children).slice(0, 3);
     assert.deepEqual(paneRows.map(r => r.querySelector('.pi-title').textContent), ['bravo', 'alpha', 'charlie'],
         'bravo (waiting on the human) must float ahead of idle alpha/charlie despite trailing them in wall order');
-    window.chela.closePalette();
+    await closePalette();
     util.setAgentsCache(AGENTS);   // restore for any test that runs after this one
 });
 
@@ -735,15 +730,14 @@ test('a pane that wants the human floats ahead of idle panes, still inside the p
 // section entirely and falls back to the normal fuzzy match over everything a query
 // would have matched before this feature existed — a view must still be reachable by
 // name once the user types.
-test('typing a query drops the panes-first section and fuzzy-matches everything, views included', () => {
-    window.chela.openPalette();
-    window.chela._renderPalette('wall');   // "Wall" is a real registered view label
+test('typing a query drops the panes-first section and fuzzy-matches everything, views included', async () => {
+    await searchPalette('wall');   // "Wall" is a real registered view label
     const rows = Array.from(document.getElementById('palette-list').children);
     assert.ok(rows.every(r => !r.classList.contains('palette-divider')),
         'a non-empty query must not render the panes-first divider');
     assert.ok(rows.some(r => r.querySelector('.pi-sub') && r.querySelector('.pi-sub').textContent === 'view'),
         'a view must still be reachable by fuzzy search once the user types — a query must never trap you in panes-only');
-    window.chela.closePalette();
+    await closePalette();
 });
 
 // ─── The four RENDERED-CSS visual cues have NO jsdom guard, by design ─────────────────

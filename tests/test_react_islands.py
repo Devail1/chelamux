@@ -48,23 +48,23 @@ def _page(monkeypatch, entry):
     return dash.app.test_client().get("/").get_data(as_text=True)
 
 
-def test_the_page_loads_the_entry_as_its_one_module_script_and_has_the_version_slot(monkeypatch):
+def test_the_page_loads_the_entry_as_its_one_module_script_and_has_the_overlays_slot(monkeypatch):
     html = _page(monkeypatch, "app/assets/main-Abc123.js")
     v = dash.ASSET_VERSION
     tag = f'<script type="module" src="static/v/{v}/app/assets/main-Abc123.js"></script>'
     assert html.count(tag) == 1 and html.count('type="module"') == 1
     assert "js/main.js" not in html, "the raw, unbundled legacy entry is back"
-    assert html.count('<span id="version-island"></span>') == 1
+    # CMX-221: Settings (and the version badge in its foot) draws into the overlays island.
+    assert html.count('<div id="overlays-island"></div>') == 1
 
 
-def test_the_version_slot_is_in_the_settings_modal_not_the_sidebar(monkeypatch):
-    # CMX-291: in the sidebar foot the badge drew over the CPU/RAM/Disk strip.
+def test_the_version_badge_is_not_in_the_sidebar(monkeypatch):
+    # CMX-291: in the sidebar foot the badge drew over the CPU/RAM/Disk strip. It is in the
+    # Settings modal's foot (features/settings, Settings.test.tsx pins it there).
     html = _page(monkeypatch, "app/assets/main-Abc123.js")
     sidebar = html[html.index('<aside class="sidebar"'):html.index("</aside>")]
-    foot = html[html.index('<div class="settings-modal-foot">'):]
-    foot = foot[:foot.index("</div>")]
-    assert "version-island" not in sidebar
-    assert '<span id="version-island"></span>' in foot
+    assert "version-island" not in sidebar and "version-badge" not in sidebar
+    assert 'id="settings-drawer"' not in html, "a static Settings modal is back beside the React one"
 
 
 def test_without_an_entry_the_page_loads_no_module_script(monkeypatch):

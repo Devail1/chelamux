@@ -400,7 +400,7 @@ class DispatchKnob(NamedTuple):
     """One row of the Dispatch tab. Unlike :class:`TimingKnob` (every member a
     plain positive number), this group mixes shapes — booleans, free text, a
     K/M/G/T size — so ``kind`` picks the cast/validation rule and which control
-    the UI renders (``_renderDispatchRows`` in nav.js), rather than assuming a
+    the UI renders (the Dispatch tab, ``features/settings`` in the dashboard frontend), rather than assuming a
     numeric ``<input>`` for everything."""
     key: str            # ~/.chela/config.json key
     env: str             # CHELA_* env var name

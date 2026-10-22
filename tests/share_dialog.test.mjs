@@ -21,11 +21,11 @@
 import { beforeAll, beforeEach, test } from 'vitest';
 import assert from 'node:assert/strict';
 import { JSDOM } from 'jsdom';
-import { exposeDomConstructors } from './js_helpers/dashboard_dom.mjs';
+import { closePalette, exposeDomConstructors, searchPalette } from './js_helpers/dashboard_dom.mjs';
 
 const PANEL = `
 <span id="shares-pill-float"></span><div id="shares-sheet-island"></div>
-<div class="palette-overlay" id="palette"><div class="palette"><input id="palette-input"><div id="palette-list"></div></div></div>
+<div id="palette-island"></div>
 <div class="panel" id="panel-terminals">
   <button id="term-mode-single"></button>
   <button id="term-mode-wall"></button>
@@ -250,23 +250,28 @@ test('⭐ a change to the share state repaints the live pane\'s banner, and a st
 });
 
 test('the palette offers Stop sharing on a shared session and Share on an unshared one', async () => {
-    const row = re => [...document.querySelectorAll('#palette-list .palette-item')].find(r => re.test(r.textContent));
+    // CMX-221: the palette is a React dialog; this page mounts it on its own.
+    if (!document.querySelector('#palette-island > *')) {
+        const { mountIsland } = await import('../chela/dashboard/frontend/src/shared/islands/index.tsx');
+        const { Palette } = await import('../chela/dashboard/frontend/src/features/palette/index.ts');
+        mountIsland('palette-island', Palette, {}, document);
+    }
+    const click = r => r.el.dispatchEvent(new window.MouseEvent('click', { bubbles: true }));
     share.noteShare('@1', 'view', null);
-    window.chela._renderPalette('sharing');
-    const stop = row(/Stop sharing/);
+    const stop = (await searchPalette('sharing')).find(r => /Stop sharing/.test(r.title));
     assert.ok(stop, 'a shared session must offer Stop sharing');
-    window.chela._palRun(Number(stop.dataset.i));
+    click(stop);
     await flush(); await flush();
     assert.deepEqual(posts, [{ on: false }]);
     assert.equal(dialog(), null, 'Stop must not open the share dialog');
     assert.equal(share.isShared('@1'), false);
-    window.chela._renderPalette('share');
-    const go = row(/^\s*Share shell\s/);
+    const go = (await searchPalette('share')).find(r => /^Share shell$/.test(r.title));
     assert.ok(go, 'an unshared session must offer Share');
     OPTIONS = { share_typing: false, window_name: 'shell-1' };
-    window.chela._palRun(Number(go.dataset.i));
+    click(go);
     await flush(); await flush();
     assert.ok(dialog(), 'Share from the palette opens the access dialog');
+    await closePalette();
 });
 
 test("the mint carries THIS pane's live size, read from its own ttyd frame", async () => {

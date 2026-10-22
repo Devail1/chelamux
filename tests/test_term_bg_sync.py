@@ -16,7 +16,7 @@ single-source-of-truth pairs checked here are:
   * every theme: style.css `--term-bg` == term_themes.py `xterm.background`;
   * `dark` (the :root default): term_themes.py == agent-terminals.sh's launch
     `TERM_THEME`, whole ITheme — what ttyd paints before the shim runs;
-  * the theme SETS agree: style.css blocks == term_themes.py == nav.js's picker.
+  * the theme SETS agree: style.css blocks == term_themes.py == the Settings picker (features/settings/model.ts).
 """
 from __future__ import annotations
 
@@ -30,7 +30,7 @@ from chela.dashboard.term_themes import DEFAULT_THEME, TERM_THEMES
 
 ROOT = Path(__file__).resolve().parent.parent
 STYLE_CSS = ROOT / "chela" / "dashboard" / "static" / "style.css"
-NAV_JS = ROOT / "chela" / "dashboard" / "static" / "js" / "nav.js"
+SETTINGS_MODEL = ROOT / "chela" / "dashboard" / "frontend" / "src" / "features" / "settings" / "model.ts"  # the Settings theme picker (CMX-221)
 AGENT_TERMINALS_SH = ROOT / "scripts" / "agent-terminals.sh"
 
 HEX_COLOR = r"#[0-9a-fA-F]{3,6}"
@@ -64,10 +64,10 @@ def _sh_term_theme() -> dict:
     return json.loads(m.group(1))
 
 
-def _nav_themes() -> list[str]:
-    js = NAV_JS.read_text()
-    m = re.search(r"const THEME_LABELS = \{(.*?)\};", js, re.S)
-    assert m, "nav.js must declare THEME_LABELS"
+def _picker_themes() -> list[str]:
+    js = SETTINGS_MODEL.read_text()
+    m = re.search(r"const THEME_LABELS(?::[^=]*)? = \{(.*?)\};", js, re.S)
+    assert m, "features/settings/model.ts must declare THEME_LABELS"
     return re.findall(r"(\w+):\s*'", m.group(1))
 
 
@@ -86,7 +86,7 @@ def test_every_theme_term_bg_matches_its_terminal_background(theme):
 
 def test_theme_sets_agree_css_palettes_and_picker():
     css = set(_css_blocks())
-    nav = _nav_themes()
+    nav = _picker_themes()
     assert set(TERM_THEMES) == css, (css ^ set(TERM_THEMES))
     assert set(nav) == set(TERM_THEMES), (set(nav) ^ set(TERM_THEMES))
     assert "warm" in nav

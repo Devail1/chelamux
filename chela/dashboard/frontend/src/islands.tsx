@@ -4,20 +4,24 @@
 import { mountDecisions } from './features/decisions/index.ts';
 import { DiffModal } from './features/diffmodal/index.ts';
 import { mountKeybar } from './features/keybar/index.ts';
-import { mountShares } from './features/share/index.ts';
 import { NewTask } from './features/newtask/index.ts';
+import { installPalette } from './features/palette/index.ts';
+import { applySavedTheme } from './features/settings/index.ts';
+import { mountShares } from './features/share/index.ts';
 import { mountSidebar } from './features/sidebar/index.ts';
 import { TaskModal } from './features/taskmodal/index.ts';
-import { VersionBadge } from './features/version/index.ts';
 import { WorkToasts, WorkView } from './features/work/index.ts';
 import { installBridge } from './shared/bridge/index.ts';
 import { mountChrome } from './chrome.tsx';
+import { installIframeBridge } from './iframeBridge.ts';
 import { mountIsland } from './shared/islands/index.tsx';
 import { installTapTips } from './shared/popover/index.ts';
 
 export function boot(win: Window = window) {
   const bridge = installBridge(win);
-  mountIsland('version-island', VersionBadge, {}, win.document);
+  applySavedTheme(win.document); // before anything paints from it
+  installIframeBridge(win);
+  installPalette(win);
   mountSidebar(win, bridge);
   mountIsland('diff-modal-island', DiffModal, {}, win.document);
   mountKeybar(win);

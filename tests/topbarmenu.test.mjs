@@ -20,7 +20,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
-import { bootDashboardDom, flush, sliceTemplate } from './js_helpers/dashboard_dom.mjs';
+import { bootDashboardDom, closePalette, flush, paletteOpen, sliceTemplate } from './js_helpers/dashboard_dom.mjs';
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..', 'chela', 'dashboard');
 const HTML = readFileSync(join(ROOT, 'templates', 'index.html'), 'utf8');
@@ -64,9 +64,8 @@ test('#btn-shares lives in .safety-float, not .sidebar-foot, in the REAL index.h
 
 beforeAll(async () => {
     const APP_HTML = sliceTemplate('<div class="app">', '</main>\n\n</div>');
-    const PALETTE = sliceTemplate('<div class="palette-overlay" id="palette"', '</div>\n\n<!-- Keyboard shortcuts')
-        .replace(/\n\n<!-- Keyboard shortcuts$/, '');
-    await bootDashboardDom({ body: APP_HTML + PALETTE });
+    // CMX-221: the palette is the overlays island's React dialog.
+    await bootDashboardDom({ body: APP_HTML + '<div id="overlays-island"></div>' });
     // The islands commit on a later turn than the boot's own reads: wait for the inbox's.
     for (let i = 0; i < 100 && !document.querySelector('#btn-decisions'); i++) await flush();
     for (let i = 0; i < 5; i++) await flush();
@@ -74,12 +73,13 @@ beforeAll(async () => {
 
 // --- 2. 🔴 ⌘K, independent of the menu ------------------------------------------------
 
-test('⌘K opens the palette directly — independent of the primary menu', () => {
-    assert.equal(document.getElementById('palette').classList.contains('open'), false);
+test('⌘K opens the palette directly — independent of the primary menu', async () => {
+    assert.equal(await paletteOpen(), false);
     document.dispatchEvent(new KeyboardEvent('keydown', { key: 'k', metaKey: true, bubbles: true }));
-    assert.ok(document.getElementById('palette').classList.contains('open'),
-        '⌘K no longer opens the palette: the direct shortcut regressed');
-    window.chela.closePalette();
+    await flush();
+    assert.ok(await paletteOpen(), '⌘K no longer opens the palette: the direct shortcut regressed');
+    assert.ok(document.getElementById('palette-input'), 'the open palette is not drawn');
+    await closePalette();
 });
 
 // --- 3. 🔴 CMX-377's own required GUARD: the REAL rendered DOM ----------------------------

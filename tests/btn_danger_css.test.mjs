@@ -21,10 +21,10 @@ import { JSDOM } from 'jsdom';   // needs `pnpm install` — tests/test_js_suite
 const here = path.dirname(fileURLToPath(import.meta.url));
 const staticDir = path.join(here, '..', 'chela', 'dashboard', 'static');
 const styleCss = fs.readFileSync(path.join(staticDir, 'style.css'), 'utf8');
-const navJs = fs.readFileSync(path.join(staticDir, 'js', 'nav.js'), 'utf8');
+const settingsModel = fs.readFileSync(path.join(staticDir, '..', 'frontend', 'src', 'features', 'settings', 'model.ts'), 'utf8');
 
 // The Settings picker's theme list — the same source tests/test_on_accent_contrast.py reads.
-const THEMES = [...navJs.match(/const THEME_LABELS = \{([\s\S]*?)\};/)[1].matchAll(/(\w+):\s*'/g)]
+const THEMES = [...settingsModel.match(/const THEME_LABELS(?::[^=]*)? = \{([\s\S]*?)\};/)[1].matchAll(/(\w+):\s*'/g)]
     .map(m => m[1]);
 
 const AA = 4.5;

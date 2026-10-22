@@ -12,6 +12,8 @@ import { context, loadContext } from '../../../shared/store/context.ts';
 import { createStore, useStore } from '../../../shared/store/index.ts';
 import { IconButton, Menu, type MenuItem } from '../../../shared/ui/index.ts';
 import { openLaunchMenu } from '../../launcher/index.ts';
+import { openPalette } from '../../palette/index.ts';
+import { toggleSettings } from '../../settings/index.ts';
 import { agentsCount, rlReading, soonest, type RlReading, type Summary } from '../model.ts';
 
 /** The last /api/summary and when it landed; null until the first. */
@@ -22,8 +24,8 @@ export async function refreshSummary(): Promise<void> {
   if (data) summary.set({ data, at: new Date() });
 }
 
-type Legacy = { openPalette?: () => void; shareCurrentAgent?: () => void; toggleSettings?: (focus?: string) => void };
-// nav.js / terminals.js own these surfaces until their slices port them: looked up at call time.
+type Legacy = { shareCurrentAgent?: () => void };
+// terminals.js owns sharing the current pane until its slice ports it: looked up at call time.
 const legacy = (): Legacy => (window as unknown as { chela?: Legacy }).chela ?? {};
 
 function Usage({ id, label, title, r }: { id: string; label: string; title: string; r: RlReading | null }) {
@@ -62,15 +64,15 @@ function Readouts() {
 export function PrimaryMenu() {
   const gear = useRef<HTMLButtonElement>(null);
   const items: MenuItem[] = [
-    { label: 'Jump to…', icon: icons.search, value: '⌘K', onSelect: () => legacy().openPalette?.() },
+    { label: 'Jump to…', icon: icons.search, value: '⌘K', onSelect: () => openPalette() },
     { label: 'New…', icon: icons.add, onSelect: () => {
         // after the menu has closed and handed focus back to the gear
         setTimeout(() => gear.current && openLaunchMenu(gear.current), 0);
       } },
     'separator',
     ...(BOOT.terminalsEnabled ? [{ label: 'Share current session', icon: icons.share, onSelect: () => legacy().shareCurrentAgent?.() }] : []),
-    { label: 'Notifications', icon: icons.notifications, onSelect: () => legacy().toggleSettings?.('notify') },
-    { label: 'Settings', icon: icons.settings, onSelect: () => legacy().toggleSettings?.() },
+    { label: 'Notifications', icon: icons.notifications, onSelect: () => toggleSettings('notify') },
+    { label: 'Settings', icon: icons.settings, onSelect: () => toggleSettings() },
   ];
   return (
     <Menu items={items} footer={<Readouts />}

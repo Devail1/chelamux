@@ -75,8 +75,9 @@ describe('CMX-291 desktop 1440×900: the build string is in Settings, not the si
     const ready = setup(async () => {
         ({ page, context, errors } = await openDashboard(browser, { width: 1440, height: 900, api: FULL }));
         await waitForReadouts(page);
-        // Booted: the island has mounted and fetched /api/version by now.
-        await page.locator('#version-island .version-badge').waitFor({ state: 'attached', timeout: 15000 });
+        // Booted: the islands have mounted (CMX-221: the badge is drawn with the Settings modal,
+        // so its own test opens it).
+        await page.locator('#btn-primary-menu').waitFor({ state: 'attached', timeout: 15000 });
     });
     after(() => context && context.close());
 
@@ -92,9 +93,11 @@ describe('CMX-291 desktop 1440×900: the build string is in Settings, not the si
         await page.evaluate(() => window.chela.toggleSettings());
         await page.waitForFunction(() => {
             const m = document.getElementById('settings-drawer');
-            return m.classList.contains('open') && getComputedStyle(m).opacity === '1';
+            return !!m && m.classList.contains('open') && getComputedStyle(m).opacity === '1';   // CMX-221: drawn once open
         }, null, { timeout: 5000 });
         const badge = page.locator('#settings-drawer #version-island .version-badge');
+        // CMX-221: the badge mounts with the modal and reads /api/version then.
+        await badge.waitFor({ state: 'attached', timeout: 5000 }).catch(() => {});
         assert.equal(await badge.count(), 1, 'the Settings modal has no version badge');
         assert.equal(await badge.textContent(), `build ${ASSET_VERSION}`);
         assert.ok(await badge.isVisible(), 'the version badge is not on screen in the open modal');

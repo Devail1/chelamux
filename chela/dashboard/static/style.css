@@ -3883,6 +3883,8 @@ body.sidebar-resizing iframe { pointer-events: none; }
 .palette-item {
     display: flex; align-items: center; gap: 11px; padding: 9px 12px;
     border-radius: 8px; cursor: pointer;
+    /* a real button (CMX-221) drawn as a row */
+    width: 100%; border: 0; background: none; color: inherit; font: inherit; text-align: left;
 }
 .palette-item.sel { background: color-mix(in srgb, var(--accent) 16%, transparent); }
 /* CMX-116: separates the "open panes, floated to the top" section (empty
@@ -4008,6 +4010,8 @@ body.sidebar-resizing iframe { pointer-events: none; }
 .settings-tab {
     padding: 8px 10px; border-radius: 7px; font-size: 12.5px; color: var(--text-dim);
     cursor: pointer; user-select: none; transition: background 0.13s ease, color 0.13s ease;
+    /* a real button (CMX-221): drawn as the rail's row, not a .btn */
+    background: none; border: 0; font-family: inherit; text-align: left;
 }
 .settings-tab:hover { background: var(--bg); color: var(--text); }
 .settings-tab.active { background: color-mix(in srgb, var(--accent) 13%, transparent); color: var(--accent); font-weight: 600; }
@@ -4037,15 +4041,16 @@ body.sidebar-resizing iframe { pointer-events: none; }
 .settings-tabpanels code.s-cmd .s-cmd-arg { white-space: nowrap; }
 /* CMX-396: search across every tab. While a query is active (.searching) every
    panel with a hit shows at once, each under its tab's name, and the rest of
-   the markup is only hidden by nav.js's .s-search-hide — never re-rendered. */
+   the markup is only hidden by the search's [data-s-hide] (features/settings
+   lib/search.ts) — never re-rendered. */
 .settings-search { flex: 0 0 auto; padding: 10px 16px; border-bottom: 1px solid var(--border); }
-.settings-search-input { width: 100%; box-sizing: border-box; }
+.settings-search .s-input { width: 100%; box-sizing: border-box; }
 .settings-search-empty { margin: 8px 0 0; font-size: 12.5px; color: var(--text-dim); }
 .settings-search-empty[hidden] { display: none; }
 .settings-modal.searching .settings-tabpanel { display: none; }
-.settings-modal.searching .settings-tabpanel.s-search-hit { display: flex; }
-.settings-modal.searching .settings-tabpanel.s-search-hit + .settings-tabpanel.s-search-hit { margin-top: 18px; }
-.settings-tabpanel .s-search-hide { display: none; }
+.settings-modal.searching .settings-tabpanel[data-s-hit] { display: flex; }
+.settings-modal.searching .settings-tabpanel[data-s-hit] + .settings-tabpanel[data-s-hit] { margin-top: 18px; }
+.settings-tabpanel [data-s-hide] { display: none; }
 .settings-search-group {
     margin: 0; font-size: 12px; font-weight: 600; color: var(--text-dim);
 }
@@ -4083,7 +4088,19 @@ body.sidebar-resizing iframe { pointer-events: none; }
        right-aligned wrapped lines were the "ragged indent". */
     .settings-modal .s-status-detail { flex-basis: 100%; text-align: left; }
     .settings-modal .cost-table th, .settings-modal .cost-table td { padding-left: 6px; padding-right: 6px; }
+    /* A narrow modal stacks each knob: its label (and badges) above its control. */
+    .settings-modal .field-row { grid-template-columns: minmax(0, 1fr) auto; }
+    .settings-modal .field-label { grid-column: 1 / -1; }
+    .settings-modal .field-control { grid-column: 1; }
+    .settings-modal .field-unit { grid-column: 2; }
+    .settings-modal .field-hint { grid-column: 1 / -1; }
 }
+/* Settings' knobs (CMX-221): a select or a text field may shrink to the row, never push it
+   wide ("bypassPermissions · no prompts at all", a long workflow path). */
+.settings-modal .field-control .ui-select { min-width: 0; max-width: 100%; overflow: hidden; }
+.settings-modal .field-control .ui-select > span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.settings-modal .s-stepper { display: inline-flex; align-items: center; gap: 6px; }
+.settings-modal .s-relay { overflow-wrap: anywhere; font-size: 11px; }
 .settings-tabs.fade-end {
     -webkit-mask-image: linear-gradient(to right, #000 calc(100% - 32px), transparent);
     mask-image: linear-gradient(to right, #000 calc(100% - 32px), transparent);

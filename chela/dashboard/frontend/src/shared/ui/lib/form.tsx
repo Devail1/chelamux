@@ -14,10 +14,15 @@ import { Tooltip } from './overlays.tsx';
 /** The id FieldRow's <label> points at; a control inside one takes it. */
 const FieldId = createContext<string | undefined>(undefined);
 
-export function FieldRow({ label, hint, unit, badge, children }: { label: string; hint?: ReactNode; unit?: string; badge?: ReactNode; children: ReactNode }) {
-  const id = useId();
+/**
+ * `id` names the control (the label points at it); `keywords` are extra words a search over
+ * the rendered rows matches (Settings, CMX-396), beyond the label.
+ */
+export function FieldRow({ label, hint, unit, badge, id: fixedId, keywords, children }: { label: string; hint?: ReactNode; unit?: string; badge?: ReactNode; id?: string; keywords?: string; children: ReactNode }) {
+  const ownId = useId();
+  const id = fixedId ?? ownId;
   return (
-    <div className="field-row">
+    <div className="field-row" data-keywords={keywords}>
       <label className="field-label" htmlFor={id}>
         {label}
         {badge}
@@ -51,16 +56,20 @@ function withEnvTip(lockedBy: string | undefined, el: ReactElement) {
 
 /**
  * `plain` is for a typed confirmation or a search: no autocomplete, no spellcheck. `list` names a
- * <datalist> of suggestions; `autoFocus` takes focus when a Dialog opens.
+ * <datalist> of suggestions; `autoFocus` takes focus when a Dialog opens. `search` is a search
+ * box (`id` names one outside a FieldRow); `onEnter` runs on Enter. `className` replaces the
+ * field's look (the ⌘K palette's own input).
  */
-export function TextInput({ value, onChange, lockedBy, disabled, label, placeholder, plain, list, autoFocus }: InputProps<string> & { placeholder?: string; plain?: boolean; list?: string; autoFocus?: boolean }) {
-  const id = useContext(FieldId);
+export function TextInput({ value, onChange, lockedBy, disabled, label, placeholder, plain, list, autoFocus, search, id: ownId, maxLength, onEnter, className = 's-input' }: InputProps<string> & { placeholder?: string; plain?: boolean; list?: string; autoFocus?: boolean; search?: boolean; id?: string; maxLength?: number; onEnter?: () => void; className?: string }) {
+  const id = useContext(FieldId) ?? ownId;
   return withEnvTip(
     lockedBy,
     <input
-      className="s-input"
-      type="text"
+      className={className}
+      type={search ? 'search' : 'text'}
       id={id}
+      maxLength={maxLength}
+      onKeyDown={onEnter ? (e) => { if (e.key === 'Enter') onEnter(); } : undefined}
       aria-label={label}
       value={value}
       placeholder={placeholder}
