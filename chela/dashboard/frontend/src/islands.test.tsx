@@ -93,7 +93,8 @@ test('boot mounts the chrome into its slots (CMX-219): pills, gear, New session,
   const { openSendMsg } = await import('./features/agentdetail/index.ts');
   await act(async () => openSendMsg('w1'));
   expect(document.querySelector('[role="dialog"] h3')?.textContent).toBe('Send Message to w1');
-  await escape();
+  // its ×, not Escape: an Escape lands where focus is, and under load focus may not be in yet
+  await act(async () => document.querySelector<HTMLElement>('[role="dialog"] .ui-close')?.click());
   vi.unstubAllGlobals();
 });
 
