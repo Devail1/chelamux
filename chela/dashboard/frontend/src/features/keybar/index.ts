@@ -2,5 +2,5 @@
 // logic) is this module's other entry point. terminals.js calls pinKeybar after it rebuilds a
 // pane or a pane's terminal loads.
 export { Keybar, type KeybarActions } from './lib/Keybar.tsx';
-export { legacyKeybarActions, mountKeybar } from './lib/mount.tsx';
+export { mountKeybar, paneKeybarActions } from './lib/mount.tsx';
 export { pinKeybar, refitPaneTerm } from './lib/pin.ts';

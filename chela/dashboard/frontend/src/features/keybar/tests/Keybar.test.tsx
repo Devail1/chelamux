@@ -3,7 +3,8 @@
 import { act, cleanup, fireEvent, render, screen } from '@testing-library/react';
 import { afterEach, beforeEach, expect, test, vi } from 'vitest';
 import { termMode } from '../../../shared/store/wall.ts';
-import { Keybar, legacyKeybarActions, mountKeybar } from '../index.ts';
+import { configurePaneFrames } from '../../paneframe/index.ts';
+import { Keybar, mountKeybar, paneKeybarActions } from '../index.ts';
 import { afterCtrlLetter, keyboardOccluded, nextCtrl, paneFitHeight, pinTop } from '../model.ts';
 
 function draw() {
@@ -140,18 +141,17 @@ test('Scroll enters tmux copy-mode, and the same button leaves it', () => {
   expect(btn.className).toBe('');
 });
 
-test('legacy actions are looked up on window.chela at call time', () => {
-  const win = { chela: undefined } as unknown as Window & { chela?: Record<string, unknown> };
-  const acts = legacyKeybarActions(win);
-  expect(() => acts.termKey('Tab')).not.toThrow();
-  const termKey = vi.fn();
-  const termPaste = vi.fn();
-  win.chela = { termKey, termPaste };
-  const btn = document.createElement('button');
-  acts.termKey('Tab');
-  acts.termPaste(btn);
-  expect(termKey.mock.calls).toEqual([['Tab']]);
-  expect(termPaste.mock.calls).toEqual([[btn]]);
+test('the default actions send the single pane\'s key through features/paneframe', async () => {
+  const sent: { url: string; body: unknown }[] = [];
+  vi.stubGlobal('fetch', (url: string, init?: RequestInit) => {
+    sent.push({ url, body: JSON.parse(String(init?.body)) });
+    return Promise.resolve({ json: () => Promise.resolve({}) });
+  });
+  configurePaneFrames({ activeWid: () => '@7', tick() {}, frameLoaded() {} });
+  paneKeybarActions.termKey('Tab');
+  await act(async () => {});
+  expect(sent).toEqual([{ url: '/api/term/key', body: { agent: '@7', key: 'Tab' } }]);
+  vi.unstubAllGlobals();
 });
 
 test('mountKeybar draws into #keybar-island, and is a no-op without one', async () => {
