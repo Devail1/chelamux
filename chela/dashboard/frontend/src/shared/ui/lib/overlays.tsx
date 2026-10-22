@@ -8,7 +8,7 @@ import * as RP from '@radix-ui/react-popover';
 import * as RToast from '@radix-ui/react-toast';
 import * as RT from '@radix-ui/react-tooltip';
 import { Check, ChevronRight, X, type LucideIcon } from 'lucide-react';
-import { useLayoutEffect, useMemo, useRef, type ReactElement, type MouseEvent as ReactMouseEvent, type ReactNode, type RefObject, type SyntheticEvent } from 'react';
+import { useLayoutEffect, useMemo, useRef, type ReactElement, type MouseEvent as ReactMouseEvent, type PointerEvent as ReactPointerEvent, type ReactNode, type RefObject, type SyntheticEvent } from 'react';
 
 const cx = (...names: (string | false | undefined)[]) => names.filter(Boolean).join(' ');
 
@@ -29,6 +29,65 @@ if (typeof document !== 'undefined') {
 function openerNow(): Element | null {
   const active = document.activeElement;
   return active && active !== document.body && !inDialog(active) ? active : lastOutside;
+}
+
+// CMX-306: what runs as any Dialog or Sheet opens. The sidebar registers closing its phone
+// drawer here (legacy closeSidebar()), so a modal opened from the drawer never opens behind it.
+const openListeners = new Set<() => void>();
+/** Run `fn` each time a Dialog or Sheet opens; returns the unsubscribe. */
+export function onOverlayOpen(fn: () => void): () => void {
+  openListeners.add(fn);
+  return () => openListeners.delete(fn);
+}
+
+/** Remember the opener as the overlay opens (from the focus history: Radix skips
+ * onOpenAutoFocus when an autoFocus field already holds focus) and tell the listeners. */
+function useOpening(open: boolean) {
+  const opener = useRef<Element | null>(null);
+  useLayoutEffect(() => {
+    if (!open) return;
+    opener.current = openerNow();
+    for (const fn of openListeners) {
+      try {
+        fn();
+      } catch (e) {
+        console.error('an overlay-open listener failed', e); // the overlay opens all the same
+      }
+    }
+  }, [open]);
+  return opener;
+}
+
+/**
+ * A tap on the backdrop closes the overlay. Radix waits for the `click` a touch ends in, and
+ * iOS Safari sends none for a tap on an element with no click handler of its own (the legacy
+ * overlays carried an inline onclick): this handler is that click target. Only a press that
+ * also STARTED on the backdrop counts (a text selection dragged out of the dialog clicks on
+ * it too), and a floating layer open above the dialog (a Select's list, a menu) takes the
+ * tap instead, as Radix's own dismiss does.
+ */
+function useBackdropClose(onOpenChange: (open: boolean) => void) {
+  const downOnBackdrop = useRef(false);
+  return {
+    onPointerDown: (e: ReactPointerEvent<HTMLElement>) => {
+      downOnBackdrop.current = e.target === e.currentTarget;
+    },
+    onClick: (e: ReactMouseEvent<HTMLElement>) => {
+      const pressed = downOnBackdrop.current;
+      downOnBackdrop.current = false;
+      if (!pressed || e.target !== e.currentTarget) return;
+      if (document.querySelector('[data-radix-popper-content-wrapper]')) return;
+      onOpenChange(false);
+    },
+  };
+}
+
+/** Focus can go back to the opener: it is on the page and on screen (not in the phone drawer
+ * that shut as the overlay opened). An element with no box (jsdom) counts as on screen. */
+function canRefocus(el: Element | null): el is HTMLElement {
+  if (!(el instanceof HTMLElement) || !el.isConnected) return false;
+  const r = el.getBoundingClientRect();
+  return !(r.width || r.height) || (r.right > 0 && r.left < window.innerWidth);
 }
 
 /** Gap and viewport margin, the legacy popover's (shared/popover). */
@@ -69,7 +128,19 @@ const SURFACE = {
   shortcuts: { overlay: 'palette-overlay open', box: 'shortcuts-sheet', desc: 'palette-desc' },
 } as const;
 
-/** The title row each variant draws: its heading, plus a close button where it has one. */
+/** The modal and palette variants' close button, in the box's corner. Drawn after the content,
+ * so focus still opens on the content's first field, not on it. */
+function CornerClose({ variant }: { variant: keyof typeof SURFACE }) {
+  if (variant !== 'modal' && variant !== 'palette') return null;
+  return (
+    <RD.Close className={cx('task-modal-close ui-close', variant === 'palette' && 'palette-close')} aria-label="Close">
+      <X aria-hidden size={18} />
+    </RD.Close>
+  );
+}
+
+/** The title row each variant draws: its heading, plus a close button where it has one (the
+ * rest draw CornerClose). Every variant has one: a phone has no Esc (CMX-306). */
 function DialogHead({ variant, heading, title, Icon }: { variant: keyof typeof SURFACE; heading: ReactNode; title: string; Icon?: LucideIcon }) {
   if (variant === 'sheet') {
     return (
@@ -80,7 +151,7 @@ function DialogHead({ variant, heading, title, Icon }: { variant: keyof typeof S
           </span>
         )}
         {heading}
-        <RD.Close className="ss-close" aria-label="Close">
+        <RD.Close className="ss-close ui-close" aria-label="Close">
           <X aria-hidden size={16} />
         </RD.Close>
       </div>
@@ -92,7 +163,7 @@ function DialogHead({ variant, heading, title, Icon }: { variant: keyof typeof S
         <RD.Title asChild>
           <span>{title}</span>
         </RD.Title>
-        <RD.Close className="icon-btn" aria-label="Close">
+        <RD.Close className="icon-btn ui-close" aria-label="Close">
           <X aria-hidden size={16} />
         </RD.Close>
       </div>
@@ -108,7 +179,7 @@ function DialogHead({ variant, heading, title, Icon }: { variant: keyof typeof S
         )}
         {heading}
         <span className="sc-esc">close <kbd>Esc</kbd></span>
-        <RD.Close className="icon-btn" aria-label="Close">
+        <RD.Close className="icon-btn ui-close" aria-label="Close">
           <X aria-hidden size={16} />
         </RD.Close>
       </div>
@@ -136,12 +207,8 @@ export function Dialog({
   keepFocus,
   children,
 }: DialogProps) {
-  const opener = useRef<Element | null>(null);
-  // Remembered as it opens. Radix skips onOpenAutoFocus when an autoFocus field already holds
-  // focus, so the opener is read here, from the focus history, not there.
-  useLayoutEffect(() => {
-    if (open) opener.current = openerNow();
-  }, [open]);
+  const opener = useOpening(open);
+  const backdrop = useBackdropClose(onOpenChange);
   if (!title.trim()) throw new Error('<Dialog> needs a title: it is the dialog\'s accessible name');
   const surface = SURFACE[variant];
   const heading = (
@@ -152,7 +219,7 @@ export function Dialog({
   return (
     <RD.Root open={open} onOpenChange={onOpenChange}>
       <RD.Portal>
-        <RD.Overlay className={surface.overlay}>
+        <RD.Overlay className={cx(surface.overlay, 'ui-overlay')} {...backdrop}>
           <RD.Content
             id={id}
             className={cx(surface.box, className)}
@@ -162,7 +229,7 @@ export function Dialog({
             onCloseAutoFocus={(e) => {
               // A dialog handing over to another (a Decisions row opening its task) needs nothing
               // here: the new dialog's focus trap keeps focus inside it.
-              if (opener.current instanceof HTMLElement) {
+              if (canRefocus(opener.current)) {
                 e.preventDefault();
                 opener.current.focus();
               }
@@ -171,6 +238,7 @@ export function Dialog({
             <DialogHead variant={variant} heading={heading} title={title} Icon={Icon} />
             {description && <RD.Description className={surface.desc}>{description}</RD.Description>}
             {children}
+            <CornerClose variant={variant} />
           </RD.Content>
         </RD.Overlay>
       </RD.Portal>
@@ -187,19 +255,16 @@ export const DialogClose = RD.Close;
  * Same behaviour as Dialog (focus trap and return, Escape, outside click).
  */
 export function Sheet({ open, onOpenChange, title, className, children }: Omit<DialogProps, 'description' | 'hideTitle'>) {
-  const opener = useRef<Element | null>(null);
-  // remembered as it opens, as Dialog does
-  useLayoutEffect(() => {
-    if (open) opener.current = openerNow();
-  }, [open]);
+  const opener = useOpening(open);
+  const backdrop = useBackdropClose(onOpenChange);
   if (!title.trim()) throw new Error('<Sheet> needs a title: it is the dialog\'s accessible name');
   return (
     <RD.Root open={open} onOpenChange={onOpenChange}>
       <RD.Portal>
-        <RD.Overlay className="shares-backdrop">
+        <RD.Overlay className="shares-backdrop ui-overlay" {...backdrop}>
           <RD.Content className={cx('shares-sheet', className)} aria-describedby={undefined}
             onCloseAutoFocus={(e) => {
-              if (opener.current instanceof HTMLElement && opener.current.isConnected) {
+              if (canRefocus(opener.current)) {
                 e.preventDefault();
                 opener.current.focus();
               }
@@ -208,7 +273,7 @@ export function Sheet({ open, onOpenChange, title, className, children }: Omit<D
               <RD.Title asChild>
                 <span>{title}</span>
               </RD.Title>
-              <RD.Close className="ss-close" aria-label="Close">
+              <RD.Close className="ss-close ui-close" aria-label="Close">
                 <X size={14} aria-hidden />
               </RD.Close>
             </div>

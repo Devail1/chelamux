@@ -21,7 +21,7 @@ import { shortTime } from '../../../shared/format/index.ts';
 import { icons } from '../../../shared/icons/index.ts';
 import { Markdown } from '../../../shared/markdown/index.ts';
 import { createStore, useStore } from '../../../shared/store/index.ts';
-import { Dialog, DialogClose, IconButton, Tabs } from '../../../shared/ui/index.ts';
+import { Dialog, IconButton, Tabs } from '../../../shared/ui/index.ts';
 import {
   CI_CHIP,
   briefSource,
@@ -285,11 +285,6 @@ export function TaskModal() {
   const t = useStore(target);
   return (
     <Dialog open={t !== null} onOpenChange={(o) => !o && closeTaskModal()} title={(t && titleText(t.item).trim()) || 'Task'} hideTitle className="modal-task">
-      <DialogClose asChild>
-        <IconButton className="task-modal-close" label="Close">
-          <icons.close aria-hidden size={18} />
-        </IconButton>
-      </DialogClose>
       {t && <TaskBody key={t.seq} item={t.item} />}
     </Dialog>
   );

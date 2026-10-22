@@ -8,6 +8,7 @@
 import { api, BOOT } from '../../shared/api/index.ts';
 import { registerLane } from '../../shared/scheduler/index.ts';
 import { type Agent, agents as agentsStore } from '../../shared/store/agents.ts';
+import { onOverlayOpen } from '../../shared/ui/index.ts';
 import { archivedKeys, archivedSessions, pruneHidden, refreshArchive, setArchive } from './lib/archive.ts';
 import { getLayout, refreshLayout, writeLayout } from './lib/layout.ts';
 import { chelaNs, isObj, lsJson, lsRead, lsSet, postJson, publish, say, sayRefused } from './lib/page.ts';
@@ -55,7 +56,8 @@ const rerender = () => renderSidebarAgents(agentsNow());
 // column to an icon rail (persisted; pure CSS off a body class, so no row re-renders).
 // index.html's inline <body> script sets the class before first paint (CMX-89).
 const SIDEBAR_COLLAPSED_KEY = 'chela_sidebar_collapsed';
-const isPhone = () => window.matchMedia('(max-width: 768px)').matches;
+// optional: a page with no matchMedia (jsdom) is not a phone
+const isPhone = () => !!window.matchMedia?.('(max-width: 768px)').matches;
 
 // The canvas changed width without a window resize, so poke the wall's re-fit (a re-fit, not
 // a rebuild: no terminal reloads, tests/wall.test.mjs).
@@ -88,6 +90,9 @@ export function toggleSidebar(force?: boolean): void {
 export function closeSidebar(): void {
   if (isPhone()) toggleSidebar(false);
 }
+// CMX-306: a modal, sheet or the palette opened from the drawer opens with it shut, never
+// behind it (legacy closeSidebar() did this per opener; the kit does it for every overlay).
+onOverlayOpen(closeSidebar);
 
 if (lsRead(SIDEBAR_COLLAPSED_KEY, null) === '1') {
   document.body.classList.add('sidebar-collapsed');

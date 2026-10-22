@@ -1,9 +1,9 @@
 // CMX-218: the kit's overlays keep their behaviour (Radix) under our class names.
 import { act, fireEvent, render, screen } from '@testing-library/react';
 import { Share2 } from 'lucide-react';
-import { useState } from 'react';
-import { expect, test, vi } from 'vitest';
-import { AnchoredPopover, Button, Dialog, DialogClose, ItemButton, Menu, Popover, Sheet, TextInput, Toast, ToastProvider, Tooltip } from '../index.ts';
+import { useState, type ReactElement } from 'react';
+import { describe, expect, test, vi } from 'vitest';
+import { AnchoredPopover, Button, Dialog, DialogClose, ItemButton, Menu, Popover, Sheet, TextInput, Toast, ToastProvider, Tooltip, onOverlayOpen } from '../index.ts';
 import { must } from './setup.ts';
 
 function DialogHarness({ onOpenChange = () => {} }: { onOpenChange?: (o: boolean) => void }) {
@@ -40,10 +40,17 @@ test('the Dialog is named by its title and drawn with .modal-overlay / .modal', 
   fireEvent.click(screen.getByText('Open'));
   const dialog = screen.getByRole('dialog', { name: 'New task' });
   expect(dialog.className).toBe('modal modal-newtask');
-  expect(dialog.parentElement?.className).toBe('modal-overlay active');
+  expect(dialog.parentElement?.className).toBe('modal-overlay active ui-overlay');
   expect(dialog.querySelector('h3')?.textContent).toBe('New task');
   // No description: no aria-describedby pointing at an element that is not there.
   expect(dialog.hasAttribute('aria-describedby')).toBe(false);
+});
+
+test('CMX-306: focus opens on the content\'s first field, not on the corner close button', async () => {
+  render(<DialogHarness />);
+  fireEvent.click(screen.getByText('Open'));
+  await act(async () => {});
+  expect(document.activeElement).toBe(screen.getByLabelText('Title'));
 });
 
 test('focus moves into the Dialog, Escape closes it, and focus returns to the opener', async () => {
@@ -88,7 +95,7 @@ test('CMX-240: the sheet variant is drawn as the safety sheets are, its title in
   );
   const dlg = screen.getByRole('dialog', { name: 'Active shares' });
   expect(dlg.className).toBe('shares-sheet');
-  expect(must(dlg.parentElement).className).toBe('shares-backdrop ui-sheet');
+  expect(must(dlg.parentElement).className).toBe('shares-backdrop ui-sheet ui-overlay');
   expect(dlg.querySelector('.modal-desc')).toBeNull();
   expect(must(dlg.querySelector('.ss-sub')).textContent).toBe('Stop one to revoke it.');
   const hd = must(dlg.querySelector('.ss-hd'));
@@ -99,10 +106,15 @@ test('CMX-240: the sheet variant is drawn as the safety sheets are, its title in
   expect(onOpenChange).toHaveBeenCalledWith(false);
 });
 
-test('the modal variant has no sheet header or close button of its own', () => {
-  render(<Dialog open title="Plain" onOpenChange={() => {}} />);
+test('the modal variant has no sheet header; its close button is the corner x (CMX-306)', () => {
+  const onOpenChange = vi.fn();
+  render(<Dialog open title="Plain" onOpenChange={onOpenChange} />);
   const dlg = screen.getByRole('dialog', { name: 'Plain' });
-  expect([dlg.querySelector('.ss-hd'), screen.queryByRole('button', { name: 'Close' })]).toEqual([null, null]);
+  expect(dlg.querySelector('.ss-hd')).toBeNull();
+  const close = screen.getByRole('button', { name: 'Close' });
+  expect(close.className).toBe('task-modal-close ui-close');
+  fireEvent.click(close);
+  expect(onOpenChange.mock.calls).toEqual([[false]]);
 });
 
 test('Popover opens from its trigger as a .popover', () => {
@@ -232,10 +244,10 @@ test('a Sheet is a named dialog in the shares-sheet look; its x and Escape close
   fireEvent.click(opener);
   const sheet = screen.getByRole('dialog', { name: 'Pending approvals' });
   expect(sheet.className).toBe('shares-sheet approvals-sheet');
-  expect(must(sheet.parentElement).className).toBe('shares-backdrop');
+  expect(must(sheet.parentElement).className).toBe('shares-backdrop ui-overlay');
   expect(must(sheet.querySelector('.ss-hd')).textContent).toBe('Pending approvals');
   const close = screen.getByRole('button', { name: 'Close' });
-  expect(close.className).toBe('ss-close');
+  expect(close.className).toBe('ss-close ui-close');
   fireEvent.click(close);
   expect(screen.queryByRole('dialog')).toBeNull();
   await act(() => new Promise((r) => setTimeout(r, 0)));
@@ -380,4 +392,145 @@ test('Menu: a row can carry its own class, title, data attributes, trailing cont
   expect(press).toHaveBeenCalledTimes(1);
   expect(plain?.className).toBe('popover-item ov-item');
   expect(plain?.hasAttribute('title')).toBe(false);
+});
+
+// CMX-306: every overlay of the kit, on a phone: one z-index layer (.ui-overlay), a close button
+// (.ui-close, the 44px touch target), a backdrop tap that closes it, and the drawer shut as it
+// opens (onOverlayOpen). One row per surface, so a new variant without them fails here.
+const SURFACES: [name: string, draw: (p: { open: boolean; onOpenChange: (o: boolean) => void }) => ReactElement, closeClass: string][] = [
+  ['modal', (p) => <Dialog {...p} title="T" />, 'task-modal-close ui-close'],
+  ['sheet', (p) => <Dialog {...p} title="T" variant="sheet" />, 'ss-close ui-close'],
+  ['settings', (p) => <Dialog {...p} title="T" variant="settings" />, 'icon-btn ui-close'],
+  ['palette', (p) => <Dialog {...p} title="T" variant="palette" hideTitle />, 'task-modal-close ui-close palette-close'],
+  ['shortcuts', (p) => <Dialog {...p} title="T" variant="shortcuts" />, 'icon-btn ui-close'],
+  ['Sheet', (p) => <Sheet {...p} title="T" />, 'ss-close ui-close'],
+];
+
+describe.each(SURFACES)('CMX-306: the %s overlay', (_name, draw, closeClass) => {
+  const mount = (open = true) => {
+    const onOpenChange = vi.fn();
+    const r = render(draw({ open, onOpenChange }));
+    return { onOpenChange, r, overlay: () => must(screen.getByRole('dialog').parentElement) };
+  };
+
+  test('is on the overlay layer, with a close button that closes it', () => {
+    const { onOpenChange, overlay } = mount();
+    expect(overlay().classList.contains('ui-overlay')).toBe(true);
+    const close = screen.getByRole('button', { name: 'Close' });
+    expect(close.className).toBe(closeClass);
+    fireEvent.click(close);
+    expect(onOpenChange.mock.calls).toEqual([[false]]);
+  });
+
+  // a tap: the press and the click on the same element
+  const tap = (el: Element) => {
+    fireEvent.pointerDown(el);
+    fireEvent.click(el);
+  };
+
+  test('a tap on the backdrop closes it; one inside it does not', () => {
+    const { onOpenChange, overlay } = mount();
+    tap(screen.getByRole('dialog'));
+    expect(onOpenChange).not.toHaveBeenCalled();
+    tap(overlay());
+    expect(onOpenChange.mock.calls).toEqual([[false]]);
+  });
+
+  test('a press that starts inside it and ends on the backdrop (a text selection) leaves it open', () => {
+    const { onOpenChange, overlay } = mount();
+    fireEvent.pointerDown(screen.getByRole('dialog'));
+    fireEvent.click(overlay());
+    expect(onOpenChange).not.toHaveBeenCalled();
+    // and that press is spent: a later click with no press of its own does not close it either
+    fireEvent.click(overlay());
+    expect(onOpenChange).not.toHaveBeenCalled();
+  });
+
+  test('a backdrop press that never clicked there, then a click inside it (it bubbles up), leaves it open', () => {
+    const { onOpenChange, overlay } = mount();
+    fireEvent.pointerDown(overlay()); // released outside the window: no click on the backdrop
+    fireEvent.click(screen.getByRole('dialog')); // a click that lands inside it and bubbles up
+    expect(onOpenChange).not.toHaveBeenCalled();
+  });
+
+  test('a backdrop tap while a floating layer is open above it leaves the dialog open', () => {
+    const { onOpenChange, overlay } = mount();
+    const wrapper = document.createElement('div');
+    wrapper.setAttribute('data-radix-popper-content-wrapper', '');
+    document.body.appendChild(wrapper);
+    try {
+      tap(overlay());
+      expect(onOpenChange).not.toHaveBeenCalled();
+    } finally {
+      wrapper.remove();
+    }
+  });
+
+  test('opening it runs the overlay-open listeners once; closed, it runs none', () => {
+    const fn = vi.fn();
+    const off = onOverlayOpen(fn);
+    try {
+      const { r } = mount(false);
+      expect(fn).not.toHaveBeenCalled();
+      r.rerender(draw({ open: true, onOpenChange: () => {} }));
+      expect(fn).toHaveBeenCalledTimes(1);
+      r.rerender(draw({ open: false, onOpenChange: () => {} }));
+      expect(fn).toHaveBeenCalledTimes(1);
+    } finally {
+      off();
+    }
+  });
+});
+
+test('CMX-306: a listener that throws neither stops the overlay opening nor the next listener; off() unsubscribes', () => {
+  const err = vi.spyOn(console, 'error').mockImplementation(() => {});
+  const after = vi.fn();
+  const offBad = onOverlayOpen(() => { throw new RangeError('boom'); });
+  const offAfter = onOverlayOpen(after);
+  try {
+    const r = render(<Dialog open title="T" onOpenChange={() => {}} />);
+    expect(screen.getByRole('dialog', { name: 'T' })).toBeTruthy();
+    expect(after).toHaveBeenCalledTimes(1);
+    expect(err.mock.calls[0]?.[0]).toBe('an overlay-open listener failed');
+    offAfter();
+    r.rerender(<Dialog open={false} title="T" onOpenChange={() => {}} />);
+    r.rerender(<Dialog open title="T" onOpenChange={() => {}} />);
+    expect(after).toHaveBeenCalledTimes(1);
+  } finally {
+    offBad();
+    offAfter();
+    err.mockRestore();
+  }
+});
+
+test.each([
+  ['Dialog', (open: boolean, set: (o: boolean) => void) => <Dialog open={open} onOpenChange={set} title="T" />],
+  ['Sheet', (open: boolean, set: (o: boolean) => void) => <Sheet open={open} onOpenChange={set} title="T" />],
+])('CMX-306: a %s opened from a control now off screen (the shut drawer) does not send focus back there', async (_n, draw) => {
+  function Harness() {
+    const [open, setOpen] = useState(false);
+    return (
+      <>
+        <Button onClick={() => setOpen(true)}>Opener</Button>
+        {draw(open, setOpen)}
+      </>
+    );
+  }
+  render(<Harness />);
+  const opener = screen.getByText('Opener');
+  // laid out at the drawer's place once it has slid away: left of the viewport
+  opener.getBoundingClientRect = () => ({ left: -250, right: -150, top: 10, bottom: 50, width: 100, height: 40, x: -250, y: 10, toJSON: () => ({}) });
+  opener.focus();
+  fireEvent.click(opener);
+  fireEvent.click(screen.getByRole('button', { name: 'Close' }));
+  await act(() => new Promise((r) => setTimeout(r, 0)));
+  expect(screen.queryByRole('dialog')).toBeNull();
+  expect(document.activeElement).not.toBe(opener);
+  // on screen again, it gets focus back
+  opener.getBoundingClientRect = () => ({ left: 10, right: 110, top: 10, bottom: 50, width: 100, height: 40, x: 10, y: 10, toJSON: () => ({}) });
+  opener.focus();
+  fireEvent.click(opener);
+  fireEvent.click(screen.getByRole('button', { name: 'Close' }));
+  await act(() => new Promise((r) => setTimeout(r, 0)));
+  expect(document.activeElement).toBe(opener);
 });

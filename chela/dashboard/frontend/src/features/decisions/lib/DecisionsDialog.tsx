@@ -7,7 +7,7 @@ import { orchestratorSubscribe, type OrchestratorStatus } from '../../../shared/
 import { agents, type Agent } from '../../../shared/store/agents.ts';
 import { createStore, useStore } from '../../../shared/store/index.ts';
 import { orchestrator } from '../../../shared/store/orchestrator.ts';
-import { Button, Dialog, DialogClose, IconButton, Select, TextInput } from '../../../shared/ui/index.ts';
+import { Button, Dialog, Select, TextInput } from '../../../shared/ui/index.ts';
 import { CLASSES, classOf, type LogEvent } from '../feed.ts';
 import { filterDecisionEvents, itemFromDecisionPayload } from '../model.ts';
 import { RECOVERABLE_STATES, chipMeta } from './chip.ts';
@@ -192,11 +192,6 @@ export function DecisionsDialog() {
   const query = useStore(inboxQuery);
   return (
     <Dialog open={open} onOpenChange={(o) => !o && closeDecisions()} title="Decisions" className="modal-decisions">
-      <DialogClose asChild>
-        <IconButton className="task-modal-close" label="Close">
-          <icons.close aria-hidden size={18} />
-        </IconButton>
-      </DialogClose>
       <div className="decisions-body">
         <OwnerChip s={owner} />
         <TextInput label="Search decisions" placeholder="Search task, branch, PR…" plain autoFocus value={query} onChange={(v) => inboxQuery.set(v)} />
