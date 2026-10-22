@@ -4,7 +4,7 @@
 // until the first answer; a failed read keeps the last answer. The word is its own .shw-text
 // span so it ellipsizes on a phone while the glyph stays.
 import { act, cleanup, render } from '@testing-library/react';
-import { afterEach, beforeEach, expect, test, vi } from 'vitest';
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, test, vi } from 'vitest';
 import css from '../../../../../static/style.css?raw';
 import { StatusHealth, statusHealth, tickStatusHealth } from '../index.ts';
 
@@ -70,14 +70,22 @@ test('glyph + word, never colour alone; the word is its own span, with a narrow 
   expect(pill().title).toBe("claude agents --json is not answering. Every pane's busy/idle status is stale fleet-wide, not a calm fleet");
 });
 
-test('the pill may shrink (min-width 0, non-zero flex-shrink) and its word ellipsizes', () => {
-  const style = document.createElement('style');
-  style.textContent = css;
-  document.head.appendChild(style);
-  const cs = getComputedStyle(pill());
-  expect(cs.minWidth).toBe('0px');
-  expect(cs.flexShrink).not.toBe('0');
-  const word = getComputedStyle(pill().querySelector('.shw-text') as HTMLElement);
-  expect([word.overflow, word.textOverflow, word.whiteSpace]).toEqual(['hidden', 'ellipsis', 'nowrap']);
-  style.remove();
+// CMX-311: jsdom parses the 240 KB style.css on insertion, ~2 s on a loaded machine: once, in
+// beforeAll (the hook's own 10 s budget), not inside a test's 5 s, and only around these tests.
+describe('under style.css', () => {
+  let style: HTMLStyleElement;
+  beforeAll(() => {
+    style = document.createElement('style');
+    style.textContent = css;
+    document.head.append(style);
+  });
+  afterAll(() => style.remove());
+
+  test('the pill may shrink (min-width 0, non-zero flex-shrink) and its word ellipsizes', () => {
+    const cs = getComputedStyle(pill());
+    expect(cs.minWidth).toBe('0px');
+    expect(cs.flexShrink).not.toBe('0');
+    const word = getComputedStyle(pill().querySelector('.shw-text') as HTMLElement);
+    expect([word.overflow, word.textOverflow, word.whiteSpace]).toEqual(['hidden', 'ellipsis', 'nowrap']);
+  });
 });
