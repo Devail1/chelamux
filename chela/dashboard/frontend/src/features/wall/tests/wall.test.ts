@@ -259,6 +259,24 @@ test('the tick does nothing off the Wall, and a failed read changes nothing', as
   expect(tiles()).toEqual(['@1']);
 });
 
+test('an error body from /api/agents drops no pane, on the tick or the windows event', async () => {
+  await show([agent('@1'), agent('@2')]);
+  serve((p) => (p.endsWith('/api/agents') ? { error: 'busy' } : {}));
+  await termTick();
+  dispatch('windows', '{}');
+  await settle();
+  expect(tiles()).toEqual(['@1', '@2']);
+  expect(renderedWids).toEqual(['@1', '@2']);
+});
+
+test('a new tile with a saved spot leaves the free row where it was', async () => {
+  await show([agent('@1')]);
+  ready('@2', '@3');
+  localStorage.setItem('pc_wall_layout', JSON.stringify({ '@2': { x: 6, y: 10, w: 6, h: 4 } }));
+  await absorbFreshTerminals(['@1', '@2', '@3']);
+  expect(gs.adopted['@3']).toEqual({ x: 0, y: 10, w: 6, h: 5 });
+});
+
 test('the windows event reconciles by window id; off the Wall it is ignored', async () => {
   await show([agent('@1'), agent('@2')]);
   serve((p) => (p.endsWith('/api/agents') ? [agent('@2')] : {}));

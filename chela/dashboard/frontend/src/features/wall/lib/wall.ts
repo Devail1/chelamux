@@ -274,7 +274,7 @@ export async function absorbFreshTerminals(live: string[]): Promise<void> {
   for (const wid of fresh) {
     if (G.gridItem(wid)) continue;
     const c = spot(wid, { x: 0, y: nextY });
-    if (c.y === nextY) nextY += c.h;
+    if (!Number.isInteger(G.savedLayout()[wid]?.y)) nextY += c.h; // only a tile placed here moves the free row
     const el = tileEl(wid, c);
     gs.append(el);
     mountTileParts(el);
@@ -338,7 +338,10 @@ async function reconcile(): Promise<void> {
  * and the sidebar (its dots and "Needs you" stay in lockstep with the wall). */
 export async function termTick(): Promise<void> {
   if (!BOOT.terminalsEnabled || view.get() !== 'terminals') return;
-  try { setRows(await api('/api/agents')); } catch { return; } // transient: the next tick
+  let fresh: unknown;
+  try { fresh = await api('/api/agents'); } catch { return; } // transient: the next tick
+  if (!Array.isArray(fresh)) return; // an error body is no pane list: dropping every pane would be a lie
+  setRows(fresh);
   await reconcile();
   applyTermStatus();
   refreshPaneLabels();
@@ -411,6 +414,7 @@ function bindStage(stage: HTMLElement): void {
 onEvent('windows', () => {
   if (!BOOT.terminalsEnabled || view.get() !== 'terminals') return;
   api('/api/agents').then((fresh) => {
+    if (!Array.isArray(fresh)) return; // an error body: the 4 s tick catches up
     setRows(fresh);
     void reconcile();
     refreshPaneLabels();
