@@ -968,9 +968,6 @@ body {
 .shares-sheet .ss-close { margin-left: auto; background: none; border: 0; color: var(--muted, #7d8590);
     font-size: 20px; cursor: pointer; line-height: 1; padding: 0 4px; }
 .shares-sheet .ss-hd h3 { margin: 0; font: inherit; }
-/* CMX-240: the kit's sheet Dialog sits on the modal layer, so its own Select's list (210)
-   opens above it; the safety float (47) stays under it. */
-.shares-backdrop.ui-sheet { z-index: 200; }
 .shares-sheet .ss-mode-opt svg, .shares-indicator svg { flex: 0 0 auto; vertical-align: -2px; }
 .shares-sheet .ss-confirm-go { margin-top: 8px; min-height: 28px; }
 .shares-sheet .ss-sub { color: var(--muted, #7d8590); font-size: 11.5px; margin-bottom: 11px; }
@@ -2096,6 +2093,7 @@ input[type="text"]:focus, textarea:focus, select:focus {
 .modal-overlay.active { display: flex; }
 
 .modal {
+    position: relative;   /* CMX-306: its close button (.task-modal-close) sits in its corner */
     background: var(--surface);
     border: 1px solid var(--border);
     border-radius: 10px;
@@ -3894,7 +3892,11 @@ body.sidebar-resizing iframe { pointer-events: none; }
     background: var(--surface); border: 1px solid var(--border); border-radius: 12px;
     box-shadow: 0 20px 60px -10px rgba(0, 0, 0, 0.7);
     animation: palette-in 0.13s ease-out;
+    position: relative;
 }
+/* CMX-306: the palette's close button, in the input row's corner (a phone has no Esc). */
+.palette-close { top: 4px; right: 4px; }
+.palette-input { padding-right: 52px; }
 @keyframes palette-in { from { opacity: 0; transform: translateY(-8px); } to { opacity: 1; transform: translateY(0); } }
 .palette-input {
     flex: 0 0 auto; font: inherit; font-size: 15px; color: var(--text);
@@ -4389,7 +4391,7 @@ body.sidebar-resizing iframe { pointer-events: none; }
         position: fixed;
         top: 0; left: 0; bottom: 0;
         width: 264px; max-width: 82vw;
-        z-index: 45;
+        z-index: var(--z-drawer);
         transform: translateX(-100%);
         transition: transform 0.18s ease;
         padding-left: env(safe-area-inset-left);
@@ -4884,6 +4886,18 @@ body.sidebar-resizing iframe { pointer-events: none; }
 .btn-sm { padding: 2px 8px; font-size: 11px; min-height: 24px; }
 .btn-md { padding: 5px 12px; font-size: 12px; min-height: 28px; }
 .btn:disabled { opacity: 0.55; cursor: not-allowed; }
+/* CMX-306: the overlay layer. Every Dialog and Sheet of the kit is a .ui-overlay, ONE layer
+   over the phone drawer (--z-drawer) and the safety float (47), under the floating layer
+   (.popover.ui-floating, 210) so a Select in a Dialog opens above it. The variants' own
+   classes set other values (the Settings scrim is the drawer's 40), so this rule comes
+   after them. */
+:root { --z-drawer: 45; --z-overlay: 200; }
+.ui-overlay { z-index: var(--z-overlay); }
+/* Its close button: a 44px target on a touch screen, where it is the way out (no Esc). */
+@media (pointer: coarse), (max-width: 768px) {
+    .ui-close { min-width: 44px; min-height: 44px; display: inline-flex; align-items: center; justify-content: center; }
+    .modal > h3 { padding-right: 40px; }
+}
 /* Radix positions a wrapper around the floating box (and copies the box's z-index onto it);
    the box itself must not be fixed too. Above .modal-overlay (200): a Select in a Dialog. */
 .popover.ui-floating, .tap-tip.ui-floating { position: static; }
