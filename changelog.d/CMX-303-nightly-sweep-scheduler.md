@@ -6,8 +6,8 @@
   dispatch slots and in the judge's shared memory slice. It fetches `origin`, reads
   `origin/<workspace.base_branch>`, and sweeps the lines that still blame to a STANDARD-tier
   commit merged in the last 24 h (core, always-human and prose merges are not swept). After a
-  night that could not verify, the next one catches up from the last night that did, at most a
-  week back. Each surviving guard is handed to a filer once; the filed keys live in
+  night that could not verify (or left mutations unrun), the next one catches up from the last
+  night that did, at most a week back. Each surviving guard is handed to a filer once; the filed keys live in
   `$CHELA_DIR/sweep-nightly/filed.json` and survive restarts. Until the filing slice lands,
   the filer files nothing and records what it would have filed in
   `$CHELA_DIR/sweep-nightly/would-file.jsonl`. It is skipped while

@@ -372,6 +372,28 @@ def test_merged_commits_parses_every_field_of_each_commit(tmp_path):
          "files": ["plugin/hook.py"], "introduced": [shas[1]]}]
 
 
+def test_the_log_reads_the_whole_window_past_a_thousand_commits(tmp_path):
+    """No commit cap: a window holding more than 1000 first-parent commits is read whole."""
+    repo = _repo(tmp_path, prs=[({"size.py": WEAK}, "the oldest (#1)", None)])
+    for i in range(1001):
+        _git(repo, "commit", "-q", "--allow-empty", "-m", f"empty {i}")
+    wf = load_workflow(repo / "WORKFLOW.md")
+    since = datetime.fromisoformat(OLD).timestamp() + 1
+    got = sweep_nightly.merged_commits(repo, "HEAD", since, wf)
+    assert len(got) == 1002 and got[-1]["subject"] == "the oldest (#1)"
+
+
+def test_the_log_is_bounded_by_the_window_start(tmp_path, monkeypatch):
+    repo = _repo(tmp_path, prs=[])
+    seen = []
+    real = sweep_nightly._git
+    monkeypatch.setattr(sweep_nightly, "_git", lambda cwd, *a, **k: seen.append(a) or
+                        real(cwd, *a, **k))
+    sweep_nightly.merged_commits(repo, "HEAD", 1234.9, load_workflow(repo / "WORKFLOW.md"))
+    assert seen[0] == ("log", "--first-parent", "--since=@1234",
+                       "--format=%H%x1f%ct%x1f%P%x1f%s", "HEAD", "--")
+
+
 def test_the_window_edge_is_inclusive(tmp_path):
     repo = _repo(tmp_path, prs=[({"size.py": WEAK}, "PR (#1)", "2021-06-01T00:00:00+00:00")])
     wf = load_workflow(repo / "WORKFLOW.md")
@@ -792,6 +814,15 @@ def test_a_budget_overflow_is_counted_unrun(tmp_path):
     repo, chela = _repo(tmp_path, extra="sweep:\n  max_mutations: 1\n"), tmp_path / "chela"
     res = _run(repo, chela, Filer())
     assert (res["mutations"], res["unrun"]) == (5, 4)
+    # ...and lines never measured are not covered: the window stays where it was.
+    assert _covered_record(chela) == {}
+
+
+def test_a_battery_with_nothing_unrun_moves_the_window(tmp_path):
+    repo, chela = _repo(tmp_path, extra="sweep:\n  max_mutations: 5\n"), tmp_path / "chela"
+    res = _run(repo, chela, Filer())
+    assert (res["mutations"], res["unrun"]) == (5, 0)
+    assert _covered_record(chela) == {str((repo / "WORKFLOW.md").resolve()): res["at"]}
 
 
 def test_sweep_lines_mutates_exactly_those_lines_and_names_unsupported(tmp_path):

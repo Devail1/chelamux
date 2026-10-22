@@ -20,7 +20,7 @@ This module is slice 1/3, the scheduler; slices 2 and 3 plug into the :class:`Fi
   :func:`chela.sweep.sweep` — the judge's own mechanics and budget.
 * **The covered window.** The last 24 h — or, after a night that could not look, back to the
   last run that did (at most :data:`MAX_CATCHUP_SECONDS`). Only a run that looked and
-  finished (not CANNOT VERIFY, no refused filing) moves it, in ``$CHELA_DIR/sweep-nightly/
+  finished (not CANNOT VERIFY, no refused filing, no mutation left UNRUN) moves it, in ``$CHELA_DIR/sweep-nightly/
   covered.json``.
 * **Filed.** Each surviving guard (one source line) goes to the :class:`Filer` once. A survivor
   already filed is never filed again: its key — workflow, file, category, line text before and
@@ -233,7 +233,7 @@ def merged_commits(repo: Path, ref: str, since: float, wf) -> list[dict]:
     tier, files, introduced}`` — ``introduced`` is every commit it brought in (itself, or a
     merge's whole side branch). Raises :class:`_Git` on any read that fails."""
     out = []
-    log_out = _git(repo, "log", "--first-parent", "--max-count=1000",
+    log_out = _git(repo, "log", "--first-parent", f"--since=@{int(since)}",
                    "--format=%H%x1f%ct%x1f%P%x1f%s", ref, "--")
     for raw in log_out.splitlines():
         sha, ct, parents, subject = (raw.split("\x1f") + ["", "", ""])[:4]
@@ -368,8 +368,9 @@ def run(wf, *, now: float | None = None, chela_dir: Path | None = None,
                                   why=f"the sweep crashed: {type(e).__name__}: {e}")
                 # ⛔ A night that could not verify (even after it read the commits: a red
                 # baseline, a torn key store) or could not file must not move the window.
+                # Nor does one whose budget left mutations UNRUN: those lines were never measured.
                 if result.get("covered") and result["status"] != CANNOT_VERIFY \
-                        and not result["failed"]:
+                        and not result["failed"] and not result.get("unrun"):
                     _record_covered(wf, now, chela_dir)
     log.info("nightly sweep (%s): %s%s", wf.path, result["status"],
              f" — {result['why']}" if result.get("why") else "")
