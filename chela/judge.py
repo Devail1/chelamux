@@ -763,17 +763,18 @@ def run_suite(
         # 🧠 CMX-119: one of the box's K suite slots, then a memory-capped scope of its own.
         with (suite_guard.slot(cwd, on_wait=_run_ctx.get("on_slot_wait"),
                                max_wait=suite_guard.max_wait(timeout)),
-              suite_guard.bounded(test_cmd) as (cmd, check),
               tempfile.TemporaryDirectory(prefix="chela-suite-") as scratch):
             env = _suite_env(Path(scratch))
             env.update(extra_env or {})
             run["env_diff"] = _env_diff(os.environ, env)
-            # ⛔ CMX-253: the whole tree, not just the shell, dies on a timeout.
-            task = _run_ctx.get("task")
-            out = procguard.run_shell_group(
-                cmd, cwd=str(cwd), env=env, timeout=timeout,
-                frozen=(lambda since: frozen_since(task, since)) if task else None)
-            breach = check(out.returncode)
+            # ⛔ CMX-307: the scope is probed and launched under the suite's OWN env.
+            with suite_guard.bounded(test_cmd, env) as (cmd, check):
+                # ⛔ CMX-253: the whole tree, not just the shell, dies on a timeout.
+                task = _run_ctx.get("task")
+                out = procguard.run_shell_group(
+                    cmd, cwd=str(cwd), env=env, timeout=timeout,
+                    frozen=(lambda since: frozen_since(task, since)) if task else None)
+                breach = check(out.returncode)
     except subprocess.TimeoutExpired as e:
         run.update(ended=_iso_now(), output=_decoded(e.stdout) + _decoded(e.stderr))
         return SuiteResult(False, -1, 0, 0, 0, "", f"the suite did not finish in {timeout:.0f}s; "

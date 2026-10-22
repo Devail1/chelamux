@@ -62,20 +62,20 @@ def test_verdict(tmp_path, cgroup, events, rc, want):
 
 def test_bounded_is_a_passthrough_when_the_ceiling_is_off(guard_on, monkeypatch):
     monkeypatch.setenv("CHELA_SUITE_MEMORY_MAX", "0")
-    monkeypatch.setattr(suite_guard, "_scope_works", lambda: pytest.fail("probed"))
+    monkeypatch.setattr(suite_guard, "_scope_works", lambda *_: pytest.fail("probed"))
     with suite_guard.bounded("uv run pytest") as (cmd, check):
         assert (cmd, check(137)) == ("uv run pytest", None)
 
 
 def test_bounded_is_a_passthrough_without_a_working_scope(guard_on, monkeypatch):
-    monkeypatch.setattr(suite_guard, "_scope_works", lambda: False)
+    monkeypatch.setattr(suite_guard, "_scope_works", lambda *_: False)
     with suite_guard.bounded("uv run pytest") as (cmd, check):
         assert (cmd, check(137)) == ("uv run pytest", None)
 
 
 @pytest.mark.parametrize("budget,slice_arg", [(0, ""), (8 * G, " --slice=chela-agents.slice")])
 def test_bounded_pins_the_full_scope_argv(guard_on, monkeypatch, budget, slice_arg):
-    monkeypatch.setattr(suite_guard, "_scope_works", lambda: True)
+    monkeypatch.setattr(suite_guard, "_scope_works", lambda *_: True)
     monkeypatch.setattr(suite_guard.config, "memory_slice_budget_bytes", lambda: budget)
     monkeypatch.setattr(suite_guard.uuid, "uuid4", lambda: type("U", (), {"hex": "f" * 32}))
     with suite_guard.bounded("uv run pytest") as (cmd, check):
@@ -94,16 +94,17 @@ def test_bounded_pins_the_full_scope_argv(guard_on, monkeypatch, budget, slice_a
 
 def test_scope_probe_pins_its_argv_and_fails_closed(monkeypatch):
     calls = []
-    monkeypatch.setattr(suite_guard, "_scope_ok", False)
+    monkeypatch.setattr(suite_guard, "_scope_ok", set())
     monkeypatch.setattr(suite_guard.memcap, "available", lambda: True)
     monkeypatch.setattr(suite_guard.subprocess, "run", lambda *a, **k: calls.append((a, k)))
     assert suite_guard._scope_works() is True
     assert calls == [((["systemd-run", "--user", "--scope", "--collect", "-q", "--", "true"],),
-                      {"check": True, "capture_output": True, "timeout": 10})]
+                      {"check": True, "capture_output": True, "timeout": 10,
+                       "env": dict(os.environ)})]
     assert suite_guard._scope_works() is True and len(calls) == 1     # remembered
     for exc in (subprocess.CalledProcessError(1, "x"), subprocess.TimeoutExpired("x", 10),
                 FileNotFoundError("systemd-run")):
-        monkeypatch.setattr(suite_guard, "_scope_ok", False)
+        monkeypatch.setattr(suite_guard, "_scope_ok", set())
         monkeypatch.setattr(suite_guard.subprocess, "run",
                             lambda *a, _e=exc, **k: (_ for _ in ()).throw(_e))
         assert suite_guard._scope_works() is False
@@ -111,6 +112,80 @@ def test_scope_probe_pins_its_argv_and_fails_closed(monkeypatch):
     monkeypatch.setattr(suite_guard.subprocess, "run", lambda *a, **k: pytest.fail("probed"))
     assert suite_guard._scope_works() is False       # no systemd-run: not even probed
     assert suite_guard._scope_works() is False       # a failure is not remembered as success
+
+
+# --- CMX-307: the scope is probed and launched under the suite's OWN env ----------------
+#
+# The judge's suite env drops every var chela.env set — XDG_RUNTIME_DIR among them on a
+# daemon started under `env -i`. A probe under os.environ passed, the launch under the suite
+# env could not reach the user bus, and every judged suite came back CANNOT VERIFY.
+
+FAKE_SYSTEMD_RUN = """#!/bin/sh
+echo "$XDG_RUNTIME_DIR|$DBUS_SESSION_BUS_ADDRESS|$*" >> "$0.calls"
+[ -n "$XDG_RUNTIME_DIR" ] || { echo "Failed to connect to bus: No medium found" >&2; exit 1; }
+while [ "$1" != "--" ]; do shift; done; shift; exec "$@"
+"""
+
+
+@pytest.fixture
+def bus_stripped(guard_on, monkeypatch, tmp_path):
+    """A fake ``systemd-run`` that, like the real one, needs the user bus; an operator env
+    that has it; and a suite env stripped of it exactly the way ``_suite_env`` strips it."""
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    for name, body in (("systemd-run", FAKE_SYSTEMD_RUN), ("systemctl", "#!/bin/sh\n")):
+        (bin_dir / name).write_text(body)
+        (bin_dir / name).chmod(0o755)
+    monkeypatch.setenv("PATH", f"{bin_dir}:{os.environ['PATH']}")
+    monkeypatch.setattr(suite_guard, "_scope_ok", set())
+    monkeypatch.setenv("XDG_RUNTIME_DIR", "/run/user/4242")
+    monkeypatch.setenv("DBUS_SESSION_BUS_ADDRESS", "unix:path=/run/user/4242/bus")
+    monkeypatch.setattr(suite_guard.config, "ENV_FILE_VARS",
+                        {k: os.environ[k] for k in suite_guard.BUS_VARS})
+    return bin_dir / "systemd-run.calls"
+
+
+def test_a_suite_env_without_the_user_bus_still_launches_its_scope(bus_stripped, tmp_path):
+    seen = tmp_path / "seen"
+    result = judge.run_suite(
+        f"echo \"[$XDG_RUNTIME_DIR|$DBUS_SESSION_BUS_ADDRESS]\" > {seen}", tmp_path, timeout=30)
+    assert "Failed to connect to bus" not in result.run["output"]
+    assert result.run["env_diff"]["XDG_RUNTIME_DIR"] is None          # the suite env strips it
+    calls = bus_stripped.read_text().splitlines()
+    assert [c.split("|")[2].endswith("-- true") for c in calls] == [True, False]  # probe, launch
+    for call in calls:                                 # the wrapper reached the bus BOTH times
+        assert call.startswith("/run/user/4242|unix:path=/run/user/4242/bus|")
+    assert seen.read_text() == "[|]\n"                # …and the suite still saw its own env
+    # The fake cannot move the run into a real scope, so the verdict still fails closed.
+    assert "ceiling was NOT applied" in result.detail
+
+
+def test_a_suite_env_that_keeps_its_own_bus_value_gets_it_back(bus_stripped, monkeypatch,
+                                                                 tmp_path):
+    seen = tmp_path / "seen"
+    judge.run_suite(f"echo \"$XDG_RUNTIME_DIR\" > {seen}", tmp_path, timeout=30,
+                    extra_env={"XDG_RUNTIME_DIR": "/suite/own"})
+    assert seen.read_text() == "/suite/own\n"
+    assert all(c.startswith("/run/user/4242|") for c in bus_stripped.read_text().splitlines())
+
+
+def test_no_user_bus_anywhere_degrades_to_an_unbounded_run(bus_stripped, monkeypatch,
+                                                           tmp_path, caplog):
+    for k in suite_guard.BUS_VARS:
+        monkeypatch.delenv(k)
+    result = judge.run_suite("exit 0", tmp_path, timeout=30)
+    assert result.green and result.detail == ""                       # the documented fallback
+    assert "runs WITHOUT a memory ceiling" in caplog.text
+    assert bus_stripped.read_text().splitlines() == ["||--user --scope --collect -q -- true"]
+
+
+@pytest.mark.skipif(not suite_guard._scope_works(), reason="needs a systemd --user session")
+def test_the_real_scope_applies_under_a_bus_stripped_suite_env(guard_on, monkeypatch):
+    monkeypatch.setattr(suite_guard, "_scope_ok", set())
+    monkeypatch.setattr(suite_guard.config, "ENV_FILE_VARS",
+                        {k: os.environ[k] for k in suite_guard.BUS_VARS if k in os.environ})
+    result = judge.run_suite('test -z "$XDG_RUNTIME_DIR"', guard_on, timeout=60)
+    assert result.green and result.detail == "", result.detail
 
 
 def test_a_threads_wait_is_credited_to_its_own_worktree_only(slots_on, monkeypatch):
@@ -124,7 +199,7 @@ def test_a_suite_over_its_ceiling_is_cannot_verify_never_a_pass(guard_on, monkey
     import contextlib
 
     @contextlib.contextmanager
-    def breached(test_cmd):
+    def breached(test_cmd, env=None):
         yield test_cmd, lambda rc: "suite exceeded 6.0G (its memory ceiling, CMX-119)"
     monkeypatch.setattr(judge.suite_guard, "bounded", breached)
     result = judge.run_suite("true", guard_on)
@@ -158,7 +233,8 @@ def test_reap_pins_its_argv_and_never_raises(monkeypatch, caplog):
     monkeypatch.setattr(suite_guard.subprocess, "run", lambda *a, **k: calls.append((a, k)))
     suite_guard._reap("chela-suite-abc")
     assert calls == [((["systemctl", "--user", "kill", "--signal=SIGKILL",
-                        "chela-suite-abc.scope"],), {"capture_output": True, "timeout": 10})]
+                        "chela-suite-abc.scope"],), {"capture_output": True, "timeout": 10,
+                                                  "env": None})]
     monkeypatch.setattr(suite_guard.subprocess, "run",
                         lambda *a, **k: (_ for _ in ()).throw(subprocess.TimeoutExpired("x", 10)))
     suite_guard._reap("chela-suite-abc")
@@ -446,7 +522,7 @@ def test_slot_max_wait_env_then_config_then_four_timeouts(guard_on, monkeypatch,
 
 
 def test_no_working_scope_with_a_ceiling_on_says_so(guard_on, monkeypatch, caplog):
-    monkeypatch.setattr(suite_guard, "_scope_works", lambda: False)
+    monkeypatch.setattr(suite_guard, "_scope_works", lambda *_: False)
     with suite_guard.bounded("x"):
         pass
     assert "runs WITHOUT a memory ceiling" in caplog.text

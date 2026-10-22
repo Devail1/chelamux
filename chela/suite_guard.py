@@ -31,6 +31,7 @@ import tempfile
 import threading
 import time
 import uuid
+from collections.abc import Mapping
 from pathlib import Path
 
 from chela import config, memcap
@@ -74,62 +75,90 @@ def verdict(unit: str, cap: int, files: Path, returncode: int) -> str | None:
     return None
 
 
-_scope_ok = False      # a probe that once worked is not re-run by every suite in a battery
+# The user-bus vars ``systemd-run --user`` needs to find the user's systemd. A suite's env may
+# not carry them: ``judge._suite_env`` drops every var ``chela.env`` set, and a daemon started
+# under ``env -i`` gets ``XDG_RUNTIME_DIR`` only from there. They name the user's systemd, not
+# live chela state, so the WRAPPER gets the operator's values and the suite gets its own back.
+BUS_VARS = ("XDG_RUNTIME_DIR", "DBUS_SESSION_BUS_ADDRESS")
+
+_scope_ok: set[tuple] = set()  # launch envs a probe worked under, not re-probed by every run
 
 
-def _scope_works() -> bool:
+def _bus_added(env: Mapping[str, str]) -> dict[str, str]:
+    """The operator's user-bus vars that ``env`` lacks or sets differently."""
+    return {k: os.environ[k] for k in BUS_VARS
+            if os.environ.get(k) and env.get(k) != os.environ[k]}
+
+
+def _scope_works(env: Mapping[str, str] | None = None) -> bool:
     """A harmless scope, launched for real — ``systemd-run`` on PATH is not a user session.
+    ⛔ Probed under the SAME env the real launch gets (``env`` plus :func:`_bus_added`): a
+    probe run under any other env can pass where the launch then fails (CMX-307).
     Only a success is remembered: a failed probe is retried by the next run."""
-    global _scope_ok
-    if _scope_ok:
+    env = os.environ if env is None else env
+    launch = {**env, **_bus_added(env)}
+    key = tuple(launch.get(k) for k in BUS_VARS)
+    if key in _scope_ok:
         return True
     if not memcap.available():
         return False
     try:
         subprocess.run(["systemd-run", "--user", "--scope", "--collect", "-q", "--", "true"],
-                       check=True, capture_output=True, timeout=10)
+                       check=True, capture_output=True, timeout=10, env=launch)
     except (OSError, subprocess.SubprocessError):
         return False
-    _scope_ok = True
+    _scope_ok.add(key)
     return True
 
 
 @contextlib.contextmanager
-def bounded(test_cmd: str):
+def bounded(test_cmd: str, env: Mapping[str, str] | None = None):
     """Yield ``(cmd, check)``: ``cmd`` runs ``test_cmd`` inside its own memory-capped scope
     and ``check(returncode)`` is :func:`verdict`. With the ceiling off, or no
-    ``systemd-run``, ``cmd`` is ``test_cmd`` unchanged and ``check`` always passes."""
+    ``systemd-run``, ``cmd`` is ``test_cmd`` unchanged and ``check`` always passes.
+
+    ``env`` is the env ``cmd`` will be run under (default ``os.environ``). ``systemd-run``
+    alone gets the operator's user-bus vars on top (:data:`BUS_VARS`); ``test_cmd`` gets
+    ``env``'s own values back, so the suite still sees exactly the env it was given."""
+    env = os.environ if env is None else env
     cap = ceiling_bytes()
-    if not cap or not _scope_works():
+    if not cap or not _scope_works(env):
         if cap:
             log.warning("suite_guard: no working `systemd-run --user --scope` — this suite "
                         "runs WITHOUT a memory ceiling (CMX-119)")
         yield test_cmd, lambda _rc: None
         return
+    added = _bus_added(env)
+    q = shlex.quote
+    outer = "".join(f"{k}={q(v)} " for k, v in added.items())
+    # `env` reads options only before the first NAME=VALUE: every `-u` goes first.
+    restore = ("".join(f" -u {k}" for k in added if k not in env)
+               + "".join(f" {k}={q(env[k])}" for k in added if k in env))
     unit = f"chela-suite-{uuid.uuid4().hex[:12]}"
     in_slice = f" --slice={memcap.SLICE_NAME}" if config.memory_slice_budget_bytes() else ""
     with tempfile.TemporaryDirectory(prefix="chela-suite-guard-") as tmp:
         files = Path(tmp)
-        q = shlex.quote
         inner = (f"cat /proc/self/cgroup > {q(str(files / 'cgroup'))}; sh -c {q(test_cmd)}; "
                  f"rc=$?; cg=/sys/fs/cgroup$(cut -d: -f3 /proc/self/cgroup); "
                  f"cat \"$cg/memory.events\" > {q(str(files / 'events'))}; exit $rc")
-        cmd = (f"systemd-run --user --scope --collect -q --unit={unit}{in_slice} "
+        cmd = (f"{'env ' + outer if outer else ''}"
+               f"systemd-run --user --scope --collect -q --unit={unit}{in_slice} "
                f"-p MemoryMax={cap} -p MemorySwapMax=0 -p OOMPolicy=continue "
-               f"-- sh -c {q(inner)}")
+               f"-- {'env' + restore + ' ' if restore else ''}sh -c {q(inner)}")
         try:
             yield cmd, lambda rc: verdict(unit, cap, files, rc)
         finally:
-            _reap(unit)
+            _reap(unit, {**env, **added})
 
 
-def _reap(unit: str) -> None:
+def _reap(unit: str, env: Mapping[str, str] | None = None) -> None:
     """SIGKILL whatever the suite left in its scope. A child reparented to PID 1 keeps its
     cgroup, so this reaches what 10-13's leaked PM2 daemons escaped (they ignored SIGTERM).
-    An already-empty scope is collected and the call simply fails — nothing to do."""
+    An already-empty scope is collected and the call simply fails — nothing to do.
+    ``env`` is the env the scope was launched under, so this reaches the same user bus."""
     try:
         subprocess.run(["systemctl", "--user", "kill", "--signal=SIGKILL", f"{unit}.scope"],
-                       capture_output=True, timeout=10)
+                       capture_output=True, timeout=10, env=env)
     except (OSError, subprocess.SubprocessError):
         log.warning("suite_guard: could not reap %s.scope", unit)
 
