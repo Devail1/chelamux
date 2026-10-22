@@ -50,14 +50,14 @@ def test_the_committed_build_matches_a_fresh_build_of_src():
 
 
 def _copy_dashboard(tmp_path: Path) -> Path:
-    """The frontend beside a copy of the static/ it bundles (CMX-215: main.tsx boots
-    ../../static/js through boot.ts, which reaches collab/ too), so a test can change either
-    without touching the repo."""
+    """The frontend beside a copy of the static/ it bundles (CMX-215: main.tsx imports
+    ../../static/js, which reaches collab/ too, and since CMX-248 style.css and its fonts), so
+    a test can change either without touching the repo."""
     tree = tmp_path / "dashboard" / "frontend"
     shutil.copytree(FRONTEND, tree, ignore=shutil.ignore_patterns("node_modules"))
     (tree / "node_modules").symlink_to(FRONTEND / "node_modules")
     shutil.copytree(BUILT.parent, tmp_path / "dashboard" / "static",
-                    ignore=shutil.ignore_patterns("app", "vendor", "img", "fonts"))
+                    ignore=shutil.ignore_patterns("app", "vendor", "img"))
     return tree
 
 
