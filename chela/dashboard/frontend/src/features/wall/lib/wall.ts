@@ -37,7 +37,6 @@ export let renderedWids: string[] = [];
 let active = ''; // the single-mode pane
 let paneDefaulted = ''; // a pane picked before the sidebar had an order (adoptSidebarDefault)
 
-const ON = BOOT.terminalsEnabled;
 const $ = (id: string) => document.getElementById(id);
 const rows = () => agents.get() as HeadAgent[];
 const liveWids = (): string[] => rows().filter((a) => (a as { online?: boolean }).online !== false && a.window_id).map((a) => a.window_id as string);
@@ -66,7 +65,7 @@ pinnedPanes.subscribe(() => {
 // The fill is viewport-relative: a resize re-applies the preset (debounced).
 let resizeTimer: ReturnType<typeof setTimeout> | undefined;
 window.addEventListener('resize', () => {
-  if (!ON || mode !== 'wall' || !G.hasGrid()) return;
+  if (!BOOT.terminalsEnabled || mode !== 'wall' || !G.hasGrid()) return;
   clearTimeout(resizeTimer);
   resizeTimer = setTimeout(G.applyGridLayout, 200);
 });
@@ -208,12 +207,13 @@ export function setTermMode(m: string): void {
 
 /** The Wall view, in wall mode: a sidebar click then minimizes an open pane (CMX-139). */
 export const isWallVisible = (): boolean => view.get() === 'terminals' && mode === 'wall';
-const sigOf = (wids: string[]) => `${mode}|${active}|${wids.slice().sort().join(',')}`; // by wid: a rename is no change
+// By wid (a rename is no change); the open pane counts in single mode only, where it is drawn.
+const sigOf = (wids: string[]) => `${mode}|${mode === 'single' ? active : ''}|${wids.slice().sort().join(',')}`;
 
 /** Render the Wall (the view's tick). Keeps every live iframe unless the mode, the single pane or
  * the pane set changed. `ctxRead`: the tick's shared context read (CMX-166). */
 export async function renderTerminals(ctxRead?: Promise<unknown> | null): Promise<void> {
-  if (!ON) return;
+  if (!BOOT.terminalsEnabled) return;
   if (!rows().length) setRows(await api('/api/agents'));
   const wids = liveWids();
   if (G.isPhone()) mode = 'single'; // a 12-column wall is useless at 375 px
@@ -309,7 +309,7 @@ export function dropTerminalPane(wid: string): void {
 
 /** Bring a pane to the user: the Wall, restored if minimized, scrolled to, focused, flashed. */
 export function focusPaneByWid(wid: string): void {
-  if (!ON || !wid) return;
+  if (!BOOT.terminalsEnabled || !wid) return;
   paneDefaulted = ''; // an explicit focus beats the stored pane and becomes it
   rememberPane(wid);
   host.selectView('terminals');
@@ -337,7 +337,7 @@ async function reconcile(): Promise<void> {
 /** The 4 s tick: reconcile, then repaint status, labels, rooms (made from the CLI too), context
  * and the sidebar (its dots and "Needs you" stay in lockstep with the wall). */
 export async function termTick(): Promise<void> {
-  if (!ON || view.get() !== 'terminals') return;
+  if (!BOOT.terminalsEnabled || view.get() !== 'terminals') return;
   try { setRows(await api('/api/agents')); } catch { return; } // transient: the next tick
   await reconcile();
   applyTermStatus();
@@ -354,7 +354,7 @@ export async function termTick(): Promise<void> {
 
 /** Relabel without touching an iframe (a rename only changes text). */
 export function refreshPaneLabels(): void {
-  if (!ON) return;
+  if (!BOOT.terminalsEnabled) return;
   refreshPaneHeads();
   if (mode === 'wall') refreshDock();
 }
@@ -381,10 +381,10 @@ export function stepAgentMobile(dir: number): void {
 // Delegated off #term-stage, bound once, so they survive rebuilds: the header swipe (phones,
 // single mode) and, while Focus is on, a click on a strip pane's header promotes it (a button,
 // link or menu in the header keeps its own meaning).
-let bound = false;
+const bound = new WeakSet<HTMLElement>();
 function bindStage(stage: HTMLElement): void {
-  if (bound) return;
-  bound = true;
+  if (bound.has(stage)) return;
+  bound.add(stage);
   let x0: number | null = null;
   let y0 = 0;
   stage.addEventListener('touchstart', (e) => {
@@ -409,7 +409,7 @@ function bindStage(stage: HTMLElement): void {
 // The window set changed (util.js already dropped the agent cache): reconcile by window id, so a
 // pure rename is a no-op. It also fires with the Wall hidden; the guard skips it then.
 onEvent('windows', () => {
-  if (!ON || view.get() !== 'terminals') return;
+  if (!BOOT.terminalsEnabled || view.get() !== 'terminals') return;
   api('/api/agents').then((fresh) => {
     setRows(fresh);
     void reconcile();
