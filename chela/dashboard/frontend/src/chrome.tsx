@@ -6,16 +6,22 @@ import { AccessRequestsPill, AccessRequestsSheet } from './features/accessreq/in
 import { AgentDetail, SendMessage } from './features/agentdetail/index.ts';
 import { ApprovalsPill, ApprovalsSheet } from './features/approvals/index.ts';
 import { LaunchMenu, NewSessionButton, NewSessionFab } from './features/launcher/index.ts';
+import { Palette, Shortcuts } from './features/palette/index.ts';
 import { PrimaryMenu, SessionsCount } from './features/primarymenu/index.ts';
 import { Resources } from './features/resources/index.ts';
+import { Settings } from './features/settings/index.ts';
 import { StatusHealth } from './features/statushealth/index.ts';
 import { UpdateBanner } from './features/update/index.ts';
 import { mountIsland } from './shared/islands/index.tsx';
 
-/** CMX-219: what floats over the page, one root: each portals or fixes itself. */
+/** CMX-219: what floats over the page, one root: each portals or fixes itself. CMX-221: plus
+ * Settings, the ⌘K palette and the shortcuts sheet. */
 export function Overlays() {
   return (
     <>
+      <Settings />
+      <Palette />
+      <Shortcuts />
       <LaunchMenu />
       <SendMessage />
       <ApprovalsSheet />

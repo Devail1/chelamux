@@ -70,12 +70,11 @@
       <!-- CMX-377: New session + jump-to search, ahead of nav (mockup order —
            head -> New session -> jump-to search -> nav). "New session" opens the
            launch menu (the launcher island, frontend/src/features/launcher, CMX-219):
-           there is only one launch surface, this is just its prominent entry point. The search input reuses the EXISTING fuzzy
-           jump (nav.js's #palette machinery, ~1507) rather than a second
-           implementation: typing here opens/drives the real #palette overlay
-           in place — global ArrowUp/ArrowDown/Enter/Escape handling already
-           works off `#palette.open`, not focus, so it needs no keydown wiring
-           of its own (see nav.js's sidebarJumpInput). -->
+           there is only one launch surface, this is just its prominent entry point. The search input reuses the ⌘K palette
+           (frontend/src/features/palette) rather than a second implementation:
+           typing here opens/drives it in place, focus staying here, and the
+           palette's arrow/Enter keys work off it being open, not focus (see its
+           sidebarJumpInput). -->
       <div class="sidebar-quick">
         <span class="island-slot" id="sidebar-new-island"></span>
         <label class="sidebar-jump">
@@ -233,106 +232,12 @@
   <span class="island-slot" id="approvals-island"></span>
 </div>
 
-<!-- Command palette (⌘K / Ctrl-K): fuzzy jump to any agent, view, or project -->
-<div class="palette-overlay" id="palette" onclick="if(event.target===this)chela.closePalette()">
-  <div class="palette">
-    <input id="palette-input" class="palette-input" type="text" autocomplete="off" spellcheck="false"
-           placeholder="Jump to an agent, view, or project…"
-           oninput="_palSel=0;chela._renderPalette(this.value)">
-    <div class="palette-list" id="palette-list"></div>
-    <div class="palette-foot"><span><kbd>↑</kbd><kbd>↓</kbd> navigate</span><span><kbd>↵</kbd> open</span><span><kbd>esc</kbd> close</span></div>
-  </div>
-</div>
-
-<!-- Keyboard shortcuts cheatsheet (CMX-121) — reachable ONLY from the ⌘K palette's
-     "Keyboard shortcuts" row (nav.js _paletteItems). Deliberately no dedicated
-     global keybind: Alt+/ was considered and dropped, Ctrl+M would be Enter inside
-     a focused terminal — so this stays a palette-only surface, not another
-     iframe-injected shortcut. Static content: nothing here is config-driven. -->
-<div class="palette-overlay" id="shortcuts-overlay" onclick="if(event.target===this)chela.closeShortcuts()">
-  <div class="shortcuts-sheet" role="dialog" aria-label="Keyboard shortcuts">
-    <div class="shortcuts-head">
-      <span class="sc-ic"><svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect width="20" height="16" x="2" y="4" rx="2"/><path d="M6 8h.01M10 8h.01M14 8h.01M18 8h.01M8 12h.01M12 12h.01M16 12h.01M7 16h10"/></svg></span>
-      <h3>Keyboard shortcuts</h3>
-      <span class="sc-esc">close <kbd>Esc</kbd></span>
-      <button class="icon-btn" onclick="chela.closeShortcuts()">✕</button>
-    </div>
-    <div class="shortcuts-cols">
-      <div class="sc-grp">
-        <h4>Navigate panes</h4>
-        <div class="sc-row"><span class="sc-lbl">Open sidebar session N (hold Alt to see N)</span><span class="sc-keys"><kbd>Alt</kbd><span class="sc-plus">+</span><kbd>1</kbd><span class="sc-plus">…</span><kbd>9</kbd></span></div>
-        <div class="sc-row"><span class="sc-lbl">Command palette / switcher</span><span class="sc-keys"><kbd>Ctrl</kbd><span class="sc-plus">/</span><kbd>⌘</kbd><span class="sc-plus">+</span><kbd>K</kbd></span></div>
-        <div class="sc-row"><span class="sc-lbl">Open / close Settings</span><span class="sc-keys"><kbd>Ctrl</kbd><span class="sc-plus">/</span><kbd>⌘</kbd><span class="sc-plus">+</span><kbd>,</kbd></span></div>
-      </div>
-      <div class="sc-grp">
-        <h4>In the palette</h4>
-        <div class="sc-row"><span class="sc-lbl">Move selection</span><span class="sc-keys"><kbd>↑</kbd><kbd>↓</kbd></span></div>
-        <div class="sc-row"><span class="sc-lbl">Open / run</span><span class="sc-keys"><kbd>Enter</kbd></span></div>
-        <div class="sc-row"><span class="sc-lbl">Close</span><span class="sc-keys"><kbd>Esc</kbd></span></div>
-      </div>
-      <div class="sc-grp">
-        <h4>Panes &amp; wall</h4>
-        <div class="sc-row"><span class="sc-lbl">Rename a pane</span><span class="sc-gesture">double-click name</span></div>
-        <div class="sc-row"><span class="sc-lbl">Cancel a wire drag</span><span class="sc-keys"><kbd>Esc</kbd></span></div>
-        <div class="sc-row"><span class="sc-lbl">Wire · Share · Orchestrator · Pin</span><span class="sc-gesture">⋯ menu</span></div>
-        <div class="sc-row"><span class="sc-lbl">Grid preset · lock · min/max/kill</span><span class="sc-gesture">toolbar / header</span></div>
-      </div>
-      <div class="sc-grp">
-        <h4>Help</h4>
-        <div class="sc-row"><span class="sc-lbl">This shortcuts map</span><span class="sc-gesture">⌘K → Keyboard shortcuts</span></div>
-      </div>
-    </div>
-    <div class="shortcuts-foot">Grouped, colorblind-safe (chips + labels, no hue coding).</div>
-  </div>
-</div>
-
 <!-- Mobile sidebar scrim (off-canvas drawer backdrop) -->
 <div class="drawer-scrim" id="sidebar-scrim" onclick="chela.closeSidebar()"></div>
 
-<!-- Settings modal (gear / bell) — TABBED (CMX-287), replaces the old off-canvas
-     drawer: "make settings easier to navigate, and allow showing cost and maybe
-     other things that are not related to the main views" (Liav). Cost (a nav view
-     CMX-279 deleted for being unopened) lives here now as a tab, not a sidebar row. -->
-<div class="drawer-scrim" id="drawer-scrim" onclick="chela.toggleSettings()"></div>
-<div class="settings-modal" id="settings-drawer" role="dialog" aria-modal="true" aria-label="Settings">
-  <div class="settings-modal-head">
-    <span>Settings</span>
-    <button class="icon-btn" onclick="chela.toggleSettings()">✕</button>
-  </div>
-  <!-- CMX-396: VS Code-style search across EVERY tab. nav.js settingsSearch()
-       filters #drawer-body's sections/rows in place (hide classes only — the
-       rows are never re-rendered, so clearing the query leaves the modal exactly
-       as it was). The status span is the screen-reader live count. -->
-  <div class="settings-search">
-    <input id="settings-search" class="s-input settings-search-input" type="search"
-           placeholder="Search settings" aria-label="Search settings" aria-controls="drawer-body"
-           autocomplete="off" spellcheck="false" oninput="chela.settingsSearch(this.value)">
-    <p class="settings-search-empty" id="settings-search-empty" hidden></p>
-    <span class="sr-only" id="settings-search-status" role="status" aria-live="polite"></span>
-  </div>
-  <div class="settings-modal-body">
-    <nav class="settings-tabs" id="settings-tabs">
-      <!-- populated by nav.js renderSettings() -->
-    </nav>
-    <div class="settings-tabpanels" id="drawer-body">
-      <!-- populated by nav.js renderSettings() -->
-    </div>
-  </div>
-  <!-- AGPL §13: a user interacting with this dashboard over a network must be
-       offered the Corresponding Source. Static markup on purpose — a JS-rendered
-       offer disappears exactly when the JS breaks, and the obligation does not. -->
-  <div class="settings-modal-foot">
-    chelamux is licensed under <a href="https://www.gnu.org/licenses/agpl-3.0.html" target="_blank" rel="noopener">AGPL v3</a>.
-    <a href="https://github.com/Devail1/chelamux" target="_blank" rel="noopener">Source code</a>.
-    <!-- CMX-178: the version island (frontend/src/features/version) renders here. CMX-291:
-         it used to sit in the sidebar foot, where it drew over the CPU/RAM/Disk strip. -->
-    <span id="version-island"></span>
-  </div>
-</div>
-
-<!-- Overlays island (CMX-219, frontend/src/chrome.tsx Overlays): the launch menu, the
-     send-message dialog, the approvals and access-request sheets and the update banner. Each
-     portals or fixes itself on the page. -->
+<!-- Overlays island (CMX-219, frontend/src/chrome.tsx Overlays): Settings, the ⌘K palette and
+     the shortcuts sheet (CMX-221), the launch menu, the send-message dialog, the approvals and
+     access-request sheets and the update banner. Each portals or fixes itself on the page. -->
 <div id="overlays-island"></div>
 
 <!-- New task (CMX-6): creates a Linear issue via the dashboard, the key never comes here.

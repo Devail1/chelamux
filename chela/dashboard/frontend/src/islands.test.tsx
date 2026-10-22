@@ -11,14 +11,28 @@ afterEach(async () => {
   await vi.waitFor(() => expect(document.querySelector('[role="dialog"]')).toBeNull());
 });
 
-test('boot installs the bridge and mounts the version island into #version-island', async () => {
-  vi.stubGlobal('fetch', () => Promise.resolve({ ok: true, json: () => Promise.resolve({ version: 'v9' }) }));
-  document.body.innerHTML = '<span id="version-island"></span>';
+test('boot installs the bridge, the saved theme, the panes\' window.chela contract and the page keys', async () => {
+  // No overlays slot: a second Overlays root would stay subscribed to the dialogs' stores after
+  // this test's body is reset, and draw (then fail to remove) a later test's portals.
+  document.body.innerHTML = '';
+  localStorage.setItem('chela_theme', 'nord');
   Reflect.deleteProperty(window, 'chelaBridge');
   await act(async () => boot(window));
   expect(window.chelaBridge?.agents.get()).toEqual([]);
-  expect(document.getElementById('version-island')?.textContent).toBe('build v9');
-  vi.unstubAllGlobals();
+  expect(document.body.dataset.theme).toBe('nord');
+  const { settings, toggleSettings } = await import('./features/settings/index.ts');
+  const { closePalette, palette } = await import('./features/palette/index.ts');
+  const chela = (window as unknown as { chela: { toggleSettings(): void; openPalette(): void } }).chela;
+  chela.toggleSettings();
+  expect(settings.get().open).toBe(true);
+  toggleSettings();
+  document.dispatchEvent(new KeyboardEvent('keydown', { key: 'k', ctrlKey: true, bubbles: true }));
+  expect(palette.get().open).toBe(true);
+  closePalette();
+  chela.openPalette();
+  expect(palette.get().open).toBe(true);
+  closePalette();
+  localStorage.clear();
 });
 
 test('boot mounts the keybar and diff modal islands into their slots (CMX-237)', async () => {

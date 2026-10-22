@@ -18,7 +18,8 @@ Invariants guarded by tests/test_term_bg_sync.py:
   * every theme's `xterm.background` == its `--term-bg` in style.css (no seam);
   * `dark` == agent-terminals.sh's launch `TERM_THEME` (the palette ttyd paints
     before the shim runs, and what an unthemed viewer sees);
-  * the keys here == the Settings picker's list in nav.js == style.css's blocks.
+  * the keys here == the Settings picker's list (frontend features/settings/model.ts) ==
+    style.css's blocks.
 
 `CHELA_TERM_THEME` (a JSON ITheme, read by BOTH agent-terminals.sh and the
 dashboard — both source chela.env) stays the operator override: when set, it

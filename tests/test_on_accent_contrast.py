@@ -23,7 +23,7 @@ import pytest
 ROOT = Path(__file__).resolve().parent.parent
 STATIC = ROOT / "chela" / "dashboard" / "static"
 STYLE_CSS = STATIC / "style.css"
-NAV_JS = STATIC / "js" / "nav.js"
+SETTINGS_MODEL = STATIC.parent / "frontend" / "src" / "features" / "settings" / "model.ts"  # the Settings theme picker (CMX-221)
 
 AA = 4.5
 WHITE = r"(?:#fff\b|#ffffff\b|white\b)"
@@ -44,9 +44,9 @@ def _theme_vars() -> dict[str, dict[str, str]]:
     return {t: dict(re.findall(r"(--[\w-]+):\s*([^;]+?)\s*;", b)) for t, b in blocks.items()}
 
 
-def _nav_themes() -> list[str]:
-    m = re.search(r"const THEME_LABELS = \{(.*?)\};", NAV_JS.read_text(), re.S)
-    assert m, "nav.js must declare THEME_LABELS"
+def _picker_themes() -> list[str]:
+    m = re.search(r"const THEME_LABELS(?::[^=]*)? = \{(.*?)\};", SETTINGS_MODEL.read_text(), re.S)
+    assert m, "features/settings/model.ts must declare THEME_LABELS"
     return re.findall(r"(\w+):\s*'", m.group(1))
 
 
@@ -72,10 +72,10 @@ def test_contrast_math_matches_wcag_reference_points():
 
 
 def test_theme_lists_agree():
-    assert sorted(_theme_vars()) == sorted(_nav_themes())
+    assert sorted(_theme_vars()) == sorted(_picker_themes())
 
 
-@pytest.mark.parametrize("theme", _nav_themes())
+@pytest.mark.parametrize("theme", _picker_themes())
 def test_on_accent_meets_aa_against_accent(theme):
     v = _theme_vars()[theme]
     # Each theme states its own ink — inheriting :root's would only be right by luck.

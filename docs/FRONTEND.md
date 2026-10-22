@@ -77,15 +77,29 @@ into `#id` and returns the React root, or `null` when the page has no such eleme
 The page's chrome (CMX-219) mounts from `src/chrome.tsx`, which has no side effect at import so
 the jsdom suites can mount it on a page of their own: the safety float's pills, the sidebar's
 New session, agent count, resources strip and gear menu, the phone "+", the agent detail, and
-`Overlays` (one root for the launch menu, the send-message dialog, the approvals and
-access-request sheets and the update banner). An island that draws one control
+`Overlays` (one root for Settings, the ⌘K palette and the shortcuts sheet, the launch menu, the
+send-message dialog, the approvals and access-request sheets and the update banner). An island that draws one control
 inside a legacy row renders into a `<span class="island-slot">` (`display: contents`), so the
 control lays out as the row's own child.
 
 When a ported surface needs something only legacy knows (the Wall, the view switch, the
 orchestrator slot), legacy hands it in at import, the way `work.js` hands `setWorkPoll` its poll:
-`nav.js` calls `setLauncherHost` and `setAgentDetailHost`. A legacy surface the island only
-opens (the palette, Settings, sharing) is looked up on `window.chela` at call time.
+`nav.js` calls `setLauncherHost`, `setAgentDetailHost` and `setPaletteHost`. A legacy surface
+the island only opens (sharing the current pane) is looked up on `window.chela` at call time.
+
+### Settings, the palette and the iframe contract
+
+Settings (`src/features/settings`, CMX-221) is one `<Dialog>` with every tab rendered while it is
+open, so its search (CMX-396) marks the rendered rows in place: a section card is
+`.settings-section`, a knob is a `FieldRow` (its `keywords` prop is extra words the search
+matches), and the marks are `data-s-hide` / `data-s-hit`, attributes React never renders, so a
+re-render keeps them. A row that lands after the query (a tab's fetch) is marked too.
+
+The ⌘K palette and the shortcuts sheet are `src/features/palette`; its `installPalette()` owns the
+page's global keys (Ctrl/⌘+K, Ctrl/⌘+,). A focused pane's keys never reach the page:
+`app.py`'s `_TERM_PALETTE_KEY_SHIM` calls `window.parent.chela.openPalette()` and
+`.toggleSettings()`, which `src/iframeBridge.ts` registers, exactly those two
+(`iframeBridge.test.ts` fails if one goes missing or another is added).
 
 Islands are a migration path, not the end state: each island is its own root, so context and
 portals do not cross between them. `FRONTEND_PORT_PLAN.md` §2.1 ends in one app shell.

@@ -1,6 +1,7 @@
 // --- Stage 0: ES-module imports ---
 import { $, BASE_PATH, TERMINALS_ON, WALL_TILE_DISPATCHED, _agentsCache, api, attrEsc, currentTab, escHtml, setAgentsCache, updateTabSignal, wantsHuman } from './util';
-import { openPalette, selectView } from './nav';
+import { selectView } from './nav';
+import { openPalette } from '../../frontend/src/features/palette';
 import { altSwitchKeydown, renderSidebarAgents, setAltHeld, sidebarOrder, updateCtxCache } from '../../frontend/src/features/sidebar/controller';
 import { orderByList } from '../../frontend/src/features/sidebar/model';
 import { focusLayout, rankOrder } from './wallmodel';

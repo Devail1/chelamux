@@ -13,10 +13,9 @@
 // Run: pnpm exec vitest run tests/new_task.test.mjs (tests/test_js_suites.py runs it by discovery).
 import { beforeAll, beforeEach, test } from 'vitest';
 import assert from 'node:assert/strict';
-import { bootDashboardDom, clickIsland, clickOnclick, flush, sliceTemplate } from './js_helpers/dashboard_dom.mjs';
+import { bootDashboardDom, clickIsland, flush, searchPalette, sliceTemplate } from './js_helpers/dashboard_dom.mjs';
 
 const PANEL = sliceTemplate('<div class="panel active" id="panel-work">', '</div>', { terminals_enabled: false });
-const PALETTE = sliceTemplate('<div class="palette-overlay" id="palette"', '</div>\n</div>');
 const ISLANDS = sliceTemplate('<div id="newtask-island">', '</div>');
 
 const WF = '/repo/WORKFLOW.md';
@@ -71,7 +70,7 @@ const escape = async () => {
 beforeAll(async () => {
     await bootDashboardDom({
         // CMX-219: the New menu is the launcher island's, in the overlays island
-        body: `${PANEL}\n<button id="new-anchor"></button><div id="overlays-island"></div>\n${ISLANDS}\n${PALETTE}`,
+        body: `${PANEL}\n<button id="new-anchor"></button><div id="overlays-island"></div>\n${ISLANDS}`,
         fetchImpl, canvasStub: true,
     });
     launcher = await import('../chela/dashboard/frontend/src/features/launcher/index.ts');
@@ -113,12 +112,9 @@ test('the toolbar button opens the New-task dialog with the polled workflow and 
 });
 
 test('the ⌘K palette has a "New task" row that opens the dialog', async () => {
-    window.chela.openPalette();
-    window.chela._renderPalette('New task');
-    const row = [...document.querySelectorAll('#palette-list .palette-item')]
-        .find(el => el.querySelector('.pi-title').textContent === 'New task');
+    const row = (await searchPalette('New task')).find(r => r.title === 'New task');
     assert.ok(row, 'no "New task" row in the palette');
-    clickOnclick(row);
+    clickIsland(row.el);
     await settle();
     assert.ok(dialog('New task'), 'the palette row did not open the dialog');
 });

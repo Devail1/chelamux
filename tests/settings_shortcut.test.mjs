@@ -1,26 +1,23 @@
-// CTRL/⌘+, TOGGLES SETTINGS — BOTH WIRES, IN A REAL DOM (CMX-385).
+// CTRL/⌘+, AND CTRL/⌘+K INSIDE A FOCUSED PANE (CMX-385), IN A REAL IFRAME.
 //
-// Like Ctrl/⌘+K, the shortcut needs two wires because a focused pane's keydown
-// fires in the ttyd iframe's OWN document and never reaches the parent:
+// A focused pane's keydown fires in the ttyd iframe's OWN document and never reaches the
+// parent, so app.py's _TERM_PALETTE_KEY_SHIM catches both keys there and calls
+// `window.parent.chela.toggleSettings()` / `.openPalette()` (the iframe contract,
+// frontend/src/iframeBridge.ts). Its text is lifted straight out of app.py and evaluated inside
+// a REAL jsdom iframe whose parent carries a stub `chela`, so `window.parent` is the genuine
+// iframe→parent relationship, not a hand-set property.
 //
-//   1. nav.js's document keydown handler (the dashboard chrome has focus) —
-//      exercised here by importing the REAL main.js/nav.js into jsdom over the
-//      REAL settings modal markup sliced out of index.html;
-//   2. app.py's _TERM_PALETTE_KEY_SHIM (a pane has focus) — its text is lifted
-//      straight out of app.py and evaluated inside a REAL jsdom iframe whose
-//      parent carries a stub `chela`, so `window.parent` is the genuine
-//      iframe→parent relationship, not a hand-set property.
+// The dashboard document's own wire (Ctrl+, / Ctrl+K / Esc) and the cheatsheet row are the
+// palette feature's (frontend/src/features/palette/tests/Palette.test.tsx, CMX-221).
 //
-// Guards (each corrupt→RED, recorded in the PR's self-check experiments):
-//   - Ctrl+, opens Settings, a second press closes it; Shift+Ctrl+, does nothing.
-//   - Esc closes Settings.
+// Guards (each corrupt→RED):
 //   - the shim calls parent.chela.toggleSettings() on Ctrl+, and preventDefaults it.
-//   - MUST STILL PASS: Ctrl+K opens the palette from both wires; Ctrl+V is not
-//     swallowed by the shim (the paste shim owns it).
+//   - the shim ignores Shift+Ctrl+, and a bare ",".
+//   - MUST STILL PASS: Ctrl+K reaches parent.chela.openPalette(); Ctrl+V is not swallowed.
 //
 // Run: pnpm exec vitest run tests/settings_shortcut.test.mjs (pytest runs it via
-// tests/test_js_suites.py; needs `npm ci` for jsdom.)
-import { beforeAll, beforeEach, test } from 'vitest';
+// tests/test_js_suites.py; needs `pnpm install` for jsdom.)
+import { test } from 'vitest';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
@@ -28,17 +25,7 @@ import { dirname, join } from 'node:path';
 import { JSDOM } from 'jsdom';
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..', 'chela', 'dashboard');
-const HTML = readFileSync(join(ROOT, 'templates', 'index.html'), 'utf8');
 const APP_PY = readFileSync(join(ROOT, 'app.py'), 'utf8');
-
-const SETTINGS_START = HTML.indexOf('<div class="drawer-scrim" id="drawer-scrim"');
-const SETTINGS_END = HTML.indexOf('<!-- Overlays island');
-if (SETTINGS_START < 0 || SETTINGS_END < 0) throw new Error('index.html markers for the settings modal moved — update this test');
-const BODY = `
-<div class="palette-overlay" id="palette">
-  <div class="palette"><input id="palette-input"><div id="palette-list"></div></div>
-</div>
-${HTML.slice(SETTINGS_START, SETTINGS_END)}`;
 
 // The shim as app.py defines it: the concatenated Python string literals of the
 // `_TERM_PALETTE_KEY_SHIM = ( ... )` tuple, comment lines dropped.
@@ -53,95 +40,6 @@ function shimFromAppPy() {
     if (!js) throw new Error('shim is not a single <script> block');
     return js[1];
 }
-
-let dom;
-
-beforeAll(async () => {
-    dom = new JSDOM(`<!doctype html><html><body>${BODY}</body></html>`,
-        { url: 'http://localhost:5005/', pretendToBeVisual: true });
-    for (const k of ['window', 'document', 'localStorage', 'navigator', 'HTMLElement',
-        'Element', 'Node', 'Event', 'MouseEvent', 'KeyboardEvent', 'CustomEvent',
-        'getComputedStyle', 'requestAnimationFrame', 'cancelAnimationFrame']) {
-        Object.defineProperty(globalThis, k, {
-            value: dom.window[k], writable: true, configurable: true,
-        });
-    }
-    dom.window.matchMedia = q => ({
-        media: q, matches: false,
-        addEventListener() {}, removeEventListener() {}, addListener() {}, removeListener() {},
-    });
-    globalThis.fetch = () => Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve({}) });
-    globalThis.window.chela = globalThis.window.chela || {};
-    globalThis.setInterval = () => 0;
-    await import('../chela/dashboard/frontend/src/boot.ts');
-});
-
-const settingsOpen = () => document.getElementById('settings-drawer').classList.contains('open');
-const paletteOpen = () => document.getElementById('palette').classList.contains('open');
-const key = (init) => {
-    const ev = new KeyboardEvent('keydown', { bubbles: true, cancelable: true, ...init });
-    document.dispatchEvent(ev);
-    return ev;
-};
-
-beforeEach(() => {
-    document.getElementById('settings-drawer').classList.remove('open');
-    document.getElementById('drawer-scrim').classList.remove('open');
-    window.chela.closePalette();
-});
-
-// --- wire 1: the dashboard document -------------------------------------------
-
-test('Ctrl+, opens Settings and a second Ctrl+, closes it', () => {
-    assert.equal(settingsOpen(), false, 'setup: Settings must start closed');
-    const ev = key({ key: ',', ctrlKey: true });
-    assert.equal(settingsOpen(), true, 'Ctrl+, did not open Settings');
-    assert.equal(ev.defaultPrevented, true, 'Ctrl+, must be swallowed (browser default)');
-    key({ key: ',', ctrlKey: true });
-    assert.equal(settingsOpen(), false, 'a second Ctrl+, did not close Settings');
-});
-
-test('⌘+, (metaKey) toggles Settings too', () => {
-    key({ key: ',', metaKey: true });
-    assert.equal(settingsOpen(), true, '⌘+, did not open Settings');
-});
-
-test('Shift+Ctrl+, and Alt+Ctrl+, do NOT toggle Settings', () => {
-    const ev = key({ key: ',', ctrlKey: true, shiftKey: true });
-    assert.equal(settingsOpen(), false, 'Shift+Ctrl+, opened Settings');
-    assert.equal(ev.defaultPrevented, false);
-    key({ key: ',', ctrlKey: true, altKey: true });
-    assert.equal(settingsOpen(), false, 'Alt+Ctrl+, opened Settings');
-    key({ key: ',' });
-    assert.equal(settingsOpen(), false, 'a bare "," opened Settings');
-});
-
-test('Esc closes an open Settings', () => {
-    window.chela.toggleSettings();
-    assert.equal(settingsOpen(), true, 'setup: toggleSettings() did not open Settings');
-    key({ key: 'Escape' });
-    assert.equal(settingsOpen(), false, 'Esc did not close Settings');
-});
-
-test('Esc with the palette over Settings closes only the palette', () => {
-    window.chela.toggleSettings();
-    window.chela.openPalette();
-    key({ key: 'Escape' });
-    assert.equal(paletteOpen(), false, 'Esc did not close the palette');
-    assert.equal(settingsOpen(), true, 'one Esc closed both layers');
-});
-
-test('MUST STILL PASS: Ctrl+K still toggles the palette from the document', () => {
-    key({ key: 'k', ctrlKey: true });
-    assert.equal(paletteOpen(), true, 'Ctrl+K no longer opens the palette');
-    assert.equal(settingsOpen(), false, 'Ctrl+K opened Settings');
-    key({ key: 'k', ctrlKey: true });
-    assert.equal(paletteOpen(), false, 'Ctrl+K no longer closes the palette');
-});
-
-test('toggleSettings is on the window.chela namespace (the shim reaches it there)', () => {
-    assert.equal(typeof window.chela.toggleSettings, 'function');
-});
 
 // --- wire 2: the pane shim from app.py, inside a real iframe ------------------
 
@@ -198,12 +96,3 @@ test('MUST STILL PASS: the shim leaves Ctrl+V alone (the paste shim owns it)', (
 // That term_http actually SERVES this shim is guarded from the rendered response in
 // tests/test_term_palette_key_shim.py — not from app.py's source text here (defeat
 // shape 05: a `[:0]` slice at the call site kept a source-substring check green).
-
-test('the shortcuts cheatsheet lists Ctrl/⌘+, for Settings', () => {
-    const doc = new JSDOM(HTML).window.document;
-    const rows = [...doc.querySelectorAll('#shortcuts-overlay .sc-row')]
-        .filter(r => r.querySelector('.sc-lbl')?.textContent.trim() === 'Open / close Settings');
-    assert.equal(rows.length, 1, 'no "Open / close Settings" row in the shortcuts cheatsheet');
-    const keys = [...rows[0].querySelectorAll('.sc-keys kbd')].map(k => k.textContent.trim());
-    assert.deepEqual(keys, ['Ctrl', '⌘', ','], `cheatsheet keys for Settings are ${JSON.stringify(keys)}`);
-});

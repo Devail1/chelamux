@@ -135,6 +135,9 @@ export function exposeDomConstructors(win) {
  * lanes (resources, approvals, the decisions log, ...) run on that page's scheduler. */
 export async function mountIslands(win, src = SRC_URL) {
     const doc = win.document;
+    // CMX-221: the overlays (Settings, the palette) are Radix dialogs, which reach for the DOM
+    // constructors (MutationObserver, NodeFilter, ...) as globals; a hand-rolled boot has few.
+    exposeDomConstructors(win);
     // The page's bridge first: the chrome's stores attach to it (shared/store/agents).
     const sidebar = !!doc.getElementById('sidebar-agents');
     if (sidebar) {
@@ -155,10 +158,15 @@ export async function mountIslands(win, src = SRC_URL) {
         const { mountIsland } = await import('../../chela/dashboard/frontend/src/shared/islands/index.tsx');
         mountIsland(id, mod[name], {}, doc);
     }
-    // CMX-219: the chrome islands (safety pills, gear menu, launcher, agent detail, overlays),
-    // into whichever of their slots the page has.
+    // CMX-219: the chrome islands (safety pills, gear menu, launcher, agent detail, overlays:
+    // Settings and the palette, CMX-221), into whichever of their slots the page has; and, as
+    // islands.tsx's boot does, the page keys and the panes' window.chela contract.
     const { mountChrome } = await import(new URL('chrome.tsx', src).href);
     mountChrome(doc);
+    const { installPalette } = await import(new URL('features/palette/index.ts', src).href);
+    const { installIframeBridge } = await import(new URL('iframeBridge.ts', src).href);
+    installIframeBridge(win);
+    installPalette(win);
     if (doc.getElementById('keybar-island')) {
         const { mountKeybar } = await import('../../chela/dashboard/frontend/src/features/keybar/index.ts');
         mountKeybar(win);
@@ -320,4 +328,59 @@ export function fireInlineHandler(el, attr) {
     const code = el.getAttribute(attr);
     if (!code) throw new Error(`fireInlineHandler: element has no ${attr} attribute`);
     return new Function('chela', 'event', code).call(el, globalThis.window.chela, { target: el, currentTarget: el });
+}
+
+/** CMX-221: the ⌘K palette is a React dialog in the overlays island (a fixture needs
+ * `<div id="overlays-island">`). Open it with `q` typed into its input, as a user would, and
+ * resolve once React drew the rows. The palette module is the page's own instance. */
+export async function searchPalette(q = '') {
+    const { openPalette } = await import('../../chela/dashboard/frontend/src/features/palette/index.ts');
+    openPalette();
+    await flush();
+    if (q) typeInto(document.getElementById('palette-input'), q);
+    await flush();
+    return paletteItems();
+}
+
+/** The palette's rendered rows: index, title, sub-line, and the row itself as `el` (not
+ * enumerable, so a row still prints in an assertion message). */
+export function paletteItems() {
+    return [...document.querySelectorAll('#palette-list .palette-item')].map(el => Object.defineProperty({
+        i: Number(el.dataset.i), title: el.querySelector('.pi-title').textContent, sub: el.querySelector('.pi-sub').textContent,
+    }, 'el', { value: el }));
+}
+
+/** Whether the palette is open (its store, the page's own instance). */
+export async function paletteOpen() {
+    const m = await import('../../chela/dashboard/frontend/src/features/palette/index.ts');
+    return m.palette.get().open;
+}
+
+export async function closePalette() {
+    const m = await import('../../chela/dashboard/frontend/src/features/palette/index.ts');
+    m.closePalette();
+    await flush();
+}
+
+/** Type `value` into a React-controlled input: the native setter (React's own value tracker
+ * would swallow a plain assignment), then the `input` event a keystroke fires. */
+export function typeInto(el, value) {
+    if (!el) throw new Error('typeInto: element is missing');
+    const win = el.ownerDocument.defaultView;
+    Object.getOwnPropertyDescriptor(win.HTMLInputElement.prototype, 'value').set.call(el, value);
+    el.dispatchEvent(new win.Event('input', { bubbles: true }));
+}
+
+/** Choose `label` in a kit Select (a Radix combobox, `trigger`), by keyboard as a user would:
+ * Enter opens the list, Enter on the option picks it. */
+export async function pickOption(trigger, label) {
+    if (!trigger) throw new Error('pickOption: trigger is missing');
+    const win = trigger.ownerDocument.defaultView;
+    win.HTMLElement.prototype.scrollIntoView ??= function () {};   // jsdom has none; Radix scrolls the chosen one in
+    trigger.dispatchEvent(new win.KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }));
+    await flush();
+    const opt = [...trigger.ownerDocument.querySelectorAll('[role="option"]')].find(o => o.textContent.trim() === label);
+    if (!opt) throw new Error(`pickOption: no option "${label}"`);
+    opt.dispatchEvent(new win.KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }));
+    await flush();
 }
