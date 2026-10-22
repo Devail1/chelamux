@@ -233,6 +233,17 @@ It escapes every character of its source and links only http(s), mailto and rela
 `javascript:`/`data:` link renders as its text (CMX-228). React renders its output only through
 `<Markdown>`, the app's one `dangerouslySetInnerHTML`.
 
+### Overlays on a phone
+
+Every `Dialog` and `Sheet` of the kit (`src/shared/ui`) is drawn on ONE layer, `.ui-overlay`
+(`--z-overlay`, 200 in `style.css`): above the phone drawer (`--z-drawer`, 45) and the safety
+float, under the floating layer (a Select's list, 210). A variant's own class never sets the
+backdrop's z-index. Each draws a close button (`.ui-close`, 44px on a touch screen), a tap on
+the backdrop closes it, and opening one runs `onOverlayOpen()` listeners: the sidebar
+controller registers `closeSidebar()` there, so an overlay opened from the drawer opens with it
+shut (CMX-306). `tests/browser/overlays_phone.test.mjs` drives every ported overlay at phone
+width; a new overlay gets a row there.
+
 ## Polls, pushes and the boot config
 
 - **`src/shared/api`**: `api()`, `BASE_PATH`, `staticUrl()` and `BOOT`, the config Flask renders
