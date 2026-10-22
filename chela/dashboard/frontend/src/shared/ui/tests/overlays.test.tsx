@@ -422,12 +422,28 @@ describe.each(SURFACES)('CMX-306: the %s overlay', (_name, draw, closeClass) => 
     expect(onOpenChange.mock.calls).toEqual([[false]]);
   });
 
+  // a tap: the press and the click on the same element
+  const tap = (el: Element) => {
+    fireEvent.pointerDown(el);
+    fireEvent.click(el);
+  };
+
   test('a tap on the backdrop closes it; one inside it does not', () => {
     const { onOpenChange, overlay } = mount();
-    fireEvent.click(screen.getByRole('dialog'));
+    tap(screen.getByRole('dialog'));
     expect(onOpenChange).not.toHaveBeenCalled();
-    fireEvent.click(overlay());
+    tap(overlay());
     expect(onOpenChange.mock.calls).toEqual([[false]]);
+  });
+
+  test('a press that starts inside it and ends on the backdrop (a text selection) leaves it open', () => {
+    const { onOpenChange, overlay } = mount();
+    fireEvent.pointerDown(screen.getByRole('dialog'));
+    fireEvent.click(overlay());
+    expect(onOpenChange).not.toHaveBeenCalled();
+    // and that press is spent: a later click with no press of its own does not close it either
+    fireEvent.click(overlay());
+    expect(onOpenChange).not.toHaveBeenCalled();
   });
 
   test('a backdrop tap while a floating layer is open above it leaves the dialog open', () => {
@@ -436,7 +452,7 @@ describe.each(SURFACES)('CMX-306: the %s overlay', (_name, draw, closeClass) => 
     wrapper.setAttribute('data-radix-popper-content-wrapper', '');
     document.body.appendChild(wrapper);
     try {
-      fireEvent.click(overlay());
+      tap(overlay());
       expect(onOpenChange).not.toHaveBeenCalled();
     } finally {
       wrapper.remove();
@@ -478,4 +494,36 @@ test('CMX-306: a listener that throws neither stops the overlay opening nor the 
     offAfter();
     err.mockRestore();
   }
+});
+
+test.each([
+  ['Dialog', (open: boolean, set: (o: boolean) => void) => <Dialog open={open} onOpenChange={set} title="T" />],
+  ['Sheet', (open: boolean, set: (o: boolean) => void) => <Sheet open={open} onOpenChange={set} title="T" />],
+])('CMX-306: a %s opened from a control now off screen (the shut drawer) does not send focus back there', async (_n, draw) => {
+  function Harness() {
+    const [open, setOpen] = useState(false);
+    return (
+      <>
+        <Button onClick={() => setOpen(true)}>Opener</Button>
+        {draw(open, setOpen)}
+      </>
+    );
+  }
+  render(<Harness />);
+  const opener = screen.getByText('Opener');
+  // laid out at the drawer's place once it has slid away: left of the viewport
+  opener.getBoundingClientRect = () => ({ left: -250, right: -150, top: 10, bottom: 50, width: 100, height: 40, x: -250, y: 10, toJSON: () => ({}) });
+  opener.focus();
+  fireEvent.click(opener);
+  fireEvent.click(screen.getByRole('button', { name: 'Close' }));
+  await act(() => new Promise((r) => setTimeout(r, 0)));
+  expect(screen.queryByRole('dialog')).toBeNull();
+  expect(document.activeElement).not.toBe(opener);
+  // on screen again, it gets focus back
+  opener.getBoundingClientRect = () => ({ left: 10, right: 110, top: 10, bottom: 50, width: 100, height: 40, x: 10, y: 10, toJSON: () => ({}) });
+  opener.focus();
+  fireEvent.click(opener);
+  fireEvent.click(screen.getByRole('button', { name: 'Close' }));
+  await act(() => new Promise((r) => setTimeout(r, 0)));
+  expect(document.activeElement).toBe(opener);
 });
