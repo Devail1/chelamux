@@ -33,20 +33,13 @@ function onKey(e: KeyboardEvent): void {
 /**
  * Listen for the keys on `win`'s document, and give index.html's sidebar "Jump to session"
  * box (legacy markup: its inline handlers call `chela.sidebarJumpInput(this)`) its handler.
- * Once per page. Returns the uninstall.
+ * Returns the uninstall.
  */
-const installed = new WeakSet<Document>();
 export function installPalette(win: Window = window): () => void {
   const ns = ((win as unknown as { chela?: Record<string, unknown> }).chela ??= {});
   ns.sidebarJumpInput = sidebarJumpInput;
-  const doc = win.document;
-  const off = () => {
-    doc.removeEventListener('keydown', onKey);
-    installed.delete(doc);
-  };
-  // once per page: a second listener would toggle the palette twice per Ctrl+K
-  if (installed.has(doc)) return off;
-  installed.add(doc);
-  doc.addEventListener('keydown', onKey);
-  return off;
+  // One module-level handler: a second install on the same page adds no second listener (the
+  // DOM drops a duplicate), so Ctrl+K never toggles twice.
+  win.document.addEventListener('keydown', onKey);
+  return () => win.document.removeEventListener('keydown', onKey);
 }
