@@ -34,11 +34,29 @@ def _lockdir(tmp_path, monkeypatch):
     return tmp_path / "chela"
 
 
-def _wait_for(path: Path, timeout: float = 10.0) -> None:
+# Generous: these wait on real child processes, and a loaded CI runner can take seconds to
+# start a Python interpreter. Every wait polls an observable state; none of them is a sleep.
+_DEADLINE = 30.0
+
+
+def _wait_for(path: Path, timeout: float = _DEADLINE) -> None:
     deadline = time.monotonic() + timeout
     while not path.exists():
         assert time.monotonic() < deadline, f"{path} never appeared"
         time.sleep(0.01)
+
+
+def _stays_alive(pid: int, window: float = 1.0) -> None:
+    """Fail as soon as ``pid`` is gone (reaped: no ``stat``) or a zombie (state Z), sampling
+    for ``window`` seconds after a kill — a SIGKILL is not always delivered by the time
+    ``kill(2)`` returns, so one look straight after it can miss a death that is coming."""
+    deadline = time.monotonic() + window
+    while True:
+        stat = (Path("/proc") / str(pid) / "stat").read_text()
+        assert stat.rsplit(") ", 1)[1][0] != "Z", f"pid {pid} died: {stat!r}"
+        if time.monotonic() >= deadline:
+            return
+        time.sleep(0.05)
 
 
 def _py(code: str, *args, **kw) -> subprocess.Popen:
@@ -46,53 +64,63 @@ def _py(code: str, *args, **kw) -> subprocess.Popen:
                             cwd=REPO, **kw)
 
 
-# A stand-in daemon: ONE tick writing a run row in two steps with a gap between them.
+# A stand-in daemon: ONE tick writing a run row in two steps, and it ends the tick only when
+# the test creates `release` — so "the tick is still running" never depends on how fast the
+# runner is (a fixed gap raced a loaded CI runner).
 _DAEMON = """
     import json, sys, time
     from pathlib import Path
     from chela import config, ticklock
     config.CHELA_DIR = Path(sys.argv[1])
-    row, in_tick, gap = Path(sys.argv[2]), Path(sys.argv[3]), float(sys.argv[4])
+    row, in_tick, release = Path(sys.argv[2]), Path(sys.argv[3]), Path(sys.argv[4])
     fd = ticklock.begin_tick(lambda s: (time.sleep(s), False)[1])
     row.write_text(json.dumps({"task_id": "CMX-1", "status": "claimed"}))
     in_tick.touch()
-    time.sleep(gap)
+    deadline = time.monotonic() + 60
+    while not release.exists() and time.monotonic() < deadline:
+        time.sleep(0.01)
     row.write_text(json.dumps({"task_id": "CMX-1", "status": "running", "window": "@7"}))
     ticklock.end_tick(fd)
     time.sleep(60)
 """
 
 
-def _start_daemon(tmp_path, lockdir, gap):
-    row, in_tick = tmp_path / "row.json", tmp_path / "in-tick"
-    proc = _py(_DAEMON, lockdir, row, in_tick, gap)
+def _start_daemon(tmp_path, lockdir):
+    row, in_tick, release = tmp_path / "row.json", tmp_path / "in-tick", tmp_path / "release"
+    proc = _py(_DAEMON, lockdir, row, in_tick, release)
     _wait_for(in_tick)
-    return proc, row
+    return proc, row, release
 
 
 def test_a_restart_requested_mid_tick_waits_and_leaves_a_consistent_run_row(tmp_path, _lockdir):
-    proc, row = _start_daemon(tmp_path, _lockdir, gap=1.0)
+    proc, row, release = _start_daemon(tmp_path, _lockdir)
+    # The tick ends 1s after the restart starts waiting, however slow the runner is.
+    ender = threading.Timer(1.0, release.touch)
     try:
         t0 = time.monotonic()
-        with ticklock.between_ticks(timeout=10) as refused:
+        ender.start()
+        with ticklock.between_ticks(timeout=_DEADLINE) as refused:
             assert refused is None
             waited = time.monotonic() - t0
             proc.send_signal(signal.SIGKILL)
             proc.wait(timeout=5)
         assert json.loads(row.read_text()) == {"task_id": "CMX-1", "status": "running",
                                                "window": "@7"}, "restart landed mid-tick"
-        assert 0.5 <= waited < 9, waited
+        assert 0.5 <= waited < _DEADLINE - 1, waited
     finally:
+        ender.cancel()
         proc.kill()
+        proc.wait(timeout=5)
 
 
 def test_a_tick_that_outlives_the_bound_is_refused_and_holds_nothing(tmp_path, _lockdir):
-    proc, row = _start_daemon(tmp_path, _lockdir, gap=3.0)
+    proc, row, release = _start_daemon(tmp_path, _lockdir)
     try:
         with ticklock.between_ticks(timeout=1) as refused:
             assert refused == ("chela-daemon is still mid-tick after 1s — not restarting it; "
                                "try again shortly")
-        deadline = time.monotonic() + 10     # the refusal did not wedge the tick
+        release.touch()                      # only now may the tick end
+        deadline = time.monotonic() + _DEADLINE   # the refusal did not wedge the tick
         while json.loads(row.read_text())["status"] != "running":
             assert time.monotonic() < deadline
             time.sleep(0.05)
@@ -120,7 +148,7 @@ def test_begin_tick_waits_for_a_restart_and_leaves_on_shutdown(_lockdir):
     t = threading.Thread(target=lambda: got.append(
         ticklock.begin_tick(lambda s: (waits.append(s), True)[1])), daemon=True)
     t.start()
-    t.join(timeout=2)
+    t.join(timeout=_DEADLINE)
     if t.is_alive():
         cm.__exit__(None, None, None)
         pytest.fail("begin_tick never consulted the shutdown-aware wait")
@@ -142,9 +170,9 @@ def test_the_daemon_restarting_itself_from_its_own_tick_does_not_wait_on_itself(
     fd = ticklock.begin_tick(lambda s: False)
     try:
         t0 = time.monotonic()
-        with ticklock.between_ticks(timeout=2) as refused:
+        with ticklock.between_ticks(timeout=5) as refused:
             assert refused is None
-        assert time.monotonic() - t0 < 1
+        assert time.monotonic() - t0 < 4    # well under the bound: it never polled the lock
     finally:
         ticklock.end_tick(fd)
 
@@ -152,24 +180,32 @@ def test_the_daemon_restarting_itself_from_its_own_tick_does_not_wait_on_itself(
 # --- agents and judges are NOT the daemon's to interrupt (why CMX-199's refusal went) ---
 def test_a_detached_judge_survives_the_daemon_being_killed(tmp_path):
     pidfile = tmp_path / "judge.pid"
+    # CMX-314: the pid is PUBLISHED by rename. A plain `write_text` creates the file empty
+    # before it writes, so `_wait_for` could see it, the kill below could land before the
+    # write, and the test read `/proc//stat` (= /proc/stat) — the CI flake.
     spawner = _py("""
-        import sys, time
+        import os, sys, time
         from pathlib import Path
         from chela import judge
-        Path(sys.argv[1]).write_text(str(judge.spawn_detached(["sleep", "30"], Path(sys.argv[2]))))
+        pid = judge.spawn_detached(["sleep", "30"], Path(sys.argv[2]))
+        tmp = Path(sys.argv[1] + ".tmp")
+        tmp.write_text(str(pid))
+        os.replace(tmp, sys.argv[1])
         time.sleep(60)
     """, pidfile, tmp_path / "judge.log", start_new_session=True)
+    judge_pid = None
     try:
         _wait_for(pidfile)
+        judge_pid = int(pidfile.read_text())
         os.killpg(spawner.pid, signal.SIGKILL)   # pm2's worst case, whole group
-        spawner.wait(timeout=5)
-        time.sleep(0.2)
+        spawner.wait(timeout=_DEADLINE)
         # a killed judge is reaped (stat gone) or a zombie (state Z) — either fails here
-        assert (Path("/proc") / pidfile.read_text() / "stat").read_text().rsplit(") ", 1)[1][0] != "Z"
+        _stays_alive(judge_pid)
     finally:
         spawner.kill()
-        with contextlib.suppress(OSError, ValueError):
-            os.kill(int(pidfile.read_text()), signal.SIGKILL)
+        if judge_pid is not None:
+            with contextlib.suppress(OSError):
+                os.kill(judge_pid, signal.SIGKILL)
 
 
 @pytest.mark.skipif(shutil.which("tmux") is None, reason="tmux not installed")
@@ -184,9 +220,11 @@ def test_a_tmux_agent_survives_the_daemon_being_killed(tmp_path):
     """, sock, tmp_path / "up", start_new_session=True)
     try:
         _wait_for(tmp_path / "up")
+        server = int(subprocess.run(["tmux", "-L", sock, "display-message", "-p", "#{pid}"],
+                                    capture_output=True, text=True, timeout=10, check=True).stdout)
         os.killpg(spawner.pid, signal.SIGKILL)
-        spawner.wait(timeout=5)
-        time.sleep(0.2)
+        spawner.wait(timeout=_DEADLINE)
+        _stays_alive(server)
         cp = subprocess.run(["tmux", "-L", sock, "has-session", "-t", "a"],
                             capture_output=True, timeout=10)
         assert cp.returncode == 0, "the agent's tmux session died with the daemon"
