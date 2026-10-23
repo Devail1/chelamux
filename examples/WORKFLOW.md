@@ -52,6 +52,10 @@ agent:
   cmd: claude --permission-mode auto
   startup_delay_seconds: 4    # minimum wait before polling the pane for readiness
   ready_timeout_seconds: 60   # cap on the readiness poll, then send anyway
+  # standing_rules: docs/AGENT_STANDING_RULES.md
+  #                           # a short rules file (relative to this repo) rendered into
+  #                           # the prompt wherever {{standing_rules}} appears, and into
+  #                           # the built-in rework prompt. Missing file → empty + a warning.
 
 hooks:
   # Optional. Runs ONCE in a freshly-created worktree, before the agent starts.

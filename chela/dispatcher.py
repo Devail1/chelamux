@@ -34,6 +34,7 @@ from chela.config import (
 from chela.messenger import messaging_socket_launch_arg, resend_enter, send_tmux
 from chela.sandbox import sandbox_launch_arg
 from chela.sources import Task, get_source, run_risk
+from chela.standing_rules import standing_rules
 from chela import transcripts
 from chela.transcripts import agent_transcript_summary
 from chela.tui_text import sanitize as tui_sanitize
@@ -2087,6 +2088,8 @@ def _prompt_vars(
         "repo_path": str(repo_path),
         "project_key": wf.project_key,
         "task_number": task_number,
+        # 📜 CMX-317: `agent.standing_rules` — "" (plus a warning) when the file is missing.
+        "standing_rules": standing_rules(wf),
     }
 
 
@@ -7843,6 +7846,8 @@ existing PR updates itself.
 
 **Do NOT touch the tracker file.**
 
+{{standing_rules}}
+
 ⛔ **If you conclude there is NOTHING to push** — the verdict is wrong, already fixed, or
 you cannot fix it — do **NOT** just say so in your final message and stop. `task-finished`
 assumes a new commit landed; calling it (or nothing at all) with no push leaves this run
@@ -7923,6 +7928,7 @@ def _rework_vars(
         "rework_round": rework_round,
         "max_reworks": _rework_cap(row),
         "required_mutations_section": _required_mutations_section(mutations or []),
+        "standing_rules": standing_rules(wf),
     }
 
 
@@ -9342,6 +9348,7 @@ def dry_run(workflow_path: str | Path) -> list[dict]:
             "repo_path": str(repo_path),
             "project_key": project_key,
             "task_number": tn,
+            "standing_rules": standing_rules(wf),
         })
         plans.append({
             "task_id": task.id,
