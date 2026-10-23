@@ -28,7 +28,7 @@ from flask import abort, Flask, jsonify, render_template, request, Response, sen
 
 from chela import config
 from chela.config import DISPATCH_WORKFLOWS, CHELA_DIR, TMUX_SESSION, NOTIFY_INTERVAL
-from chela import agent_manager, capabilities, collab, concurrency, collab_host, collab_stream, context, diffsurface, discovery, dismissed_sessions, dispatcher, epoch, event_log, gateanswer, hold, hooks, inbox, judge, launcher, messenger, notify, okf, personas, pr_status, probecache, rc_rename, restore, rooms, sandbox_status, scheduler, sessionids, share_requests, share_sandbox, share_store, sidebar_archive, sidebar_layout, spawn, starter, tasklists, transcripts, update, usage, userconfig
+from chela import agent_manager, capabilities, collab, concurrency, collab_host, collab_stream, context, diffsurface, discovery, dismissed_sessions, dispatcher, epoch, event_log, fleet, gateanswer, hold, hooks, inbox, judge, launcher, messenger, notify, okf, personas, pr_status, probecache, rc_rename, restore, rooms, sandbox_status, scheduler, sessionids, share_requests, share_sandbox, share_store, sidebar_archive, sidebar_layout, spawn, starter, tasklists, transcripts, update, usage, userconfig
 from chela.dashboard import resources, term_themes
 from chela import topic_ledger as tg_topics
 from chela.personas import autolaunch, lease
@@ -5127,6 +5127,7 @@ def api_dispatcher():
         entry["recent_runs"] = recent
         workflows_payload.append(entry)
 
+    held = hold.active()
     return jsonify({
         # True whenever there's anything to show — explicit config, a discovered
         # repo-root workflow, or workflows with recorded runs. The frontend
@@ -5136,7 +5137,9 @@ def api_dispatcher():
         # CMX-206: the Board's Pause/Resume button reads its state off THIS payload
         # (the poll features/work already runs every 30s) rather than a second fetch of
         # `/api/settings` — see `hold.active()` for what makes a hold current.
-        "dispatch_hold": (hold.active().as_dict() if hold.active() else None),
+        "dispatch_hold": held.as_dict() if held else None,
+        # CMX-252: what a `--pause --all` stopped (agents, frozen judges, since when).
+        "fleet_pause": fleet.snapshot(held=held),
     })
 
 
@@ -5168,18 +5171,37 @@ def api_dispatcher_pause():
         # A hold the daemon will never see is worse than none — the caller would believe
         # dispatch is paused when it is not. Fail loudly, same as the CLI.
         return jsonify({"ok": False, "error": f"could not take the hold: {e}"}), 500
-    return jsonify({"ok": True, "dispatch_hold": held.as_dict()})
+    if data.get("all") is not True:
+        return jsonify({"ok": True, "dispatch_hold": held.as_dict()})
+    # CMX-252: `chela dispatch --pause --all` — the hold above, then every dispatched agent.
+    try:
+        state = fleet.pause_all(by=held.by)
+    except Exception as e:  # noqa: BLE001 — say the hold stands, whatever broke after it
+        log.exception("fleet pause failed")
+        return jsonify({"ok": False, "dispatch_hold": held.as_dict(),
+                        "error": f"dispatch is held, but pausing the agents failed: {e}"}), 500
+    return jsonify({"ok": True, "dispatch_hold": held.as_dict(),
+                    "fleet_pause": fleet.snapshot(state, held)})
 
 
 @app.route("/api/dispatcher/resume", methods=["POST"])
 @require_auth
 def api_dispatcher_resume():
     """Release the dispatch hold. Idempotent — releasing when nothing is held is not an
-    error, so a stale/duplicate click never surfaces as a failure."""
-    released = hold.release(by="dashboard")
+    error, so a stale/duplicate click never surfaces as a failure.
+
+    CMX-252: like ``chela dispatch --resume``, a ``--pause --all`` fleet is resumed first
+    (agents sent "resume", judges thawed), while the hold still stands."""
+    try:
+        resumed, released = fleet.resume_fleet(by="dashboard")
+    except Exception as e:  # noqa: BLE001 — say the hold stands, whatever broke
+        log.exception("fleet resume failed")
+        return jsonify({"ok": False, "error": f"resuming the agents failed: {e}. "
+                                              "Dispatch is still held."}), 500
     return jsonify({
         "ok": True,
         "released": released.as_dict() if released else None,
+        "fleet_resumed": resumed,
     })
 
 
