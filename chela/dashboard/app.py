@@ -1199,7 +1199,10 @@ _TTYD_BUNDLE_MIN_BYTES = 64 * 1024   # only ttyd's client is this big; our shims
 _TTYD_BUNDLE_KEEP = 4                # ttyd builds remembered (one per upgrade in flight)
 _TTYD_BUNDLES: dict[str, tuple[bytes, bytes]] = {}   # digest -> (js, gzipped js)
 _TTYD_BUNDLES_LOCK = threading.Lock()
-_INLINE_SCRIPT_RE = re.compile(r"<script\b(?![^>]*\bsrc\s*=)[^>]*>(.*?)</script>", re.S | re.I)
+_INLINE_SCRIPT_RE = re.compile(r"<script\b([^>]*)>(.*?)</script>", re.S | re.I)
+# Only a plain classic script is lifted: an external copy of a module, a nonce'd, a
+# deferred or a data (`type="application/json"`) script would not behave the same.
+_CLASSIC_SCRIPT_ATTRS_RE = re.compile(r"\s*(?:type\s*=\s*([\"']?)text/javascript\1\s*)?", re.I)
 
 
 def _gzip(data: bytes) -> bytes:
@@ -1207,7 +1210,8 @@ def _gzip(data: bytes) -> bytes:
 
 
 def _accepts_gzip() -> bool:
-    return "gzip" in (request.headers.get("Accept-Encoding") or "").lower()
+    """The request accepts gzip with a nonzero quality (``gzip;q=0`` is a refusal)."""
+    return request.accept_encodings["gzip"] > 0
 
 
 def _externalize_ttyd_bundle(html: str) -> str:
@@ -1215,8 +1219,8 @@ def _externalize_ttyd_bundle(html: str) -> str:
     ``<script src="/term-bundle/<digest>.js">``, remembering its bytes for
     :func:`term_bundle`. Smaller inline scripts are left where they are."""
     def lift(m: re.Match) -> str:
-        js = m.group(1).encode("utf-8")
-        if len(js) < _TTYD_BUNDLE_MIN_BYTES:
+        js = m.group(2).encode("utf-8")
+        if len(js) < _TTYD_BUNDLE_MIN_BYTES or not _CLASSIC_SCRIPT_ATTRS_RE.fullmatch(m.group(1)):
             return m.group(0)
         digest = hashlib.sha256(js).hexdigest()[:16]
         with _TTYD_BUNDLES_LOCK:
@@ -1228,16 +1232,34 @@ def _externalize_ttyd_bundle(html: str) -> str:
     return _INLINE_SCRIPT_RE.sub(lift, html)
 
 
+def _ttyd_bundle(digest: str) -> tuple[bytes, bytes] | None:
+    with _TTYD_BUNDLES_LOCK:
+        entry = _TTYD_BUNDLES.get(digest)
+    if entry is not None:
+        return entry
+    for wid, port in _terminals_port_map().items():
+        try:
+            page = urllib.request.urlopen(  # noqa: S310 - loopback only
+                f"http://127.0.0.1:{port}/term/{wid}/", timeout=5).read()
+        except Exception:
+            continue    # a dead ttyd: try the next one
+        _externalize_ttyd_bundle(page.decode("utf-8", "replace"))
+        with _TTYD_BUNDLES_LOCK:
+            entry = _TTYD_BUNDLES.get(digest)
+        if entry is not None:
+            return entry
+    return None
+
+
 @app.route("/term-bundle/<digest>.js")
 @require_auth
 def term_bundle(digest):
     """ttyd's client script, lifted out of its page by _externalize_ttyd_bundle. The
-    URL names these bytes, so it is immutable. A digest no page handed out since this
-    dashboard started is a 404: the page that names it is never cached (no-cache),
-    so a reload re-fetches the page and re-registers the bundle."""
+    URL names these bytes, so it is immutable. A digest this process has not seen (the
+    dashboard restarted between a page and its script) is looked for in the live ttyds'
+    pages; one none of them serves is a 404."""
     _require_terminals()
-    with _TTYD_BUNDLES_LOCK:
-        entry = _TTYD_BUNDLES.get(digest)
+    entry = _ttyd_bundle(digest)
     if entry is None:
         abort(404)
     js, gz = entry
@@ -1298,10 +1320,10 @@ def term_http(wid, rest):
         html = (html.replace("</head>", shims + "</head>", 1)
                 if "</head>" in html else html + shims)
         body = html.encode("utf-8")
+        headers.append(("Vary", "Accept-Encoding"))
         if _accepts_gzip():
             body = _gzip(body)
             headers.append(("Content-Encoding", "gzip"))
-            headers.append(("Vary", "Accept-Encoding"))
     return Response(body, status=status, headers=headers)
 
 

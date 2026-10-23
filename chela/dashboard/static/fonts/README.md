@@ -39,15 +39,14 @@ terminals and code.
 
 | Font | Files | License | Copyright / source |
 |------|-------|---------|--------------------|
-| Symbols Nerd Font | `SymbolsNerdFont-Powerline.woff2`, `-FileIcons.woff2`, `-FontAwesome.woff2`, `-UI.woff2` (web terminal); `SymbolsNerdFontMono-Regular.ttf` (the full font: `/screenshot`, and the blocks' source) | MIT | Nerd Fonts — https://github.com/ryanoasis/nerd-fonts |
+| Symbols Nerd Font | `SymbolsNerdFont-Powerline.woff2`, `-FileIcons.woff2`, `-FontAwesome.woff2`, `-UI.woff2`, `-MaterialA.woff2`, `-MaterialB.woff2` (web terminal); `SymbolsNerdFontMono-Regular.ttf` (the full font: `/screenshot`, and the blocks' source) | MIT | Nerd Fonts — https://github.com/ryanoasis/nerd-fonts |
 
-The web terminal's Nerd Font is cut into four blocks (`term_fonts.py`
+The web terminal's Nerd Font is cut into six blocks (`term_fonts.py`
 `NERD_SUBSETS`), each an `@font-face` with its own `unicode-range`, so a pane
 downloads a block only when one of its glyphs is on screen: Powerline + Powerline
 Extra + Pomicons + IEC power (a few kB), Seti-UI + Devicons, Font Awesome + its
-extension + Font Logos, and Codicons + Octicons + Weather. **Material Design Icons
-(U+F0001-F1AF0) are left out**: 6,896 of the font's 10,397 glyphs, used by none of
-the TUIs the wall runs.
+extension + Font Logos, Codicons + Octicons + Weather, and Material Design Icons
+(U+F0001-F1AF0) in two halves. Together they hold every glyph of the full font.
 
 ## Coverage fallback (not in the web terminal font picker)
 

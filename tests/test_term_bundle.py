@@ -117,6 +117,7 @@ def test_the_bundle_is_served_plain_to_a_client_without_gzip(ttyd):
 
 
 def test_an_unknown_bundle_is_404(ttyd):
+    ttyd(_PAGE)     # never the real loopback: a live ttyd may listen on 7681
     resp = app_mod.app.test_client().get("/term-bundle/0123456789abcdef.js")
     assert resp.status_code == 404
 
@@ -156,3 +157,61 @@ def test_a_non_html_passthrough_is_untouched(ttyd):
     resp = app_mod.app.test_client().get("/term/@1/token", headers={"Accept-Encoding": "gzip"})
     assert "Content-Encoding" not in resp.headers
     assert resp.get_data(as_text=True) == '{"token": ""}'
+
+
+# --- review follow-ups ----------------------------------------------------------------
+
+@pytest.mark.parametrize("attrs", [
+    ' type="module"', ' type="application/json"', ' nonce="abc"', " defer",
+    ' type="text/javascript" async',
+])
+def test_a_script_that_is_not_plain_classic_is_never_lifted(attrs):
+    page = f"<script{attrs}>{_BIG}</script>"
+    assert app_mod._externalize_ttyd_bundle(page) == page
+    assert app_mod._TTYD_BUNDLES == {}
+
+
+@pytest.mark.parametrize("attrs", ["", ' type="text/javascript"', " type='text/javascript'",
+                                   " TYPE=text/javascript"])
+def test_a_plain_classic_script_is_lifted(attrs):
+    out = app_mod._externalize_ttyd_bundle(f"<script{attrs}>{_BIG}</script>")
+    assert out == f'<script src="/term-bundle/{_DIGEST}.js"></script>'
+
+
+def test_gzip_refused_with_q0_is_not_sent(ttyd):
+    ttyd(_PAGE)
+    client = app_mod.app.test_client()
+    resp = client.get("/term/@1/", headers={"Accept-Encoding": "gzip;q=0, identity"})
+    assert "Content-Encoding" not in resp.headers
+    assert resp.headers["Vary"] == "Accept-Encoding"
+    resp = client.get(f"/term-bundle/{_DIGEST}.js", headers={"Accept-Encoding": "gzip;q=0"})
+    assert "Content-Encoding" not in resp.headers
+    assert resp.data == _BIG.encode()
+
+
+def test_an_unseen_digest_is_recovered_from_a_live_ttyd(monkeypatch):
+    """The dashboard restarted between serving a page and its script request."""
+    monkeypatch.setattr(app_mod, "_require_terminals", lambda: None)
+    monkeypatch.setattr(app_mod, "_terminals_port_map", lambda: {"@1": 7681, "@2": 7682})
+    asked = []
+
+    def urlopen(url, timeout):
+        asked.append((url, timeout))
+        if ":7681/" in url:
+            raise ConnectionRefusedError("dead ttyd")
+        return _FakeTtydResponse(_PAGE.encode())
+    monkeypatch.setattr(app_mod.urllib.request, "urlopen", urlopen)
+    resp = app_mod.app.test_client().get(f"/term-bundle/{_DIGEST}.js")
+    assert resp.status_code == 200
+    assert resp.data == _BIG.encode()
+    assert asked == [("http://127.0.0.1:7681/term/@1/", 5), ("http://127.0.0.1:7682/term/@2/", 5)]
+
+
+def test_a_digest_no_live_ttyd_serves_is_404(monkeypatch):
+    monkeypatch.setattr(app_mod, "_require_terminals", lambda: None)
+    monkeypatch.setattr(app_mod, "_terminals_port_map", lambda: {"@1": 7681})
+    monkeypatch.setattr(app_mod.urllib.request, "urlopen",
+                        lambda url, timeout: _FakeTtydResponse(_PAGE.encode()))
+    resp = app_mod.app.test_client().get("/term-bundle/0123456789abcdef.js")
+    assert resp.status_code == 404
+    assert list(app_mod._TTYD_BUNDLES) == [_DIGEST]     # the live build was registered

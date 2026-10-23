@@ -34,6 +34,7 @@ _GLYPHS = {
     chr(0xF015): "Symbols Nerd Font",     # Font Awesome: home
     chr(0xEA60): "Symbols Nerd Font",     # Codicons
     chr(0xF418): "Symbols Nerd Font",     # Octicons: git-branch
+    chr(0xF02A2): "Symbols Nerd Font",    # Material Design: nf-md-git
 }
 
 
@@ -70,14 +71,15 @@ def test_the_nerd_font_is_woff2_blocks_much_smaller_than_the_old_ttf():
     assert [f.file for f in nerd] == [
         "SymbolsNerdFont-Powerline.woff2", "SymbolsNerdFont-FileIcons.woff2",
         "SymbolsNerdFont-FontAwesome.woff2", "SymbolsNerdFont-UI.woff2",
+        "SymbolsNerdFont-MaterialA.woff2", "SymbolsNerdFont-MaterialB.woff2",
     ]
     sizes = {f.file: (FONTS_DIR / f.file).stat().st_size for f in nerd}
     # Every block is a unicode-range face, so a pane downloads only the blocks it shows.
     assert all(f.unicode_range for f in nerd)
     # The block every prompt / status line needs is tiny.
     assert sizes["SymbolsNerdFont-Powerline.woff2"] < 16 * 1024, sizes
-    # All of them together are a quarter of the old TTF at most; any one, an eighth.
-    assert sum(sizes.values()) < _OLD_NERD_TTF_BYTES // 4, sizes
+    # All of them together are half the old TTF at most; any one, an eighth.
+    assert sum(sizes.values()) < _OLD_NERD_TTF_BYTES // 2, sizes
     assert max(sizes.values()) < _OLD_NERD_TTF_BYTES // 8, sizes
 
 
@@ -113,6 +115,14 @@ def test_each_nerd_block_kept_every_glyph_its_range_names():
         cmap = TTFont(str(FONTS_DIR / file)).getBestCmap()
         lost = [hex(cp) for cp in source if _in(cp, spec) and cp not in cmap]
         assert not lost, f"{file} dropped {lost[:10]}"
+
+
+def test_the_nerd_blocks_together_cover_every_glyph_of_the_font():
+    TTFont = _ttfont()
+    source = TTFont(str(FONTS_DIR / NERD_SOURCE)).getBestCmap()
+    uncovered = [hex(cp) for cp in source
+                 if cp > 0x20 and not any(_in(cp, spec) for _, spec in NERD_SUBSETS)]
+    assert not uncovered, uncovered[:10]
 
 
 @pytest.mark.parametrize("glyph,family", list(_GLYPHS.items()))

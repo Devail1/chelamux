@@ -9,7 +9,8 @@ all of it before the final font apply. Three rules follow from that:
   cut into a few blocks (:data:`NERD_SUBSETS`), each its own ``@font-face`` with a
   ``unicode-range``: a browser downloads a block only once a glyph from it is on screen, so
   a Claude Code pane fetches the few-kB Powerline block, or none. Material Design Icons
-  (U+F0001-F1AF0, 6,896 glyphs, two thirds of the font) is left out.
+  (U+F0001-F1AF0, 6,896 glyphs, two thirds of the font) is two blocks of its own, so the
+  prompts and file browsers that use `nf-md-*` icons still get them, and nothing else pays.
 * **Content-hashed URLs.** :func:`font_url` names a font by a hash of its bytes, and the
   dashboard serves that URL ``immutable``: a pane never revalidates a font.
 * **Icons never block.** Every face is ``font-display:swap``; the font shim waits only for
@@ -44,6 +45,9 @@ NERD_SUBSETS = (
     ("SymbolsNerdFont-FontAwesome.woff2", "U+E200-E2A9,U+ED00-F2FF,U+F300-F381"),
     # Codicons, Octicons, Weather.
     ("SymbolsNerdFont-UI.woff2", "U+E300-E3E3,U+EA60-EC1E,U+F400-F533"),
+    # Material Design Icons (`nf-md-*`: starship, eza, yazi), in two halves.
+    ("SymbolsNerdFont-MaterialA.woff2", "U+F0001-F0D78"),
+    ("SymbolsNerdFont-MaterialB.woff2", "U+F0D79-F1AF0"),
 )
 
 
