@@ -313,6 +313,8 @@ def test_a_file_that_cannot_be_RESTORED_takes_the_whole_report_down(tmp_path):
     calls = {"n": 0}
 
     def flaky_write(self, data, *a, **k):
+        if self.name != "guard.py":                  # CMX-162: the recovery marker's own write
+            return real_write(self, data, *a, **k)
         calls["n"] += 1
         if calls["n"] == 2:                          # the RESTORE of the first experiment
             return real_write(self, data + "\n# contamination\n", *a, **k)
@@ -343,6 +345,8 @@ def test_a_restore_write_that_RAISES_names_what_it_raised(tmp_path):
     calls = {"n": 0}
 
     def flaky_write(self, data, *a, **k):
+        if self.name != "guard.py":                  # CMX-162: the recovery marker's own write
+            return real_write(self, data, *a, **k)
         calls["n"] += 1
         if calls["n"] == 2:                          # the RESTORE of the first experiment
             raise OSError("no space left on device")
