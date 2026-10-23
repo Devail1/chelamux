@@ -1515,8 +1515,10 @@ def _format_awaiting_run(r: dict, *, now: datetime | None = None) -> str:
     retry_n = r.get("retry_count") or 0
     reopen_chip = f"reopen={reopen_n}  " if reopen_n else ""
     retry_chip = f"retry={retry_n}  " if retry_n else ""
+    infra_n = r.get("infra_restarts") or 0      # 🏗️🔁 CMX-192
+    infra_chip = f"infra={infra_n}  " if infra_n else ""
     return (f"  {task_id}  {status:<16}  {_ci_chip(r):<11}  age={age:<5}  "
-            f"{reopen_chip}{retry_chip}{pr:<45}  {title}")
+            f"{reopen_chip}{retry_chip}{infra_chip}{pr:<45}  {title}")
 
 
 def cmd_dispatch_runs(args) -> None:

@@ -1584,6 +1584,7 @@ def run_events(runs: list[dict], seen: dict[str, str],
             # PR are intact.
             reviews = _reviews(run)
             payload["rework_count"] = run.get("rework_count") or 0
+            payload["infra_restarts"] = run.get("infra_restarts") or 0      # CMX-192
             payload["reviews"] = reviews
             payload["last_error"] = run.get("last_error")
             payload["worktree_path"] = run.get("worktree_path")
@@ -1594,7 +1595,8 @@ def run_events(runs: list[dict], seen: dict[str, str],
                 "run_needs_human",
                 # No parens, no `(s)`: the summary is sanitized before it is typed at a
                 # prompt (_event), and bracket punctuation comes back out mid-word.
-                f"📥 {label} NEEDS A HUMAN — reworks: {payload['rework_count']} · verdicts "
+                f"📥 {label} NEEDS A HUMAN — reworks: {payload['rework_count']} · infra "
+                f"restarts: {payload['infra_restarts']} · verdicts "
                 f"on the row: {len(reviews)} · {reason} — {ref}"
                 f"{' · ' + snippet if snippet else ''}", payload, wid=wid))
         elif status == "changes_requested" and _rework_cap_reached(run):
@@ -1624,8 +1626,9 @@ def run_events(runs: list[dict], seen: dict[str, str],
             # The round that will ACTUALLY run (count after the respawn's bump), out of the
             # effective cap including human-granted rounds — never above it, because an
             # at-cap run never reaches this branch (CMX-58).
-            nxt = (f"rework {payload['rework_count'] + 1} of {_effective_rework_cap(run)}"
-                   if not run.get("last_error")
+            # 🏗️🔁 CMX-192: numbered against the budget it actually spends — a review round
+            # against the rework cap, an infra restart (already counted) against its own.
+            nxt = (_next_round(run) if not run.get("last_error")
                    else f"RETRY after: {str(run['last_error'])[:60]}")
             out.append(_event(
                 "run_changes_requested",
@@ -1674,16 +1677,31 @@ def run_events(runs: list[dict], seen: dict[str, str],
 
 
 def _cap_fields(run: dict) -> dict:
-    """The three columns the dispatcher's cap check reads, tolerantly — this is fed a runs
+    """The columns the dispatcher's cap check reads, tolerantly — this is fed a runs
     snapshot (or a hand-built dict in a test), not a ``sqlite3.Row``."""
     return {"rework_count": run.get("rework_count") or 0,
             "retry_count": run.get("retry_count") or 0, "risk": run.get("risk"),
-            "conflict_reworks": run.get("conflict_reworks") or 0}
+            "conflict_reworks": run.get("conflict_reworks") or 0,
+            # 🏗️🔁 CMX-192. `review_reworks` keeps its NULL: a pre-CMX-192 row reads as
+            # `rework_count` there, and a 0 here would hand it a fresh budget.
+            "infra_restarts": run.get("infra_restarts") or 0,
+            "review_reworks": run.get("review_reworks"),
+            "rework_cause": run.get("rework_cause")}
 
 
 def _effective_rework_cap(run: dict) -> int:
     from chela import dispatcher
     return dispatcher.effective_rework_cap(_cap_fields(run))
+
+
+def _next_round(run: dict) -> str:
+    """🏗️🔁 CMX-192. The round the next re-spawn spends, named by its budget."""
+    from chela import dispatcher
+    fields = _cap_fields(run)
+    if dispatcher.rework_cause(fields) == dispatcher.REWORK_CAUSE_INFRA:
+        return (f"infra restart {dispatcher.infra_restarts(fields)} of "
+                f"{dispatcher.infra_restart_cap(fields)}, not a review round")
+    return f"rework {dispatcher.review_reworks(fields) + 1} of {_effective_rework_cap(run)}"
 
 
 def _rework_cap_reached(run: dict) -> bool:

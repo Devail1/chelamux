@@ -1135,11 +1135,11 @@ def test_a_run_a_human_merged_under_the_verdict_is_not_sent_back(tmp_path):
 
     real = dispatcher.request_changes
 
-    def _merged_first(ident, body):
+    def _merged_first(ident, body, **kw):
         with dispatcher._db() as conn:
             conn.execute("UPDATE runs SET status='done' WHERE task_id=?", (ident,))
             conn.commit()
-        return real(ident, body)
+        return real(ident, body, **kw)
 
     with patch.object(dispatcher, "request_changes", side_effect=_merged_first):
         summary = _tick(wf, fake)
@@ -1671,11 +1671,16 @@ def test_a_red_ci_at_the_rework_cap_escalates_on_the_SAME_tick_and_is_not_respaw
     re-spawned this same tick, one round OVER budget, and every red-at-cap run would get a
     free extra round forever. That justification was defended only by a comment. It is a test
     now, and any reorder turns it red.
+
+    🏗️🔁 CMX-192: a CI send-back spends the INFRA budget, not the review one, so "at the cap"
+    here is the infra cap — and the reason it escalates with names infra.
     """
     monkeypatch.setenv("CHELA_MAX_REWORKS", "1")
+    monkeypatch.setenv("CHELA_MAX_INFRA_RESTARTS", "2")
     wf = _wf(tmp_path)
     with dispatcher._db() as conn:
-        _row(conn, workflow_path=str(wf.path), rework_count=1)   # the budget is spent
+        _row(conn, workflow_path=str(wf.path), rework_count=1,
+             infra_restarts=1)                  # one infra round left — this red spends it
     fake = _FakeGh(rollup=[_check_run("test", conclusion="FAILURE")])
 
     summary = _tick(wf, fake)
@@ -1686,7 +1691,35 @@ def test_a_red_ci_at_the_rework_cap_escalates_on_the_SAME_tick_and_is_not_respaw
     run = dispatcher.resolve_run("abc123")
     assert run["status"] == "needs_human"
     assert (run["rework_count"] or 0) == 1
+    assert run["infra_restarts"] == 2
+    assert "infra restart cap reached (2/2)" in run["last_error"]
+    assert "still fails review" not in run["last_error"]
     assert len(dispatcher.reviews_of(run)) == 1
+
+
+def test_a_red_ci_at_the_REVIEW_cap_is_a_free_infra_round_not_an_escalation(
+    tmp_path, monkeypatch,
+):
+    """🏗️🔁 CMX-192: the review cap is spent (`rework_count == cap`), but a red CI is not a
+    review verdict — it is charged to `infra_restarts`, refunded on the rework cap, and the
+    run is re-spawned instead of being told it "still fails review"."""
+    monkeypatch.setenv("CHELA_MAX_REWORKS", "1")
+    monkeypatch.setenv("CHELA_MAX_INFRA_RESTARTS", "5")
+    wf = _wf(tmp_path)
+    with dispatcher._db() as conn:
+        _row(conn, workflow_path=str(wf.path), rework_count=1)
+    fake = _FakeGh(rollup=[_check_run("test", conclusion="FAILURE")])
+
+    summary = _tick(wf, fake)
+
+    assert summary["ci_failed"] == 1
+    assert summary["escalated"] == 0
+    assert summary["reworked"] == 1
+    run = dispatcher.resolve_run("abc123")
+    assert run["status"] == "running"
+    assert run["infra_restarts"] == 1
+    assert run["rework_count"] == 2
+    assert dispatcher.review_reworks(run) == 1      # still only the one review round
 
 
 # --- issue #426: a CONFLICTING PR reports a state distinct from `none`, without ever
@@ -1854,3 +1887,287 @@ def test_a_rollup_with_no_failure_never_sends_back(tmp_path, rollup, expected):
     assert summary["ci_failed"] == 0
     run = dispatcher.resolve_run("abc123")
     assert run["pr_checks"] == expected and run["status"] == "awaiting_review"
+
+
+# --- 🏗️🔁 CMX-192: infra restarts are NOT review rounds -------------------------------
+#
+# CMX-180 hit "rework cap reached 3/3: the PR still fails review" with ZERO judge rounds: a
+# red CI from the CMX-188 clock flake, a human `chela retry`, and a rework agent killed by a
+# tmux death. The rework cap counts review verdicts only; the rest is `infra_restarts`, with
+# its own higher cap.
+
+def _set_status(status):
+    with dispatcher._db() as conn:
+        conn.execute("UPDATE runs SET status=? WHERE task_id='abc123'", (status,))
+        conn.commit()
+
+
+def test_the_cmx180_history_spends_no_review_round_and_does_not_escalate(tmp_path, monkeypatch):
+    """GUARD: CI-flake rework → human retry → killed agent leaves the review counter at 0 and
+    the infra counter at 2, and the run is NOT needs_human. The review cap is 1 on purpose:
+    before CMX-192 the killed agent's tick escalated it with "the PR still fails review"."""
+    monkeypatch.setenv("CHELA_MAX_REWORKS", "1")
+    monkeypatch.setenv("CHELA_MAX_INFRA_RESTARTS", "8")
+    wf = _wf(tmp_path)
+    with dispatcher._db() as conn:
+        _row(conn, workflow_path=str(wf.path))
+    fake = _FakeGh(rollup=[_check_run("test", conclusion="FAILURE")])
+
+    # (1) the clock flake: CI red → sent back, re-spawned.
+    summary = _tick(wf, fake)
+    assert summary["ci_failed"] == 1 and summary["reworked"] == 1
+    run = dispatcher.resolve_run("abc123")
+    assert (run["status"], run["rework_count"], run["infra_restarts"]) == ("running", 1, 1)
+
+    # (2) a human retry (the run had been parked in needs_human).
+    _set_status("needs_human")
+    with patch.object(dispatcher, "_post_pr_comment", return_value=(True, "")):
+        assert dispatcher.retry("abc123")["ok"]
+    summary = _tick(wf, fake)
+    assert summary["reworked"] == 1 and summary["escalated"] == 0
+    assert dispatcher.resolve_run("abc123")["infra_restarts"] == 1   # a retry costs nothing
+
+    # (3) tmux death: the rework agent's window is gone.
+    fake.windows.clear()
+    summary = _tick(wf, fake)
+
+    run = dispatcher.resolve_run("abc123")
+    assert summary["escalated"] == 0
+    assert run["status"] != "needs_human"
+    assert run["status"] == "running"                  # re-spawned once more, not parked
+    assert dispatcher.review_reworks(run) == 0
+    assert run["infra_restarts"] == 2
+    assert not dispatcher.rework_cap_reached(run)
+
+
+def test_a_real_judge_block_spends_a_REVIEW_round(tmp_path, monkeypatch):
+    """Negative control: a judge `blocked` verdict is a review round — it increments the
+    review counter, not the infra one."""
+    monkeypatch.setenv("CHELA_MAX_REWORKS", "3")
+    wf = _wf(tmp_path)
+    with dispatcher._db() as conn:
+        _row(conn, workflow_path=str(wf.path))
+    fake = _FakeGh(rollup=[_check_run("test", conclusion="SUCCESS")])
+
+    assert dispatcher.request_changes("abc123", "a guard survived", post_comment=False,
+                                      judge_state="blocked")["ok"]
+    summary = _tick(wf, fake)
+
+    run = dispatcher.resolve_run("abc123")
+    assert summary["reworked"] == 1
+    assert run["rework_count"] == 1
+    assert dispatcher.review_reworks(run) == 1
+    assert (run["infra_restarts"] or 0) == 0
+
+
+def test_judge_blocks_at_the_review_cap_escalate_with_still_fails_review(tmp_path, monkeypatch):
+    """The review cap still bites, and still says "still fails review" — infra restarts on
+    the same run are refunded, not counted, and named in the reason."""
+    monkeypatch.setenv("CHELA_MAX_REWORKS", "1")
+    wf = _wf(tmp_path)
+    with dispatcher._db() as conn:
+        _row(conn, workflow_path=str(wf.path), rework_count=3, review_reworks=1,
+             infra_restarts=2)
+    assert dispatcher.request_changes("abc123", "still broken", post_comment=False)["ok"]
+
+    summary = _tick(wf, _FakeGh(rollup=[_check_run("test", conclusion="SUCCESS")]))
+
+    run = dispatcher.resolve_run("abc123")
+    assert summary["escalated"] == 1 and summary["reworked"] == 0
+    assert run["status"] == "needs_human"
+    assert "still fails review" in run["last_error"]
+    assert "rework cap reached (1/1; infra restarts: 2)" in run["last_error"]
+    assert "infra restart cap" not in run["last_error"]
+
+
+def test_dead_rework_agents_hit_the_INFRA_cap_with_an_infra_reason(tmp_path, monkeypatch):
+    """GUARD: N infra restarts reach the infra cap → needs_human, with a reason that names
+    infra and never "still fails review" — even though the review cap is far away."""
+    monkeypatch.setenv("CHELA_MAX_REWORKS", "5")
+    monkeypatch.setenv("CHELA_MAX_INFRA_RESTARTS", "2")
+    wf = _wf(tmp_path)
+    with dispatcher._db() as conn:
+        _row(conn, workflow_path=str(wf.path))
+    fake = _FakeGh(rollup=[_check_run("test", conclusion="SUCCESS")])
+    assert dispatcher.request_changes("abc123", "fix it", post_comment=False)["ok"]
+    assert _tick(wf, fake)["reworked"] == 1             # the review round itself
+
+    fake.windows.clear()
+    assert _tick(wf, fake)["escalated"] == 0            # death 1: re-spawned
+    assert dispatcher.resolve_run("abc123")["infra_restarts"] == 1
+    fake.windows.clear()
+    _tick(wf, fake)                                     # death 2: the infra budget is spent
+
+    run = dispatcher.resolve_run("abc123")
+    assert run["status"] == "needs_human"
+    assert run["infra_restarts"] == 2
+    assert "infra restart cap reached (2/2)" in run["last_error"]
+    assert "review reworks: 1/4" in run["last_error"]       # risk normal: 4
+    assert "still fails review" not in run["last_error"]
+    _assert_actionable_escalation(run["last_error"])
+
+
+def test_a_locked_db_under_the_ci_verdict_hands_the_infra_restart_back(tmp_path):
+    """`except sqlite3.Error` on the CI verdict: nothing was sent back, so nothing is charged
+    — `infra_restarts` returns to its value BEFORE the red (3, not 0, not 4)."""
+    import sqlite3
+
+    wf = _wf(tmp_path)
+    with dispatcher._db() as conn:
+        _row(conn, workflow_path=str(wf.path), infra_restarts=3)
+    fake = _FakeGh(rollup=[_check_run("test", conclusion="FAILURE")])
+    with patch.object(dispatcher, "request_changes",
+                      side_effect=sqlite3.OperationalError("database is locked")):
+        _tick(wf, fake)
+    assert dispatcher.resolve_run("abc123")["infra_restarts"] == 3
+
+
+def test_a_refused_ci_verdict_hands_the_infra_restart_back(tmp_path):
+    """The CAS refused the CI verdict (the row moved): no round, so no infra charge."""
+    wf = _wf(tmp_path)
+    with dispatcher._db() as conn:
+        _row(conn, workflow_path=str(wf.path), infra_restarts=3)
+    fake = _FakeGh(rollup=[_check_run("test", conclusion="FAILURE")])
+    with patch.object(dispatcher, "request_changes",
+                      return_value={"ok": False, "error": "moved"}):
+        summary = _tick(wf, fake)
+    assert summary["ci_failed"] == 0
+    assert dispatcher.resolve_run("abc123")["infra_restarts"] == 3
+
+
+def test_a_ci_send_back_charges_one_infra_restart_on_top_of_the_existing_ones(tmp_path):
+    wf = _wf(tmp_path)
+    with dispatcher._db() as conn:
+        _row(conn, workflow_path=str(wf.path), infra_restarts=3)
+    _tick(wf, _FakeGh(rollup=[_check_run("test", conclusion="FAILURE")]))
+    assert dispatcher.resolve_run("abc123")["infra_restarts"] == 4
+
+
+@pytest.mark.parametrize("row, review, reached", [
+    # base cap 2 (CHELA_MAX_REWORKS); cap = base + retry + conflict
+    ({"rework_count": 2}, 2, True),                                  # legacy row: NULL → count
+    ({"rework_count": 5, "review_reworks": 1}, 1, False),            # the column wins
+    ({"rework_count": 5, "review_reworks": 2}, 2, True),
+    ({"rework_count": 5, "review_reworks": 2, "rework_cause": "infra"}, 2, False),
+    ({"rework_count": 5, "review_reworks": 2, "retry_count": 1}, 2, False),
+    ({"rework_count": 5, "review_reworks": 3, "retry_count": 1}, 3, True),
+    ({"rework_count": 5, "review_reworks": 2, "conflict_reworks": 1}, 2, False),
+    ({"rework_count": 5, "review_reworks": 0}, 0, False),            # 0 is not NULL
+    ({"rework_count": 5, "review_reworks": 2, "rework_cause": "review"}, 2, True),
+    ({"rework_count": 5, "review_reworks": 2, "rework_cause": "bogus"}, 2, True),
+])
+def test_the_review_cap_counts_review_rounds_only(monkeypatch, row, review, reached):
+    monkeypatch.setenv("CHELA_MAX_REWORKS", "2")
+    monkeypatch.setenv("CHELA_MAX_INFRA_RESTARTS", "8")
+    full = {"retry_count": 0, "risk": None, **row}
+    assert dispatcher.review_reworks(full) == review
+    assert dispatcher.review_cap_reached(full) is reached
+    assert dispatcher.rework_cap_reached(full) is reached
+
+
+@pytest.mark.parametrize("infra, retry, reached", [
+    (2, 0, False), (3, 0, True), (4, 0, True), (3, 1, False), (4, 1, True),
+])
+def test_infra_cap_is_its_own_knob_plus_human_retries(monkeypatch, infra, retry, reached):
+    monkeypatch.setenv("CHELA_MAX_REWORKS", "5")
+    monkeypatch.setenv("CHELA_MAX_INFRA_RESTARTS", "3")
+    row = {"rework_count": 0, "retry_count": retry, "risk": None, "infra_restarts": infra}
+    assert dispatcher.infra_restart_cap(row) == 3 + retry
+    assert dispatcher.infra_cap_reached(row) is reached
+    assert dispatcher.rework_cap_reached(row) is reached     # either budget counts
+    assert dispatcher.review_cap_reached(row) is False
+
+
+def test_an_old_row_without_the_infra_column_reads_as_zero():
+    assert dispatcher.infra_restarts({"rework_count": 1}) == 0
+
+
+@pytest.mark.parametrize("run, text", [
+    ({"rework_count": 3, "review_reworks": 1, "rework_cause": "review"}, "rework 2 of 2"),
+    ({"rework_count": 3, "review_reworks": 1, "rework_cause": "infra", "infra_restarts": 2},
+     "infra restart 2 of 8, not a review round"),
+    ({"rework_count": 3}, "rework 4 of 2"),             # legacy row: NULL → rework_count
+    ({"rework_count": 3, "review_reworks": 0}, "rework 1 of 2"),
+])
+def test_the_inbox_numbers_the_next_round_against_the_budget_it_spends(monkeypatch, run, text):
+    """🏗️🔁 CMX-192: "sent back for rework — rework N of M" counts REVIEW rounds; an infra
+    send-back is named as one, against its own cap. `_cap_fields` keeps `review_reworks`'
+    NULL (a 0 there would hand a legacy row a fresh budget)."""
+    from chela import inbox
+    monkeypatch.setenv("CHELA_MAX_REWORKS", "2")
+    monkeypatch.setenv("CHELA_MAX_INFRA_RESTARTS", "8")
+    assert inbox._next_round(run) == text
+
+
+def test_request_changes_writes_the_cause_it_is_given(tmp_path):
+    """Both kinds through `request_changes`: the default is a review, `infra` is stored as
+    such — and anything else is a review, never silently free."""
+    with dispatcher._db() as conn:
+        _row(conn)
+    assert dispatcher.request_changes("abc123", "x", post_comment=False, cause="infra")["ok"]
+    assert dispatcher.resolve_run("abc123")["rework_cause"] == "infra"
+    for cause, stored in ((None, "review"), ("bogus", "review")):
+        _set_status("awaiting_review")
+        kw = {} if cause is None else {"cause": cause}
+        assert dispatcher.request_changes("abc123", "x", post_comment=False, **kw)["ok"]
+        assert dispatcher.resolve_run("abc123")["rework_cause"] == stored
+
+
+def test_retry_keeps_the_cause_so_its_round_spends_what_escalated(tmp_path, monkeypatch):
+    """A retry after an INFRA escalation re-spawns as infra (review counter untouched); the
+    retry grant lifts the infra cap by one so it is not re-escalated on the spot."""
+    monkeypatch.setenv("CHELA_MAX_INFRA_RESTARTS", "2")
+    wf = _wf(tmp_path)
+    with dispatcher._db() as conn:
+        _row(conn, workflow_path=str(wf.path), status="needs_human", rework_count=3,
+             review_reworks=1, infra_restarts=2, rework_cause="infra")
+    with patch.object(dispatcher, "_post_pr_comment", return_value=(True, "")):
+        assert dispatcher.retry("abc123")["ok"]
+    summary = _tick(wf, _FakeGh(rollup=[_check_run("test", conclusion="SUCCESS")]))
+    run = dispatcher.resolve_run("abc123")
+    assert summary["escalated"] == 0 and summary["reworked"] == 1
+    assert (run["rework_cause"], run["review_reworks"], run["rework_count"]) == ("infra", 1, 4)
+
+
+def test_a_legacy_row_respawned_on_a_review_verdict_counts_from_rework_count(tmp_path):
+    """A pre-CMX-192 row (`review_reworks` NULL) starts its review count at `rework_count`:
+    it is not handed a fresh budget by the migration."""
+    wf = _wf(tmp_path)
+    with dispatcher._db() as conn:
+        _row(conn, workflow_path=str(wf.path), status="changes_requested", rework_count=2,
+             review_reworks=None, rework_cause=None)
+    _tick(wf, _FakeGh(rollup=[_check_run("test", conclusion="SUCCESS")]))
+    run = dispatcher.resolve_run("abc123")
+    assert (run["rework_count"], run["review_reworks"]) == (3, 3)
+
+
+def _failed_row(tmp_path, db_status, snap_status, cause="review"):
+    with dispatcher._db() as conn:
+        _row(conn, status=snap_status, rework_count=1, review_reworks=1, infra_restarts=1,
+             rework_cause=cause)
+        snap = conn.execute("SELECT * FROM runs WHERE task_id='abc123'").fetchone()
+        conn.execute("UPDATE runs SET status=? WHERE task_id='abc123'", (db_status,))
+        conn.commit()
+        dispatcher._rework_failed(conn, snap, "boom")
+    return dispatcher.resolve_run("abc123")
+
+
+def test_a_rework_that_died_after_it_was_spawned_turns_the_cause_infra(tmp_path):
+    run = _failed_row(tmp_path, "running", "running")
+    assert run["status"] == "changes_requested"
+    assert (run["infra_restarts"], run["rework_cause"]) == (2, "infra")
+    assert (run["rework_count"], run["review_reworks"]) == (1, 1)
+
+
+def test_a_rework_that_died_BEFORE_its_spawn_write_keeps_its_verdicts_cause(tmp_path):
+    """The re-spawn raised before it wrote `running` (so it never charged its verdict): the
+    death is still an infra restart, but the verdict's own cause stays to be charged."""
+    run = _failed_row(tmp_path, "changes_requested", "changes_requested")
+    assert (run["infra_restarts"], run["rework_cause"]) == (2, "review")
+
+
+def test_a_rework_that_died_after_its_spawn_write_from_the_3b_snapshot_turns_infra(tmp_path):
+    """3b's `except` hands `_rework_failed` its PRE-spawn snapshot (`changes_requested`) —
+    the DB row is what says the round was spawned."""
+    run = _failed_row(tmp_path, "running", "changes_requested")
+    assert (run["infra_restarts"], run["rework_cause"]) == (2, "infra")
