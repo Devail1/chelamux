@@ -66,18 +66,20 @@ test('every slot draws its content in its place', () => {
     inSlot('primary-menu-island', '#btn-primary-menu'), inSlot('sidebar-resize', '.sidebar-resize'),
     inSlot('panel-work', '#work-seg'), inSlot('shares-pill-row', '#term-shares'),
     inSlot('keybar-island', '#term-keybar'), inSlot('keybar-island', '#term-bar'),
-    inSlot('new-fab-island', '#btn-new-mobile'), inSlot('status-health-island', '#status-health-warn'),
+    inSlot('status-health-island', '#status-health-warn'),
     inSlot('shares-pill-float', '#btn-shares'), inSlot('access-req-island', '#btn-access-req'),
   ]).toEqual([
     'decisions-island', 'sidebar-new-island', 'sessions-count-island', 'sidebar-view-menu', 'sidebar-agents',
     'resources-island', 'primary-menu-island', 'sidebar-resize', 'panel-work', 'shares-pill-row', 'keybar-island',
-    'keybar-island', 'new-fab-island', 'status-health-island', 'shares-pill-float', 'access-req-island',
+    'keybar-island', 'status-health-island', 'shares-pill-float', 'access-req-island',
   ].map((s) => [s, true]));
   // The safety cluster floats OUTSIDE the off-canvas sidebar (CMX-377); the row copies sit in the Wall's toolbar.
   expect($('.safety-float > #shares-pill-float > #btn-shares')).not.toBeNull();
   expect($('.sidebar .safety-float, .sidebar #btn-shares')).toBeNull();
   expect($('#panel-terminals > .term-toolbar > #shares-pill-row > #term-shares')).not.toBeNull();
   expect($('#panel-terminals > .term-toolbar > #term-approvals-island')).not.toBeNull();
+  // CMX-313: no phone "+" (New session is the drawer's button)
+  expect($('#new-fab-island, #btn-new-mobile, .mobile-new-fab')).toBeNull();
   expect($('.sidebar-quick > #sidebar-new-island + .sidebar-jump > #sidebar-jump-input')).not.toBeNull();
 });
 

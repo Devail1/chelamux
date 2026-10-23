@@ -3,7 +3,7 @@
 // and the REAL module graph (same idiom as tests/mobile_new_fab.test.mjs).
 //
 // Guards (each corrupt→RED, recorded in the PR's self-check experiments):
-//   - the desktop sidebar "New session" button AND the phone "+" each open the launch menu
+//   - the sidebar "New session" button (the drawer's, on a phone too: CMX-313 removed the "+") opens the launch menu
 //     (the launcher island since CMX-219), which contains "Sandboxed session…";
 //   - clicking it asks for a project directory and POSTs it to /api/agents/spawn-sandboxed,
 //     the share_sandbox launcher's route, never the plain /api/agents/spawn a shell window
@@ -56,11 +56,6 @@ test('the desktop "New session" menu offers Sandboxed session…', async () => {
     const item = await openedMenuItem(doc.querySelector('.sidebar-new-btn'));
     assert.ok(item, 'no Sandboxed session entry in the desktop New session menu');
     assert.match(item.textContent, /Sandboxed session/);
-});
-
-test('the phone "+" menu offers Sandboxed session…', async () => {
-    const item = await openedMenuItem(doc.getElementById('btn-new-mobile'));
-    assert.ok(item, 'no Sandboxed session entry in the phone "+" menu');
 });
 
 test('Sandboxed session… POSTs the project to the sandboxed launcher route', async () => {

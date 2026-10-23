@@ -193,15 +193,17 @@ test('desktop: even with the visual viewport shrunk (browser zoom), no override'
     assert.equal(fitVar(), '');
 });
 
-test('style.css applies the fit to the phone pane, after the fullscreen rule', () => {
+test('style.css applies the fit to the phone pane, after the full-bleed pane rule', () => {
     const css = readFileSync(new URL('../chela/dashboard/static/style.css', import.meta.url), 'utf8')
         .replace(/\/\*[\s\S]*?\*\//g, '');
     const rule = /html\.kb-fit\s+\.term-single\s+\.term-pane\s*\{\s*height:\s*var\(\s*--kb-pane-fit-h\s*\)\s*;?\s*\}/;
     const m = rule.exec(css);
     assert.ok(m, 'missing `html.kb-fit .term-single .term-pane { height: var(--kb-pane-fit-h) }`');
-    const full = css.indexOf('body.term-mobile-full .term-single .term-pane {');
+    // CMX-313: the phone pane is always full-bleed, pinned to the viewport (it was the
+    // opt-in body.term-mobile-full rule before)
+    const full = css.search(/\.term-single\s+\.term-pane\s*\{[^}]*position:\s*fixed/);
     assert.ok(full >= 0 && m.index > full,
-        'the kb-fit rule must come AFTER the fullscreen pane rule (equal specificity — source order decides)');
+        'the kb-fit rule must come AFTER the full-bleed pane rule (the fit must win the height)');
     const mq = css.lastIndexOf('@media', m.index);
     assert.match(css.slice(mq, m.index), /^@media\s*\(max-width:\s*768px\)/, 'the kb-fit rule must be phone-only');
 });

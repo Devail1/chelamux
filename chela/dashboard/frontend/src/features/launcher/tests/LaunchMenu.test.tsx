@@ -6,7 +6,7 @@
 import { act, cleanup, fireEvent, render, screen } from '@testing-library/react';
 import { afterEach, beforeEach, expect, test, vi } from 'vitest';
 import { agents } from '../../../shared/store/agents.ts';
-import { LaunchMenu, NewSessionButton, NewSessionFab, closeLaunchMenu, launchProject, launcher, newSandboxedSession, newShellWindow, openLaunchMenu, refreshLauncher, samePath, setLauncherHost } from '../index.ts';
+import { LaunchMenu, NewSessionButton, closeLaunchMenu, launchProject, launcher, newSandboxedSession, newShellWindow, openLaunchMenu, refreshLauncher, samePath, setLauncherHost } from '../index.ts';
 
 type Call = { url: string; method: string; body: unknown };
 let calls: Call[] = [];
@@ -33,7 +33,7 @@ beforeEach(() => {
     return Promise.resolve({ json: () => Promise.resolve(replies[url] ?? { ok: true }) });
   });
   vi.stubGlobal('alert', (m: string) => alerts.push(m));
-  render(<><NewSessionButton /><NewSessionFab /><LaunchMenu /></>);
+  render(<><NewSessionButton /><LaunchMenu /></>);
 });
 afterEach(() => {
   act(() => closeLaunchMenu());
@@ -54,7 +54,7 @@ async function click(el: Element | null | undefined) {
   await settle();
 }
 
-test('New session and the phone "+" each open the launch menu, re-reading the lists', async () => {
+test('New session opens the launch menu, re-reading the lists', async () => {
   await openFrom('.sidebar-new-btn');
   expect(menu()?.getAttribute('aria-label')).toBe('New');
   expect(calls.map((c) => c.url)).toEqual(['/api/launcher']);
@@ -64,9 +64,6 @@ test('New session and the phone "+" each open the launch menu, re-reading the li
     ['Init a repo', 'Scheduled task', 'Sandboxed session…', 'Sandboxed session · allow web access…', 'Shell window']);
   act(() => closeLaunchMenu());
   expect(menu()).toBeNull();
-  await openFrom('#btn-new-mobile');
-  expect(menu()).not.toBeNull();
-  expect(document.getElementById('btn-new-mobile')?.getAttribute('aria-label')).toBe('New session');
 });
 
 test('Escape closes it', async () => {

@@ -19,6 +19,16 @@ const TEMPLATE = join(ROOT, 'chela', 'dashboard', 'templates', 'index.html');
 
 export const ORIGIN = 'http://chela.test';
 
+// The phone's drawer opener (CMX-313): the floating ☰ with no pane open, the pane title
+// bar's hamburger with one open. Exactly one of the two is visible at a time.
+export const DRAWER_OPENER = '#btn-menu-mobile:visible, #term-stage.term-single .gs-head-menu:visible';
+/** Click the phone's visible drawer opener from inside the page (for page.evaluate callers). */
+export const OPEN_DRAWER_IN_PAGE = () => {
+    const el = [...document.querySelectorAll('#btn-menu-mobile, #term-stage.term-single .gs-head-menu')]
+        .find(b => b.getClientRects().length && getComputedStyle(b).display !== 'none');
+    el.click();
+};
+
 // One agent per status state. The sidebar row and the pane header each derive
 // the state through their OWN real code (nav.js / terminals.js tileState) from
 // these same fields, so matching marks are a fact about the product, not the

@@ -1505,7 +1505,7 @@ test('starting a wire from the badge menu closes the menu immediately, and Escap
 // is the fixed bar's measured footprint; the pane must subtract it. Static
 // source-text facts, same honest-scoping as the ctx-bar-h guards above — jsdom can't
 // resolve the rendered overlap itself.
-test('CMX-133: mobile keeps the pane header (shorter) instead of hiding it, and hides only the inapplicable window-control keys (not the × kill button)', () => {
+test('CMX-133/CMX-313: mobile keeps the pane header, and never hides its hamburger', () => {
     // A media-aware rule parser — source-text parsing, jsdom can't resolve the actual
     // cascade (see the honest-scoping note above the keybar-h test below), but tracking
     // the FULL nested @media stack per leaf rule rather than flattening it away. A
@@ -1645,75 +1645,15 @@ test('CMX-133: mobile keeps the pane header (shorter) instead of hiding it, and 
         '.gs-head must not be hidden on mobile — alone, via a more specific selector, or via a rule ' +
         'neutered by @media — the header\'s dot/menu (Share/Orchestrator/Pin) must stay reachable on phones');
 
-    // The shape-only regex this replaced (`padding: Npx Npx; font-size: Npx;`) never
-    // compared magnitudes to the desktop rule, so inflating the mobile numbers past
-    // desktop's satisfied it while making the "shorter" bar taller than desktop.
-    const gsHeadBlocks = rules.filter((r) => r.selector.split(',').map((s) => s.trim()).includes('.gs-head'));
-    assert.equal(gsHeadBlocks.length, 2,
-        'expected exactly one desktop .gs-head rule and one mobile override — found ' + gsHeadBlocks.length);
-    // CMX-230 tokenised .gs-head's desktop font-size onto :root's
-    // --wall-pane-font-size (a bare px literal there is exactly what that
-    // ticket's own type-scale guard now forbids — see
-    // tests/dashboard_scale_nav_a11y.test.mjs) — so a `font-size:` value here
-    // may be a literal Npx (the mobile override still is) OR a `var(--name)`
-    // reference, resolved against its :root declaration.
-    const rootTokenPx = (name) => {
-        const root = CSS.match(/:root\s*\{([^}]*)\}/);
-        assert.ok(root, ':root block not found');
-        const m = root[1].match(new RegExp('--' + name + ':\\s*([0-9.]+)px'));
-        assert.ok(m, `--${name} not declared as a px value on :root`);
-        return parseFloat(m[1]);
-    };
-    // CMX-377: the desktop rule moved from a padding-derived height to a FIXED
-    // `height: 40px` (the brief's own spec) — vertical padding is no longer a
-    // meaningful "how tall is the bar" proxy for it, so the desktop side reads
-    // `height` directly instead of padding's first number. Mobile keeps its
-    // own pre-existing padding-derived compact bar (CMX-133, untouched by this
-    // restyle) — its total is approximated as 2×vertical-padding + font-size
-    // (a single-line bar's content-box height), a reasonable proxy this file
-    // already used for the pre-CMX-377 desktop rule.
-    const fontSize = (body) => {
-        const fsLiteral = body.match(/font-size:\s*([0-9.]+)px/);
-        const fsVar = body.match(/font-size:\s*var\(--([\w-]+)\)/);
-        assert.ok(fsLiteral || fsVar, 'each .gs-head rule must declare font-size: Npx or font-size: var(--token)');
-        return fsLiteral ? parseFloat(fsLiteral[1]) : rootTokenPx(fsVar[1]);
-    };
-    const desktopHeight = (() => {
-        const m = gsHeadBlocks[0].body.match(/height:\s*([0-9.]+)px/);
-        assert.ok(m, 'the desktop .gs-head rule must declare a fixed height: Npx');
-        return parseFloat(m[1]);
-    })();
-    const desktopFs = fontSize(gsHeadBlocks[0].body);
-    const mobilePad = gsHeadBlocks[1].body.match(/padding:\s*([0-9.]+)px\s+([0-9.]+)px/);
-    assert.ok(mobilePad, 'the mobile .gs-head override must declare padding: Npx Npx');
-    const mobileFs = fontSize(gsHeadBlocks[1].body);
-    const mobileHeightEstimate = 2 * parseFloat(mobilePad[1]) + mobileFs;
-    assert.ok(mobileHeightEstimate < desktopHeight,
-        `the mobile .gs-head's estimated height (${mobileHeightEstimate}px, from its own padding+font-size) must ` +
-        `be smaller than desktop's fixed height (${desktopHeight}px) — this is the "shorter bar" the PR claims`);
-    assert.ok(mobileFs < desktopFs,
-        `the mobile .gs-head font-size (${mobileFs}px) must be smaller than desktop's (${desktopFs}px)`);
-
-    // CMX-133: `.gs-keys` — and its `.gs-win-ctl` wrapper, which is where min/max/kill
-    // actually live — must NOT be hidden on mobile any more, by any route. Hiding
-    // either one swallows the × kill button, the only way to tear a session down on
-    // phones, while leaving every individual-button assertion below satisfied.
-    assert.equal(hiddenOnMobile('gs-keys'), false,
-        '.gs-keys must not be hidden on mobile — directly, via a more specific descendant selector like ' +
-        '`.term-single .gs-keys`, or via a rule nested in a @media that never actually matches a phone — ' +
-        'any of those hides the × kill button along with the inapplicable drag/min/max controls');
-    assert.equal(hiddenOnMobile('gs-win-ctl'), false,
-        '.gs-win-ctl (the wrapper `.gs-keys` holds — min/max/kill all live inside it) must not be hidden ' +
-        'on mobile either; hiding the wrapper drops the × kill button while every `.gs-keys`/`.gs-min-btn`/' +
-        '`.gs-max-btn`/`.gs-kill-btn` assertion here stays satisfied');
-
-    // The individual window-control buttons that genuinely don't apply to a forced
-    // single pane (drag has nothing to drag onto, minimize has no dock, maximize is
-    // already full-screen) must still be hidden ON AN ACTUAL PHONE — but NOT gs-kill-btn.
-    assert.ok(hiddenOnMobile('gs-min-btn'), '.gs-min-btn must stay hidden on mobile — no dock to minimize to');
-    assert.ok(hiddenOnMobile('gs-max-btn'), '.gs-max-btn must stay hidden on mobile — already full-screen');
-    assert.equal(hiddenOnMobile('gs-kill-btn'), false,
-        '.gs-kill-btn must NOT be hidden on mobile — it is the only way to close/kill a session there');
+    // CMX-313 (Liav, 10-23) retired the compact phone header and its × (CMX-133): the phone's
+    // single pane now draws the Claude-app title bar (PaneHead `.gs-head-bar`), whose
+    // hamburger opens the drawer and whose ⋮ menu holds Close. No .gs-keys is rendered there
+    // at all, so the stylesheet no longer hides its buttons; what matters is that the
+    // hamburger is never hidden on a phone. The rendered layout is measured in
+    // tests/browser/phone_pane_titlebar.test.mjs.
+    assert.equal(hiddenOnMobile('gs-head-menu'), false,
+        '.gs-head-menu (the title bar\'s hamburger) must not be hidden on mobile — with the pane open it is ' +
+        'the only way into the drawer');
 });
 
 // 133-WIRING — the CSS guard above only proves the mobile stylesheet keeps `.gs-keys`
@@ -1731,7 +1671,7 @@ test('CMX-133: mobile keeps the pane header (shorter) instead of hiding it, and 
 // stay green. Stub matchMedia to report a PHONE width for the extent of this one
 // test, so `_isMobileTerm()` really is true while the header renders — the only way
 // to prove `kill` isn't gated on it.
-test('CMX-133: the single-pane header includes the × kill button on an ACTUAL phone (matchMedia stubbed to a phone width), not gated on draggable or _isMobileTerm()', async () => {
+test('CMX-313: the single-pane header on an ACTUAL phone (matchMedia stubbed to a phone width) is the title bar: hamburger, no ✕, no maximize', async () => {
     const origMatchMedia = window.matchMedia;
     window.matchMedia = (q) => ({
         media: q, matches: true, addEventListener() {}, removeEventListener() {},
@@ -1745,12 +1685,10 @@ test('CMX-133: the single-pane header includes the × kill button on an ACTUAL p
             'setTermMode("single") must force the single-pane layout for this assertion to be meaningful');
         const head = stage.querySelector('.gs-head');
         assert.ok(head, 'single-pane mode must still render a pane header');
-        assert.ok(head.querySelector('.gs-kill-btn'),
-            'the single-pane header must include the × kill button on an ACTUAL phone (matchMedia stubbed ' +
-            'to report a phone-width match, so `_isMobileTerm()` is really true here) — gating it on ' +
-            '`draggable` (true only for wall tiles) or on `_isMobileTerm()` (this file\'s other guards never ' +
-            'exercise it, since every other test runs under the desktop-width matchMedia stub) silently ' +
-            'reproduces the exact CMX-133 bug: no × on any real phone');
+        assert.ok(head.classList.contains('gs-head-bar'), 'the phone single pane must draw the title bar');
+        assert.ok(head.querySelector('.gs-head-menu'), 'the phone title bar must carry the drawer\'s hamburger');
+        assert.equal(head.querySelector('.gs-kill-btn'), null, 'the phone title bar must not draw ✕ (Close is in ⋮)');
+        assert.equal(head.querySelector('.gs-max-btn'), null, 'the phone title bar must not draw maximize');
     } finally {
         // Restore the desktop-width stub and wall mode so any test appended after
         // this one sees the same environment every other test in this file expects.

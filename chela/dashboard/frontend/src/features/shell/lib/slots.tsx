@@ -8,7 +8,7 @@ import { ApprovalsPill, ApprovalsSheet } from '../../approvals/index.ts';
 import { DecisionsButton, DecisionsDialog } from '../../decisions/index.ts';
 import { DiffModal } from '../../diffmodal/index.ts';
 import { Keybar, paneKeybarActions } from '../../keybar/index.ts';
-import { LaunchMenu, NewSessionButton, NewSessionFab } from '../../launcher/index.ts';
+import { LaunchMenu, NewSessionButton } from '../../launcher/index.ts';
 import { NewTask } from '../../newtask/index.ts';
 import { Palette, Shortcuts } from '../../palette/index.ts';
 import { PrimaryMenu, SessionsCount } from '../../primarymenu/index.ts';
@@ -95,7 +95,6 @@ export const SLOTS: Readonly<Record<string, () => ReactNode>> = {
   'shares-pill-row': () => <SharesPill id="term-shares" />,
   'term-approvals-island': () => <ApprovalsPill id="term-approvals" />,
   'keybar-island': () => <Keybar actions={paneKeybarActions} />,
-  'new-fab-island': () => <NewSessionFab />,
   'status-health-island': () => <StatusHealth />,
   'shares-pill-float': () => <SharesPill id="btn-shares" />,
   'access-req-island': () => <AccessRequestsPill />,

@@ -190,6 +190,13 @@ tile, start a wire, leave a room, relabel the dock) goes through the host `featu
 render with no React children: the facepile `.gs-presence` and the Share row's
 `.gs-share-count` (`collab/presence-owner.js`), and the room badge `.gs-room` (`wire.ts`).
 
+On a phone the single pane's header is the screen's one title bar (CMX-313, `.gs-head-bar`): the
+drawer's hamburger on the left, the title over its subtitle in the middle, the status chip and
+⋮ on the right. Close is a row of the ⋮ menu and there is no maximize, because the pane is
+always full: `style.css` pins it to the viewport, edge to edge, from the top to the keybar.
+The floating ☰ (`.mobile-menu-fab`) shows only while no pane is open, and there is no phone
+"+": New session is the drawer's own button.
+
 The rest of a tile is React too (CMX-242, plan P27/P28/P30/P32), on the same pattern:
 
 | Module | Draws | Mounted by features/wall into |

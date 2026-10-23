@@ -111,12 +111,12 @@ export function App() {
           {BOOT.terminalsEnabled && <Wall />}
         </main>
       </div>
-      {/* Phone only: the drawer's opener and New session in one tap, outside the sidebar, whose
-          `transform` would trap a fixed child off-screen (CMX-377, CMX-386). */}
+      {/* Phone only: the drawer's opener, outside the sidebar, whose `transform` would trap a
+          fixed child off-screen (CMX-377). A view with a pane open hides it: the pane's title
+          bar carries the opener (CMX-313). New session is the drawer's own button (no "+"). */}
       <IconButton label="Open menu" className="mobile-menu-fab" id="btn-menu-mobile" aria-expanded={false} onClick={() => toggleSidebar()}>
         <icons.menu aria-hidden="true" />
       </IconButton>
-      <Slot id="new-fab-island" />
       {/* Always on top, on every breakpoint, OUTSIDE the off-canvas sidebar: a live share or a
           broken status feed must never hide behind a closed drawer (CMX-377). */}
       <div className="safety-float">
