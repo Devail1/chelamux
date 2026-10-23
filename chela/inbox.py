@@ -2347,11 +2347,14 @@ def stuck_events(runs: list[dict], store: dict, probes: dict[str, dict], now: fl
             continue
         entry = dict(prev.get(task) or {})
         parked = park.manual(run)
-        if parked:
-            entry["active_at"] = now
-            why = park.overdue(parked, now, runs_by_id, config.park_max_s())
-            if why and entry.get("park_overdue") != parked["at"]:
+        why = parked and park.overdue(parked, now, runs_by_id, config.park_max_s())
+        if parked and why:
+            # ⏸️ CMX-318: an outlived park is reported ONCE — and from then on it shields
+            # nothing: the run's quiet clock starts at that notice, so a hang behind a
+            # forgotten park is still caught (below) as STUCK a full quiet budget later.
+            if entry.get("park_overdue") != parked["at"]:
                 entry["park_overdue"] = parked["at"]
+                entry["active_at"] = now
                 wid = run_wid(run, windows, now_epoch)
                 age = now - parked["since"] if parked["since"] is not None else None
                 out.append(_event(
@@ -2362,9 +2365,12 @@ def stuck_events(runs: list[dict], store: dict, probes: dict[str, dict], now: fl
                     f"re-park it — {up}",
                     _run_payload(run, parked_at=parked["at"], parked_reason=parked["reason"],
                                  parked_until=parked["until"], overdue=why), wid=wid))
+        elif parked:
+            entry["active_at"] = now
             nxt[task] = entry
             continue
-        entry.pop("park_overdue", None)
+        else:
+            entry.pop("park_overdue", None)
         probe = probes.get(task)
         if probe is None:
             if entry:

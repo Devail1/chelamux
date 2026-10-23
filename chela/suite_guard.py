@@ -354,31 +354,63 @@ def _holders(d: Path, k: int) -> str:
     return ", ".join(out) or "holders unknown"
 
 
-def holders() -> list[str]:
+def _flocked(locks: Path = Path("/proc/locks")) -> set[tuple[str, int]] | None:
+    """``{(dev, inode)}`` of every file someone holds a ``flock`` on, read from
+    ``/proc/locks`` (``dev`` as it prints it, ``"08:30"``) — or None when it cannot be read.
+    Reading it takes no lock, so it never makes a free slot look busy to ``_take``."""
+    try:
+        lines = locks.read_text().splitlines()
+    except OSError:
+        return None
+    out = set()
+    for line in lines:
+        f = line.split()
+        if len(f) < 6 or f[1] != "FLOCK":
+            continue
+        try:
+            maj, mnr, ino = f[5].split(":")
+            out.add((f"{maj}:{mnr}", int(ino)))
+        except ValueError:
+            continue
+    return out
+
+
+def holders(locks: Path = Path("/proc/locks")) -> list[str]:
     """The worktree names holding a suite slot now (``["CMX-12-r1"]``) — what a parked
-    run's "waiting for a suite slot (holder: …)" names (CMX-318). A slot whose lock is free
-    holds nobody, whatever its stale record says."""
+    run's "waiting for a suite slot (holder: …)" names (CMX-318). A slot file whose lock is
+    free holds nobody, whatever its stale record says. When ``/proc/locks`` cannot be read,
+    a record whose process is still alive is named instead."""
     d = config.CHELA_DIR / SLOTS_DIRNAME
+    held = _flocked(locks)
     out = []
     for i in range(slots()):
         path = d / f"slot-{i}"
         try:
-            fd = os.open(path, os.O_RDONLY)
+            st = path.stat()
         except OSError:
             continue
         try:
-            fcntl.flock(fd, fcntl.LOCK_SH | fcntl.LOCK_NB)
-            fcntl.flock(fd, fcntl.LOCK_UN)
-            continue                    # nobody holds it
-        except BlockingIOError:
-            pass
-        finally:
-            os.close(fd)
+            rec = json.loads(path.read_text() or "{}")
+        except (OSError, ValueError):
+            rec = {}
+        if held is not None:
+            dev = f"{os.major(st.st_dev):02x}:{os.minor(st.st_dev):02x}"
+            if (dev, st.st_ino) not in held:
+                continue
+        elif not isinstance(rec, dict) or _proc_stat(_int(rec.get("pid"))) is None:
+            continue
         try:
-            out.append(Path(json.loads(path.read_text() or "{}")["cwd"]).name)
-        except (OSError, ValueError, KeyError, TypeError):
+            out.append(Path(rec["cwd"]).name)
+        except (KeyError, TypeError):
             out.append("unknown")
     return out
+
+
+def _int(v) -> int:
+    try:
+        return int(v)
+    except (TypeError, ValueError):
+        return -1
 
 
 class SlotTimeout(TimeoutError):

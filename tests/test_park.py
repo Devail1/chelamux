@@ -63,8 +63,8 @@ def test_negative_control_the_same_idle_run_unparked_is_stuck():
 def test_a_park_that_outlives_the_max_is_exactly_one_notice():
     store, run = inbox._empty(), _parked(at=NOW - 21600 + 1200)
     assert inbox.stuck_events([run], store, _idle(), NOW) == []                 # 5h40m
-    fired = [inbox.stuck_events([run], store, _idle(), NOW + 1200 + i * 600) for i in range(6)]
-    assert [_kinds(f) for f in fired] == [["run_park_overdue"]] + [[]] * 5
+    fired = [inbox.stuck_events([run], store, _idle(), NOW + 1200 + i * 100) for i in range(12)]
+    assert [_kinds(f) for f in fired] == [["run_park_overdue"]] + [[]] * 11
     event = fired[0][0]
     assert "has been parked 6h" in event["summary"]
     assert "past the 6h park max" in event["summary"]
@@ -72,6 +72,22 @@ def test_a_park_that_outlives_the_max_is_exactly_one_notice():
     assert "chela unpark T1 or re-park it" in event["summary"]
     assert event["payload"]["parked_at"] == run["parked_at"]
     assert event["payload"]["task_id"] == "T1"
+
+
+def test_after_its_one_notice_an_outlived_park_shields_nothing():
+    """A hang behind a forgotten park is still caught: STUCK a full quiet budget after the
+    overdue notice, never on the same tick."""
+    store, run = inbox._empty(), _parked(at=NOW - 30000)
+    assert _kinds(inbox.stuck_events([run], store, _idle(), NOW)) == ["run_park_overdue"]
+    assert inbox.stuck_events([run], store, _idle(), NOW + 1199) == []
+    assert _kinds(inbox.stuck_events([run], store, _idle(), NOW + 1200)) == ["run_stuck"]
+    assert inbox.stuck_events([run], store, _idle(), NOW + 1800) == []
+
+
+def test_an_in_date_park_never_restarts_into_stuck():
+    store, run = inbox._empty(), _parked(at=NOW - 60)
+    for i in range(30):                                    # 5h of ticks, still in date
+        assert inbox.stuck_events([run], store, _idle(), NOW + i * 600) == []
 
 
 def test_the_max_reads_its_env_value(monkeypatch):
@@ -207,6 +223,9 @@ def test_no_until_is_none(raw):
     ("2w", "is not a duration"),
     ("-2h", "is not a duration"),
     ("after the flaky fix", "is not a duration"),
+    ("\u0662h", "is not a duration"),                    # a non-ASCII digit
+    ("1234567890d", "is not a duration"),                # ten digits
+    ("999999999d", "too far in the future"),             # would overflow a datetime
 ])
 def test_an_until_chela_cannot_check_is_refused(raw, words):
     with pytest.raises(ValueError, match=words):
@@ -314,6 +333,51 @@ def test_holders_names_only_slots_whose_lock_is_held(tmp_path, monkeypatch):
     assert suite_guard.holders() == []
 
 
+def _slot_files(tmp_path, monkeypatch, recs):
+    monkeypatch.setattr(config, "CHELA_DIR", tmp_path)
+    monkeypatch.setenv("CHELA_SUITE_SLOTS", str(len(recs)))
+    d = tmp_path / suite_guard.SLOTS_DIRNAME
+    d.mkdir()
+    paths = []
+    for i, rec in enumerate(recs):
+        (d / f"slot-{i}").write_text(rec)
+        paths.append(d / f"slot-{i}")
+    return paths
+
+
+def _lock_line(n, path, kind="FLOCK"):
+    st = path.stat()
+    return (f"{n}: {kind}  ADVISORY  WRITE 4242 "
+            f"{os.major(st.st_dev):02x}:{os.minor(st.st_dev):02x}:{st.st_ino} 0 EOF")
+
+
+def test_holders_reads_proc_locks_and_takes_no_lock(tmp_path, monkeypatch):
+    paths = _slot_files(tmp_path, monkeypatch, [
+        json.dumps({"pid": 1, "cwd": "/wts/CMX-7"}), json.dumps({"pid": 1, "cwd": "/wts/CMX-8"}),
+        json.dumps({"pid": 1, "cwd": "/wts/CMX-9"})])
+    locks = tmp_path / "locks"
+    locks.write_text("\n".join([_lock_line(1, paths[0]), _lock_line(2, paths[1], "POSIX"),
+                                "garbage", "3: FLOCK ADVISORY WRITE 1 zz 0 EOF"]) + "\n")
+    monkeypatch.setattr(suite_guard.fcntl, "flock", lambda *a: pytest.fail("took a lock"))
+    # slot-1 is POSIX-locked by someone else, not a slot holder; slot-2 is not locked at all
+    assert suite_guard.holders(locks) == ["CMX-7"]
+
+
+def test_holders_without_proc_locks_names_live_records(tmp_path, monkeypatch):
+    _slot_files(tmp_path, monkeypatch, [
+        json.dumps({"pid": os.getpid(), "cwd": "/wts/CMX-7"}),
+        json.dumps({"pid": 2 ** 22 + 7, "cwd": "/wts/CMX-8"}),       # no such process
+        json.dumps({"pid": "x", "cwd": "/wts/CMX-9"}), "[]"])
+    assert suite_guard.holders(tmp_path / "missing") == ["CMX-7"]
+
+
+def test_a_held_slot_with_no_cwd_is_unknown(tmp_path, monkeypatch):
+    paths = _slot_files(tmp_path, monkeypatch, [json.dumps({"pid": 1})])
+    locks = tmp_path / "locks"
+    locks.write_text(_lock_line(1, paths[0]) + "\n")
+    assert suite_guard.holders(locks) == ["unknown"]
+
+
 def test_holders_with_no_slot_files_is_empty(tmp_path, monkeypatch):
     monkeypatch.setattr(config, "CHELA_DIR", tmp_path)
     monkeypatch.setenv("CHELA_SUITE_SLOTS", "2")
@@ -336,6 +400,44 @@ def test_a_process_in_the_runs_own_worktree_is_refused_even_as_orchestrator(tmp_
     for cwd in (wt, wt / "sub"):
         why = park.refusal(run, is_orchestrator=True, env={}, cwd=str(cwd))
         assert why and "inside CMX-5's own worktree — an agent cannot park itself" in why
+
+
+def test_an_agent_that_cds_away_and_drops_its_env_is_still_refused(tmp_path):
+    """`cd / && env -u CLAUDECODE chela park …` — the Claude process that spawned that
+    shell still runs in the worktree."""
+    wt = tmp_path / "CMX-5"
+    wt.mkdir()
+    run = {"task_id": "CMX-5", "worktree_path": str(wt)}
+    why = park.refusal(run, is_orchestrator=False, env={}, cwd="/",
+                       ancestors=["/", str(wt), "/home"])
+    assert why and "own worktree" in why
+    assert park.refusal(run, is_orchestrator=False, env={}, cwd="/",
+                        ancestors=["/", "/home"]) is None
+
+
+def test_ancestor_cwds_walks_the_parent_chain(tmp_path):
+    proc = tmp_path / "proc"
+    for pid, ppid, cwd in ((30, 20, "/wt/CMX-5"), (20, 10, None), (10, 1, "/home")):
+        (proc / str(pid)).mkdir(parents=True)
+        (proc / str(pid) / "stat").write_text(f"{pid} (a b) S {ppid} 0 0\n")
+        if cwd:
+            os.symlink(cwd, proc / str(pid) / "cwd")
+    assert park.ancestor_cwds(30, proc) == ["/wt/CMX-5", "/home"]
+    assert park.ancestor_cwds(99, proc) == []                         # gone: nothing
+    (proc / "10" / "stat").write_text("10 (loop) S 30 0 0\n")         # a cycle ends
+    assert park.ancestor_cwds(30, proc) == ["/wt/CMX-5", "/home"]
+
+
+def test_ancestor_cwds_defaults_to_this_process_parent():
+    assert park.ancestor_cwds()[0] == os.readlink(f"/proc/{os.getppid()}/cwd")
+
+
+def test_refusal_reads_the_real_ancestors_by_default(tmp_path, monkeypatch):
+    monkeypatch.setattr(park, "ancestor_cwds", lambda: [str(tmp_path / "CMX-5" / "x")])
+    (tmp_path / "CMX-5").mkdir()
+    why = park.refusal({"task_id": "CMX-5", "worktree_path": str(tmp_path / "CMX-5")},
+                       is_orchestrator=True, env={}, cwd="/")
+    assert why and "own worktree" in why
 
 
 def test_a_sibling_directory_is_not_the_worktree(tmp_path):

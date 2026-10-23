@@ -31,7 +31,7 @@ ACTIVE = ("claimed", "running")
 TERMINAL = ("done", "closed", "failed")
 MANUAL, SLOT = "manual", "slot"
 
-_DURATION = re.compile(r"^(\d+)([smhd])$")
+_DURATION = re.compile(r"^([0-9]{1,9})([smhd])$")
 _RUN_EVENT = re.compile(r"^run:(\S+)$")
 _UNIT_S = {"s": 1, "m": 60, "h": 3600, "d": 86400}
 
@@ -51,7 +51,10 @@ def parse_until(raw: str | None, now: datetime) -> str | None:
     if m:
         if int(m.group(1)) <= 0:
             raise ValueError(f"--until {raw!r} is not in the future")
-        return (now + timedelta(seconds=int(m.group(1)) * _UNIT_S[m.group(2)])).isoformat()
+        try:
+            return (now + timedelta(seconds=int(m.group(1)) * _UNIT_S[m.group(2)])).isoformat()
+        except OverflowError:
+            raise ValueError(f"--until {raw!r} is too far in the future") from None
     try:
         at = datetime.fromisoformat(raw)
     except ValueError:
@@ -139,20 +142,46 @@ def overdue(park: dict, now: float, runs_by_id: dict[str, dict], max_s: int) -> 
     return None
 
 
-def refusal(run: dict, *, is_orchestrator: bool, env=None, cwd: str | None = None) -> str | None:
+def ancestor_cwds(pid: int | None = None, proc: Path = Path("/proc")) -> list[str]:
+    """The working directory of every ancestor of ``pid`` (default: this process's parent),
+    nearest first — readable ones only. An agent can ``cd /`` and unset its env before it
+    calls ``chela park``; the Claude Code process that spawned that shell still runs in the
+    run's worktree."""
+    out, seen = [], set()
+    pid = os.getppid() if pid is None else pid
+    while pid and pid > 1 and pid not in seen:
+        seen.add(pid)
+        try:
+            out.append(os.readlink(proc / str(pid) / "cwd"))
+        except OSError:
+            pass
+        try:
+            stat = (proc / str(pid) / "stat").read_text()
+            pid = int(stat.rsplit(")", 1)[1].split()[1])
+        except (OSError, IndexError, ValueError):
+            break
+    return out
+
+
+def refusal(run: dict, *, is_orchestrator: bool, env=None, cwd: str | None = None,
+            ancestors: list[str] | None = None) -> str | None:
     """Why THIS process may not park ``run`` — or None if it may.
 
-    A process inside the run's own worktree is that agent (or a shell it spawned); any other
-    Claude Code session (``CLAUDECODE``) that is not the orchestrator is an agent too. Only
-    the orchestrator, or the operator in a plain terminal, parks."""
+    A process inside the run's own worktree — or spawned, at any depth, by one that is
+    (``ancestors``, default :func:`ancestor_cwds`) — is that agent; any other Claude Code
+    session (``CLAUDECODE``) that is not the orchestrator is an agent too. Only the
+    orchestrator, or the operator in a plain terminal, parks."""
     src = os.environ if env is None else env
     worktree = run.get("worktree_path")
     if worktree:
+        dirs = [cwd or os.getcwd(), *(ancestor_cwds() if ancestors is None else ancestors)]
         try:
-            here, root = Path(cwd or os.getcwd()).resolve(), Path(worktree).resolve()
+            root = Path(worktree).resolve()
+            inside = any(here == root or root in here.parents
+                         for here in (Path(d).resolve() for d in dirs))
         except OSError:
             return "cannot tell whether this process runs inside the run's own worktree"
-        if here == root or root in here.parents:
+        if inside:
             return (f"this process runs inside {run.get('task_id')}'s own worktree — an agent "
                     "cannot park itself (that is a way past the stuck detector)")
     if is_orchestrator:
