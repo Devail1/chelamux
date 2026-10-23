@@ -1420,6 +1420,8 @@ def test_survivors_with_unrun_mutations_still_say_survivors(tmp_path, monkeypatc
     _fake_battery(monkeypatch, (WEAK_MUT, judge.SURVIVED), (late, sweep.UNRUN))
     res = _run(repo, chela, Filer())
     assert (res["status"], res["filed"], res["unrun"]) == ("survivors", ["CMX-901"], 1)
+    assert res["why"] == ("1 mutation(s) the budget never reached are UNRUN — CANNOT VERIFY "
+                          "for their lines, not clean")
     # filed, but never measured everything: the window still does not move
     assert _covered_record(chela) == {}
     again = _run(repo, chela, Filer())
@@ -1429,7 +1431,9 @@ def test_survivors_with_unrun_mutations_still_say_survivors(tmp_path, monkeypatc
 def test_already_filed_with_an_unknown_file_is_unknown_not_clean(tmp_path, monkeypatch):
     repo, chela = _repo(tmp_path), tmp_path / "chela"
     _fake_battery(monkeypatch, (WEAK_MUT, judge.SURVIVED), unsupported=["x.go"])
-    assert _run(repo, chela, Filer())["status"] == "survivors"
+    first = _run(repo, chela, Filer())
+    assert (first["status"], first["why"]) == (
+        "survivors", "x.go UNKNOWN — no mutator handles them, not clean")
     again = _run(repo, chela, Filer())
     assert (again["status"], again["already_filed"]) == ("unknown", 1)
 

@@ -30,8 +30,9 @@ every same-shape site; slice 3 plugs the tracker into the :class:`Filer` seam.
   same-shape site in the checkout: a FIXED-STRING ``git grep -F`` of the stripped line, so a
   regex metacharacter in it never drops a site. A group whose sites cannot be listed, or whose
   listing misses one of its own survivors, is not filed (fail closed; the next night retries).
-* **Filed.** Each group goes to the :class:`Filer` once. A survivor already filed is never
-  filed again: its key — workflow, file, kind, line text before and after, no line number — is
+* **Filed.** Each group goes to the :class:`Filer` unless EVERY survivor in it was filed
+  before; a new site of a filed category files the group again. A survivor already filed is never
+  filed again on its own: its key — workflow, file, kind, line text before and after, no line number — is
   kept in ``$CHELA_DIR/sweep-nightly/filed.json``, which outlives restarts and is written after
   EACH filing. Until slice 3 the default filer is :class:`WouldFile`, which files nothing and
   records what it would have filed.
@@ -594,4 +595,5 @@ def _file(wf, worktree: Path, head: str, ref: str, survivors: list[sweep.Mutatio
         _write_json(keys_path, store)       # per issue: a crash never files one twice
         result["filed"].append(ident)
     if result["filed"] or result["failed"] or result["would_file"]:
-        result.update(status=SURVIVORS, why="")
+        # A night with survivors AND unmeasured lines says both: the count alone hides it.
+        result.update(status=SURVIVORS, why=_quiet_why(result))
