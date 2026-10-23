@@ -57,6 +57,8 @@ function useFloatClearance(head: RefObject<HTMLElement | null>) {
       el.style.setProperty('--work-head-float', w > 0 ? `${Math.ceil(w) + 16}px` : '0px');
     };
     fit();
+    // a browser without it (jsdom) keeps the first measure
+    if (typeof ResizeObserver === 'undefined') return;
     const ro = new ResizeObserver(fit);
     ro.observe(float);
     return () => ro.disconnect();
