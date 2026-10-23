@@ -28,7 +28,12 @@
 import vm from 'node:vm';
 import { readFileSync } from 'node:fs';
 
-const [, , shimPath, mode, prefsJson] = process.argv;
+// scenario (CMX-322): '' — every face is loaded before the shim runs; 'late-icons' /
+// 'late-text' — an icon face (or, as the control, a text face) lands only AFTER the
+// shim's walk, announced the way a browser does: a `loadingdone` on document.fonts;
+// 'first-frame' — nothing pokes chelaApplyTermPrefs, so only the shim's own first-frame
+// apply can run before the harness reads the result (its interval's first tick is 500 ms).
+const [, , shimPath, mode, prefsJson, scenario = ''] = process.argv;
 const shimSrc = readFileSync(shimPath, 'utf8');
 const prefs = JSON.parse(prefsJson || '{}');
 
@@ -98,7 +103,8 @@ term.options.fontSize = DEFAULT_SIZE;
 // The bug report's diagnosed state: fonts ARE fully loaded by the time the shim's
 // document.fonts.load() promise resolves — this is not a load-order race, the
 // atlas is just stale despite that.
-fontsReady = true;
+const lateFace = scenario === 'late-icons' || scenario === 'late-text';
+fontsReady = !lateFace;
 
 // --- fake browser globals the shim needs ---
 // Real browsers have `window === globalThis`, so a bare `requestAnimationFrame(x)`
@@ -108,9 +114,14 @@ fontsReady = true;
 // throw ReferenceError in here despite working fine in a real tab.
 const localStorage = { getItem: (k) => (k in prefs ? prefs[k] : null) };
 const listeners = { visibilitychange: [], storage: [] };
+const fontListeners = {};
+const loads = [];
 const document = {
   hidden: false,
-  fonts: { load: () => Promise.resolve() },
+  fonts: {
+    load: (f) => { loads.push(f); return Promise.resolve(); },
+    addEventListener: (name, cb) => { (fontListeners[name] ||= []).push(cb); },
+  },
   addEventListener: (name, cb) => { (listeners[name] ||= []).push(cb); },
 };
 const sandbox = {
@@ -129,7 +140,7 @@ vm.runInContext(shimSrc, ctx, { filename: 'term-font-pref-shim.js' });
 // Drive one interval tick's worth of work: the shim's own setInterval already
 // fired once synchronously isn't guaranteed, so invoke the exposed hook directly
 // (this is exactly what the parent frame does for "instant feedback").
-ctx.chelaApplyTermPrefs();
+if (scenario !== 'first-frame') ctx.chelaApplyTermPrefs();
 
 // Let every promise microtask + our fake rAF (setImmediate) macrotask settle.
 function settle(rounds) {
@@ -137,7 +148,15 @@ function settle(rounds) {
 }
 await settle(20);
 
+if (lateFace) {
+  fontsReady = true;
+  const family = scenario === 'late-icons' ? '"Symbols Nerd Font"' : '"JetBrains Mono"';
+  for (const cb of fontListeners.loadingdone || []) cb({ fontfaces: [{ family }] });
+  await settle(20);
+}
+
 process.stdout.write(JSON.stringify({
+  loads,
   tofu: !!currentAtlas?.tofu,
   fontFamily: rawOptions.fontFamily,
   fontSize: rawOptions.fontSize,

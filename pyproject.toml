@@ -37,6 +37,7 @@ dev = [
     "pytest-xdist>=3.6",               # parallel test runner — see addopts below for the worker count
     "ruff>=0.6",
     "telegramify-markdown>=0.5,<1.0",  # so format tests exercise real rendering (CI omits [telegram])
+    "fonttools[woff]>=4.0",            # read the terminal's woff2 fonts in the glyph tests; build_term_fonts.py
 ]
 
 [project.scripts]

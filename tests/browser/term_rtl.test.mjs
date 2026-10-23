@@ -78,6 +78,12 @@ function termShims() {
     return { fontCss, prefShim };
 }
 
+// A font URL from term_fonts.font_url (/static/fonts/v/<digest>/<file>), served from disk.
+function fulfillFont(route, url) {
+    const file = url.pathname.replace(/^\/static\/fonts\/(v\/[^/]+\/)?/, '');
+    return route.fulfill({ body: readFileSync(join(FONTS, file)), contentType: 'font/woff2' });
+}
+
 // The non-space characters of every xterm row on the page, each row left to right by
 // where the browser actually drew it.
 function seenRows() {
@@ -128,9 +134,7 @@ describe('Hebrew in a wall pane renders right to left (vendored xterm.js)', { sk
                 await context.route('**/*', route => {
                     const url = new URL(route.request().url());
                     if (url.origin !== FIXTURE) return route.abort('blockedbyclient');
-                    if (url.pathname.startsWith('/static/fonts/')) {
-                        return route.fulfill({ body: readFileSync(join(FONTS, url.pathname.slice('/static/fonts/'.length))), contentType: 'font/ttf' });
-                    }
+                    if (url.pathname.startsWith('/static/fonts/')) return fulfillFont(route, url);
                     if (url.pathname === '/vendor/xterm.js') return route.fulfill({ body: readFileSync(join(VENDOR, 'xterm.js')), contentType: 'text/javascript' });
                     if (url.pathname === '/vendor/xterm.css') return route.fulfill({ body: readFileSync(join(VENDOR, 'xterm.css')), contentType: 'text/css' });
                     return route.fulfill({
@@ -203,9 +207,7 @@ describe('Hebrew in a wall pane renders right to left (real ttyd, agent-terminal
             try {
                 await context.route('**/*', async route => {
                     const url = new URL(route.request().url());
-                    if (url.pathname.startsWith('/static/fonts/')) {
-                        return route.fulfill({ body: readFileSync(join(FONTS, url.pathname.slice('/static/fonts/'.length))), contentType: 'font/ttf' });
-                    }
+                    if (url.pathname.startsWith('/static/fonts/')) return fulfillFont(route, url);
                     if (url.pathname === '/') {
                         // term_http: the font CSS + preference shim go in before </head>.
                         const resp = await route.fetch();
