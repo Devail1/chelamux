@@ -1,14 +1,14 @@
-// ➕📐 CMX-6: the Work toolbar's "+ New task" and "+ Init a repo", the New menu's "Init a repo"
-// and "Scheduled task", and the ⌘K row, on the REAL page (the module graph, the markup sliced
+// ➕📐 CMX-6: the Work header's New task and its ⋯ "Init a repo" (CMX-316), the New menu's
+// "Init a repo" and "Scheduled task", and the ⌘K row, on the REAL page (the module graph, the markup sliced
 // out of templates/index.html, a stubbed fetch). The dialogs and the toolbar are React islands
 // with their own suites (frontend/src/features/newtask, features/runs, features/work, CMX-231
 // and CMX-233); this file pins how the page reaches them:
-//   - the toolbar button appears only for a linear workflow;
-//   - it, the ⌘K row, the toolbar's and the New menu's "Init a repo" open the island dialogs,
+//   - the header's New task is enabled only for a linear workflow;
+//   - it, the ⌘K row, the header ⋯'s and the New menu's "Init a repo" open the island dialogs,
 //     filled from the payload the ONE /api/dispatcher poll published (and, for Init, the
 //     launcher's dirs);
 //   - refreshWork() (what a create, an init and a delete call) is that poll, so the new
-//     issue lands on the board as `CMX-N`, linked to its Linear page.
+//     issue lands on the board as `CMX-N`, its ⋮ linking to its Linear page.
 //
 // Run: pnpm exec vitest run tests/new_task.test.mjs (tests/test_js_suites.py runs it by discovery).
 import { beforeAll, beforeEach, test } from 'vitest';
@@ -48,7 +48,19 @@ function fetchImpl(url, opts) {
 }
 
 const $ = sel => document.querySelector(sel);
-const button = text => [...document.querySelectorAll('#panel-work button')].find(b => b.textContent === text) || null;
+// Open a Radix menu the way a keyboard does (Enter on its trigger) and return its rows.
+async function openMenu(trigger, menuSel) {
+    assert.ok(trigger, 'the menu trigger is missing');
+    trigger.dispatchEvent(new window.KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+    await settle();
+    const menu = document.querySelector(menuSel);
+    assert.ok(menu, `${menuSel} did not open`);
+    return [...menu.querySelectorAll('[role="menuitem"]')];
+}
+const closeMenus = async () => {
+    document.querySelectorAll('[role="menu"]').forEach(m => m.dispatchEvent(new window.KeyboardEvent('keydown', { key: 'Escape', bubbles: true })));
+    await settle();
+};
 const dialog = name => [...document.querySelectorAll('[role="dialog"]')].find(d => d.querySelector('h3')?.textContent === name) || null;
 const settle = async () => { for (let i = 0; i < 4; i++) await flush(); };
 // Open the launch menu and pick one of its rows, as a click does.
@@ -85,12 +97,12 @@ beforeEach(async () => {
     calls = [];
 });
 
-test('the toolbar button shows for a linear workflow and is gone otherwise', async () => {
-    assert.ok($('#panel-work #new-task-btn'), 'no "+ New task" for a linear workflow');
+test('the header\'s New task is enabled for a linear workflow and disabled otherwise', async () => {
+    assert.equal($('#panel-work .work-head #new-task-btn')?.disabled, false, 'no enabled New task for a linear workflow');
     dispatchPayload = payload('markdown');
     await pollWork();
     await settle();
-    assert.equal($('#new-task-btn'), null);
+    assert.equal($('#new-task-btn').disabled, true);
 });
 
 test('every poll is published to the store the islands read', async () => {
@@ -100,7 +112,7 @@ test('every poll is published to the store the islands read', async () => {
     assert.equal(workStore.get(), dispatchPayload);
 });
 
-test('the toolbar button opens the New-task dialog with the polled workflow and blockers', async () => {
+test('the header button opens the New-task dialog with the polled workflow and blockers', async () => {
     clickIsland($('#new-task-btn'));
     await settle();
     const d = dialog('New task');
@@ -117,9 +129,14 @@ test('the ⌘K palette has a "New task" row that opens the dialog', async () => 
     assert.ok(dialog('New task'), 'the palette row did not open the dialog');
 });
 
-test('the toolbar\'s "+ Init a repo" and the New menu\'s "Init a repo" open the Init dialog, suggesting the launcher\'s dirs', async () => {
+test('the header ⋯\'s and the New menu\'s "Init a repo" open the Init dialog, suggesting the launcher\'s dirs', async () => {
     await launcher.refreshLauncher();
-    for (const open of [async () => clickIsland(button('+ Init a repo')), async () => menuItem('Init a repo')]) {
+    const fromHeader = async () => {
+        const row = (await openMenu($('#work-more-btn'), '.work-head-menu')).find(i => i.textContent === 'Init a repo');
+        assert.ok(row, 'no "Init a repo" in the header\'s ⋯');
+        clickIsland(row);
+    };
+    for (const open of [fromHeader, async () => menuItem('Init a repo')]) {
         await open();
         await settle();
         assert.ok(dialog('Init a repo for the dispatcher'), 'the Init dialog did not open');
@@ -144,19 +161,31 @@ function serverCreates(trackerUrl) {
     dispatchPayload = base;
 }
 
-test('refreshWork() is the Work poll: a created issue shows on the board as CMX-N, linked', async () => {
+// CMX-316: the compact card carries no link on its face; its ⋮ opens the Linear page.
+const linearRow = async card => (await openMenu(card.querySelector('.wcard-menu-btn'), '.wcard-overflow-menu')).find(i => i.textContent === 'Open CMX-100 in Linear');
+
+test('refreshWork() is the Work poll: a created issue shows on the board as CMX-N, its ⋮ opening its Linear page', async () => {
     clickIsland(document.querySelector('.side-item[data-view="work"]'));
     serverCreates('https://linear.app/acme/issue/CMX-100');
     await refreshWork();
     await settle();
     assert.ok(calls.some(c => c.url.endsWith('/api/dispatcher')), 'refreshWork() did not poll /api/dispatcher');
-    const card = document.querySelector('.kanban-card[data-task-id="CMX-100"]');
+    const card = document.querySelector('.wcard[data-task-id="CMX-100"]');
     assert.ok(card, 'the created issue is not in the queue after the refresh');
-    assert.equal(card.querySelectorAll('a').length, 1, 'expected exactly one link on the card');
-    const link = card.querySelector('a.kanban-tracker-link');
-    assert.equal(link.getAttribute('href'), 'https://linear.app/acme/issue/CMX-100');
-    assert.equal(link.getAttribute('target'), '_blank');
-    assert.equal(link.textContent.trim(), 'CMX-100');
+    assert.equal(card.querySelector('.wcard-id').textContent, 'CMX-100');
+    const opened = [];
+    const realOpen = window.open;
+    window.open = (...a) => { opened.push(a); return null; };
+    try {
+        const row = await linearRow(card);
+        assert.ok(row, 'no "Open CMX-100 in Linear" in the card\'s ⋮');
+        clickIsland(row);
+        await settle();
+    } finally {
+        window.open = realOpen;
+        await closeMenus();
+    }
+    assert.deepEqual(opened, [['https://linear.app/acme/issue/CMX-100', '_blank', 'noopener,noreferrer']]);
 });
 
 test('a created issue with no https url is a plain id, never a link', async () => {
@@ -165,9 +194,11 @@ test('a created issue with no https url is a plain id, never a link', async () =
         serverCreates(url);
         await refreshWork();
         await settle();
-        const card = document.querySelector('.kanban-card[data-task-id="CMX-100"]');
+        const card = document.querySelector('.wcard[data-task-id="CMX-100"]');
         assert.ok(card, `card missing for ${url}`);
         assert.equal(card.querySelector('a'), null, `linked ${url}`);
-        assert.match(card.querySelector('span.kanban-card-id').textContent, /CMX-100/);
+        assert.equal(card.querySelector('.wcard-id').textContent, 'CMX-100');
+        assert.equal(await linearRow(card), undefined, `the ⋮ links ${url}`);
+        await closeMenus();
     }
 });

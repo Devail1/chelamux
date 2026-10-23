@@ -2,10 +2,10 @@
 // tests/kanban_linear_model.test.mjs, the model half of tests/kanban_hidden_columns.test.mjs,
 // and the flatten/filter/badge halves of kanban_flatten.test.mjs and dispatch_hold.test.mjs).
 import { expect, test } from 'vitest';
-import { BUCKET_ORDER, DONE_LIMIT, FILTER_KEY, STATUS_CHIPS, boardColumns, branchOrLine, flatten, inFilter, lanesFromBuckets, loadFilter, mergeControl, pruneFilter, toggleProject, workBadgeCounts, type Card } from '../board.ts';
-import { COL_PREFS_KEY, hiddenSummary, loadColPrefs, saveColPrefs, splitColumns } from '../hidden.ts';
+import { BUCKET_ORDER, DONE_LIMIT, FILTER_KEY, STATUS_CHIPS, boardColumns, branchOrLine, flatten, inFilter, lanesFromBuckets, loadFilter, mergeControl, pruneFilter, workBadgeCounts, type Card } from '../board.ts';
+import { COL_PREFS_KEY, loadColPrefs, splitColumns } from '../hidden.ts';
 import { KANBAN_LANES, KANBAN_LANE_LABELS, laneOf } from '../lanes.ts';
-import { UNMAPPED_KEY, columnKey, columnOf, runStateBadges, sampledLabel, trackerBoard, trackerColumns } from '../linear.ts';
+import { UNMAPPED_KEY, columnKey, columnOf, sampledLabel, trackerBoard, trackerColumns } from '../linear.ts';
 
 const ALL_STATUSES = ['backlog', 'parked', 'open', 'claimed', 'running', 'awaiting_review', 'changes_requested', 'needs_human', 'failed', 'done', 'closed'];
 const LINEAR = [
@@ -106,17 +106,6 @@ test('columnKey and sampledLabel', () => {
   expect(sampledLabel('Done', false)).toBe('Done');
 });
 
-test('run state rides as badges (a word and an icon): judging, blocked race, rework N from the first round', () => {
-  expect(runStateBadges({ judge_state: 'running', rework_count: 2 })).toEqual([
-    { label: 'judging', cls: 'st-judging', icon: 'judging' },
-    { label: 'rework 2', cls: 'st-rework', icon: 'retry' },
-  ]);
-  expect(runStateBadges({ judge_state: 'blocked_race' })).toEqual([{ label: 'blocked race', cls: 'st-blocked-race', icon: 'blockedRace' }]);
-  expect(runStateBadges({ judge_state: 'clean', rework_count: 1 }).map((b) => b.label)).toEqual(['rework 1']);
-  expect(runStateBadges({ judge_state: 'clean', rework_count: 0 })).toEqual([]);
-  expect(runStateBadges(null)).toEqual([]);
-});
-
 // --- hidden.ts ------------------------------------------------------------------------------
 
 const col = (key: string, n: number) => ({ key, label: key.toUpperCase(), cards: Array.from({ length: n }) });
@@ -134,18 +123,6 @@ test('loadColPrefs: only "show" survives; throwing storage, junk JSON and arrays
   expect(loadColPrefs({ getItem: (k) => (k === 'chela_kanban_colprefs' ? '{"a":"show","b":"hide","c":1}' : null), setItem: () => {} })).toEqual({ a: 'show' });
   expect(loadColPrefs({ getItem: () => { throw new RangeError('denied'); }, setItem: () => {} })).toEqual({});
   for (const v of ['{not json', '["show"]', 'null', null]) expect(loadColPrefs(st(v))).toEqual({});
-});
-
-test('saveColPrefs writes the literal key and reports a refused write', () => {
-  const mem: Record<string, string> = {};
-  expect(saveColPrefs({ getItem: () => null, setItem: (k, v) => { mem[k] = v; } }, { a: 'show' })).toBe(true);
-  expect(mem).toEqual({ chela_kanban_colprefs: '{"a":"show"}' });
-  expect(saveColPrefs({ getItem: () => null, setItem: () => { throw new TypeError('quota'); } }, {})).toBe(false);
-});
-
-test('hiddenSummary is the phone one-liner; nothing hidden → empty', () => {
-  expect(hiddenSummary([col('backlog', 0), col('review', 0)])).toBe('Hidden: BACKLOG · REVIEW');
-  expect(hiddenSummary([])).toBe('');
 });
 
 // --- board.ts -------------------------------------------------------------------------------
@@ -205,13 +182,11 @@ test('boardColumns: chela lanes, or Linear\'s columns; the filter keeps only sel
   expect(labels(boardColumns({ workflows: [a] }, []))[4]).toBe('Done');
 });
 
-test('the project filter (CMX-194): empty is every project; pills toggle; a vanished project is pruned', () => {
+test('the project filter (CMX-194): empty is every project; a vanished project is pruned', () => {
   expect(inFilter([], '/a')).toBe(true);
   expect(inFilter(['/a'], '/a')).toBe(true);
   expect(inFilter(['/a'], '/b')).toBe(false);
   expect(inFilter(['/a'], undefined)).toBe(false);
-  expect(toggleProject([], '/a')).toEqual(['/a']);
-  expect(toggleProject(['/a', '/b'], '/a')).toEqual(['/b']);
   const sel = ['/a', '/b'];
   expect(pruneFilter(sel, ['/a', '/b', '/c'])).toBe(sel);
   expect(pruneFilter(sel, ['/b'])).toEqual(['/b']);

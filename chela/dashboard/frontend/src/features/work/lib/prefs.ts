@@ -1,8 +1,10 @@
-// The Work view's per-browser choices that the phone's title bar and the board share
-// (CMX-315): the project filter, the phone layout and the recently picked projects. WorkView
-// owns them and hands them to the Board, so the switcher sheet and the board read one value.
+// The Work view's per-browser choices that the title bar and the board share (CMX-315): the
+// project filter, the phone layout and the recently picked projects; CMX-316 adds the desktop
+// layout and the columns hidden from the desktop board. WorkView owns them and hands them to
+// the Board, so the switcher and the board read one value.
 import { useState } from 'react';
 import { FILTER_KEY, loadFilter } from '../board.ts';
+import { HIDDEN_COLS_KEY, loadHiddenCols, toggleHidden } from '../desktop.ts';
 import { loadRecent, RECENT_KEY, touchRecent } from '../phone.ts';
 
 // Every storage call inside a lambda, so a missing or throwing localStorage stays inside the
@@ -27,6 +29,10 @@ export function read(key: string): string | null {
 export type PhoneLayout = 'rows' | 'board';
 export const LAYOUT_KEY = 'chela_work_phone_layout';
 
+/** CMX-316: the desktop layout: the Board (the default) or Rows, a sortable table. */
+export type DeskLayout = 'board' | 'rows';
+export const DESK_LAYOUT_KEY = 'chela_work_desktop_layout';
+
 export type WorkPrefs = {
   filter: string[];
   pickFilter: (next: string[]) => void;
@@ -35,12 +41,19 @@ export type WorkPrefs = {
   recent: string[];
   /** The switcher's single pick: one project, or every one for ''. */
   pickProject: (path: string) => void;
+  deskLayout: DeskLayout;
+  pickDeskLayout: (next: DeskLayout) => void;
+  /** The column keys hidden from the desktop board (⋯ › Column options). */
+  hiddenCols: string[];
+  toggleColumn: (key: string) => void;
 };
 
 export function useWorkPrefs(): WorkPrefs {
   const [filter, setFilter] = useState(() => loadFilter(LS));
   const [layout, setLayout] = useState<PhoneLayout>(() => (read(LAYOUT_KEY) === 'board' ? 'board' : 'rows'));
   const [recent, setRecent] = useState(() => loadRecent(LS));
+  const [deskLayout, setDeskLayout] = useState<DeskLayout>(() => (read(DESK_LAYOUT_KEY) === 'rows' ? 'rows' : 'board'));
+  const [hiddenCols, setHiddenCols] = useState(() => loadHiddenCols(LS));
   function pickFilter(next: string[]) {
     setFilter(next);
     save(FILTER_KEY, JSON.stringify(next));
@@ -60,6 +73,17 @@ export function useWorkPrefs(): WorkPrefs {
       const next = touchRecent(recent, path);
       setRecent(next);
       save(RECENT_KEY, JSON.stringify(next));
+    },
+    deskLayout,
+    pickDeskLayout(next) {
+      setDeskLayout(next);
+      save(DESK_LAYOUT_KEY, next);
+    },
+    hiddenCols,
+    toggleColumn(key) {
+      const next = toggleHidden(hiddenCols, key);
+      setHiddenCols(next);
+      save(HIDDEN_COLS_KEY, JSON.stringify(next));
     },
   };
 }

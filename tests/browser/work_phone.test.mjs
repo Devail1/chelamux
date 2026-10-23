@@ -15,7 +15,7 @@
 // row and no coloured button; the switcher is a bottom sheet listing projects with counts; a
 // pick retitles the bar; ⋯ → Board draws one column per screen (no peek) under underlined
 // tabs; Pause all agents opens a confirm on top; no sideways page scroll. ⭐ The desktop
-// negative control keeps its toolbar, pills and full cards.
+// negative control draws none of the phone's bar (its own header is work_desktop.test.mjs's).
 //
 // Harness: tests/browser/fixture.mjs. Local: `pnpm run test:browser`.
 // Screenshots for a PR: CMX315_SHOTS=<dir> node --test tests/browser/work_phone.test.mjs
@@ -198,20 +198,17 @@ describe('CMX-315 390×844: the phone Work view has one title bar, Rows by defau
     });
 });
 
-describe('CMX-315 negative control, 1440×900: the desktop Work view is unchanged', { skip: why }, () => {
+describe('CMX-315 negative control, 1440×900: the phone bar is the phone\'s only', { skip: why }, () => {
     let ctx, page;
     const ready = setup(async () => {
         ({ context: ctx, page } = await openDashboard(browser, { width: 1440, height: 900, api: API }));
-        await openWork(page, '.kanban-card');
+        await openWork(page, '.wcard');
     });
     after(() => ctx && ctx.close());
 
-    test('the toolbar, the project pills and the full cards; no title bar, no compact card', async () => {
+    test('no title bar, no phone segments, no Rows list; the desktop header row instead (CMX-316)', async () => {
         ready();
-        for (const sel of ['.work-toolbar #dispatch-hold-btn', '.work-toolbar #fleet-pause-btn', '.work-toolbar #new-task-btn', '.kanban-filter-chip']) {
-            assert.equal((await seen(page, sel)).shown, true, `${sel} is gone from the desktop`);
-        }
-        assert.equal(await page.locator('.work-bar, .wcard, .wrow').count(), 0);
-        assert.ok(await page.locator('.kanban-card .kanban-delete-btn').count() > 0, 'the desktop card lost its ✕');
+        assert.equal(await page.locator('.work-bar, .work-phone-seg, .wrow, .wtabs').count(), 0);
+        assert.equal((await seen(page, '.work-head #dispatch-hold-btn')).shown, true, 'the desktop header is gone');
     });
 });

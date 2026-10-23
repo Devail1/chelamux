@@ -1,7 +1,7 @@
 // CMX-315: the phone Work view (Liav's approved mockups, 10-23): ONE title bar (☰, the project
 // as the title, +, ⋯), the project switcher sheet, the Work options sheet (layout, Init a repo,
 // Pause dispatch, Pause all agents with its confirm), Rows by default, and the compact card
-// with everything destructive in its ⋮. The desktop toolbar is WorkView.test.tsx's.
+// with everything destructive in its ⋮. The desktop header is Desktop.test.tsx's (CMX-316).
 import { act, fireEvent, render, screen, within } from '@testing-library/react';
 import { afterEach, beforeEach, expect, test, vi } from 'vitest';
 import { installBridge } from '../../../shared/bridge/index.ts';
@@ -298,12 +298,12 @@ test('a failed pause says so and leaves the state to the next poll', async () =>
 
 // --- the negative control -------------------------------------------------------------------------
 
-test('wider than a phone: no title bar, the toolbar and the project pills as before', async () => {
+test('wider than a phone: no title bar; the desktop header row (CMX-316) and the compact card on the board', async () => {
   viewport.phone = false;
   await mount(TWO);
   expect(document.querySelector('.work-bar')).toBeNull();
-  expect(document.querySelector('.work-toolbar #dispatch-hold-btn')).not.toBeNull();
-  expect([...document.querySelectorAll('.kanban-filter-chip')].map((c) => c.textContent)).toEqual(['All (2)', 'chelamux', 'lean-alpha']);
-  expect(document.querySelectorAll('.kanban-card').length).toBeGreaterThan(0);
-  expect(document.querySelectorAll('.wcard, .wrow').length).toBe(0);
+  expect(document.querySelector('.work-head #dispatch-hold-btn')).not.toBeNull();
+  expect(document.querySelectorAll('.kanban-filter-chip, .kanban-card').length).toBe(0);
+  expect(document.querySelectorAll('#kanban-board .wcard').length).toBeGreaterThan(0);
+  expect(document.querySelectorAll('.wrow').length).toBe(0);
 });

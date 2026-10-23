@@ -1,20 +1,21 @@
 // WORK: one view over one poll (static/js/work.js and index.html's #panel-work until CMX-233,
 // CMX-212 P14). Three SEGMENTS of the same work: Board (the kanban), Runs (the per-workflow
-// dispatch tables) and Schedules (the pokes), with the toolbar's New task, Init a repo and
-// Pause/Resume dispatch (and Pause all agents, CMX-252). The segment is saved per browser, so a reload lands where you were.
-// CMX-315: on a phone the toolbar is ONE title bar (PhoneBar.tsx): the drawer's ☰, the project
+// dispatch tables) and Schedules (the pokes), with New task, Init a repo and Pause/Resume
+// dispatch (and Pause all agents, CMX-252). The segment is saved per browser, so a reload lands where you were.
+// CMX-315: on a phone the controls are ONE title bar (PhoneBar.tsx): the drawer's ☰, the project
 // as the title (its switcher), New task and ⋯ (the layout and the dispatch actions).
+// CMX-316: wider, ONE header row (DeskHead.tsx): the project switcher, the segments, Pause
+// dispatch, New task and ⋯.
 import { useEffect, useState } from 'react';
 import { useStore } from '../../../shared/store/index.ts';
-import { launcher } from '../../../shared/store/launcher.ts';
 import { view } from '../../../shared/store/view.ts';
-import { work, type DispatchHold as HoldState, type FleetPause as Fleet } from '../../../shared/store/work.ts';
-import { Button, TextButton, useMediaQuery } from '../../../shared/ui/index.ts';
-import { openNewTask } from '../../newtask/index.ts';
-import { Runs, openInitRepo } from '../../runs/index.ts';
+import { work, type FleetPause as Fleet } from '../../../shared/store/work.ts';
+import { TextButton, useMediaQuery } from '../../../shared/ui/index.ts';
+import { Runs } from '../../runs/index.ts';
 import { Schedules, refreshSchedules } from '../../schedules/index.ts';
+import { boardColumns, pruneFilter } from '../board.ts';
 import { Board } from './Board.tsx';
-import { PAUSE_ALL_ASK, useDispatchHold } from './hold.ts';
+import { DeskHead } from './DeskHead.tsx';
 import { WorkBar } from './PhoneBar.tsx';
 import { useWorkPrefs } from './prefs.ts';
 
@@ -33,29 +34,6 @@ function loadSegment(): Segment {
   } catch {
     return 'board';
   }
-}
-
-/** CMX-206: `chela dispatch --pause` from the dashboard. Drawn only once a poll has landed,
- * so it never flashes "Pause" over a queue that is actually held. CMX-252: "Pause all agents"
- * is `--pause --all`, and Resume resumes that fleet too, as `chela dispatch --resume` does. */
-function DispatchHold({ hold, fleet }: { hold: HoldState; fleet: Fleet }) {
-  const h = useDispatchHold(hold, fleet);
-  function pauseAll() {
-    if (window.confirm(PAUSE_ALL_ASK)) h.pauseAll();
-  }
-  return (
-    <>
-      <Button id="dispatch-hold-btn" variant={h.paused ? 'secondary' : 'primary'} className={h.paused ? 'btn-warn' : undefined} disabled={h.busy} onClick={() => h.toggle((q) => window.confirm(q))}>
-        {h.label}
-      </Button>
-      {!fleet && (
-        <Button id="fleet-pause-btn" variant="secondary" className="btn-warn" disabled={h.busy} onClick={pauseAll}>
-          Pause all agents
-        </Button>
-      )}
-      <span className="work-toolbar-hint" id="dispatch-hold-hint">{hold ? hold.summary || 'Dispatch is paused.' : ''}</span>
-    </>
-  );
 }
 
 /** CMX-252: what the fleet pause stopped — each agent, each frozen judge, since when, and
@@ -111,6 +89,9 @@ export function WorkView() {
   }
   // CMX-6: chela creates issues only in a Linear tracker.
   const linear = (data?.workflows || []).some((w) => w?.tracker_kind === 'linear');
+  // The board's columns, for ⋯ › Column options (the board draws them from the same payload).
+  const paths = data?.configured ? (data.workflows || []).map((wf) => wf.path) : [];
+  const columns = !phone && paths.length ? boardColumns(data, pruneFilter(prefs.filter, paths)) : [];
   const segs = (
     <div className="work-seg" id="work-seg" role="group" aria-label="Work view">
       {SEGMENTS.map((s) => (
@@ -128,12 +109,7 @@ export function WorkView() {
           <div className="work-phone-seg">{segs}</div>
         </>
       ) : (
-        <div className="work-toolbar">
-          {segs}
-          {linear && <Button variant="primary" id="new-task-btn" onClick={openNewTask}>+ New task</Button>}
-          <Button variant="primary" title="Seed a starter WORKFLOW.md + TODO.md into a repo" onClick={() => openInitRepo(launcher.get())}>+ Init a repo</Button>
-          {data && <DispatchHold hold={data.dispatch_hold ?? null} fleet={data.fleet_pause ?? null} />}
-        </div>
+        <DeskHead data={data} prefs={prefs} linear={linear} segments={segs} columns={columns} />
       )}
       {data?.fleet_pause && <FleetPaused fleet={data.fleet_pause} />}
       <Board live={data} active={seg === 'board'} prefs={prefs} />
