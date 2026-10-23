@@ -3226,7 +3226,8 @@ body.sidebar-resizing iframe { pointer-events: none; }
 @media (max-width: 640px) {
     .settings-modal {
         top: 4vh; left: 3vw; transform: translate(0, 0) scale(0.97);
-        width: 94vw; height: 92vh; max-height: 92vh;
+        /* CMX-310: dvh where supported, so a phone's URL bar never clips the footer */
+        width: 94vw; height: 92vh; height: 92dvh; max-height: 92vh; max-height: 92dvh;
     }
     .settings-modal.open { transform: translate(0, 0) scale(1); }
 }
