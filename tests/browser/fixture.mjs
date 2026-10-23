@@ -20,11 +20,12 @@ const TEMPLATE = join(ROOT, 'chela', 'dashboard', 'templates', 'index.html');
 export const ORIGIN = 'http://chela.test';
 
 // The phone's drawer opener (CMX-313): the floating ☰ with no pane open, the pane title
-// bar's hamburger with one open. Exactly one of the two is visible at a time.
-export const DRAWER_OPENER = '#btn-menu-mobile:visible, #term-stage.term-single .gs-head-menu:visible';
+// bar's hamburger with one open, the Work view's title bar's on Work (CMX-315). Exactly one
+// is visible at a time.
+export const DRAWER_OPENER = '#btn-menu-mobile:visible, #term-stage.term-single .gs-head-menu:visible, #panel-work.active .work-bar-menu:visible';
 /** Click the phone's visible drawer opener from inside the page (for page.evaluate callers). */
 export const OPEN_DRAWER_IN_PAGE = () => {
-    const el = [...document.querySelectorAll('#btn-menu-mobile, #term-stage.term-single .gs-head-menu')]
+    const el = [...document.querySelectorAll('#btn-menu-mobile, #term-stage.term-single .gs-head-menu, #panel-work.active .work-bar-menu')]
         .find(b => b.getClientRects().length && getComputedStyle(b).display !== 'none');
     el.click();
 };

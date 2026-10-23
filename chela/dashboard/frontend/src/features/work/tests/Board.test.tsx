@@ -306,14 +306,22 @@ test('an empty column says so in words (no dash glyph)', () => {
 
 // --- Hidden columns (CMX-136) -------------------------------------------------------------------
 
-test('an empty column is in the panel, not on the board; the phone one-liner and the nav strip agree', () => {
+test('an empty column is in the panel, not on the board; the one-liner and the phone tabs agree', () => {
   show(payload({ tracker_columns: LINEAR, active_runs: [run({ tracker_state: 'In Progress' })] }));
   expect(colLabels()).toEqual(['In Progress']);
   expect(rowLabels()).toEqual(['Backlog', 'Todo', 'In Review', 'Done']);
   expect([...must(panel()).querySelectorAll('.col-count')].map((c) => c.textContent)).toEqual(['0', '0', '0', '0']);
   expect(board().style.getPropertyValue('--kanban-cols')).toBe('1');
   expect(panel()?.querySelector('.kanban-hidden-inline')?.textContent).toBe('Hidden: Backlog · Todo · In Review · Done');
-  expect([...document.querySelectorAll('.kanban-nav-label')].map((e) => e.textContent)).toEqual(['In Progress']);
+  view?.unmount();
+  view = null;
+  viewport.phone = true;
+  localStorage.setItem('chela_work_phone_layout', 'board');
+  show(payload({ tracker_columns: LINEAR, active_runs: [run({ tracker_state: 'In Progress' })] }));
+  expect([...document.querySelectorAll('.wtab-label')].map((e) => e.textContent)).toEqual(['In Progress']);
+  (view as ReturnType<typeof render> | null)?.unmount();
+  view = null;
+  viewport.phone = false;
   // A count change moves a column between the panel and the board; nothing hidden, no panel.
   show(payload({ tracker_columns: LINEAR, active_runs: LINEAR.slice(0, 5).map((c, i) => run({ task_id: `CMX-${i}`, tracker_state: c.name })) }));
   expect(colLabels()).toEqual(['Backlog', 'Todo', 'In Progress', 'In Review', 'Done']);
@@ -595,76 +603,108 @@ test('promote: a backlog card with a workflow asks, posts it, and surfaces a ref
   expect(document.querySelector('.kanban-promote-btn')).toBeNull();
 });
 
-// --- the phone layout ---------------------------------------------------------------------
+// --- the phone layouts (CMX-315) ---------------------------------------------------------------
 
-test('Swipe ⇄ Rows: a class on #work-board, the pressed button, persisted and read back', () => {
-  show(payload({ active_runs: [run()] }));
-  const pane = must(document.getElementById('work-board'));
-  const btn = (name: string) => screen.getByRole('button', { name });
-  expect(pane.className).toBe('work-pane active kanban-mobile-swipe');
-  expect(btn('Swipe').getAttribute('aria-pressed')).toBe('true');
-  fireEvent.click(btn('Rows'));
-  expect(pane.className).toBe('work-pane active kanban-mobile-rows');
-  expect([btn('Swipe').getAttribute('aria-pressed'), btn('Rows').getAttribute('aria-pressed'), btn('Rows').className]).toEqual(['false', 'true', 'kanban-layout-btn active']);
-  expect(localStorage.getItem('chela_kanban_mlayout')).toBe('rows');
-  view?.unmount();
-  view = null;
-  show(payload({ active_runs: [run()] }));
-  expect(document.getElementById('work-board')?.className).toBe('work-pane active kanban-mobile-rows');
-  fireEvent.click(btn('Swipe'));
-  expect(localStorage.getItem('chela_kanban_mlayout')).toBe('swipe');
-});
+const groups = () => [...document.querySelectorAll<HTMLElement>('#work-rows .wrows-group')].map((g) => [g.dataset.col, g.querySelector('.wrows-count')?.textContent, g.querySelectorAll('.wrow').length]);
 
-test('an inactive Board pane is not .active', () => {
-  render(<Board live={payload({})} active={false} />);
-  expect(document.getElementById('work-board')?.className).toBe('work-pane kanban-mobile-swipe');
-});
-
-test('Rows accordion: on a phone a head (click or key) folds its column and persists; Backlog/Done/Archived start folded; wider, a head does nothing', () => {
-  pinAll(LANES);
+test('a phone draws Rows by default: one list grouped by status, in-flight work first, empty groups left out; no pills, no columns', () => {
   viewport.phone = true;
-  show(payload({ active_runs: [run()] }));
-  const folded = () => [...board().querySelectorAll<HTMLElement>('.kanban-col')].filter((c) => c.classList.contains('kanban-col-collapsed')).map((c) => c.dataset.col);
-  const head = (label: string) => must(col(label).querySelector<HTMLElement>('.kanban-col-head'));
-  expect(folded()).toEqual(['backlog', 'done', 'archived']);
-  expect(head('Backlog').getAttribute('aria-expanded')).toBe('false');
-  fireEvent.click(head('Backlog'));
-  fireEvent.keyDown(head('Review'), { key: ' ' });
-  expect(folded()).toEqual(['review', 'done', 'archived']);
-  expect(head('Review').getAttribute('aria-expanded')).toBe('false');
-  expect(JSON.parse(localStorage.getItem('chela_kanban_collapsed') ?? '')).toEqual(['done', 'archived', 'review']);
+  show(payload({ active_runs: [run(), run({ task_id: 'CMX-2' })], awaiting_review_runs: [run({ task_id: 'CMX-3', status: 'awaiting_review' })], open_tasks: [{ id: 'CMX-4', title: 'queued' }] }));
+  const pane = must(document.getElementById('work-board'));
+  expect([pane.className, pane.dataset.layout]).toEqual(['work-pane active work-phone-rows', 'rows']);
+  expect(groups()).toEqual([['in_progress', '2', 2], ['review', '1', 1], ['todo', '1', 1]]);
+  expect(document.querySelectorAll('.kanban-filter-chip, .kanban-col, .kanban-card, #kanban-board').length).toBe(0);
+  expect(must(document.querySelector('.wrows-group[data-col="todo"] .wrow-title')).textContent).toBe('queued');
+});
+
+test('an inactive Board pane is not .active, on a phone or wider', () => {
+  render(<Board live={payload({})} active={false} />);
+  expect(document.getElementById('work-board')?.className).toBe('work-pane');
+  view?.unmount();
+  document.body.replaceChildren();
+  viewport.phone = true;
+  render(<Board live={payload({})} active={false} />);
+  expect(document.getElementById('work-board')?.className).toBe('work-pane work-phone-rows');
+});
+
+test('Rows: a head (click or Space) folds its group and persists; Backlog, Done and Archived start folded', () => {
+  viewport.phone = true;
+  const data = payload({ active_runs: [run()], backlog_items: [{ text: 'idea', file: '/x/BACKLOG.md' }], recent_runs: [run({ task_id: 'D', status: 'done' }), run({ task_id: 'C', status: 'closed' })] });
+  show(data);
+  const head = (key: string) => must(document.querySelector<HTMLElement>(`.wrows-group[data-col="${key}"] .wrows-head`));
+  expect(groups()).toEqual([['in_progress', '1', 1], ['backlog', '1', 0], ['done', '1', 0], ['archived', '1', 0]]);
+  expect([head('backlog').getAttribute('aria-expanded'), head('in_progress').getAttribute('aria-expanded')]).toEqual(['false', 'true']);
+  fireEvent.click(head('backlog'));
+  fireEvent.keyDown(head('in_progress'), { key: ' ' });
+  expect(groups()).toEqual([['in_progress', '1', 0], ['backlog', '1', 1], ['done', '1', 0], ['archived', '1', 0]]);
+  expect(JSON.parse(localStorage.getItem('chela_kanban_collapsed') ?? '')).toEqual(['done', 'archived', 'tr-backlog', 'tr-done', 'in_progress']);
   view?.unmount();
   view = null;
-  viewport.phone = false;
-  show(payload({ active_runs: [run()] }));
-  expect(folded()).toEqual(['review', 'done', 'archived']);
-  fireEvent.click(head('Review'));
-  expect(folded()).toEqual(['review', 'done', 'archived']);
+  show(data);
+  expect(groups()).toEqual([['in_progress', '1', 0], ['backlog', '1', 1], ['done', '1', 0], ['archived', '1', 0]]);
+  fireEvent.keyDown(head('backlog'), { key: 'x' });
+  expect(head('backlog').getAttribute('aria-expanded')).toBe('true');
 });
 
-test('a junk collapsed set is the default', () => {
-  pinAll(LANES);
+test('Rows: a junk collapsed set is the default; a Linear board folds its Backlog and Done', () => {
+  viewport.phone = true;
   localStorage.setItem('chela_kanban_collapsed', '{bad');
-  show(payload({ active_runs: [run()] }));
-  expect([...board().querySelectorAll('.kanban-col-collapsed')].map((c) => (c as HTMLElement).dataset.col)).toEqual(['backlog', 'done', 'archived']);
+  show(payload({ tracker_columns: LINEAR, active_runs: LINEAR.slice(0, 5).map((c, i) => run({ task_id: `CMX-${i}`, tracker_state: c.name })) }));
+  expect(groups()).toEqual([['tr-in-progress', '1', 1], ['tr-in-review', '1', 1], ['tr-todo', '1', 1], ['tr-backlog', '1', 0], ['tr-done', '1', 0]]);
 });
 
-test('the quick-nav strip: one chip per drawn column with its count; a tap scrolls to that column and marks it', () => {
-  pinAll(LANES);
+test('before the first poll a phone draws no list and no "Nothing here"', () => {
+  viewport.phone = true;
+  show(null);
+  expect(must(document.getElementById('work-board')).children.length).toBe(0);
+});
+
+test('Rows with nothing to show says so', () => {
+  viewport.phone = true;
+  show(payload({}));
+  expect(document.querySelector('#work-board .kanban-empty-col')?.textContent).toBe('Nothing here');
+  expect(document.getElementById('work-rows')).toBeNull();
+});
+
+test('Board on a phone: the status tabs ARE the columns, no column header; a tap scrolls there and underlines it, a swipe moves the underline', () => {
+  localStorage.setItem('chela_work_phone_layout', 'board');
+  viewport.phone = true;
   const scrolled: [string | undefined, unknown][] = [];
   Element.prototype.scrollIntoView = function (this: HTMLElement, opts?: unknown) {
     scrolled.push([this.dataset.col, opts]);
   } as typeof Element.prototype.scrollIntoView;
-  show(payload({ active_runs: [run()] }));
-  const navChips = [...document.querySelectorAll<HTMLElement>('#kanban-nav-strip .kanban-nav-chip')];
-  expect(navChips.map((c) => [c.querySelector('.kanban-nav-label')?.textContent, c.querySelector('.kanban-nav-count')?.textContent])).toEqual([
-    ['Backlog', '0'], ['To Do', '0'], ['In Progress', '1'], ['Review', '0'], ['Done', '0'], ['Archived', '0'],
-  ]);
-  fireEvent.click(must(navChips[3]));
-  expect(scrolled).toEqual([['review', { behavior: 'smooth', inline: 'start', block: 'nearest' }]]);
-  const on = [...document.querySelectorAll<HTMLElement>('.kanban-nav-chip')].map((c) => c.getAttribute('aria-current'));
-  expect(on).toEqual(['false', 'false', 'false', 'true', 'false', 'false']);
-  expect(document.querySelector('.kanban-nav-chip.active')?.textContent).toBe('Review0');
+  show(payload({ active_runs: [run()], awaiting_review_runs: [run({ task_id: 'CMX-3', status: 'awaiting_review' })], open_tasks: [{ id: 'CMX-4', title: 'queued' }] }));
+  const tabs = () => [...document.querySelectorAll<HTMLElement>('.wtab')];
+  expect(tabs().map((t) => [t.dataset.col, t.textContent, t.getAttribute('aria-current')])).toEqual([['todo', 'To Do 1', 'true'], ['in_progress', 'In Progress 1', 'false'], ['review', 'Review 1', 'false']]);
+  expect([...board().children].map((c) => [c.className, c.querySelectorAll('.wcard').length])).toEqual([['wcol kanban-col-todo', 1], ['wcol kanban-col-in_progress', 1], ['wcol kanban-col-review', 1]]);
+  expect(document.querySelectorAll('.kanban-col-head, .kanban-card').length).toBe(0);
+  scrolled.length = 0;
+  fireEvent.click(must(tabs()[2]));
+  expect(scrolled).toContainEqual(['review', { behavior: 'smooth', inline: 'start', block: 'nearest' }]);
+  expect(tabs().map((t) => t.className)).toEqual(['wtab', 'wtab', 'wtab active']);
+  Object.defineProperty(board(), 'clientWidth', { configurable: true, value: 390 });
+  board().scrollLeft = 392;
+  fireEvent.scroll(board());
+  expect(tabs().map((t) => t.getAttribute('aria-current'))).toEqual(['false', 'true', 'false']);
+  Object.defineProperty(board(), 'clientWidth', { configurable: true, value: 0 });
+  board().scrollLeft = 800;
+  fireEvent.scroll(board());
+  expect(tabs().map((t) => t.getAttribute('aria-current'))).toEqual(['false', 'true', 'false']);
+});
+
+test('Board on a phone with no column to draw says so', () => {
+  localStorage.setItem('chela_work_phone_layout', 'board');
+  viewport.phone = true;
+  show(payload({}));
+  expect(document.querySelector('#work-board .kanban-empty-col')?.textContent).toBe('Nothing here');
+  expect(document.querySelectorAll('.wtab').length).toBe(0);
+});
+
+test('an unconfigured payload is the empty state on a phone too', () => {
+  viewport.phone = true;
+  show({ configured: false, workflows: [] });
+  expect(document.getElementById('kanban-empty')).not.toBeNull();
+  expect(document.getElementById('work-rows')).toBeNull();
 });
 
 // --- Liav 2026-10-19: a column is a lane, not a share of the window -----------------------------

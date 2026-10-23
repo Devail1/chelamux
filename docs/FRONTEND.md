@@ -197,6 +197,22 @@ always full: `style.css` pins it to the viewport, edge to edge, from the top to 
 The floating ☰ (`.mobile-menu-fab`) shows only while no pane is open, and there is no phone
 "+": New session is the drawer's own button.
 
+### The Work view on a phone
+
+On a phone the Work view has ONE title bar too (CMX-315, `features/work` `PhoneBar.tsx`,
+`.work-bar`): the drawer's hamburger, the current project as the title (a chevron over
+"Work · N running · M queued"), New task (+) and ⋯. The floating ☰ steps aside for it, and the
+safety pills float bottom right, clear of + and ⋯. The title opens the project switcher, a
+bottom sheet (single-select, recent projects first, a search past 6 projects); it writes the
+same project filter as the desktop's pills. ⋯ opens Work options: the layout (Rows, the
+default, or Board), Init a repo, Pause dispatch and Pause all agents, which asks in a dialog.
+Rows is one list grouped by status, in-flight work first (`phone.ts` `rowGroups`); Board
+swipes one column a screen under the status tabs. Both draw the compact card
+(`Compact.tsx`, exported for the desktop to reuse): the title, one id/PR/state line, one
+flags line, two lines of note, and a ⋮ (`cardActions.tsx`) holding the branch and every
+action, the destructive ones included. Orange marks only risk high, rework and CI failing,
+always on a word. `WorkView` owns the choices the bar and the board share (`prefs.ts`).
+
 The rest of a tile is React too (CMX-242, plan P27/P28/P30/P32), on the same pattern:
 
 | Module | Draws | Mounted by features/wall into |

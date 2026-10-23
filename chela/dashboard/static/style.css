@@ -2130,10 +2130,6 @@ input[type="text"]:focus, textarea:focus, select:focus {
 .kanban-hidden-inline { display: none; color: var(--text-dim); }
 .kanban-col-hide { flex: 0 0 auto; margin-left: 6px; background: none; border: 1px solid var(--border); border-radius: 4px; color: var(--text-dim); font-size: 10px; padding: 0 5px; cursor: pointer; }
 
-/* Accordion caret — hidden by default (desktop grid + swipe carousel have no
-   collapse). The mobile Rows layout flips it on. */
-.kanban-col-caret { display: none; }
-
 .kanban-col-head .col-count {
     background: var(--bg);
     border: 1px solid var(--border);
@@ -2601,11 +2597,6 @@ summary.runs-section { cursor: pointer; }
     .dispatcher-table tr.row-confirming .row-confirm-cell { display: block; padding: 4px 0; }
 }
 
-/* ---- Mobile layout controls (Kanban) ---- */
-/* The Swipe/Rows toggle + swipe quick-nav strip. Hidden on desktop (the 5-lane
-   grid needs no controls); the ≤768px block below flips them on. */
-.kanban-mobile-controls { display: none; }
-
 /* ---- Responsive ---- */
 
 @media (max-width: 768px) {
@@ -2626,142 +2617,28 @@ summary.runs-section { cursor: pointer; }
     .tab { flex: 0 0 auto; white-space: nowrap; padding: 8px 12px; }
     .tab[data-tab="terminals"] { margin-left: 0 !important; }
 
-    /* ---- Kanban mobile layouts (Swipe / Rows) ---- */
-    /* Controls (toggle + nav strip) are mobile-only. */
-    .kanban-mobile-controls { display: block; }
-
-    .kanban-layout-toggle {
-        display: inline-flex;
-        gap: 0;
-        margin-bottom: 8px;
-        border: 1px solid var(--border);
-        border-radius: 8px;
-        overflow: hidden;
+    /* ---- CMX-315: the phone Work view (Liav's mockups, 10-23) ----
+       Board (swiped): the status tabs ARE the columns, one screen wide, scroll
+       snapped; the active tab is underlined (an underline + weight, never hue
+       alone). No column header and no peek of the next column. */
+    .wtabs {
+        display: flex; flex-wrap: nowrap; gap: 20px; overflow-x: auto; scrollbar-width: none;
+        margin: 0 -14px 12px; padding: 0 16px; border-bottom: 1px solid var(--border);
     }
-    .kanban-layout-btn {
-        background: var(--bg);
-        color: var(--text-dim);
-        border: none;
-        padding: 6px 16px;
-        font-size: 12px;
-        font-family: var(--ui-font);
-        cursor: pointer;
+    .wtabs::-webkit-scrollbar { display: none; }
+    .wtab {
+        flex: 0 0 auto; display: inline-flex; align-items: center; gap: 6px; white-space: nowrap;
+        min-height: 44px; padding: 0; border: 0; border-bottom: 2px solid transparent; background: none;
+        color: var(--text-dim); font: 14px var(--ui-font); cursor: pointer;
     }
-    .kanban-layout-btn + .kanban-layout-btn { border-left: 1px solid var(--border); }
-    /* Active state is colorblind-safe: solid fill + bold weight + inset ring,
-       not hue alone. */
-    .kanban-layout-btn.active {
-        background: var(--accent);
-        color: var(--on-accent);
-        font-weight: 700;
-        box-shadow: inset 0 0 0 2px var(--accent);
+    .wtab.active { color: var(--text); font-weight: 600; border-bottom-color: var(--accent); }
+    .wtab-count { font-variant-numeric: tabular-nums; }
+    .kanban-board.wboard {
+        display: flex; flex-wrap: nowrap; gap: 0; overflow-x: auto; scroll-snap-type: x mandatory;
+        -webkit-overflow-scrolling: touch; scrollbar-width: none;
     }
-
-    /* Quick-nav strip — swipe layout only (hidden in rows below). */
-    .kanban-nav-strip {
-        display: flex;
-        flex-wrap: nowrap;
-        gap: 6px;
-        overflow-x: auto;
-        -webkit-overflow-scrolling: touch;
-        scrollbar-width: none;
-        margin-bottom: 10px;
-        padding-bottom: 2px;
-    }
-    .kanban-nav-strip::-webkit-scrollbar { display: none; }
-    .kanban-nav-chip {
-        flex: 0 0 auto;
-        display: inline-flex;
-        align-items: center;
-        gap: 5px;
-        background: var(--bg);
-        border: 1px solid var(--border);
-        color: var(--text-dim);
-        border-radius: 12px;
-        padding: 3px 10px;
-        font-size: 11px;
-        font-family: var(--ui-font);
-        cursor: pointer;
-        white-space: nowrap;
-    }
-    .kanban-nav-chip .kanban-nav-count {
-        background: var(--surface);
-        border-radius: 8px;
-        padding: 0 6px;
-        font-size: 10px;
-        color: var(--text);
-    }
-    /* Active chip is colorblind-safe: fill + bold + ring, plus the count pill
-       stays legible — never hue as the only cue. */
-    .kanban-nav-chip.active {
-        background: var(--accent);
-        border-color: var(--accent);
-        color: var(--on-accent);
-        font-weight: 700;
-        box-shadow: inset 0 0 0 2px var(--accent);
-    }
-    .kanban-nav-chip.active .kanban-nav-count { background: rgba(13, 17, 23, 0.18); color: #0d1117; }
-
-    /* Default (swipe carousel): horizontal scroll-snap; all 5 lanes swipe
-       with a peek of the next. */
-    .kanban-board {
-        display: flex;
-        flex-wrap: nowrap;
-        grid-template-columns: none;
-        overflow-x: auto;
-        scroll-snap-type: x mandatory;
-        -webkit-overflow-scrolling: touch;
-        gap: 10px;
-    }
-    .kanban-col {
-        flex: 0 0 86%;
-        max-width: none;
-        scroll-snap-align: start;
-        margin-bottom: 0;
-    }
-    .kanban-cards { max-height: none; }
-
-    /* Hidden columns at phone width: one "Hidden: Backlog · Review" line above the board. */
-    .kanban-board-wrap { flex-direction: column-reverse; align-items: stretch; }
-    .kanban-board-wrap > .kanban-hidden-panel { flex: none; padding: 6px 8px; }
-    .kanban-hidden-details { display: none; }
-    .kanban-hidden-inline { display: block; }
-
-    /* Rows accordion — full-width stacked columns; each head is a tap toggle
-       that collapses/expands its cards. Every header + count stays visible. */
-    #work-board.kanban-mobile-rows .kanban-nav-strip { display: none; }
-    #work-board.kanban-mobile-rows .kanban-board {
-        display: block;
-        overflow-x: visible;
-        scroll-snap-type: none;
-    }
-    #work-board.kanban-mobile-rows .kanban-col {
-        flex: none;
-        width: 100%;
-        min-height: 0;
-        margin-bottom: 8px;
-    }
-    #work-board.kanban-mobile-rows .kanban-col-head {
-        margin-bottom: 0;
-        border-bottom: none;
-        cursor: pointer;
-        padding-bottom: 4px;
-    }
-    #work-board.kanban-mobile-rows .kanban-col-caret {
-        display: inline-block;
-        flex: 0 0 auto;
-        width: 12px;
-        color: var(--text-dim);
-        transition: transform 0.15s;
-    }
-    #work-board.kanban-mobile-rows .kanban-col-caret::before { content: '▾'; }
-    #work-board.kanban-mobile-rows .kanban-col-collapsed .kanban-col-caret::before { content: '▸'; }
-    #work-board.kanban-mobile-rows .kanban-col:not(.kanban-col-collapsed) .kanban-col-head {
-        border-bottom: 1px solid var(--border);
-        margin-bottom: 8px;
-        padding-bottom: 8px;
-    }
-    #work-board.kanban-mobile-rows .kanban-col-collapsed .kanban-cards { display: none; }
+    .wboard::-webkit-scrollbar { display: none; }
+    .wcol { flex: 0 0 100%; min-width: 0; scroll-snap-align: start; display: flex; flex-direction: column; gap: 10px; }
 
     /* Dispatcher tables: re-flow as stacked label/value rows. Cells carry a
        data-label attribute set by app.js so the column header survives the
@@ -3919,10 +3796,150 @@ body.sidebar-resizing iframe { pointer-events: none; }
        (.gs-head-menu), so the floating one steps aside. The phone "+" is gone
        (CMX-386 → CMX-313): New session is the drawer's own button. */
     body:has(#panel-terminals.active .gs-head-menu) .mobile-menu-fab { display: none; }
+    /* CMX-315: the Work view's title bar (.work-bar) carries the opener too,
+       and starts at the screen's top edge (no clearance for the floating one). */
+    body:has(#panel-work.active .work-bar) .mobile-menu-fab { display: none; }
+    .canvas:has(#panel-work.active .work-bar) { padding-top: 0; }
+    /* The safety pills leave the bar's + and ⋯ alone: bottom right, over the list.
+       Not with the drawer open: there they would cover its footer (the gear). */
+    body:has(#panel-work.active .work-bar):not(.sidebar-open) .safety-float {
+        top: auto; bottom: max(14px, env(safe-area-inset-bottom));
+    }
+    /* ONE title bar, the pane's (CMX-313) look: ☰, the project over its
+       counts, + and ⋯. Sticky at the canvas's top; --work-bar-h is its height,
+       which the Rows group heads stick under. */
+    #panel-work { --work-bar-h: calc(max(6px, env(safe-area-inset-top)) + 51px); }
+    .work-bar {
+        position: sticky; top: 0; z-index: 5;
+        display: grid; grid-template-columns: auto minmax(0, 1fr) auto auto; align-items: center; gap: 8px;
+        margin: 0 -14px; box-sizing: border-box; min-height: var(--work-bar-h);
+        padding: max(6px, env(safe-area-inset-top)) 12px 6px;
+        background: var(--bg); border-bottom: 1px solid var(--border); font-family: var(--ui-font);
+    }
+    .work-bar-btn {
+        display: inline-flex; align-items: center; justify-content: center; flex: 0 0 auto;
+        width: 44px; height: 44px; padding: 0; box-sizing: border-box; border-radius: 50%; cursor: pointer;
+        background: var(--surface); border: 1px solid var(--border); color: var(--text);
+    }
+    .work-bar-btn:hover { border-color: var(--accent); color: var(--accent); }
+    .work-bar-btn:disabled { opacity: 0.45; cursor: not-allowed; }
+    .work-bar-title {
+        display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 1px; min-width: 0;
+        min-height: 44px; padding: 2px 4px; border: 0; background: none; color: var(--text); cursor: pointer; font-family: inherit;
+    }
+    .work-bar-name { display: inline-flex; align-items: center; gap: 4px; max-width: 100%; font-size: 16px; font-weight: 600; }
+    .work-bar-project, .work-bar-sub { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .work-bar-name svg { flex: 0 0 auto; }
+    .work-bar-sub { max-width: 100%; font-size: 12px; color: var(--text-dim); }
+    /* Board | Runs | Schedules: one full-width segmented control under the bar. */
+    .work-phone-seg { padding: 10px 0; }
+    .work-phone-seg .work-seg {
+        display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); width: 100%; box-sizing: border-box;
+        padding: 3px; border-radius: 10px; background: var(--surface);
+    }
+    .work-phone-seg .work-seg-btn { min-height: 34px; border-radius: 8px; font-size: 14px; }
+    .work-phone-seg .work-seg-btn + .work-seg-btn { border-left: 0; }
+    .work-phone-seg .work-seg-btn.active { box-shadow: none; background: color-mix(in srgb, var(--text) 14%, var(--surface)); }
     /* The launch menu never runs off the right: a long nowrap project label
        would otherwise size the popover past a 390px screen. */
     .launch-menu { max-width: calc(100vw - 16px); }
 }
+
+/* ---- CMX-315: the Work view's compact card, Rows row and phone sheets ----
+   The compact card (features/work Compact.tsx) is the shared card the desktop
+   follow-up reuses: the title (2 lines), one meta line (id in mono, PR, the
+   state with its icon), one flags line, a 2-line note. Orange (Okabe-Ito, red-
+   weak safe) is ONLY a real warning (risk high, rework, CI failing) and always
+   sits on a word: removing every colour here loses no information. */
+.wcard {
+    display: flex; flex-direction: column; gap: 8px; padding: 14px; cursor: pointer;
+    background: var(--surface); border: 1px solid var(--border); border-radius: 12px;
+    font-family: var(--ui-font); color: var(--text);
+}
+.wcard:focus-visible, .wrow:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.wcard-head { display: flex; gap: 8px; align-items: flex-start; }
+.wcard-title {
+    flex: 1 1 auto; min-width: 0; font-size: 15px; line-height: 1.35; font-weight: 600;
+    display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden;
+}
+.wcard-meta, .wcard-flags { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 14px; font-size: 13px; color: var(--text-dim); }
+.wcard-id, .wrow-id { font-family: var(--font); color: var(--accent); }
+.wcard-pr, .wrow-pr { font-family: var(--font); }
+.wcard-state, .wcard-flag { display: inline-flex; align-items: center; gap: 4px; }
+.wcard-state { color: var(--text); }
+.wcard-flag.warn, .wrow-flag.warn { color: var(--ok-orange); font-weight: 600; }
+.wcard-note {
+    font-size: 13px; line-height: 1.4; color: var(--text-dim);
+    display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden;
+}
+.wcard-note svg { vertical-align: -2px; }
+.wcard-menu { flex: 0 0 auto; display: inline-flex; }
+.wcard-menu-btn {
+    width: 36px; height: 44px; margin: -10px -8px -8px 0; padding: 0; border: 0; background: none;
+    color: var(--text-dim); display: inline-flex; align-items: center; justify-content: center; cursor: pointer;
+}
+.wcard-menu-btn:hover, .wcard-menu-btn[aria-expanded="true"] { color: var(--accent); }
+.wcard-running { font-size: 12px; color: var(--text-dim); }
+.wcard-error { font-size: 12px; color: var(--red); }
+.wcard-overflow-menu .wcard-branch-item .ov-label { font-family: var(--font); font-size: 12px; overflow-wrap: anywhere; }
+
+/* Rows: one list grouped by status, each group's head sticky under the bar. */
+.wrows { margin: 0 -14px; }
+.wrows-head {
+    position: sticky; top: var(--work-bar-h, 0px); z-index: 2;
+    display: flex; align-items: center; gap: 8px; padding: 14px 16px 6px; cursor: pointer;
+    background: var(--bg); color: var(--text-dim);
+    font: 600 12px var(--ui-font); letter-spacing: 0.06em; text-transform: uppercase;
+}
+.wrows-label { flex: 1 1 auto; min-width: 0; }
+.wrows-count { font-family: var(--font); }
+.wrows-caret { transform: rotate(90deg); transition: transform 0.15s; }
+.wrows-group.folded .wrows-caret { transform: none; }
+.wrow {
+    display: flex; align-items: center; gap: 10px; min-height: 44px; padding: 10px 8px 10px 16px;
+    border-bottom: 1px solid var(--border); cursor: pointer; font-family: var(--ui-font); color: var(--text);
+}
+.wrow-main { flex: 1 1 auto; min-width: 0; }
+.wrow-title { font-size: 15px; font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.wrow-meta { display: flex; gap: 12px; margin-top: 3px; font-size: 12px; color: var(--text-dim); min-width: 0; }
+.wrow-flag { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.wrow .wcard-menu-btn { margin: 0; }
+
+/* The phone sheets: the project switcher and Work options (bottom sheets). */
+.work-sheet { padding-left: 0; padding-right: 0; }
+.work-sheet .ss-hd { padding: 0 16px 8px; font-size: 16px; }
+.wproj-search { padding: 0 16px 10px; }
+.wproj-search .s-input { width: 100%; box-sizing: border-box; min-height: 40px; font-size: 16px; }
+.wproj-list { max-height: 60vh; overflow-y: auto; }
+.wproj-list .ui-radio-group { display: flex; flex-direction: column; }
+.ui-radio-opt.wproj-row {
+    align-items: center; gap: 14px; min-height: 56px; box-sizing: border-box; padding: 6px 20px;
+    border: 0; border-bottom: 1px solid var(--border); border-radius: 0;
+}
+.wproj-row:has([data-state="checked"]) { background: color-mix(in srgb, var(--accent) 18%, var(--surface)); }
+.wproj-row:has([data-state="checked"]) .wproj-name { font-weight: 600; }
+.wproj-row .ui-radio-text { flex: 1 1 auto; min-width: 0; display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 2px 10px; }
+.wproj-name { font-size: 16px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.wproj-counts { grid-column: 1; font-size: 12px; color: var(--text-dim); }
+.wproj-needs { grid-column: 2; grid-row: 1 / span 2; align-self: center; font-size: 12px; font-weight: 600; color: var(--ok-orange); }
+.wproj-none { padding: 12px 20px; margin: 0; color: var(--text-dim); font-size: 13px; }
+.wopt-head { margin: 4px 0 0; padding: 4px 20px 6px; font: 600 12px var(--ui-font); letter-spacing: 0.06em; text-transform: uppercase; color: var(--text-dim); }
+.wopt-layout { display: flex; gap: 8px; padding: 4px 20px 12px; }
+.wopt-layout-btn {
+    min-height: 36px; padding: 0 14px; border-radius: 18px; border: 1px solid var(--border);
+    background: transparent; color: var(--text-dim); font: 14px var(--ui-font); cursor: pointer;
+}
+.wopt-layout-btn.active { border-color: var(--accent); color: var(--text); font-weight: 600; background: color-mix(in srgb, var(--accent) 18%, var(--surface)); }
+.wopt-sep { height: 1px; background: var(--border); margin: 6px 0; }
+.popover-item.wopt-item {
+    display: flex; align-items: center; gap: 14px; width: 100%; min-height: 52px; padding: 0 20px;
+    font-size: 16px; text-align: left; border-radius: 0; background: transparent;
+}
+.popover-item.wopt-item:hover { background: color-mix(in srgb, var(--text) 8%, var(--surface)); }
+.wopt-label { flex: 1 1 auto; min-width: 0; }
+.wopt-hint { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; font-weight: 400; color: var(--text-dim); }
+.popover-item.wopt-warn { color: var(--ok-orange); font-weight: 600; }
+.work-confirm-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 14px; }
 
 /* ---- Mobile keybar v2 (Moshi-style accessory row) ----
    A persistent, horizontally-scrollable key row pinned to the bottom (above the
