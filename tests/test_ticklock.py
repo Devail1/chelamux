@@ -52,8 +52,11 @@ def _stays_alive(pid: int, window: float = 1.0) -> None:
     ``kill(2)`` returns, so one look straight after it can miss a death that is coming."""
     deadline = time.monotonic() + window
     while True:
-        stat = (Path("/proc") / str(pid) / "stat").read_text()
-        assert stat.rsplit(") ", 1)[1][0] != "Z", f"pid {pid} died: {stat!r}"
+        try:
+            stat = (Path("/proc") / str(pid) / "stat").read_text()
+        except FileNotFoundError:
+            pytest.fail(f"pid {pid} died and was reaped")
+        assert stat.rsplit(") ", 1)[1][0] != "Z", f"pid {pid} died, a zombie: {stat!r}"
         if time.monotonic() >= deadline:
             return
         time.sleep(0.05)
@@ -172,7 +175,7 @@ def test_the_daemon_restarting_itself_from_its_own_tick_does_not_wait_on_itself(
         t0 = time.monotonic()
         with ticklock.between_ticks(timeout=5) as refused:
             assert refused is None
-        assert time.monotonic() - t0 < 4    # well under the bound: it never polled the lock
+        assert time.monotonic() - t0 < 2    # well under the bound: it never polled the lock
     finally:
         ticklock.end_tick(fd)
 
@@ -187,7 +190,7 @@ def test_a_detached_judge_survives_the_daemon_being_killed(tmp_path):
         import os, sys, time
         from pathlib import Path
         from chela import judge
-        pid = judge.spawn_detached(["sleep", "30"], Path(sys.argv[2]))
+        pid = judge.spawn_detached(["sleep", "300"], Path(sys.argv[2]))
         tmp = Path(sys.argv[1] + ".tmp")
         tmp.write_text(str(pid))
         os.replace(tmp, sys.argv[1])
@@ -203,6 +206,7 @@ def test_a_detached_judge_survives_the_daemon_being_killed(tmp_path):
         _stays_alive(judge_pid)
     finally:
         spawner.kill()
+        spawner.wait(timeout=_DEADLINE)
         if judge_pid is not None:
             with contextlib.suppress(OSError):
                 os.kill(judge_pid, signal.SIGKILL)
@@ -214,7 +218,7 @@ def test_a_tmux_agent_survives_the_daemon_being_killed(tmp_path):
     spawner = _py("""
         import subprocess, sys, time
         from pathlib import Path
-        subprocess.run(["tmux", "-L", sys.argv[1], "new-session", "-d", "-s", "a", "sleep 30"], check=True)
+        subprocess.run(["tmux", "-L", sys.argv[1], "new-session", "-d", "-s", "a", "sleep 300"], check=True)
         Path(sys.argv[2]).touch()
         time.sleep(60)
     """, sock, tmp_path / "up", start_new_session=True)
@@ -229,6 +233,8 @@ def test_a_tmux_agent_survives_the_daemon_being_killed(tmp_path):
                             capture_output=True, timeout=10)
         assert cp.returncode == 0, "the agent's tmux session died with the daemon"
     finally:
+        spawner.kill()
+        spawner.wait(timeout=_DEADLINE)
         subprocess.run(["tmux", "-L", sock, "kill-server"], capture_output=True, timeout=10)
 
 
