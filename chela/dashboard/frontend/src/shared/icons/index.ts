@@ -4,8 +4,8 @@
 import {
   ArrowUpToLine, Ban, Bell, CalendarClock, Check, ChevronDown, ChevronRight, ChevronUp, Circle,
   CircleDashed, CircleDot, CircleHelp, CircleMinus, Columns3, Crown, Ellipsis, EllipsisVertical, ExternalLink, Eye,
-  Diamond, Flag, FlaskConical, GitBranch, GitCompare, GitMerge, GitPullRequest, Globe, Hand, Inbox, Keyboard, LayoutGrid, Link2, Lock, LockOpen, Maximize2, Menu, Minimize2, Minus,
-  NotebookPen, OctagonX, Pin, Play, Plug, Plus, RefreshCw, RotateCw, Scale, Search, Settings, Share2,
+  Diamond, Flag, FlaskConical, FolderPlus, GitBranch, GitCompare, GitMerge, GitPullRequest, Globe, Hand, Inbox, Keyboard, LayoutGrid, Link2, Lock, LockOpen, Maximize2, Menu, Minimize2, Minus,
+  NotebookPen, OctagonX, Pause, Pin, Play, Plug, Plus, RefreshCw, RotateCw, Scale, Search, Settings, Share2,
   SlidersHorizontal, Snowflake, SquareCheck, SquareTerminal, Star, Target, TriangleAlert, Workflow, X,
 } from 'lucide-react';
 
@@ -86,6 +86,9 @@ export const icons = {
   layoutLocked: Lock,
   layoutUnlocked: LockOpen,
   autoArrange: Target,
+  // CMX-315: the phone Work view's ⋯ sheet
+  initRepo: FolderPlus,
+  pause: Pause,
 } as const;
 
 /** A meaning in the map, for a pure model that names the icon its renderer draws. */
