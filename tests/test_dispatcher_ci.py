@@ -2071,11 +2071,14 @@ def test_the_review_cap_counts_review_rounds_only(monkeypatch, row, review, reac
 def test_infra_cap_is_its_own_knob_plus_human_retries(monkeypatch, infra, retry, reached):
     monkeypatch.setenv("CHELA_MAX_REWORKS", "5")
     monkeypatch.setenv("CHELA_MAX_INFRA_RESTARTS", "3")
-    row = {"rework_count": 0, "retry_count": retry, "risk": None, "infra_restarts": infra}
+    row = {"rework_count": 0, "retry_count": retry, "risk": None, "infra_restarts": infra,
+           "rework_cause": "infra"}
     assert dispatcher.infra_restart_cap(row) == 3 + retry
     assert dispatcher.infra_cap_reached(row) is reached
     assert dispatcher.rework_cap_reached(row) is reached     # either budget counts
     assert dispatcher.review_cap_reached(row) is False
+    # a REVIEW round waiting is never stopped by the infra budget (review cap is far off)
+    assert dispatcher.infra_cap_reached({**row, "rework_cause": "review"}) is False
 
 
 def test_an_old_row_without_the_infra_column_reads_as_zero():
@@ -2171,3 +2174,26 @@ def test_a_rework_that_died_after_its_spawn_write_from_the_3b_snapshot_turns_inf
     the DB row is what says the round was spawned."""
     run = _failed_row(tmp_path, "running", "changes_requested")
     assert (run["infra_restarts"], run["rework_cause"]) == (2, "infra")
+
+
+def test_a_review_verdict_on_a_spent_infra_budget_is_the_review_caps_call(tmp_path, monkeypatch):
+    """A judge block lands on a run whose infra budget is spent but whose review budget is
+    not: it is re-spawned as a review round — never escalated with an infra reason."""
+    monkeypatch.setenv("CHELA_MAX_REWORKS", "3")
+    monkeypatch.setenv("CHELA_MAX_INFRA_RESTARTS", "2")
+    wf = _wf(tmp_path)
+    with dispatcher._db() as conn:
+        _row(conn, workflow_path=str(wf.path), rework_count=2, review_reworks=0,
+             infra_restarts=2, rework_cause="infra")
+    assert dispatcher.request_changes("abc123", "a guard survived", post_comment=False)["ok"]
+    summary = _tick(wf, _FakeGh(rollup=[_check_run("test", conclusion="SUCCESS")]))
+    run = dispatcher.resolve_run("abc123")
+    assert summary["escalated"] == 0 and summary["reworked"] == 1
+    assert (run["status"], run["review_reworks"]) == ("running", 1)
+
+
+def test_the_needs_human_notice_names_review_rounds_and_infra_restarts_apart(monkeypatch):
+    from chela import inbox
+    monkeypatch.setenv("CHELA_MAX_REWORKS", "2")
+    assert inbox._review_reworks({"rework_count": 4, "review_reworks": 1}) == 1
+    assert inbox._review_reworks({"rework_count": 4}) == 4          # legacy NULL row

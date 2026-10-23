@@ -3910,6 +3910,7 @@ def mark_rework_disputed(task_id: str, reason: str) -> dict:
                          "— nothing was changed. Re-read it and decide again.",
             }
         rework_count = fresh["rework_count"] or 0
+        review_round = review_reworks(fresh)        # 🏗️🔁 CMX-192: what the cap counts
         reviews = reviews_of(dict(fresh))
         reviews.append({
             "round": len(reviews) + 1, "at": _now(), "body": reason, "verdict": "disputed",
@@ -3921,7 +3922,7 @@ def mark_rework_disputed(task_id: str, reason: str) -> dict:
         if head_moved:
             new_status = "awaiting_review"
             text = (
-                f"🔀 Rework round {rework_count}/{_rework_cap(fresh)} disputed by the agent, "
+                f"🔀 Rework round {review_round}/{_rework_cap(fresh)} disputed by the agent, "
                 f"but the PR's head already moved past the disputed verdict "
                 f"(`{judge_sha[:12]}` → `{ci.head_sha[:12]}`) — routed back to automatic "
                 f"review instead of a human; the new head still goes through the judge "
@@ -3935,7 +3936,7 @@ def mark_rework_disputed(task_id: str, reason: str) -> dict:
         else:
             new_status = "needs_human"
             text = _format_escalation(
-                f"🔁🚫 Rework round {rework_count}/{_rework_cap(fresh)} disputed by the agent — "
+                f"🔁🚫 Rework round {review_round}/{_rework_cap(fresh)} disputed by the agent — "
                 f"nothing was pushed: {reason}",
                 recommendation="Read the agent's reasoning against the verdict. If it's right, "
                                 "`chela retry` to send the same head through the loop again "
@@ -3981,6 +3982,7 @@ def mark_rework_disputed(task_id: str, reason: str) -> dict:
         "ok": True, "task_id": task_id, "status": new_status,
         "branch_name": row.get("branch_name"), "pr_url": pr_url,
         "rework_count": rework_count, "max_reworks": _rework_cap(row),
+        "review_reworks": review_round,
         "comment_posted": posted, "comment_detail": detail,
         "head_moved": head_moved,
     }
@@ -4465,6 +4467,7 @@ def request_changes(
         "ok": True, "task_id": task_id, "status": "changes_requested",
         "branch_name": run.get("branch_name"), "pr_url": run.get("pr_url"),
         "round": len(reviews), "rework_count": run.get("rework_count") or 0,
+        "review_reworks": review_reworks(run),
         "max_reworks": _rework_cap(run), "comment_posted": posted, "comment_detail": detail,
         # The CLI checks that SOMETHING will actually come and pick this run up before it
         # tells the reviewer so (main._rework_prospects). It needs the workflow to check.
@@ -4759,6 +4762,7 @@ def reopen(ident: str, reason: str = "") -> dict:
         "ok": True, "task_id": task_id, "status": "awaiting_review",
         "branch_name": run.get("branch_name"), "pr_url": run.get("pr_url"),
         "rework_count": run.get("rework_count") or 0, "max_reworks": _rework_cap(run),
+        "review_reworks": review_reworks(run),
         "reopen_count": new_reopen_count,
         "comment_posted": posted, "comment_detail": detail,
     }
@@ -4857,6 +4861,7 @@ def retry(ident: str, reason: str = "") -> dict:
         "ok": True, "task_id": task_id, "status": "changes_requested",
         "branch_name": run.get("branch_name"), "pr_url": run.get("pr_url"),
         "rework_count": run.get("rework_count") or 0, "max_reworks": cap,
+        "review_reworks": review_reworks(run),
         "retry_count": new_retry_count,
         "comment_posted": posted, "comment_detail": detail,
     }
@@ -7278,8 +7283,11 @@ def infra_restart_cap(row) -> int:
 
 
 def infra_cap_reached(row) -> bool:
-    """🏗️🔁 CMX-192. Has this run restarted on infrastructure as often as it may?"""
-    return infra_restarts(row) >= infra_restart_cap(row)
+    """🏗️🔁 CMX-192. Has this run restarted on infrastructure as often as it may — and is the
+    round it is waiting for an infra one? A review verdict on a run with a spent infra budget
+    is the review cap's call, with the review reason: the infra budget is not what it spends."""
+    return (rework_cause(row) == REWORK_CAUSE_INFRA
+            and infra_restarts(row) >= infra_restart_cap(row))
 
 
 def review_cap_reached(row) -> bool:

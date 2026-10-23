@@ -1585,6 +1585,7 @@ def run_events(runs: list[dict], seen: dict[str, str],
             reviews = _reviews(run)
             payload["rework_count"] = run.get("rework_count") or 0
             payload["infra_restarts"] = run.get("infra_restarts") or 0      # CMX-192
+            payload["review_reworks"] = _review_reworks(run)
             payload["reviews"] = reviews
             payload["last_error"] = run.get("last_error")
             payload["worktree_path"] = run.get("worktree_path")
@@ -1595,8 +1596,9 @@ def run_events(runs: list[dict], seen: dict[str, str],
                 "run_needs_human",
                 # No parens, no `(s)`: the summary is sanitized before it is typed at a
                 # prompt (_event), and bracket punctuation comes back out mid-word.
-                f"📥 {label} NEEDS A HUMAN — reworks: {payload['rework_count']} · infra "
-                f"restarts: {payload['infra_restarts']} · verdicts "
+                f"📥 {label} NEEDS A HUMAN — reworks: {payload['rework_count']} · review "
+                f"rounds: {payload['review_reworks']} · infra restarts: "
+                f"{payload['infra_restarts']} · verdicts "
                 f"on the row: {len(reviews)} · {reason} — {ref}"
                 f"{' · ' + snippet if snippet else ''}", payload, wid=wid))
         elif status == "changes_requested" and _rework_cap_reached(run):
@@ -1687,6 +1689,11 @@ def _cap_fields(run: dict) -> dict:
             "infra_restarts": run.get("infra_restarts") or 0,
             "review_reworks": run.get("review_reworks"),
             "rework_cause": run.get("rework_cause")}
+
+
+def _review_reworks(run: dict) -> int:
+    from chela import dispatcher
+    return dispatcher.review_reworks(_cap_fields(run))
 
 
 def _effective_rework_cap(run: dict) -> int:

@@ -2698,10 +2698,10 @@ def cmd_rework_disputed(args) -> None:
     if status == "awaiting_review":
         print(f"🔀 Task {result['task_id']} disputed — the head already moved past the "
               "judged verdict, routed back to awaiting_review for automatic re-judging "
-              f"(rework {result.get('rework_count')}/{result.get('max_reworks')})")
+              f"(rework {result.get('review_reworks', result.get('rework_count'))}/{result.get('max_reworks')})")
     else:
         print(f"🔁🚫 Task {result['task_id']} disputed — needs_human "
-              f"(rework {result.get('rework_count')}/{result.get('max_reworks')})")
+              f"(rework {result.get('review_reworks', result.get('rework_count'))}/{result.get('max_reworks')})")
     if result.get("comment_posted"):
         print(f"  PR comment posted: {result.get('pr_url') or ''}")
     else:
@@ -2795,7 +2795,7 @@ def cmd_review(args) -> None:
     task_id, status = result["task_id"], result["status"]
     if args.request_changes:
         print(f"Run {task_id} ({result.get('branch_name') or '?'}) → changes_requested "
-              f"(verdict {result['round']}, rework {result['rework_count']}/{result['max_reworks']})")
+              f"(verdict {result['round']}, rework {result.get('review_reworks', result['rework_count'])}/{result['max_reworks']})")
         for line in _rework_prospects(result.get("workflow_path")):
             print(f"  {line}")
     else:
@@ -3473,7 +3473,7 @@ def cmd_reopen(args) -> None:
         print(f"reopen: {result.get('error', 'unknown error')}")
         sys.exit(1)
     print(f"🔓 Run {result['task_id']} ({result.get('branch_name') or '?'}) → awaiting_review "
-          f"(rework {result.get('rework_count')}/{result.get('max_reworks')}, "
+          f"(rework {result.get('review_reworks', result.get('rework_count'))}/{result.get('max_reworks')}, "
           f"reopen #{result.get('reopen_count')}) — back under judge/review/merge.")
     if result.get("comment_posted"):
         print(f"  PR comment posted: {result.get('pr_url') or ''}")
@@ -3500,7 +3500,7 @@ def cmd_retry(args) -> None:
         print(f"retry: {result.get('error', 'unknown error')}")
         sys.exit(1)
     print(f"🔁 Run {result['task_id']} ({result.get('branch_name') or '?'}) → "
-          f"changes_requested (rework {result.get('rework_count')}/{result.get('max_reworks')}, "
+          f"changes_requested (rework {result.get('review_reworks', result.get('rework_count'))}/{result.get('max_reworks')}, "
           f"+{result.get('retry_count')} human-granted) — the dispatcher will re-spawn it "
           "next tick.")
     if result.get("comment_posted"):
