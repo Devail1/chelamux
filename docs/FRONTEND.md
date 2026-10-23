@@ -262,7 +262,93 @@ width; a new overlay gets a row there.
    `react_islands.test.mjs` runs an isolated dashboard (temp `CHELA_DIR`, its own port).
    Never point a test at the live dashboard.
 
-No em dashes in UI strings.
+Controls come from the kit (`src/shared/ui`): a raw `<button>`, `<input>`, `<select>`,
+`<textarea>` or `<dialog>`, or a direct `@radix-ui/*` import, anywhere else fails
+`src/uikit.test.ts`. No emoji (icons come from `src/shared/icons`) and no em dashes in UI
+strings. A `style.css` rule whose classes and ids no source renders fails
+`tests/test_port_done.py`: delete it with the markup that used it.
+
+## The port's definition of done
+
+The React port (CMX-212) is done when every item of `FRONTEND_PORT_PLAN.md` §6 holds. Each is
+a test, so none can quietly regress (CMX-249, plan P35):
+
+| §6 | What holds | Held by |
+|---|---|---|
+| 1 | No legacy view module: `static/js/` holds only the three pure models `src/` imports (`wallmodel`, `windowid`, `wire`), no `.js` | `tests/test_port_done.py` |
+| 2 | `templates/index.html` is the Vite entry: head, pre-paint script, boot JSON, `#root`; no inline `on*=` and no `chela.` call | `tests/test_port_done.py`, `tests/test_react_islands.py` |
+| 3 | `window.chela` is exactly `openPalette` and `toggleSettings`; Ctrl/⌘+K and Ctrl/⌘+, pressed inside a pane reach the page | `src/iframeBridge.test.ts`, `tests/browser/bundle_boot.test.mjs`, `tests/browser/pane_keys.test.mjs` |
+| 4 | Every former node suite is ported or retired with a reason (the table below) | `tests/test_port_done.py` |
+| 5 | The look: the eight palettes keep WCAG AA on-accent contrast | `tests/test_on_accent_contrast.py`, `tests/btn_danger_css.test.mjs`, the browser suites |
+| 6 | No dual implementation: no `.js` and `.ts` module with one base name, no `LegacyTab` | `tests/test_port_done.py` |
+| 7 | The iframe boundary (plan §3), one test per row | `src/features/paneframe/tests/boundary.test.tsx`; `tests/test_port_done.py` checks every row has its test |
+| 8 | One UI kit (above) | `src/uikit.test.ts` |
+| 9 | Every UX decision of plan §7 holds; the plan's table names each row's test | `tests/test_port_done.py` checks every row names a test that exists |
+
+### What happened to the node suites
+
+The dashboard's `tests/*.test.mjs` suites that the port deleted, and where each one's
+assertions went. Paths are under `chela/dashboard/frontend/src/` unless they start with
+`tests/`. The suites still in `tests/` run under Vitest (CMX-216).
+
+| Suite | Slice (PR) | Outcome |
+|---|---|---|
+| `access_requests.test.mjs` | CMX-219 (#826) | ported: `features/accessreq/tests/AccessRequests.test.tsx` |
+| `approvals.test.mjs` | CMX-219 (#826) | ported: `features/approvals/tests/Approvals.test.tsx` |
+| `approvals_categories.test.mjs` | CMX-219 (#826) | ported: `features/approvals/tests/Approvals.test.tsx` |
+| `concurrency_model.test.mjs` | CMX-221 (#834) | ported: `features/settings/tests/model.test.ts` |
+| `decisions.test.mjs` | CMX-228 (#822) | ported: `features/decisions/tests/Decisions.test.tsx`, `features/decisions/tests/model.test.ts`; the inline `onclick` and `window.chela` cases retired with that markup |
+| `decisions_badge.test.mjs` | CMX-228 (#822) | ported: `features/decisions/tests/Decisions.test.tsx`, `features/decisions/tests/model.test.ts` |
+| `decisions_search.test.mjs` | CMX-228 (#822) | ported: `features/decisions/tests/Decisions.test.tsx`, `features/decisions/tests/model.test.ts` |
+| `decisions_seed.test.mjs` | CMX-228 (#822) | ported: `features/decisions/tests/Decisions.test.tsx`, `features/decisions/tests/model.test.ts` |
+| `decisions_sse.test.mjs` | CMX-228 (#822) | ported: `features/decisions/tests/Decisions.test.tsx`, `features/decisions/tests/model.test.ts` |
+| `diffpanel_model.test.mjs` | CMX-237 (#817) | ported: `features/diffmodal/tests/model.test.ts` |
+| `dispatch_hold.test.mjs` | CMX-233 (#824) | ported: `features/work/tests/WorkView.test.tsx`; the `index.html` onclick cases retired with the markup |
+| `feed.test.mjs` | CMX-228 (#822) | ported: `features/decisions/tests/feed.test.ts`; the lane, graveyard and flat-view cases retired with the Feed view |
+| `kanban_flatten.test.mjs` | CMX-233 (#824) | ported: `features/work/tests/Board.test.tsx`, `features/work/tests/models.test.ts` |
+| `kanban_hidden_columns.test.mjs` | CMX-233 (#824) | ported: `features/work/tests/models.test.ts`, `features/work/tests/Board.test.tsx` |
+| `kanban_lane_model.test.mjs` | CMX-233 (#824) | ported: `features/work/tests/models.test.ts` |
+| `kanban_linear_model.test.mjs` | CMX-233 (#824) | ported: `features/work/tests/models.test.ts` |
+| `kanban_open_tracker_state.test.mjs` | CMX-233 (#824) | ported: `features/work/tests/Board.test.tsx` |
+| `kanban_tracker_link.test.mjs` | CMX-233 (#824) | ported: `features/work/tests/Board.test.tsx` |
+| `kanban_tracker_render.test.mjs` | CMX-233 (#824) | ported: `features/work/tests/Board.test.tsx` |
+| `orchestrator.test.mjs` | CMX-228 (#822) | ported: `shared/orchestrator/tests/orchestrator.test.ts` |
+| `palette_settings.test.mjs` | CMX-221 (#834) | ported: `features/palette/tests/Palette.test.tsx` |
+| `resources_model.test.mjs` | CMX-219 (#826) | ported: `features/resources/tests/Resources.test.tsx` |
+| `risk_chip.test.mjs` | CMX-233 (#824) | ported: `features/work/tests/Board.test.tsx` |
+| `runs_linear.test.mjs` | CMX-231 (#820) | ported: `features/runs/tests/Runs.test.tsx` |
+| `runstate.test.mjs` | CMX-231 (#820) | ported: `features/runs/tests/model.test.ts` |
+| `runtoast.test.mjs` | CMX-219 (#826) | ported: `features/runtoast/tests/model.test.ts` |
+| `settings_concurrency.test.mjs` | CMX-221 (#834) | ported: `features/settings/tests/Knobs.test.tsx` |
+| `settings_cost.test.mjs` | CMX-221 (#834) | ported: `features/settings/tests/Cost.test.tsx`, `features/settings/tests/Settings.test.tsx`, `features/settings/tests/Knobs.test.tsx` |
+| `settings_dispatch.test.mjs` | CMX-221 (#834) | ported: `features/settings/tests/Knobs.test.tsx` |
+| `settings_file_drop.test.mjs` | CMX-221 (#834) | ported: `features/settings/tests/General.test.tsx` |
+| `settings_modal_precedence.test.mjs` | CMX-221 (#834) | ported: `features/settings/tests/Settings.test.tsx`, `features/settings/tests/Knobs.test.tsx` |
+| `settings_remote_control.test.mjs` | CMX-221 (#834) | ported: `features/settings/tests/General.test.tsx` |
+| `settings_search.test.mjs` | CMX-221 (#834) | ported: `features/settings/tests/Settings.test.tsx`, `features/settings/tests/Knobs.test.tsx` |
+| `settings_share_typing.test.mjs` | CMX-221 (#834) | ported: `features/settings/tests/Prefs.test.tsx` |
+| `settings_telegram_topics.test.mjs` | CMX-221 (#834) | ported: `features/settings/tests/General.test.tsx` |
+| `settings_term_size.test.mjs` | CMX-221 (#834) | ported: `features/settings/tests/Prefs.test.tsx` |
+| `settings_timing.test.mjs` | CMX-221 (#834) | ported: `features/settings/tests/Knobs.test.tsx` |
+| `settings_update.test.mjs` | CMX-221 (#834) | ported: `features/settings/tests/General.test.tsx`, `features/update/tests/flow.test.ts` |
+| `settings_usage.test.mjs` | CMX-221 (#834) | ported: `features/settings/tests/Cost.test.tsx` |
+| `share_mode_sheet.test.mjs` | CMX-240 (#823) | ported: `features/share/tests/SharesSheet.test.tsx`, `tests/share_dialog.test.mjs` |
+| `share_sheet.test.mjs` | CMX-240 (#823) | ported: `features/share/tests/SharesSheet.test.tsx`, `tests/share_dialog.test.mjs` |
+| `shortcuts.test.mjs` | CMX-221 (#834) | ported: `features/palette/tests/Palette.test.tsx` |
+| `sidebar_recent_sessions.test.mjs` | CMX-278 (#821) | ported: `features/sidebar/tests/Recent.test.tsx` |
+| `status_health_mobile.test.mjs` | CMX-219 (#826) | ported: `features/statushealth/tests/StatusHealth.test.tsx` |
+| `task_handoff.test.mjs` | CMX-233 (#824) | ported: `features/runs/tests/model.test.ts`, `features/work/tests/Board.test.tsx` |
+| `task_progress_chip.test.mjs` | CMX-233 (#824) | ported: `features/work/tests/Board.test.tsx` |
+| `taskmodal_judge_badge.test.mjs` | CMX-228 (#822) | ported: `features/taskmodal/tests/TaskModal.test.tsx`, `features/taskmodal/tests/model.test.ts` |
+| `taskmodal_model.test.mjs` | CMX-228 (#822) | ported: `features/taskmodal/tests/model.test.ts`, `shared/markdown/tests/markdown.test.tsx` |
+| `taskmodal_render.test.mjs` | CMX-228 (#822) | ported: `features/taskmodal/tests/TaskModal.test.tsx`, `shared/markdown/tests/markdown.test.tsx` |
+| `term_theme_live.test.mjs` | CMX-221 (#834) | ported: `features/settings/tests/Prefs.test.tsx` |
+| `update_banner.test.mjs` | CMX-219 (#826) | ported: `features/update/tests/UpdateBanner.test.tsx` |
+| `update_banner_close_size.test.mjs` | CMX-219 (#826) | ported: `features/update/tests/UpdateBanner.test.tsx` |
+| `update_banner_stale.test.mjs` | CMX-219 (#826) | ported: `features/update/tests/UpdateBanner.test.tsx` |
+
+Partly ported suites that stay in `tests/` (their other half moved): `topbarmenu`,
+`em_dash_rewrite_branches`, `popover_placement`, `settings_shortcut`, `kanban_task_modal_wiring`.
 
 ## The dev loop
 

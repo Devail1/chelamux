@@ -3,6 +3,7 @@
 // DOES is controller.ts's (through `actions`, CMX-278).
 import { useEffect, useRef, useState, type MouseEvent, type ReactNode } from 'react';
 import { icons } from '../../../shared/icons/index.ts';
+import { TextButton } from '../../../shared/ui/index.ts';
 import {
   ARCHIVED_SECTION_KEY, DISPATCHED_KEY, type Group, type Item, type SidebarState, sidebarModel,
 } from '../model.ts';
@@ -45,9 +46,9 @@ function Unarchive({ itemKey, resume, actions }: { itemKey: string; resume: bool
     });
   };
   return (
-    <button className="row-unarchive" data-item={itemKey} title={what} aria-label={what} disabled={busy} onClick={click}>
+    <TextButton className="row-unarchive" data-item={itemKey} title={what} aria-label={what} disabled={busy} onClick={click}>
       {busy ? (resume ? 'Resuming…' : 'Unarchiving…') : 'Unarchive'}
-    </button>
+    </TextButton>
   );
 }
 
@@ -168,10 +169,10 @@ function GroupView({ g, index, count, s, actions, alt }: GroupProps) {
         <span className="group-actions">
           <GroupMenu g={g} index={index} count={count} s={s} actions={actions} menu={menu} />
           {g.cwd && (
-            <button className="group-add" data-g={g.key} title={`New session in ${g.label}`}
+            <TextButton className="group-add" data-g={g.key} title={`New session in ${g.label}`}
               aria-label={`New session in ${g.label}`} onClick={stop(() => actions.groupNewSession(g.key))}>
               <icons.add size={14} aria-hidden="true" />
-            </button>
+            </TextButton>
           )}
         </span>
       </div>

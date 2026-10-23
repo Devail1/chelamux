@@ -5,7 +5,8 @@ or `CHELA_DASH_HOST` / `CHELA_DASHBOARD_PORT`). It needs the `dashboard` extra, 
 `uv sync --all-extras` installs. It binds loopback and has no login of its own: reach it
 remotely through a tailnet or an SSH tunnel ([the security notes](https://chela.pages.dev/docs#security)).
 
-There are two views and a Settings panel:
+The page is a React app (`docs/FRONTEND.md`), served as a committed build, so running it needs
+no Node. There are two views and a Settings panel:
 
 - **Wall** — every agent's live terminal, each pane marked *working*, *needs you*, *PR open*
   or *idle*, with a context bar, its tmux id (`@N`, click to copy), and file drop / paste into
@@ -24,8 +25,8 @@ phone). A session started in your home directory groups under the home folder's 
 windows with no working directory fall into **Other**.
 
 - **Dispatched work is one row per run**, `CMX-N · <title>`, in a *Dispatched* group: the
-  agent and judge windows fold into it, and while the judge's battery runs the row reads
-  `⚖️ testing · 3/6 · 15m`.
+  agent and judge windows fold into it, and while the judge's battery runs the row carries a judge chip,
+  `3/6` (its tooltip: `Judge testing · 3/6 · 15m`).
 - **The orchestrator's row carries an `orchestrator` badge.** The inbox icon in the sidebar
   header jumps to it (focusing its pane and expanding its group) and opens the decisions log.
   It is not pinned: it stays in its folder group.
@@ -102,7 +103,7 @@ else the window name.
 
 ## Pending approvals
 
-A ⚖️ pill on every view counts the override and release requests waiting on you. Its sheet
+An approvals pill on every view counts the override and release requests waiting on you. Its sheet
 shows what is asked, who asked, why, its age and time to expiry. **Approve** (a second tap
 confirms) and **Deny** go through the same path as Telegram and `chela merge-approve`, and
 re-check the head, CI, mergeability and expiry first; a request that cannot be approved says
