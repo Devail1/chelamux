@@ -78,7 +78,16 @@ export type Workflow = {
 /** `chela dispatch --pause` (CMX-206): null/absent when dispatch runs. */
 export type DispatchHold = { summary?: string } | null;
 
-export type WorkPayload = { configured?: boolean; workflows?: Workflow[]; dispatch_hold?: DispatchHold };
+/** CMX-252: what a `chela dispatch --pause --all` stopped (chela.fleet.snapshot). */
+export type FleetPause = {
+  since_ago?: string | null;
+  by?: string;
+  expires_in?: string | null;
+  agents?: { task: string; wid?: string | null; state?: string | null; finishing?: string | null }[];
+  judges?: { task: string; frozen_for?: string | null; processes?: number }[];
+} | null;
+
+export type WorkPayload = { configured?: boolean; workflows?: Workflow[]; dispatch_hold?: DispatchHold; fleet_pause?: FleetPause };
 
 /** null until the first poll lands. */
 export const work = createStore<WorkPayload | null>(null);

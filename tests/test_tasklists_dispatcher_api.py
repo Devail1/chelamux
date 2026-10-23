@@ -216,4 +216,5 @@ def test_api_dispatcher_shape_is_unchanged_with_no_runs(monkeypatch, client, tmp
     monkeypatch.setattr(dash.epoch, "current", lambda: None)
 
     data = client.get("/api/dispatcher").get_json()
-    assert data == {"configured": False, "workflows": [], "dispatch_hold": None}
+    assert data == {"configured": False, "workflows": [], "dispatch_hold": None,
+                    "fleet_pause": None}  # CMX-252

@@ -187,6 +187,55 @@ test('a refusal alerts its reason (or a fallback); a throw alerts too; the butto
   }
 });
 
+// --- Pause all agents / the paused fleet (CMX-252) ----------------------------------------------
+
+const fleetBtn = () => document.getElementById('fleet-pause-btn') as HTMLButtonElement | null;
+const panel = () => document.getElementById('fleet-pause');
+const FLEET = {
+  since_ago: '3m', by: 'dashboard', expires_in: '27m',
+  agents: [{ task: 'CMX-1', wid: '@5', state: 'interrupted' }, { task: 'CMX-2', wid: '@6', state: 'finishing', finishing: 'judge sweep' }],
+  judges: [{ task: 'CMX-3', frozen_for: '2m', processes: 4 }],
+};
+
+test('confirming "Pause all agents" POSTs pause with all:true; declining POSTs nothing', async () => {
+  const ask = vi.spyOn(window, 'confirm').mockReturnValue(false);
+  await mount({ configured: true, workflows: [] });
+  await act(async () => fireEvent.click(must(fleetBtn())));
+  expect(ask).toHaveBeenCalledWith('Pause every dispatched agent? Dispatch is held, each agent is told to start nothing until you resume, and running judges are frozen.');
+  expect(posts()).toEqual([]);
+  ask.mockReturnValue(true);
+  await act(async () => fireEvent.click(must(fleetBtn())));
+  expect(posts()).toEqual([{ url: '/api/dispatcher/pause', method: 'POST', body: { all: true } }]);
+});
+
+test('a paused fleet: no "Pause all agents", Resume names the agents, and the panel lists agents, judges, since and expiry', async () => {
+  await mount({ configured: true, workflows: [], dispatch_hold: { summary: 'held' }, fleet_pause: FLEET });
+  expect(fleetBtn()).toBeNull();
+  expect(holdBtn()?.textContent).toBe('Resume agents and dispatch');
+  expect(panel()?.querySelector('.fleet-pause-head')?.textContent).toBe('Agents paused 3m ago by dashboard. The hold expires in 27m; the agents resume then.');
+  expect([...must(panel()).querySelectorAll('li')].map((li) => li.textContent)).toEqual([
+    'agent CMX-1 in @5: interrupted', 'agent CMX-2 in @6: finishing (judge sweep)', 'judge CMX-3: frozen 2m (4 process(es))',
+  ]);
+  await act(async () => fireEvent.click(must(holdBtn())));
+  expect(posts().map((p) => p.url)).toEqual(['/api/dispatcher/resume']);
+});
+
+test('a fleet pause with no hold left and nothing running says so; no fleet pause draws no panel', async () => {
+  await mount({ configured: true, workflows: [], dispatch_hold: null, fleet_pause: { by: '', agents: [], judges: [] } });
+  expect(panel()?.querySelector('.fleet-pause-head')?.textContent).toBe('Agents paused by ?. The hold is gone; the next dispatch tick resumes the agents.');
+  expect(panel()?.querySelector('.fleet-pause-empty')?.textContent).toBe('No agent was running.');
+  // the hold is gone but the agents are still paused: Resume, without a confirm
+  const ask = vi.spyOn(window, 'confirm');
+  expect([holdBtn()?.textContent, fleetBtn()]).toEqual(['Resume agents and dispatch', null]);
+  await act(async () => fireEvent.click(must(holdBtn())));
+  expect(ask).not.toHaveBeenCalled();
+  expect(posts().map((p) => p.url)).toEqual(['/api/dispatcher/resume']);
+  dispatcher = { configured: true, workflows: [], dispatch_hold: { summary: 'held' }, fleet_pause: null };
+  await act(async () => pollWork());
+  expect(panel()).toBeNull();
+  expect([holdBtn()?.textContent, fleetBtn()?.textContent]).toEqual(['Resume dispatch', 'Pause all agents']);
+});
+
 // --- the poll -----------------------------------------------------------------------------------
 
 test('the poll publishes the payload and fills the sidebar badges; a failed read keeps the last one', async () => {
