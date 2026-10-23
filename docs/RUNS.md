@@ -212,7 +212,8 @@ the machine is yours. List them under `pause_all` in `~/.chela/config.json`:
 `--pause --all` runs `pm2 stop` on each one that is up. `--resume`, the dashboard and
 Telegram resumes and a lapsed `--ttl` run `pm2 start` on the ones this pause stopped, one at
 a time in `resume_order` (any it does not name start last, in `extra_services` order). A
-service that was already down before the pause stays down. If `pm2 jlist` cannot be read, no
+service that was already down before the pause stays down; one whose `pm2 stop` failed is
+started only if pm2 reports it down by then. `chela-*` services are never stopped this way. If `pm2 jlist` cannot be read, no
 service is stopped. Every pm2 call runs under `env -i` with only `HOME`, `PATH` and
 `PM2_HOME`, so pm2 never reads variables a pm2-run parent leaked. `--hold-status` and the
 dashboard list each service as `stopped`, `not running`, `failed` or `unknown`. With no

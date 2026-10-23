@@ -97,7 +97,10 @@ def _pause(wid: str, finishing: str | None) -> str:
 def extra_services() -> tuple[list[str], list[str]]:
     """``(stop list, start order)`` from ``pause_all`` in ``~/.chela/config.json``. Missing
     or malformed config reads as no extra services. The start order is ``resume_order``
-    first, then any stopped service it does not name, in ``extra_services`` order."""
+    first, then any stopped service it does not name, in ``extra_services`` order.
+
+    A name pm2 would read as an option (``-…``) is dropped, and so is a ``chela-*`` service:
+    stopping chela's own daemon would leave nothing to run the resume."""
     try:
         cfg = userconfig.get("pause_all")
     except Exception:  # noqa: BLE001 — a bad config must never stop a pause
@@ -109,7 +112,12 @@ def extra_services() -> tuple[list[str], list[str]]:
         raw = cfg.get(key)
         if not isinstance(raw, list):
             return []
-        return list(dict.fromkeys(n.strip() for n in raw if isinstance(n, str) and n.strip()))
+        kept = dict.fromkeys(n.strip() for n in raw if isinstance(n, str) and n.strip())
+        bad = [n for n in kept if n.startswith(("-", "chela-"))]
+        if bad:
+            log.warning("pause_all.%s: ignoring %s (an option or chela's own service)",
+                        key, ", ".join(bad))
+        return [n for n in kept if n not in bad]
 
     stop = names("extra_services")
     order = [n for n in names("resume_order") if n in stop]
@@ -148,20 +156,18 @@ def _pm2_running() -> set[str] | None:
 def _stop_services(state: dict) -> None:
     """Stop each configured service that is up, recording what happened to each. One
     already down is recorded NOT_RUNNING and never started by resume; when pm2 cannot be
-    read, nothing is stopped (UNKNOWN). A service this pause already stopped is kept."""
+    read, nothing is stopped (UNKNOWN). A re-pause re-reads pm2: one restarted by hand
+    since is stopped again, and a STOPPED or FAILED one that is down stays owed a start."""
     stop, _ = extra_services()
     if not stop:
         return
     services = state.setdefault("services", {})
-    todo = [n for n in stop if services.get(n) != STOPPED]
-    if not todo:
-        return
     running = _pm2_running()
-    for name in todo:
+    for name in stop:
         if running is None:
-            services[name] = UNKNOWN
+            services.setdefault(name, UNKNOWN)           # an earlier pass's record stands
         elif name not in running:
-            services[name] = NOT_RUNNING
+            services[name] = STOPPED if services.get(name) in (STOPPED, FAILED) else NOT_RUNNING
         else:
             cp = _pm2("stop", name)
             ok = cp is not None and cp.returncode == 0
@@ -172,11 +178,21 @@ def _stop_services(state: dict) -> None:
 
 def _start_services(state: dict) -> dict[str, bool]:
     """``pm2 start`` every service this pause stopped, one at a time in the configured
-    order; ``{name: started}``, in the order tried."""
-    stopped = [n for n, s in state.get("services", {}).items() if s == STOPPED]
+    order; ``{name: started}``, in the order tried. A FAILED stop (it was up at the pause)
+    is started too when pm2 now reports it down: a stop that timed out may still have
+    landed. When pm2 cannot be read, a FAILED one is left alone and logged."""
+    recorded = state.get("services", {})
+    owed = [n for n, st in recorded.items() if st in (STOPPED, FAILED)]
+    if any(recorded[n] == FAILED for n in owed):
+        running = _pm2_running()
+        if running is None:
+            log.warning("fleet resume: pm2 unreadable: check %s by hand",
+                        ", ".join(n for n in owed if recorded[n] == FAILED))
+        owed = [n for n in owed if recorded[n] == STOPPED
+                or (running is not None and n not in running)]
     _, order = extra_services()
     started = {}
-    for name in [n for n in order if n in stopped] + [n for n in stopped if n not in order]:
+    for name in [n for n in order if n in owed] + [n for n in owed if n not in order]:
         cp = _pm2("start", name)
         started[name] = cp is not None and cp.returncode == 0
         if not started[name]:
@@ -280,7 +296,8 @@ def tick(held) -> list[str]:
 
 def resume_all() -> dict | None:
     """Send "resume" to every agent this pause stopped; returns ``{"since", "resumed":
-    {task_id: delivered}, "thawed", "services": {name: started}}`` or None when no fleet pause was in force.
+    {task_id: delivered}, "thawed", "services": {name: started}}``
+    or None when no fleet pause was in force.
 
     The window is re-read from the run ROW: an agent whose run is no longer active is not
     messaged (its window may be someone else's now).

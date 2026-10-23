@@ -276,12 +276,74 @@ def test_a_stop_that_fails_is_recorded_failed_not_started_on_resume_and_retried(
     assert again["services"]["game-tracker"] == "stopped"
 
 
-def test_a_re_pause_with_every_service_stopped_calls_no_pm2(pm2):
+def test_a_re_pause_with_every_service_stopped_only_re_reads_pm2(pm2):
     pm2.configure(CONFIG)
     fleet.pause_all()
     pm2.clear()
     assert fleet.pause_all()["services"] == dict.fromkeys(CONFIG["extra_services"], "stopped")
-    assert pm2.argvs() == []
+    assert pm2.argvs() == [["jlist"]]
+
+
+def test_a_re_pause_stops_again_one_restarted_by_hand_and_keeps_it_owed(pm2):
+    pm2.configure(CONFIG)
+    fleet.pause_all()
+    pm2.set(**{**pm2.status(), "game-agent": "online"})
+    pm2.clear()
+    assert fleet.pause_all()["services"]["game-agent"] == "stopped"
+    assert pm2.argvs() == [["jlist"], ["stop", "game-agent"]]
+
+
+def test_a_re_pause_with_pm2_unreadable_keeps_the_earlier_record(pm2):
+    pm2.configure(CONFIG)
+    pm2.set(**{"game-agent": "online", "game-tracker": "stopped", "game-mirror": "online"})
+    fleet.pause_all()
+    pm2.break_jlist()
+    assert fleet.pause_all()["services"] == {"game-agent": "stopped",
+                                             "game-tracker": "not running",
+                                             "game-mirror": "stopped"}
+
+
+def test_a_re_pause_records_a_failed_stop_that_since_landed_as_stopped(pm2):
+    pm2.configure({"extra_services": ["a"]})
+    pm2.set(a="online")
+    pm2.fail("stop", "a")
+    assert fleet.pause_all()["services"] == {"a": "failed"}
+    pm2.set(a="stopped")
+    assert fleet.pause_all()["services"] == {"a": "stopped"}
+
+
+@pytest.mark.parametrize("at_resume, started", [("stopped", True), ("online", False)])
+def test_a_failed_stop_is_started_on_resume_only_when_pm2_now_says_it_is_down(
+        pm2, at_resume, started):
+    pm2.configure({"extra_services": ["a", "b"]})
+    pm2.set(a="online", b="online")
+    pm2.fail("stop", "a")
+    fleet.pause_all()
+    pm2.set(a=at_resume, b="stopped")
+    pm2.clear()
+    resumed = fleet.resume_all()["services"]
+    assert resumed == ({"a": True, "b": True} if started else {"b": True})
+    assert pm2.argvs() == [["jlist"], *([["start", "a"]] if started else []), ["start", "b"]]
+
+
+def test_a_failed_stop_is_left_alone_on_resume_when_pm2_is_unreadable(pm2, caplog):
+    pm2.configure({"extra_services": ["a", "b"]})
+    pm2.set(a="online", b="online")
+    pm2.fail("stop", "a")
+    fleet.pause_all()
+    pm2.break_jlist()
+    pm2.clear()
+    assert fleet.resume_all()["services"] == {"b": True}
+    assert pm2.argvs() == [["jlist"], ["start", "b"]]
+    assert "pm2 unreadable: check a by hand" in caplog.text
+
+
+def test_option_like_and_chela_service_names_are_dropped(pm2, caplog):
+    pm2.configure({"extra_services": ["-s", "chela-daemon", "a"],
+                   "resume_order": ["chela-dashboard", "a"]})
+    assert fleet.extra_services() == (["a"], ["a"])
+    assert "pause_all.extra_services: ignoring -s, chela-daemon" in caplog.text
+    assert "pause_all.resume_order: ignoring chela-dashboard" in caplog.text
 
 
 def test_a_start_that_fails_is_reported_and_the_rest_still_start(pm2, caplog):
