@@ -25,19 +25,24 @@ _REQUIRED_GLYPHS = "⏺❌✅✦✷✨⚙"
 
 def test_symbola_fallback_font_face_is_served():
     assert any(
-        family == "Symbola Fallback" and filename == "Symbola-Subset.ttf"
-        for family, filename, _variable, _weight in _TERM_FONTS
-    ), "Symbola-Subset.ttf must be registered in _TERM_FONTS so it's actually @font-face'd"
+        f.family == "Symbola Fallback" and f.file == "Symbola-Subset.woff2"
+        for f in _TERM_FONTS
+    ), "Symbola-Subset.woff2 must be registered in _TERM_FONTS so it's actually @font-face'd"
     assert "Symbola Fallback" in _TERM_FONT_CSS
-    assert "Symbola-Subset.ttf" in _TERM_FONT_CSS
+    assert "/Symbola-Subset.woff2" in _TERM_FONT_CSS
 
 
-def test_symbola_subset_file_actually_contains_the_reported_glyphs():
+@pytest.mark.parametrize("file", ["Symbola-Subset.ttf", "Symbola-Subset.woff2"])
+def test_symbola_subset_file_actually_contains_the_reported_glyphs(file):
+    """The .woff2 is what the web terminal loads (CMX-322); the .ttf is what /screenshot
+    and `chela doctor` read."""
     fonttools = pytest.importorskip("fontTools.ttLib")
-    font = fonttools.TTFont(str(_FONTS_DIR / "Symbola-Subset.ttf"))
+    if file.endswith(".woff2"):
+        pytest.importorskip("brotli")
+    font = fonttools.TTFont(str(_FONTS_DIR / file))
     cmap = font.getBestCmap()
     missing = [ch for ch in _REQUIRED_GLYPHS if ord(ch) not in cmap]
-    assert not missing, f"Symbola-Subset.ttf is missing glyphs: {missing!r}"
+    assert not missing, f"{file} is missing glyphs: {missing!r}"
 
 
 def test_shim_fallback_chain_includes_symbola_before_monospace():

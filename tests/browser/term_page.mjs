@@ -42,6 +42,12 @@ export function termShims() {
     return { fontCss, prefShim, bootCss, themeShim, fallbackMs: Number(fallbackMs) };
 }
 
+// A font URL from term_fonts.font_url (/static/fonts/v/<digest>/<file>), served from disk.
+export function fulfillFont(route, url) {
+    const file = url.pathname.replace(/^\/static\/fonts\/(v\/[^/]+\/)?/, '');
+    return route.fulfill({ body: readFileSync(join(FONTS, file)), contentType: 'font/woff2' });
+}
+
 export const TTYD = process.env.TTYD || 'ttyd';
 export const ttydMissing = () => (spawnSync(TTYD, ['--version']).status === 0 ? false
     : 'ttyd is not installed: the real-ttyd check DID NOT RUN (set TTYD=<path> to run it)');

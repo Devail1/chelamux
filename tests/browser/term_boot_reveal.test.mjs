@@ -24,7 +24,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { launchChromium } from './fixture.mjs';
-import { FONTS, VENDOR, startTtyd, termShims, ttydClientOptions, ttydMissing } from './term_page.mjs';
+import { VENDOR, fulfillFont, startTtyd, termShims, ttydClientOptions, ttydMissing } from './term_page.mjs';
 
 const PHONE = { viewport: { width: 390, height: 600 }, deviceScaleFactor: 3, isMobile: true, hasTouch: true };
 // The viewer's Settings > Terminal size, unlike the server default (14) and ttyd's own (13).
@@ -110,9 +110,7 @@ async function bootVendored({ head, hangFonts = false, server, pokes = 0 }) {
     await context.route('**/*', route => {
         const url = new URL(route.request().url());
         if (url.origin !== FIXTURE) return route.abort('blockedbyclient');
-        if (url.pathname.startsWith('/static/fonts/')) {
-            return route.fulfill({ body: readFileSync(join(FONTS, url.pathname.slice('/static/fonts/'.length))), contentType: 'font/ttf' });
-        }
+        if (url.pathname.startsWith('/static/fonts/')) return fulfillFont(route, url);
         if (url.pathname === '/vendor/xterm.js') return route.fulfill({ body: readFileSync(join(VENDOR, 'xterm.js')), contentType: 'text/javascript' });
         if (url.pathname === '/vendor/xterm.css') return route.fulfill({ body: readFileSync(join(VENDOR, 'xterm.css')), contentType: 'text/css' });
         return route.fulfill({
@@ -213,9 +211,7 @@ describe('a pane paints nothing until its final font and size (real ttyd, phone)
         try {
             await context.route('**/*', async route => {
                 const url = new URL(route.request().url());
-                if (url.pathname.startsWith('/static/fonts/')) {
-                    return route.fulfill({ body: readFileSync(join(FONTS, url.pathname.slice('/static/fonts/'.length))), contentType: 'font/ttf' });
-                }
+                if (url.pathname.startsWith('/static/fonts/')) return fulfillFont(route, url);
                 if (url.pathname === '/') {
                     // term_http's order: theme shim, font CSS, boot CSS, preference shim.
                     const resp = await route.fetch();

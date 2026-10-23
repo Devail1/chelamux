@@ -2850,7 +2850,7 @@ def _windows_resolvable_applies() -> bool:
 #
 # CMX-156/CMX-159's whole point: JetBrains Mono, Symbols Nerd Font and every font-picker
 # option all lack `⏺ ❌ ✅ ✦ ✷ ✨ ⚙` — the web terminal's tool-marker and spinner glyphs — so
-# both the dashboard (`chela/dashboard/app.py` `_TERM_FONTS`) and the telegram
+# both the dashboard (`chela/dashboard/term_fonts.py` `TERM_FONTS`, as `Symbola-Subset.woff2`) and the telegram
 # `/screenshot` PNG renderer (`chela/telegram/screenshot.py`) fall back to one bundled
 # Symbola subset for exactly those codepoints. `tests/test_term_symbol_fallback.py`
 # already proves the REPO's copy has them; this fact proves the copy on THIS INSTALL still
@@ -3706,7 +3706,7 @@ def facts() -> list[Fact]:
         Fact(
             name="fonts.glyph_coverage",
             declared_by="the render surfaces that fall back to it for coverage "
-                        "(chela/dashboard/app.py _TERM_FONTS, chela/telegram/"
+                        "(chela/dashboard/term_fonts.py TERM_FONTS, chela/telegram/"
                         "screenshot.py) — both need the TUI marker glyphs and neither "
                         "font they pick before it contains them (CMX-156/159)",
             owned_by="the font file on disk (chela/dashboard/static/fonts/"

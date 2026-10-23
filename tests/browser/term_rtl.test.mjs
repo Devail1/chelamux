@@ -27,7 +27,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { launchChromium } from './fixture.mjs';
-import { FONTS, VENDOR, startTtyd, termShims, ttydClientOptions, ttydMissing } from './term_page.mjs';
+import { VENDOR, fulfillFont, startTtyd, termShims, ttydClientOptions, ttydMissing } from './term_page.mjs';
 
 // A pane's reply line, and Claude Code's prompt box with Hebrew typed into it.
 const OUTPUT = 'abc שלום עולם xyz';
@@ -92,9 +92,7 @@ describe('Hebrew in a wall pane renders right to left (vendored xterm.js)', { sk
                 await context.route('**/*', route => {
                     const url = new URL(route.request().url());
                     if (url.origin !== FIXTURE) return route.abort('blockedbyclient');
-                    if (url.pathname.startsWith('/static/fonts/')) {
-                        return route.fulfill({ body: readFileSync(join(FONTS, url.pathname.slice('/static/fonts/'.length))), contentType: 'font/ttf' });
-                    }
+                    if (url.pathname.startsWith('/static/fonts/')) return fulfillFont(route, url);
                     if (url.pathname === '/vendor/xterm.js') return route.fulfill({ body: readFileSync(join(VENDOR, 'xterm.js')), contentType: 'text/javascript' });
                     if (url.pathname === '/vendor/xterm.css') return route.fulfill({ body: readFileSync(join(VENDOR, 'xterm.css')), contentType: 'text/css' });
                     return route.fulfill({
@@ -145,9 +143,7 @@ describe('Hebrew in a wall pane renders right to left (real ttyd, agent-terminal
             try {
                 await context.route('**/*', async route => {
                     const url = new URL(route.request().url());
-                    if (url.pathname.startsWith('/static/fonts/')) {
-                        return route.fulfill({ body: readFileSync(join(FONTS, url.pathname.slice('/static/fonts/'.length))), contentType: 'font/ttf' });
-                    }
+                    if (url.pathname.startsWith('/static/fonts/')) return fulfillFont(route, url);
                     if (url.pathname === '/') {
                         // term_http: the font CSS + preference shim go in before </head>.
                         const resp = await route.fetch();
