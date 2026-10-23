@@ -6,6 +6,7 @@
 import { api } from '../../../shared/api/index.ts';
 import { onEvent } from '../../../shared/events/index.ts';
 import { registerLane } from '../../../shared/scheduler/index.ts';
+import { createStore } from '../../../shared/store/index.ts';
 import { setWorkPoll, work, type WorkPayload } from '../../../shared/store/work.ts';
 import { RUN_TOAST_KINDS, runToastKind } from '../../runtoast/index.ts';
 import { workBadgeCounts } from '../board.ts';
@@ -18,6 +19,10 @@ function renderBadges(data: WorkPayload | null) {
   setNavBadges({ 'side-runs-count': String(runs), 'side-pr-count': `${prs} PR` });
 }
 
+/** CMX-316: when the last payload landed (ms), the clock the Rows table's ages read: the Work
+ * view runs no timer of its own, so an age is as fresh as the last poll. */
+export const polledAt = createStore(0);
+
 /** Fetch once and publish. Never throws: a failed read keeps the last payload (the next tick retries). */
 export async function pollWork(): Promise<void> {
   let data: WorkPayload | null;
@@ -27,6 +32,7 @@ export async function pollWork(): Promise<void> {
     console.error('pollWork', e);
     return;
   }
+  polledAt.set(Date.now());
   work.set(data);
   renderBadges(data);
 }
