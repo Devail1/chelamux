@@ -7,6 +7,7 @@
 import { useRef, useState, type TouchEvent } from 'react';
 import { createPortal } from 'react-dom';
 import { icons } from '../../../shared/icons/index.ts';
+import { TextButton } from '../../../shared/ui/index.ts';
 import { type AgentRow, type RecentRow, type RecentState, dismissKey, dispatcherToggleLabel, recentView } from '../model.ts';
 import type { SidebarActions } from './actions.ts';
 
@@ -14,11 +15,11 @@ const SWIPE_DISMISS_PX = 70;
 
 function Dismiss({ r, label, actions }: { r: RecentRow; label: string; actions: SidebarActions }) {
   return (
-    <button className="recent-dismiss" title="Dismiss: hide this session from Recent (the transcript is kept)"
+    <TextButton className="recent-dismiss" title="Dismiss: hide this session from Recent (the transcript is kept)"
       aria-label={`Dismiss ${label}`} data-dismiss={dismissKey(r)}
       onClick={e => { e.stopPropagation(); void actions.dismissRecentSession(dismissKey(r)); }}>
       <icons.close size={14} aria-hidden="true" />
-    </button>
+    </TextButton>
   );
 }
 
@@ -65,9 +66,9 @@ function Resume({ r, actions }: { r: RecentRow; actions: SidebarActions }) {
     });
   };
   return (
-    <button className="btn-accent recent-resume" title="Resume this session" disabled={busy}
+    <TextButton className="btn-accent recent-resume" title="Resume this session" disabled={busy}
       data-store={r.store} data-wid={r.wid} data-session={r.session_id ?? ''}
-      onClick={e => { e.stopPropagation(); click(); }}>{busy ? 'Resuming…' : 'Resume'}</button>
+      onClick={e => { e.stopPropagation(); click(); }}>{busy ? 'Resuming…' : 'Resume'}</TextButton>
   );
 }
 
@@ -117,7 +118,7 @@ function UndoToast({ undo, actions }: { undo: NonNullable<RecentState['undo']>; 
   return createPortal(
     <div className="run-toast recent-undo-toast" role="status" onClick={() => actions.closeRecentUndo()}>
       <span className="recent-undo-text">{undo.text}</span>{' '}
-      <button className="recent-undo" onClick={e => { e.stopPropagation(); void actions.undoDismissRecent(undo.sids); }}>Undo</button>
+      <TextButton className="recent-undo" onClick={e => { e.stopPropagation(); void actions.undoDismissRecent(undo.sids); }}>Undo</TextButton>
     </div>,
     stack,
   );
@@ -134,16 +135,16 @@ export function Recent({ recent, agents, actions }: { recent: RecentState; agent
         <span className="side-title">Recent sessions</span>
         <span className="side-count" id="hdr-recent">{resumable.length}</span>
         {resumable.length > 1 && (
-          <button className="recent-clear-all" id="recent-clear-all" title="Dismiss every recent session (transcripts are kept)"
-            onClick={() => void actions.clearRecentSessions()}>Clear all</button>
+          <TextButton className="recent-clear-all" id="recent-clear-all" title="Dismiss every recent session (transcripts are kept)"
+            onClick={() => void actions.clearRecentSessions()}>Clear all</TextButton>
         )}
       </div>
       <div className="side-list" id="side-recent">
         {resumable.map(r => <ResumableRow key={dismissKey(r) || `${r.store} ${r.wid}`} r={r} actions={actions} />)}
         {relaunch.map(r => <OwnedRow key={dismissKey(r)} r={r} actions={actions} />)}
         {hidden.length > 0 && (
-          <button className="recent-toggle-dispatcher" aria-expanded={recent.revealed}
-            onClick={() => actions.toggleDispatcherSessions()}>{dispatcherToggleLabel(hidden.length, recent.revealed)}</button>
+          <TextButton className="recent-toggle-dispatcher" aria-expanded={recent.revealed}
+            onClick={() => actions.toggleDispatcherSessions()}>{dispatcherToggleLabel(hidden.length, recent.revealed)}</TextButton>
         )}
         {recent.revealed && hidden.map(r => <OwnedRow key={dismissKey(r)} r={r} actions={actions} />)}
       </div>
