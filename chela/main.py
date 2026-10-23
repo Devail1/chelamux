@@ -46,6 +46,7 @@ from chela import (
     notify,
     okf,
     ops,
+    park,
     orchestrator,
     rc_rename,
     restore,
@@ -1539,10 +1540,80 @@ def cmd_dispatch_runs(args) -> None:
     if status:
         for r in runs:
             print(_format_awaiting_run(r))
+            _print_park(r)
         return
     for r in runs:
         title = (r["title"] or "")[:60]
         print(f"  {r['task_id']}  {r['status']:<16}  attempt={r['attempt']}  {r.get('window_name') or '-':<24}  {title}")
+        _print_park(r)
+
+
+def _park_line(p: dict, now: float) -> str:
+    """⏸️ CMX-318: the line under a parked run — what holds it, since when, and why."""
+    since = p.get("since")
+    when = (f"since {datetime.fromtimestamp(since, timezone.utc):%Y-%m-%d %H:%M}Z "
+            f"({hold.human_duration(now - since)} ago)" if since is not None else "since ?")
+    if p.get("kind") == park.SLOT:
+        return f"      ⏳ waiting {when}: {p.get('reason')}"
+    extra = "".join(f"  {k}={p[k]}" for k in ("until", "by") if p.get(k))
+    return f"      ⏸️ parked {when}: {p.get('reason')}{extra}"
+
+
+def _print_park(r: dict) -> None:
+    p = park.state(r)
+    if p:
+        print(_park_line(p, time.time()))
+
+
+def _parker() -> tuple[bool, str]:
+    """(is this the orchestrator?, who to record as the parker)."""
+    try:
+        mine = inbox.caller_is_orchestrator()
+    except Exception:  # noqa: BLE001 — unknown is not the orchestrator
+        log.warning("park: could not tell whether this is the orchestrator", exc_info=True)
+        mine = False
+    if mine:
+        return True, "orchestrator"
+    return False, os.environ.get("USER") or os.environ.get("USERNAME") or "operator"
+
+
+def cmd_park(args) -> None:
+    """⏸️ CMX-318: `chela park <run> --reason "…" [--until <time|run:ID>]` — hold a running
+    agent on purpose. The stuck detector skips it; one notice if it outlives --until or
+    the max. An agent cannot park itself (`park.refusal`)."""
+    run = dispatcher.resolve_run(args.run)
+    if run is None:
+        print(f"park: no run matches {args.run!r} (task id, branch, or window name)")
+        sys.exit(1)
+    is_orch, by = _parker()
+    why = park.refusal(run, is_orchestrator=is_orch)
+    if why:
+        print(f"park: refused — {why}")
+        sys.exit(1)
+    try:
+        until = park.parse_until(args.until, datetime.now(timezone.utc))
+    except ValueError as e:
+        print(f"park: {e}")
+        sys.exit(1)
+    result = dispatcher.park_run(run["task_id"], args.reason, until=until, by=by)
+    if not result.get("ok"):
+        print(f"park: {result.get('error', 'unknown error')}")
+        sys.exit(1)
+    cap = hold.human_duration(config.park_max_s())
+    print(f"⏸️ {result['task_id']} parked by {by}: {result['reason']}"
+          + (f" — until {until}" if until else "")
+          + ". No stuck notice while parked; one notice past "
+          + ("--until or " if until else "") + f"{cap}. `chela unpark {result['task_id']}`.")
+
+
+def cmd_unpark(args) -> None:
+    """⏸️ CMX-318: lift a park — the stuck clock restarts from now."""
+    _, by = _parker()
+    result = dispatcher.unpark_run(args.run, by=by)
+    if not result.get("ok"):
+        print(f"unpark: {result.get('error', 'unknown error')}")
+        sys.exit(1)
+    print(f"▶️ {result['task_id']} unparked — the stuck detector watches it again.")
 
 
 def cmd_knowledge_export(args) -> None:
@@ -3970,6 +4041,20 @@ def main() -> None:
              "(sent back) and needs_human (the loop gave up) — with PR URL + age",
     )
 
+    # park / unpark (CMX-318) — hold a running agent on purpose, so it is not called stuck
+    p_park = sub.add_parser(
+        "park", help="Hold a running run on purpose: no stuck notice while parked "
+                     "(orchestrator / operator only — an agent cannot park itself)")
+    p_park.add_argument("run", help="Task id, branch, or window name")
+    p_park.add_argument("--reason", required=True, help="Why it is held (shown everywhere)")
+    p_park.add_argument(
+        "--until", default=None,
+        help="When the park should end: a duration (90m, 2h), an ISO-8601 time, or "
+             "run:<ID> (until that run is done/closed/failed). One notice once it is "
+             "outlived — or past CHELA_PARK_MAX_S (default 6h) either way")
+    p_unpark = sub.add_parser("unpark", help="Lift a park: the stuck detector watches it again")
+    p_unpark.add_argument("run", help="Task id, branch, or window name")
+
     # review — the verdict on a PR under review (the rework loop's carrier)
     p_review = sub.add_parser(
         "review",
@@ -4594,6 +4679,10 @@ def main() -> None:
         cmd_dispatch(args)
     elif args.command == "dispatch-runs":
         cmd_dispatch_runs(args)
+    elif args.command == "park":
+        cmd_park(args)
+    elif args.command == "unpark":
+        cmd_unpark(args)
     elif args.command == "knowledge":
         if args.know_cmd == "export":
             cmd_knowledge_export(args)

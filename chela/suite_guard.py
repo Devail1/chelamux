@@ -354,6 +354,33 @@ def _holders(d: Path, k: int) -> str:
     return ", ".join(out) or "holders unknown"
 
 
+def holders() -> list[str]:
+    """The worktree names holding a suite slot now (``["CMX-12-r1"]``) — what a parked
+    run's "waiting for a suite slot (holder: …)" names (CMX-318). A slot whose lock is free
+    holds nobody, whatever its stale record says."""
+    d = config.CHELA_DIR / SLOTS_DIRNAME
+    out = []
+    for i in range(slots()):
+        path = d / f"slot-{i}"
+        try:
+            fd = os.open(path, os.O_RDONLY)
+        except OSError:
+            continue
+        try:
+            fcntl.flock(fd, fcntl.LOCK_SH | fcntl.LOCK_NB)
+            fcntl.flock(fd, fcntl.LOCK_UN)
+            continue                    # nobody holds it
+        except BlockingIOError:
+            pass
+        finally:
+            os.close(fd)
+        try:
+            out.append(Path(json.loads(path.read_text() or "{}")["cwd"]).name)
+        except (OSError, ValueError, KeyError, TypeError):
+            out.append("unknown")
+    return out
+
+
 class SlotTimeout(TimeoutError):
     """No suite slot came free in time. An ``OSError``, so ``run_suite`` reports it as a
     suite that could not be run — CANNOT VERIFY, never a pass."""

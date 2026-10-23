@@ -128,7 +128,7 @@ export function Card({ card, onDragStart, onDragEnd }: Props) {
         )}
         {line && <span className="ts">{line}</span>}
         {chip && <Chip className={`kanban-state-chip ${chip.cls}`} icon={icons[chip.icon]}>{chip.label}</Chip>}
-        {runStateBadges(card).map((b) => <Chip key={b.cls} className={`kanban-state-chip ${b.cls}`} icon={icons[b.icon]}>{b.label}</Chip>)}
+        {runStateBadges(card).map((b) => <Chip key={b.cls} className={`kanban-state-chip ${b.cls}`} title={b.title} icon={icons[b.icon]}>{b.label}</Chip>)}
         {risk && <span className={`kanban-risk-chip ${risk.cls}`} title={risk.reason || risk.label}>{risk.label}</span>}
         {progress && <Chip className="task-progress-chip" title={progress.title} icon={icons.tasks}>{progress.label}</Chip>}
         {card.pr_url && (

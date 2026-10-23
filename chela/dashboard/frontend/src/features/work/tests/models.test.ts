@@ -117,6 +117,19 @@ test('run state rides as badges (a word and an icon): judging, blocked race, rew
   expect(runStateBadges(null)).toEqual([]);
 });
 
+test('CMX-318: a parked run carries its reason and since-when; a slot wait reads as waiting', () => {
+  const now = 10_000;
+  expect(runStateBadges({ park: { kind: 'manual', reason: 'waiting for the flaky fix', since: now - 7200, until: 'run:CMX-9', by: 'orchestrator' } }, now)).toEqual([
+    { label: 'parked 2h ago: waiting for the flaky fix', cls: 'st-parked', icon: 'pause', title: 'waiting for the flaky fix · until run:CMX-9 · by orchestrator' },
+  ]);
+  expect(runStateBadges({ park: { kind: 'slot', reason: 'waiting for a suite slot (holder: CMX-7)', since: now - 300 } }, now)).toEqual([
+    { label: 'waiting 5m ago: waiting for a suite slot (holder: CMX-7)', cls: 'st-slot-wait', icon: 'slotWait', title: 'waiting for a suite slot (holder: CMX-7)' },
+  ]);
+  const long = 'x'.repeat(60);
+  expect(runStateBadges({ park: { kind: 'manual', reason: long, since: null } }, now)[0]?.label).toBe(`parked since ?: ${'x'.repeat(47)}…`);
+  expect(runStateBadges({ park: null }, now)).toEqual([]);
+});
+
 // --- hidden.ts ------------------------------------------------------------------------------
 
 const col = (key: string, n: number) => ({ key, label: key.toUpperCase(), cards: Array.from({ length: n }) });

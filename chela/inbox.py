@@ -126,7 +126,7 @@ from contextlib import contextmanager
 from pathlib import Path
 
 from chela import agent_manager, discovery, epoch, event_log, hooks, judge, messenger, notify, sessions, transcripts
-from chela import config, stall_alerts, suite_guard
+from chela import config, park, stall_alerts, suite_guard
 from chela.config import INBOX_ENABLED
 from chela.hold import human_duration
 from chela.tui_text import sanitize_prompt
@@ -1767,7 +1767,7 @@ MARKERS = {".chela-task-finished-request.json": "task-finished",
            ".chela-push-request.json": "push-request"}
 
 _CMX86_KINDS = ("run_judge_not_started", "run_ci_red", "run_pr_conflicting", "run_stuck",
-                "run_marker_unread", "run_selfcheck_long")
+                "run_marker_unread", "run_selfcheck_long", "run_park_overdue")
 
 
 def caller_is_orchestrator(store: dict | None = None) -> bool:
@@ -2340,11 +2340,31 @@ def stuck_events(runs: list[dict], store: dict, probes: dict[str, dict], now: fl
     out: list[dict] = []
     quiet_after, unread_after = config.stuck_agent_alert_s(), config.marker_unread_alert_s()
     up = _daemon_phrase(daemon, uptime)
+    runs_by_id = {r.get("task_id"): r for r in runs if r.get("task_id")}
     for run in runs:
         task = run.get("task_id")
         if not task or run.get("status") not in STUCK_RUN_STATES:
             continue
         entry = dict(prev.get(task) or {})
+        parked = park.manual(run)
+        if parked:
+            entry["active_at"] = now
+            why = park.overdue(parked, now, runs_by_id, config.park_max_s())
+            if why and entry.get("park_overdue") != parked["at"]:
+                entry["park_overdue"] = parked["at"]
+                wid = run_wid(run, windows, now_epoch)
+                age = now - parked["since"] if parked["since"] is not None else None
+                out.append(_event(
+                    "run_park_overdue",
+                    f"⏸️ {_label(run)} has been parked "
+                    f"{human_duration(age) if age is not None else 'for an unknown time'} "
+                    f"and {why} — reason: {parked['reason']} — `chela unpark {task}` or "
+                    f"re-park it — {up}",
+                    _run_payload(run, parked_at=parked["at"], parked_reason=parked["reason"],
+                                 parked_until=parked["until"], overdue=why), wid=wid))
+            nxt[task] = entry
+            continue
+        entry.pop("park_overdue", None)
         probe = probes.get(task)
         if probe is None:
             if entry:
@@ -2450,9 +2470,11 @@ def _cmx86_stale(kind: str, payload: dict, run: dict) -> str | None:
             return "PR is no longer CONFLICTING"
         if said_head and head and head != said_head:
             return "PR head moved since the conflict was seen"
-    elif (kind in ("run_stuck", "run_marker_unread", "run_selfcheck_long")
+    elif (kind in ("run_stuck", "run_marker_unread", "run_selfcheck_long", "run_park_overdue")
           and status not in STUCK_RUN_STATES):
         return f"run is now {status!r}, no longer running"
+    elif kind == "run_park_overdue" and run.get("parked_at") != payload.get("parked_at"):
+        return "the park it reported was lifted or replaced"
     return None
 
 

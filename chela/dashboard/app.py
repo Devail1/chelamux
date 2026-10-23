@@ -28,7 +28,7 @@ from flask import abort, Flask, jsonify, render_template, request, Response, sen
 
 from chela import config
 from chela.config import DISPATCH_WORKFLOWS, CHELA_DIR, TMUX_SESSION, NOTIFY_INTERVAL
-from chela import agent_manager, capabilities, collab, concurrency, collab_host, collab_stream, context, diffsurface, discovery, dismissed_sessions, dispatcher, epoch, event_log, fleet, gateanswer, hold, hooks, inbox, judge, launcher, messenger, notify, okf, personas, pr_status, probecache, rc_rename, restore, rooms, sandbox_status, scheduler, sessionids, share_requests, share_sandbox, share_store, sidebar_archive, sidebar_layout, spawn, starter, tasklists, transcripts, update, usage, userconfig
+from chela import agent_manager, capabilities, collab, concurrency, collab_host, collab_stream, context, diffsurface, discovery, dismissed_sessions, dispatcher, epoch, event_log, fleet, gateanswer, hold, hooks, inbox, judge, launcher, messenger, notify, okf, park, personas, pr_status, probecache, rc_rename, restore, rooms, sandbox_status, scheduler, sessionids, share_requests, share_sandbox, share_store, sidebar_archive, sidebar_layout, spawn, starter, tasklists, transcripts, update, usage, userconfig
 from chela.dashboard import resources, term_themes
 from chela import topic_ledger as tg_topics
 from chela.personas import autolaunch, lease
@@ -5122,6 +5122,9 @@ def api_dispatcher():
             r["tasks"] = tasklists.progress_for_run(r, session_entries, current_epoch)
             r["closed_run_stall"] = (dispatcher.CLOSED_RUN_STALL
                                      if r.get("task_id") in stalled_ids else None)
+            # ⏸️ CMX-318: why a claimed/running run is held on purpose (`chela park`, or a
+            # suite-slot wait) — the card's "parked"/"waiting" badge. None otherwise.
+            r["park"] = park.state(r)
         entry["active_runs"] = active
         entry["awaiting_review_runs"] = awaiting
         entry["recent_runs"] = recent
