@@ -171,3 +171,11 @@ def test_format_awaiting_run_shows_conflict_chip():
     r = _run("abc123", "awaiting_review", pr_url="https://x/pull/1",
               pr_checks="none", pr_mergeable="CONFLICTING", started_at=_NOW.isoformat())
     assert "ci:blocked (conflicts)" in main._format_awaiting_run(r, now=_NOW)
+
+
+def test_format_awaiting_run_shows_infra_restarts_only_when_there_are_some():
+    """🏗️🔁 CMX-192: the separate infra counter is visible in the review view."""
+    r = _run("abc123", "changes_requested", pr_url="https://x/pull/1", started_at=_NOW.isoformat())
+    assert "infra=" not in main._format_awaiting_run(r, now=_NOW)
+    r["infra_restarts"] = 2
+    assert "infra=2  " in main._format_awaiting_run(r, now=_NOW)

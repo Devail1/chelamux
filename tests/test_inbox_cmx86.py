@@ -624,7 +624,7 @@ def test_a_cas_refused_ci_rework_retracts_the_echo_at_the_call_site(tmp_path, mo
     wf = _red_row(tmp_path)
     refused = []
     monkeypatch.setattr(dispatcher, "request_changes",
-                        lambda t, b: refused.append(t) or {"ok": False, "error": "moved"})
+                        lambda t, b, **_: refused.append(t) or {"ok": False, "error": "moved"})
     _tick(wf, _FakeGh(rollup=[_check_run("test", conclusion="FAILURE")]))
     assert refused == ["abc123"]                       # the refused branch really ran
     assert len(_queued("run_ci_red")) == 1
@@ -639,7 +639,7 @@ def test_a_db_refused_ci_rework_retracts_the_echo_at_the_call_site(tmp_path, mon
     from tests.test_dispatcher_ci import _check_run, _FakeGh, _tick
     wf = _red_row(tmp_path)
 
-    def busy(t, b):
+    def busy(t, b, **_):
         raise sqlite3.OperationalError("database is locked")
     monkeypatch.setattr(dispatcher, "request_changes", busy)
     _tick(wf, _FakeGh(rollup=[_check_run("test", conclusion="FAILURE")]))
@@ -653,7 +653,7 @@ def test_an_accepted_ci_rework_keeps_the_echo(tmp_path, monkeypatch):
     announced, so the ``changes_requested`` it causes is not a second notice."""
     from tests.test_dispatcher_ci import _check_run, _FakeGh, _tick
     wf = _red_row(tmp_path)
-    monkeypatch.setattr(dispatcher, "request_changes", lambda t, b: {"ok": True})
+    monkeypatch.setattr(dispatcher, "request_changes", lambda t, b, **_: {"ok": True})
     _tick(wf, _FakeGh(rollup=[_check_run("test", conclusion="FAILURE")]))
     assert inbox.load()["expected_edges"]["abc123"]["why"] == inbox.CI_RED_ECHO
 

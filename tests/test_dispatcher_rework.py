@@ -1015,6 +1015,8 @@ def test_a_rework_that_cannot_launch_is_NEVER_re_claimed_as_a_FRESH_task(tmp_pat
     exception handler makes tick 2 re-dispatch it with the fresh prompt.
     """
     monkeypatch.setenv("CHELA_MAX_REWORKS", "2")
+    # 🏗️🔁 CMX-192: a launch that never lands is INFRA — it is bounded by its own cap now.
+    monkeypatch.setenv("CHELA_MAX_INFRA_RESTARTS", "2")
     wf = _wf(tmp_path)
     wt = tmp_path / ".chela" / "wts" / "abc123"
     wt.mkdir(parents=True)
@@ -1047,6 +1049,9 @@ def test_a_rework_that_cannot_launch_is_NEVER_re_claimed_as_a_FRESH_task(tmp_pat
     assert statuses == ["changes_requested", "changes_requested", "needs_human"]
     run = dispatcher.resolve_run("abc123")
     assert run["rework_count"] == 2                # every round accounted for; none bypassed
+    assert run["infra_restarts"] == 2              # ...as infra, not as review (CMX-192)
+    assert "infra restart cap reached (2/2)" in run["last_error"]
+    assert "still fails review" not in run["last_error"]
     assert run["attempt"] == 1                     # it was never re-dispatched as a new task
     assert dispatcher.latest_verdict(dict(run)) == "the wire is loose"   # the verdict SURVIVED
     assert all("fresh dispatch" not in p for p in prompts)
