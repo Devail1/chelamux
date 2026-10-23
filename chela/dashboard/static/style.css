@@ -645,15 +645,6 @@ body {
    `.gs-min-btn, .gs-max-btn { display: none }` mobile rule below (same trap
    the pane-header-v2 comment above already flags for this pair of classes). */
 .gs-min-btn svg, .gs-max-btn svg { vertical-align: middle; }
-/* Mobile single-pane fullscreen toggle (paneHead, terminals.js) — same
-   base-hide/mobile-reveal shape as `.term-keybar` below
-   (not the specificity-trap shape the comment above warns about: this is a
-   *different* selector, not `.gs-min-btn`/`.gs-max-btn` themselves). Belt and
-   suspenders: paneHead() only ever renders this button when
-   !draggable && _isMobileTerm(), so it never exists in a desktop DOM at all —
-   this base rule only guards a stale render surviving a resize past 768px. */
-.gs-mobile-full-btn { display: none; }
-.gs-mobile-full-btn svg { vertical-align: middle; }
 .gs-keys button:hover { border-color: var(--accent); }
 .gs-keys button.btn-accent { background: var(--accent); color: var(--on-accent); border-color: var(--accent); }
 /* × kill — only rendered for non-managed sessions. Red hover signals it's
@@ -3252,31 +3243,8 @@ summary.runs-section { cursor: pointer; }
        renderTerminals() also force-switches to single. */
     #term-wall-grid { display: none !important; }
     #panel-terminals > div:first-child { flex-wrap: wrap; }
-    /* Fill the screen: 100dvh (NOT vh — the mobile address bar collapses and
-       vh overshoots the real visible height) minus the chrome that sits
-       above/below the pane on a phone. CMX-130's 70vh was a rough guess
-       tuned against the old collapsible #term-bar and left dead space below
-       the pane once the v2 fixed keybar replaced it (this fixes that).
-       --gs-head-h below is a measured constant: the mobile .gs-head row
-       itself (2px+2px padding around the title+subtitle label: two lines now
-       the ai-title subtitle is shown again, above). CMX-202 dropped the
-       agent-pill strip above the pane (and its 38px --term-switcher-h): the
-       sidebar is the phone's session switcher, so the pane gets that height
-       back. --term-keybar-h (47px, below) and --term-ctx-bar-h
-       (30px, :root) already existed. Subtracting the keybar's footprint AND
-       env(safe-area-inset-bottom) separately still matters (CMX-130): the
-       keybar's own bottom padding is `calc(6px + env(safe-area-inset-bottom))`,
-       so on a home-indicator phone the bar is 47px + inset tall — subtracting
-       only the 47px would leave the inset's worth of the pane's bottom row
-       (input box + "auto mode on") still under the bar. */
-    :root { --gs-head-h: 32px; }
-    .term-single .term-pane {
-        height: calc(100dvh - var(--gs-head-h) - var(--term-keybar-h, 0px) - var(--term-ctx-bar-h) - env(safe-area-inset-bottom) - var(--kb-occluded, 0px));
-    }
-    /* NB: the pane is DELIBERATELY left inset by .content's horizontal padding
-       (no width reclaim). That side gutter is what lets a touch-drag beside the
-       terminal scroll the PAGE instead of being swallowed by the iframe — a
-       full-bleed pane traps the scroll. Do not re-add a negative margin here. */
+    /* The phone pane's box (full-bleed, pinned to the viewport) is the mobile
+       keybar block's `.term-single .term-pane` rule (CMX-313). */
     #term-bar { max-height: 60vh; overflow-y: auto; }
 
     /* Dense layout: Special & Ctrl as full-width rows; D-pad + Nav + Scroll
@@ -3424,7 +3392,7 @@ summary.runs-section { cursor: pointer; }
 /* Phone-only floating trigger for the off-canvas drawer (CMX-377) — see the
    mobile media query below for when it shows. Desktop never needs it: the
    sidebar's own toggle in .sidebar-head is always on screen there. */
-.mobile-menu-fab, .mobile-new-fab {
+.mobile-menu-fab {
     display: none; position: fixed; z-index: 46;
     top: max(14px, env(safe-area-inset-top)); left: max(14px, env(safe-area-inset-left));
     width: 42px; height: 42px; border-radius: 50%;
@@ -3432,11 +3400,8 @@ summary.runs-section { cursor: pointer; }
     background: var(--surface); border: 1px solid var(--border); color: var(--text);
     box-shadow: 0 2px 10px rgba(0, 0, 0, 0.35);
 }
-/* CMX-386: the "+" (New session) sits one fab-width + an 8px gap to the right
-   of the ☰, off the same safe-area inset. */
-.mobile-new-fab { left: calc(max(14px, env(safe-area-inset-left)) + 50px); }
-.mobile-menu-fab svg, .mobile-new-fab svg { width: 20px; height: 20px; display: block; }
-.mobile-menu-fab:hover, .mobile-new-fab:hover { border-color: var(--accent); color: var(--accent); }
+.mobile-menu-fab svg { width: 20px; height: 20px; display: block; }
+.mobile-menu-fab:hover { border-color: var(--accent); color: var(--accent); }
 
 /* Always-on-top safety cluster (CMX-377) — see index.html's comment on why
    #status-health-warn and #btn-shares live here, outside the sidebar, on
@@ -4412,13 +4377,11 @@ body.sidebar-resizing iframe { pointer-events: none; }
        own toggle button sitting right behind it. */
     .mobile-menu-fab { display: inline-flex; }
     body.sidebar-open .mobile-menu-fab { display: none; }
-    /* CMX-386: its "+" sibling opens #new-menu with the drawer closed. It
-       hides with the ☰ while the drawer is open — the drawer's own "New
-       session" button is right there, and the "+" would float over it. */
-    .mobile-new-fab { display: inline-flex; }
-    body.sidebar-open .mobile-new-fab { display: none; }
-    /* ...and the menu it opens (anchored under it by openNewMenu, clamped to
-       the 8px left edge) never runs off the right: a long nowrap project label
+    /* CMX-313: with a pane open the pane's title bar carries the opener
+       (.gs-head-menu), so the floating one steps aside. The phone "+" is gone
+       (CMX-386 → CMX-313): New session is the drawer's own button. */
+    body:has(#panel-terminals.active .gs-head-menu) .mobile-menu-fab { display: none; }
+    /* The launch menu never runs off the right: a long nowrap project label
        would otherwise size the popover past a 390px screen. */
     .launch-menu { max-width: calc(100vw - 16px); }
 }
@@ -4434,61 +4397,66 @@ body.sidebar-resizing iframe { pointer-events: none; }
     /* The persistent v2 bar replaces the old collapsible keybar on phones. */
     #term-bar { display: none !important; }
 
-    /* CMX-130: the pane header is back — a prior pass hid it outright reasoning
-       the agent name/status already lived in the switcher pills, but losing it
-       also loses the only place the header's dot/menu (Share/Orchestrator/Pin)
-       live on phones. Keep it, just shorter (tighter padding/font) than the
-       desktop bar. See CMX-133 below for what happens to the window-control
-       keys (drag/min/max/kill) themselves. */
-    .gs-head { padding: 2px 8px; font-size: 11px; }
-    /* CMX-146 hid the dim ai-title subtitle here (single mobile pane was tight
-       on vertical space); un-hidden per Liav's 2026-07-25 call — it already
-       truncates to one line via the base rule above (overflow/ellipsis/
-       nowrap), just trimmed a touch smaller than .gs-head's 11px so it reads
-       as clearly secondary without growing the compact header. */
-    .pane-subtitle { display: block; font-size: 9.5px; }
-    /* CMX-133: drag/minimize genuinely don't apply to the forced single pane,
-       but × kill is the only way to tear a session down on phones (no wall,
-       no overflow-menu equivalent) — keep just that button. */
-    .gs-keys { display: flex; }
-    /* Maximize doesn't apply either (there's nothing else on the wall to
-       overlay over) — replaced by ONE mobile-only fullscreen toggle instead
-       (.gs-mobile-full-btn, revealed just below): it grows the pane to
-       100dvh and hides the surrounding chrome, tap again to restore. */
-    .gs-min-btn, .gs-max-btn { display: none; }
-    .gs-mobile-full-btn { display: inline-flex; }
+    /* CMX-313 (Liav, 10-23): the phone pane looks like the Claude app. ONE
+       title bar, the pane's own header (PaneHead's `.gs-head-bar`): the
+       drawer's round hamburger on the left, the title over its subtitle in the
+       middle, the status chip and ⋯ on the right. Close lives in the ⋯ menu
+       (easy to hit by accident in a bar), and there is no maximize: the pane is
+       always full. The title is centred in the room between the two sides and
+       ellipsises; the right side is capped, so a long UNSANDBOXED banner or
+       facepile cannot squeeze the title out. The bar's top padding is the
+       notch's safe area, so its background runs under the status bar. */
+    .gs-head.gs-head-bar {
+        display: grid; grid-template-columns: auto minmax(0, 1fr) auto;
+        align-items: center; gap: 8px; height: auto; min-height: 52px; box-sizing: border-box;
+        padding: max(6px, env(safe-area-inset-top)) max(10px, env(safe-area-inset-right)) 6px max(10px, env(safe-area-inset-left));
+        font-size: 14px; color: var(--text);
+    }
+    .gs-head-bar .gs-label {
+        flex-direction: column; align-items: center; gap: 1px; text-align: center; max-width: 100%;
+    }
+    .gs-head-bar .pane-title { max-width: 100%; font-weight: 600; }
+    .gs-head-bar .gs-label .pane-subtitle { flex: 0 0 auto; max-width: 100%; font-size: 11.5px; }
+    .gs-head-bar .pane-subtitle.pane-cwd::before { content: none; }
+    .gs-head-end { display: flex; align-items: center; justify-content: flex-end; gap: 6px; min-width: 0; max-width: 45vw; }
+    .gs-head-end .gs-unsafe-banner { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    /* The round buttons and the chip: the Claude app's 40px pills, a filled
+       disc a step lighter than the bar so each reads as a button. */
+    .gs-head-menu, .gs-head-bar .gs-menu-btn, .gs-status-chip {
+        display: inline-flex; align-items: center; justify-content: center; flex: 0 0 auto;
+        width: 40px; height: 40px; padding: 0; box-sizing: border-box; border-radius: 50%;
+        background: color-mix(in srgb, var(--text) 10%, var(--surface)); border: 1px solid var(--border); color: var(--text);
+    }
+    .gs-head-menu { cursor: pointer; }
+    .gs-head-menu svg, .gs-head-bar .gs-menu-btn svg { width: 18px; height: 18px; display: block; }
+    .gs-head-menu:hover { border-color: var(--accent); color: var(--accent); }
 
-    /* term-mobile-full: body class toggled by the pane header's fill-screen
-       button (.gs-mobile-full-btn above): the single pane claims nearly the
-       whole screen (the height rule below). Three things deliberately stay:
-       the compact .gs-head (with its collapse toggle + × kill — the only way
-       back OUT of fullscreen), the keybar (Liav, 2026-07-25), because it is
-       not clutter but the mobile INPUT METHOD: Esc/Tab/Ctrl/arrows/Paste are
-       unreachable without it, and the pane's own footer (Liav, 2026-10-19:
-       its window id, model and context % beat the status line, so it shows
-       in every pane mode; CMX-242). */
-    /* True overlay, not just a tall box: the pane normally sits inside
-       .canvas's own top padding (CMX-377: clearance for the floating
-       .mobile-menu-fab/.safety-float, no topbar to measure against any more),
-       so a bare `height:100dvh` overshoots the viewport and pushes the
-       terminal's bottom rows under the fold. Pin it to the viewport (fixed +
-       top/left/right:0) so the height below is measured against the whole
-       screen instead. Subtract the keybar's FULL footprint (--term-keybar-h +
-       the safe-area inset its own bottom padding carries — same CMX-130
-       reasoning as the non-fullscreen rule above) so the fixed bar sits past
-       the pane instead of painting over the terminal's bottom row. z-index
-       100 clears the floating fab/safety cluster (46/47); the pane no longer
-       overlaps the keybar (35) geometrically, so their z-order is moot, and
-       both stay under modals (200). */
-    body.term-mobile-full .term-single .term-pane {
+    /* The pane: full width and full height between the screen's top edge (the
+       bar pads the safe area) and the keybar. No margin, border, radius, focus
+       ring or waiting glow: the status chip says waiting, and the terminal gets
+       the room. Pinned to the viewport (fixed) because the pane sits inside
+       .canvas's padding (60px clears the floating opener on the other views).
+       The height subtracts the keybar's FULL footprint (--term-keybar-h + the
+       safe-area inset its own bottom padding carries, CMX-130) and the soft
+       keyboard (--kb-occluded, published by pin.ts from VisualViewport: dvh
+       does not track the keyboard, so without it the line you type into hides
+       behind it). The keybar, the footer and the context bar stay (Liav,
+       2026-07-25 and 10-19). z-index 30: under the keybar (35), the drawer's
+       scrim and drawer (40/45, the hamburger opens it OVER the pane), the
+       safety float (47) and modals (200). The pane fills the screen, so the
+       page has nothing to scroll and a touch-drag needs no side gutter. */
+    .term-single .term-pane {
         position: fixed;
         top: 0; left: 0; right: 0;
-        /* --kb-occluded (published by _kbPin from VisualViewport) is how much
-           the SOFTWARE KEYBOARD covers — 0 when it's closed. dvh does not track
-           it, so without this the terminal's input line hides behind the
-           keyboard exactly when you're typing into it. */
         height: calc(100dvh - var(--term-keybar-h, 0px) - env(safe-area-inset-bottom) - var(--kb-occluded, 0px));
-        z-index: 100;
+        z-index: 30;
+        border: 0; border-radius: 0; box-shadow: none;
+    }
+    .term-single .term-pane::before { box-shadow: none; }
+    /* The safety pills float under the bar, never over its ⋯: the bar is its
+       40px buttons + its padding (the safe area or 6px, and 6px), at least 52px. */
+    body:has(#panel-terminals.active .gs-head-bar) .safety-float {
+        top: calc(max(52px, max(6px, env(safe-area-inset-top)) + 46px) + 8px);
     }
     /* CMX-102: keyboard OPEN → the pane's height is MEASURED by _kbPin/_kbFitPane
        (terminals.js) so its box ends exactly at the keybar's top edge. The calc()

@@ -21,7 +21,6 @@ const MODES = {
     'a wall tile': [DESKTOP, '', `<div class="grid-stack-item"><div class="grid-stack-item-content">${BAR}</div></div>`],
     'a maximized wall tile': [DESKTOP, 'pane-is-maximized', `<div class="grid-stack-item"><div class="grid-stack-item-content pane-maximized">${BAR}</div></div>`],
     'the phone pane': [PHONE, '', `<div id="term-stage" class="term-single"><div class="term-pane">${BAR}</div></div>`],
-    'the phone pane filling the screen': [PHONE, 'term-mobile-full', `<div id="term-stage" class="term-single"><div class="term-pane">${BAR}</div></div>`],
     'a maximized phone pane': [PHONE, 'pane-is-maximized', `<div id="term-stage" class="term-single"><div class="term-pane pane-maximized">${BAR}</div></div>`],
 };
 
@@ -43,8 +42,8 @@ for (const [mode, [vp, bodyClass, html]] of Object.entries(MODES)) {
     });
 }
 
-test('the phone pane filling the screen keeps the terminal\'s room for the footer under it', () => {
-    const win = page(PHONE, 'term-mobile-full',
+test('the phone pane (always full since CMX-313) keeps the terminal\'s room for the footer under it', () => {
+    const win = page(PHONE, '',
         `<div id="term-stage" class="term-single"><div class="term-pane"><iframe class="term-frame"></iframe>${BAR}</div></div>`);
     assert.equal(win.getComputedStyle(win.document.querySelector('.term-frame')).marginBottom, 'var(--term-ctx-bar-h)',
         'the terminal gives up its bottom margin, so the footer would cover its last row');

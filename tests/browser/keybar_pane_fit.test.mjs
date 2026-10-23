@@ -187,10 +187,10 @@ for (const v of VARIANTS) describe(`CMX-102 [${v.name}]: phone keyboard open —
         ready();
         assert.ok(!closed.kbFit && !reclosed.kbFit, 'html.kb-fit must be absent with the keyboard closed');
         assert.equal(reclosed.paneBottom, closed.paneBottom, 'closing the keyboard restores the closed layout');
-        // Closed = the CSS calc(), byte-for-byte what shipped before CMX-102: 100dvh minus
-        // the listed chrome (32 + 47 + 30; no safe-area inset in headless Chromium). CMX-202
-        // dropped the pill strip's 38px from that list.
-        assert.equal(closed.paneHeight, H - 32 - 47 - 30, 'the closed pane height is the calc()');
+        // Closed = the CSS calc(): since CMX-313 the pane is full-bleed and pinned to the
+        // viewport, so 100dvh minus the keybar's 47px (its header and context bar are inside
+        // it; no safe-area inset in headless Chromium).
+        assert.equal(closed.paneHeight, H - 47, 'the closed pane height is the calc()');
         assert.deepEqual(errors, []);
     });
 });

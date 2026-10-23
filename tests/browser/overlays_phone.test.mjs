@@ -26,7 +26,7 @@ import { after, before, describe, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdirSync } from 'node:fs';
 import { join } from 'node:path';
-import { launchChromium, openDashboard } from './fixture.mjs';
+import { launchChromium, openDashboard, OPEN_DRAWER_IN_PAGE } from './fixture.mjs';
 
 const { browser, why } = await launchChromium();
 after(() => browser && browser.close());
@@ -58,7 +58,7 @@ const drawerShut = page => page.evaluate(() => {
 async function openDrawer(page) {
     // The ☰'s own click, dispatched: with three safety pills lit (this fixture's queues), the
     // float reaches over the ☰ at 390px, which is not what this suite is about.
-    await page.evaluate(() => { if (!document.querySelector('.sidebar').classList.contains('open')) document.getElementById('btn-menu-mobile').click(); });
+    await page.evaluate(`if (!document.querySelector('.sidebar').classList.contains('open')) (${OPEN_DRAWER_IN_PAGE})()`);
     await page.waitForFunction(() => Math.abs(document.querySelector('.sidebar').getBoundingClientRect().left) < 0.5,
         null, { timeout: 5000 });
 }
@@ -183,7 +183,7 @@ describe(`CMX-306 phone ${W}×${H}, touch: every overlay opens on top and closes
             await o.open(page);
             const dlg = dialog(page, o.dialog ?? o.name);
             await dlg.waitFor({ state: 'visible', timeout: 5000 });
-            await page.evaluate(() => { if (!document.querySelector('.sidebar').classList.contains('open')) document.getElementById('btn-menu-mobile').click(); });
+            await page.evaluate(`if (!document.querySelector('.sidebar').classList.contains('open')) (${OPEN_DRAWER_IN_PAGE})()`);
             await page.waitForFunction(() => Math.abs(document.querySelector('.sidebar').getBoundingClientRect().left) < 0.5,
                 null, { timeout: 5000 });
             const hit = await dlg.evaluate(d => {
