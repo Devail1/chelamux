@@ -3,7 +3,7 @@
 // "Work · N running · M queued", New task (+) and ⋯. The title opens the project switcher (a
 // bottom sheet, single-select, replacing the desktop's project pills), ⋯ the Work options
 // sheet (the layout, Init a repo, Pause dispatch, Pause all agents, which asks to confirm).
-import { useState } from 'react';
+import { useState, type MouseEvent } from 'react';
 import { icons } from '../../../shared/icons/index.ts';
 import { launcher } from '../../../shared/store/launcher.ts';
 import type { WorkPayload } from '../../../shared/store/work.ts';
@@ -13,7 +13,7 @@ import { openInitRepo } from '../../runs/index.ts';
 import { toggleSidebar } from '../../sidebar/controller.ts';
 import { pruneFilter } from '../board.ts';
 import { barSubtitle, countsLine, projectRows, projectTitle, SEARCH_AFTER, totalCounts } from '../phone.ts';
-import { PAUSE_ALL_ASK, useDispatchHold } from './hold.ts';
+import { PAUSE_ALL_ASK, useDispatchHold, type Hold } from './hold.ts';
 import type { PhoneLayout, WorkPrefs } from './prefs.ts';
 
 /** RadioGroup's value for "All projects" (a radio's value cannot be empty). */
@@ -42,19 +42,27 @@ function ProjectSheet({ open, onOpenChange, data, prefs }: { open: boolean; onOp
       ),
     })),
   ];
-  function pick(v: string) {
-    prefs.pickProject(v === ALL ? '' : v);
+  function close() {
     setQuery('');
     onOpenChange(false);
   }
+  function pick(v: string) {
+    prefs.pickProject(v === ALL ? '' : v);
+    close();
+  }
+  // A tap on the row already picked fires no change: it closes the sheet all the same. (The
+  // click bubbles here before the radio repaints, so only the old pick reads as checked.)
+  function tapped(e: MouseEvent) {
+    if ((e.target as Element).closest('.wproj-row')?.querySelector('[data-state="checked"]')) close();
+  }
   return (
-    <Sheet open={open} onOpenChange={onOpenChange} title="Project" className="work-sheet work-project-sheet">
+    <Sheet open={open} onOpenChange={(o) => (o ? onOpenChange(true) : close())} title="Project" className="work-sheet work-project-sheet">
       {search && (
         <div className="wproj-search">
           <TextInput search plain value={query} onChange={setQuery} label="Search projects" placeholder="Search projects" />
         </div>
       )}
-      <div className="wproj-list">
+      <div className="wproj-list" onClick={tapped}>
         <RadioGroup label="Project" value={value} onChange={pick} options={options} />
         {search && rows.length === 0 && <p className="wproj-none">No project matches.</p>}
       </div>
@@ -67,10 +75,9 @@ const LAYOUTS: { id: PhoneLayout; label: string }[] = [
   { id: 'board', label: 'Board' },
 ];
 
-function OptionsSheet({ open, onOpenChange, data, prefs, onPauseAll }: { open: boolean; onOpenChange: (open: boolean) => void; data: WorkPayload | null; prefs: WorkPrefs; onPauseAll: () => void }) {
+function OptionsSheet({ open, onOpenChange, data, prefs, h, onPauseAll }: { open: boolean; onOpenChange: (open: boolean) => void; data: WorkPayload | null; prefs: WorkPrefs; h: Hold; onPauseAll: () => void }) {
   const hold = data?.dispatch_hold ?? null;
   const fleet = data?.fleet_pause ?? null;
-  const h = useDispatchHold(hold, fleet);
   function then(fn: () => void) {
     onOpenChange(false);
     fn();
@@ -107,8 +114,7 @@ function OptionsSheet({ open, onOpenChange, data, prefs, onPauseAll }: { open: b
   );
 }
 
-function PauseAllConfirm({ open, onOpenChange, data }: { open: boolean; onOpenChange: (open: boolean) => void; data: WorkPayload | null }) {
-  const h = useDispatchHold(data?.dispatch_hold ?? null, data?.fleet_pause ?? null);
+function PauseAllConfirm({ open, onOpenChange, h }: { open: boolean; onOpenChange: (open: boolean) => void; h: Hold }) {
   return (
     <Dialog open={open} onOpenChange={onOpenChange} title="Pause all agents?" description={PAUSE_ALL_ASK} className="work-confirm">
       <div className="work-confirm-actions">
@@ -129,6 +135,8 @@ function PauseAllConfirm({ open, onOpenChange, data }: { open: boolean; onOpenCh
 
 export function WorkBar({ data, prefs, linear }: { data: WorkPayload | null; prefs: WorkPrefs; linear: boolean }) {
   const [sheet, setSheet] = useState<'project' | 'options' | 'pause-all' | null>(null);
+  // ONE hold for the sheet and the confirm, so a request in flight disables both.
+  const hold = useDispatchHold(data?.dispatch_hold ?? null, data?.fleet_pause ?? null);
   const openChange = (which: typeof sheet) => (open: boolean) => setSheet(open ? which : null);
   const paths = (data?.workflows || []).map((wf) => wf.path);
   const filter = pruneFilter(prefs.filter, paths);
@@ -155,8 +163,8 @@ export function WorkBar({ data, prefs, linear }: { data: WorkPayload | null; pre
         </IconButton>
       </header>
       <ProjectSheet open={sheet === 'project'} onOpenChange={openChange('project')} data={data} prefs={prefs} />
-      <OptionsSheet open={sheet === 'options'} onOpenChange={openChange('options')} data={data} prefs={prefs} onPauseAll={() => setSheet('pause-all')} />
-      <PauseAllConfirm open={sheet === 'pause-all'} onOpenChange={openChange('pause-all')} data={data} />
+      <OptionsSheet open={sheet === 'options'} onOpenChange={openChange('options')} data={data} prefs={prefs} h={hold} onPauseAll={() => setSheet('pause-all')} />
+      <PauseAllConfirm open={sheet === 'pause-all'} onOpenChange={openChange('pause-all')} h={hold} />
     </>
   );
 }

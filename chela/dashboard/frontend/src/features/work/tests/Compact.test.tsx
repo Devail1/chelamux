@@ -35,6 +35,14 @@ function menu() {
 }
 const items = () => [...menu().querySelectorAll('[role="menuitem"], [role="separator"]')].map((i) => (i.getAttribute('role') === 'separator' ? '---' : i.textContent));
 const item = (label: string) => must([...menu().querySelectorAll<HTMLElement>('[role="menuitem"]')].find((i) => i.textContent === label), `menu item ${label}`);
+/** Pick a ⋮ row whose question waits for the menu to close (a timer), and let it run. */
+async function choose(label: string) {
+  const row = item(label);
+  await act(async () => {
+    fireEvent.click(row);
+    await new Promise((r) => setTimeout(r, 0));
+  });
+}
 const posts = () => calls.filter((c) => c.method === 'POST').map((c) => [c.url, c.body]);
 const modalOpen = () => !!document.querySelector('[role="dialog"]');
 
@@ -114,15 +122,13 @@ test('a refused delete shows the server\'s words on the card', async () => {
 test('⋮ Close & requeue asks why: a blank answer posts nothing, a reason posts it; a failure stays on the card', async () => {
   const ask = vi.spyOn(window, 'prompt').mockReturnValue('   ');
   show(card());
-  fireEvent.click(item('Close & requeue'));
+  await choose('Close & requeue');
   expect(posts()).toEqual([]);
   ask.mockReturnValue(' stuck ');
-  let row = item('Close & requeue');
-  await act(async () => fireEvent.click(row));
+  await choose('Close & requeue');
   expect(posts()).toEqual([['/api/dispatcher/runs/CMX-303/close', { reason: 'stuck', requeue: true }]]);
   reply = () => ({ status: 500, body: { ok: false, error: 'tracker down' } });
-  row = item('Close & requeue');
-  await act(async () => fireEvent.click(row));
+  await choose('Close & requeue');
   expect(must(face().querySelector('[role="alert"]')).textContent).toBe('tracker down');
 });
 
@@ -131,13 +137,22 @@ test('an action in flight shows on the card and disables the others', async () =
   let release: (v: unknown) => void = () => {};
   vi.stubGlobal('fetch', () => new Promise((r) => (release = r)));
   show(card());
-  const requeue = item('Close & requeue');
-  act(() => fireEvent.click(requeue));
+  await choose('Close & requeue');
   expect(must(face().querySelector('[role="status"]')).textContent).toBe('Working…');
   expect(['Close & requeue', 'Delete'].map((l) => item(l).hasAttribute('data-disabled'))).toEqual([true, true]);
   expect(item('Open details').hasAttribute('data-disabled')).toBe(false);
   await act(async () => release({ ok: true, status: 200, json: () => Promise.resolve({ ok: true }) }));
   expect(face().querySelector('[role="status"]')).toBeNull();
+});
+
+test('a ⋮ question waits for the menu to close: nothing asks during the pick itself', async () => {
+  const ask = vi.spyOn(window, 'prompt').mockReturnValue('');
+  show(card());
+  const row = item('Close & requeue');
+  act(() => fireEvent.click(row));
+  expect(ask).not.toHaveBeenCalled();
+  await act(async () => new Promise((r) => setTimeout(r, 0)));
+  expect(ask).toHaveBeenCalledTimes(1);
 });
 
 test('⋮ Merge only on a reviewed PR whose CI passed, after a confirm', async () => {
@@ -146,11 +161,10 @@ test('⋮ Merge only on a reviewed PR whose CI passed, after a confirm', async (
   expect(items()).not.toContain('Merge PR #838');
   unmount();
   show(card({ status: 'awaiting_review', pr_checks: 'passing' }));
-  fireEvent.click(item('Merge PR #838'));
+  await choose('Merge PR #838');
   expect([ask.mock.calls[0]?.[0], posts()]).toEqual(['Squash-merge PR #838 and delete branch?', []]);
   ask.mockReturnValue(true);
-  const merge = item('Merge PR #838');
-  await act(async () => fireEvent.click(merge));
+  await choose('Merge PR #838');
   expect(posts()).toEqual([['/api/dispatcher/runs/CMX-303/merge', undefined]]);
 });
 
@@ -160,8 +174,7 @@ test('a backlog bullet: state "backlog", ⋮ Promote (asks) and Delete its line;
   const { unmount } = show(bullet);
   expect(texts('.wcard-meta > span')).toEqual(['backlog']);
   expect(items()).toEqual(['Open details', 'Promote to TODO', '---', 'Delete']);
-  const promote = item('Promote to TODO');
-  await act(async () => fireEvent.click(promote));
+  await choose('Promote to TODO');
   expect(ask.mock.calls[0]?.[0]).toContain('Promote backlog item to TODO?');
   expect(posts()).toEqual([['/api/dispatcher/backlog/promote', { workflow_path: '/p/WORKFLOW.md', text: 'an idea' }]]);
   unmount();

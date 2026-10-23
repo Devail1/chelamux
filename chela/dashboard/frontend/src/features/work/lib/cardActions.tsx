@@ -92,7 +92,12 @@ export function useCardMenu(card: CardData): { menu: ReactNode; strip: ReactNode
   const [running, setRunning] = useState<string | null>(null);
   const del = useDelete(deletePayload(card));
 
-  async function run(busy: string, answer: string | false, act: (answer: string) => Promise<string | null>) {
+  // The question waits for the menu to close: a blocking confirm or prompt opened while Radix
+  // still holds its focus trap and pointer lock can leave the page untappable on a phone.
+  function run(busy: string, ask: () => string | false, act: (answer: string) => Promise<string | null>) {
+    setTimeout(() => void settle(busy, ask(), act), 0);
+  }
+  async function settle(busy: string, answer: string | false, act: (answer: string) => Promise<string | null>) {
     if (answer === false) return;
     setRunning(busy);
     const e = await act(answer);
@@ -120,15 +125,15 @@ export function useCardMenu(card: CardData): { menu: ReactNode; strip: ReactNode
       onSelect: () => void navigator.clipboard?.writeText(line).catch(() => undefined) });
   }
   if (mergeControl(card) === 'button') {
-    items.push({ label: `Merge ${prName(card.pr_url)}`, icon: icons.merged, disabled: busy, onSelect: () => void run('Merging…', askMerge(card), () => mergeRun(taskId)) });
+    items.push({ label: `Merge ${prName(card.pr_url)}`, icon: icons.merged, disabled: busy, onSelect: () => run('Merging…', () => askMerge(card), () => mergeRun(taskId)) });
   }
   if (card.status === 'backlog' && wfPath && text) {
-    items.push({ label: 'Promote to TODO', icon: icons.add, disabled: busy, onSelect: () => void run('Promoting…', askPromote(text), () => promoteBacklog(wfPath, text)) });
+    items.push({ label: 'Promote to TODO', icon: icons.add, disabled: busy, onSelect: () => run('Promoting…', () => askPromote(text), () => promoteBacklog(wfPath, text)) });
   }
   const destructive: MenuItem[] = [];
   if (close) {
     destructive.push({ label: close.label, icon: icons.retry, className: 'wcard-requeue-item', disabled: busy,
-      onSelect: () => void run('Working…', askRequeue(taskId), (reason) => requeueRun(taskId, reason)) });
+      onSelect: () => run('Working…', () => askRequeue(taskId), (reason) => requeueRun(taskId, reason)) });
   }
   if (deletePayload(card)) destructive.push({ label: 'Delete', icon: icons.close, className: 'wcard-delete-item', disabled: busy, onSelect: del.ask });
   if (destructive.length) items.push('separator', ...destructive);

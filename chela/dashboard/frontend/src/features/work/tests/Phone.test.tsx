@@ -92,6 +92,7 @@ test('the ☰ opens the sidebar drawer', async () => {
   await mount(TWO);
   fireEvent.click(screen.getByRole('button', { name: 'Open menu' }));
   expect([sb.classList.contains('open'), document.body.classList.contains('sidebar-open')]).toEqual([true, true]);
+  expect(screen.getByRole('button', { name: 'Open menu' }).getAttribute('aria-expanded')).toBe('true');
   sb.remove();
 });
 
@@ -134,6 +135,24 @@ test('picking a project: single-select, it becomes the title, the board and the 
   expect(title()[0]).toBe('All projects');
   expect(localStorage.getItem('chela_kanban_projects')).toBe('[]');
   expect(JSON.parse(localStorage.getItem('chela_work_recent_projects') ?? '')).toEqual([LEAN]);
+});
+
+test('a tap on the row already picked closes the switcher; any close clears the search', async () => {
+  const many: WorkPayload = { configured: true, workflows: Array.from({ length: 7 }, (_, i) => wf(`/p/proj-${i}/WORKFLOW.md`)) };
+  await mount(many);
+  fireEvent.click(bar().querySelector('.work-bar-title') as HTMLElement);
+  fireEvent.click(within(dialog('Project')).getAllByRole('radio')[0] as HTMLElement);
+  expect(screen.queryByRole('dialog')).toBeNull();
+  expect(localStorage.getItem('chela_kanban_projects')).toBeNull();
+  fireEvent.click(bar().querySelector('.work-bar-title') as HTMLElement);
+  fireEvent.change(within(dialog('Project')).getByRole('searchbox'), { target: { value: 'proj-3' } });
+  expect(radios()).toHaveLength(2);
+  fireEvent.click(must(dialog('Project').querySelector('.wproj-search')));
+  expect(screen.queryByRole('dialog')).not.toBeNull();
+  fireEvent.keyDown(dialog('Project'), { key: 'Escape' });
+  fireEvent.click(bar().querySelector('.work-bar-title') as HTMLElement);
+  expect((within(dialog('Project')).getByRole('searchbox') as HTMLInputElement).value).toBe('');
+  expect(radios()).toHaveLength(8);
 });
 
 test('a desktop multi-select shows as "N projects" with no row checked; a vanished project drops out of the title', async () => {
@@ -254,6 +273,18 @@ test('⋯ Pause all agents asks to confirm: Cancel posts nothing, confirming pos
   expect(posts().map((p) => [p.url, p.body])).toEqual([['/api/dispatcher/pause', { all: true }]]);
   expect(screen.queryByRole('dialog')).toBeNull();
   expect(ask).not.toHaveBeenCalled();
+});
+
+test('a pause in flight disables the sheet\'s other pause until it lands', async () => {
+  let release: (v: unknown) => void = () => {};
+  await mount(TWO);
+  vi.stubGlobal('fetch', (url: string) => (url === '/api/dispatcher' ? Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve(TWO) }) : new Promise((r) => (release = r))));
+  fireEvent.click(within(options()).getByRole('button', { name: /Pause all agents/ }));
+  fireEvent.click(within(dialog('Pause all agents?')).getByRole('button', { name: 'Pause all agents' }));
+  const hold = must(options().querySelector<HTMLButtonElement>('#wopt-hold'));
+  expect(hold.disabled).toBe(true);
+  await act(async () => release({ ok: true, status: 200, json: () => Promise.resolve({ ok: true }) }));
+  expect(must(dialog('Work options').querySelector<HTMLButtonElement>('#wopt-hold')).disabled).toBe(false);
 });
 
 test('a failed pause says so and leaves the state to the next poll', async () => {

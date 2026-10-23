@@ -653,6 +653,12 @@ test('Rows: a junk collapsed set is the default; a Linear board folds its Backlo
   expect(groups()).toEqual([['tr-in-progress', '1', 1], ['tr-in-review', '1', 1], ['tr-todo', '1', 1], ['tr-backlog', '1', 0], ['tr-done', '1', 0]]);
 });
 
+test('before the first poll a phone draws no list and no "Nothing here"', () => {
+  viewport.phone = true;
+  show(null);
+  expect(must(document.getElementById('work-board')).children.length).toBe(0);
+});
+
 test('Rows with nothing to show says so', () => {
   viewport.phone = true;
   show(payload({}));

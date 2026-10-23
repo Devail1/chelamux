@@ -212,7 +212,8 @@ export function Board({ live, active, prefs }: { live: WorkPayload | null; activ
   if (phone) {
     return (
       <div className={['work-pane', active && 'active', `work-phone-${layout}`].filter(Boolean).join(' ')} id="work-board" data-seg="board" data-layout={layout}>
-        {data && !configured ? <Empty /> : layout === 'rows' ? <Rows columns={visible} collapsed={collapsed} onToggle={toggleCol} /> : <SwipeBoard columns={visible} />}
+        {/* Nothing before the first poll: an empty list would read as an empty project. */}
+        {!data ? null : !configured ? <Empty /> : layout === 'rows' ? <Rows columns={visible} collapsed={collapsed} onToggle={toggleCol} /> : <SwipeBoard columns={visible} />}
       </div>
     );
   }
