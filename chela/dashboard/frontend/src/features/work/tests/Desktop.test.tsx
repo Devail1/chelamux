@@ -4,7 +4,7 @@
 // column options). The board itself (rails, compact cards, the Rows table) is Board.test.tsx's;
 // the phone is Phone.test.tsx's.
 import { act, fireEvent, render, screen, within } from '@testing-library/react';
-import { afterEach, beforeEach, expect, test } from 'vitest';
+import { afterEach, beforeEach, expect, test, vi } from 'vitest';
 import { installBridge } from '../../../shared/bridge/index.ts';
 import { view } from '../../../shared/store/view.ts';
 import { work, type Run, type WorkPayload, type Workflow } from '../../../shared/store/work.ts';
@@ -169,4 +169,15 @@ test('an unconfigured payload: no column options, the explainer, and the header 
   expect(rows()).toEqual(['Init a repo', 'Pause all agents', '---', 'Board:true', 'Rows:false']);
   expect(document.getElementById('kanban-empty')).not.toBeNull();
   expect(title()).toEqual(['All projects', '0 running · 0 queued · dispatch on']);
+});
+
+test('the Rows table\'s ages read the last poll\'s clock: a later poll ages them, with no timer of its own', async () => {
+  const clock = vi.spyOn(Date, 'now').mockReturnValue(Date.parse('2026-10-23T12:00:00Z'));
+  localStorage.setItem('chela_work_desktop_layout', 'rows');
+  await mount({ configured: true, workflows: [wf(CHELA, { active_runs: [run({ started_at: '2026-10-23T11:00:00Z' })] })] });
+  const age = () => document.querySelector('.wtable-row[data-task-id="CMX-1"] .wtable-age')?.textContent;
+  expect(age()).toBe('1h');
+  clock.mockReturnValue(Date.parse('2026-10-23T14:00:00Z'));
+  await act(async () => pollWork());
+  expect(age()).toBe('3h');
 });

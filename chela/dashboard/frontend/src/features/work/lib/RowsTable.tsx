@@ -4,9 +4,10 @@
 // A column head sorts within each group (ascending, descending, then back to the board's
 // order). The keyboard walks the rows: ↑ ↓ Home End move, Enter or Space opens the task, and
 // each row's ⋮ holds the card's actions (cardActions.tsx).
-import { useEffect, useState, type KeyboardEvent } from 'react';
+import { useState, type KeyboardEvent } from 'react';
 import { icons } from '../../../shared/icons/index.ts';
 import { Markdown } from '../../../shared/markdown/index.ts';
+import { useStore } from '../../../shared/store/index.ts';
 import { TextButton } from '../../../shared/ui/index.ts';
 import { openTaskModal } from '../../taskmodal/index.ts';
 import { displayTitle } from '../../taskmodal/model.ts';
@@ -14,6 +15,7 @@ import { cardKey, type Card as CardData, type Column } from '../board.ts';
 import { nextSort, rowCells, sortCards, TABLE_COLUMNS, type Sort } from '../desktop.ts';
 import { rowGroups } from '../phone.ts';
 import { useCardMenu } from './cardActions.tsx';
+import { polledAt } from './poll.ts';
 
 function TableRow({ card, now }: { card: CardData; now: number }) {
   const { menu, strip } = useCardMenu(card);
@@ -56,12 +58,10 @@ function walk(e: KeyboardEvent<HTMLTableElement>) {
 
 export function RowsTable({ columns, collapsed, onToggle }: { columns: Column[]; collapsed: Set<string>; onToggle: (key: string) => void }) {
   const [sort, setSort] = useState<Sort>(null);
-  // The clock the age column reads: the table's opening, then once a minute.
-  const [now, setNow] = useState(Date.now);
-  useEffect(() => {
-    const t = setInterval(() => setNow(Date.now()), 60_000);
-    return () => clearInterval(t);
-  }, []);
+  // The clock the age column reads: the last poll's (the Work view runs no timer of its own,
+  // tests/views.test.mjs), or the table's opening before one.
+  const [opened] = useState(Date.now);
+  const now = Math.max(useStore(polledAt), opened);
   const groups = rowGroups(columns);
   if (!groups.length) return <div className="kanban-empty-col">Nothing here</div>;
   return (
