@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import atexit
 import functools
+import gzip
 import hashlib
 import json
 import logging
@@ -29,7 +30,7 @@ from flask import abort, Flask, jsonify, render_template, request, Response, sen
 from chela import config
 from chela.config import DISPATCH_WORKFLOWS, CHELA_DIR, TMUX_SESSION, NOTIFY_INTERVAL
 from chela import agent_manager, capabilities, collab, concurrency, collab_host, collab_stream, context, diffsurface, discovery, dismissed_sessions, dispatcher, epoch, event_log, fleet, gateanswer, hold, hooks, inbox, judge, launcher, messenger, notify, okf, personas, pr_status, probecache, rc_rename, restore, rooms, sandbox_status, scheduler, sessionids, share_requests, share_sandbox, share_store, sidebar_archive, sidebar_layout, spawn, starter, tasklists, transcripts, update, usage, userconfig
-from chela.dashboard import resources, term_themes
+from chela.dashboard import resources, term_fonts, term_themes
 from chela import topic_ledger as tg_topics
 from chela.personas import autolaunch, lease
 from chela.backlog import _BULLET_RE, parse_backlog
@@ -930,53 +931,27 @@ _TERM_SCROLL_SHIM = (
 # static/fonts/README.md for per-font licenses (all OFL-1.1 except Miriam Mono
 # CLM, GPL-2 — the only free MONOSPACE Hebrew font, hence its inclusion).
 #
-# Manifest: (family, filename, variable?, weight-if-static). Variable fonts get a
-# 100–900 weight range in one face; static fonts get one @font-face per weight.
-_TERM_FONTS = [
-    # Icons — font-display:block avoids a box-flash before the icon font loads.
-    ("Symbols Nerd Font", "SymbolsNerdFontMono-Regular.ttf", None, None),
-    # Coverage-only fallback (not in the picker — see _TERM_FONT_PREF_SHIM's
-    # `fam` chain): CMX-159. Same Symbola subset CMX-156 bundled for the
-    # /screenshot PNG renderer (U+2300-23FF, U+2600-27BF) — the TUI glyphs
-    # (`⏺` `❌` `✅` `✦` `✷` `✨` `⚙`) that neither JetBrains Mono nor Symbols
-    # Nerd Font contain, and that CMX-155's atlas fix couldn't help because a
-    # texture-atlas rebuild can't rasterize a glyph no stacked font contains.
-    ("Symbola Fallback", "Symbola-Subset.ttf", None, None),
-    # English / Latin monospace (picker: English face)
-    ("JetBrains Mono",  "JetBrainsMono.ttf",       True,  None),
-    ("Fira Code",       "FiraCode.ttf",            True,  None),
-    ("IBM Plex Mono",   "IBMPlexMono-Regular.ttf", False, "normal"),
-    ("IBM Plex Mono",   "IBMPlexMono-Bold.ttf",    False, "bold"),
-    ("Source Code Pro", "SourceCodePro.ttf",       True,  None),
-    ("Cascadia Code",   "CascadiaCode.ttf",        True,  None),
-    # Hebrew (picker: Hebrew face). Miriam is the only monospace one.
-    ("Miriam Mono CLM", "MiriamMonoCLM-Book.ttf",  False, "normal"),
-    ("Miriam Mono CLM", "MiriamMonoCLM-Bold.ttf",  False, "bold"),
-    ("Noto Sans Hebrew", "NotoSansHebrew.ttf",     True,  None),
-    ("Heebo",           "Heebo.ttf",               True,  None),
-    ("Assistant",       "Assistant.ttf",           True,  None),
-    ("Rubik",           "Rubik.ttf",               True,  None),
-    ("Frank Ruhl Libre", "FrankRuhlLibre.ttf",     True,  None),
-    ("David Libre",     "DavidLibre-Regular.ttf",  False, "normal"),
-    ("David Libre",     "DavidLibre-Bold.ttf",     False, "bold"),
-]
-
-
-def _term_font_face(family, filename, variable, weight):
-    if variable is None:  # Symbols icon font — block to avoid glyph-box flash
-        disp = "font-display:block"
-        wgt = ""
-    else:
-        disp = "font-display:swap"
-        wgt = "font-weight:100 900;" if variable else "font-weight:%s;" % weight
-    return ("@font-face{font-family:'%s';%s"
-            "src:url('/static/fonts/%s') format('truetype');%s}"
-            % (family, wgt, filename, disp))
-
+# CMX-322: the manifest, the woff2 files, their content-hashed URLs and the
+# icon blocks' unicode-ranges live in term_fonts.py.
+_TERM_FONTS = term_fonts.TERM_FONTS
 
 _TERM_FONT_CSS = (
-    "<style>" + "".join(_term_font_face(*f) for f in _TERM_FONTS) + "</style>"
+    "<style>" + "".join(term_fonts.font_face_css(f) for f in _TERM_FONTS) + "</style>"
 )
+
+
+@app.route("/static/fonts/v/<digest>/<path:filename>")
+def static_font(digest, filename):
+    """A terminal font at its content-hashed URL (term_fonts.font_url). The URL names
+    these exact bytes, so it is cached for good: a pane never revalidates a font."""
+    resp = send_from_directory(term_fonts.FONTS_DIR, filename)
+    if digest == term_fonts.FONT_DIGESTS.get(filename):
+        resp.headers["Cache-Control"] = "public, max-age=31536000, immutable"
+    else:
+        # An older page asking for a font that has since changed: these are the
+        # CURRENT bytes, which must not be cached under the old URL.
+        resp.headers["Cache-Control"] = "no-cache"
+    return resp
 
 _TERM_SCROLLBAR_CSS = (
     "<style>"
@@ -1097,6 +1072,14 @@ def _term_theme_shim() -> str:
 # fixed, later ticks are a cheap no-op; it also re-applies (and re-arms the
 # walk) on tab refocus and on storage changes, and covers `window.term` not
 # existing yet at first tick.
+# CMX-322 (pane-open latency): apply() waits only for the chosen Latin and Hebrew
+# faces, never the icon faces (Symbols Nerd Font, Symbola Fallback). Those are
+# unicode-range blocks a browser downloads once a glyph of theirs is on screen,
+# so one may land after the walk: its `loadingdone` re-arms the walk, which is
+# what keeps an icon rasterised from the fallback from staying tofu. The text
+# faces start downloading when the shim runs (in <head>, alongside ttyd's own
+# script), and the first apply runs on the first frame `window.term` exists, not
+# on the first 500 ms tick.
 _TERM_FONT_PREF_SHIM = (
     "<script>(function(){"
     "var LAT={jetbrains:'JetBrains Mono',firacode:'Fira Code',"
@@ -1107,9 +1090,15 @@ _TERM_FONT_PREF_SHIM = (
     "var atlasFixed=false;"
     "function raf(){return new Promise(function(res){"
     "if(window.requestAnimationFrame)requestAnimationFrame(res);else setTimeout(res,16);});}"
+    "function pick(){return{lat:LAT[localStorage.getItem('chela_term_latin')]||LAT.jetbrains,"
+    "heb:HEB[localStorage.getItem('chela_term_font')]||HEB.miriam};}"
+    "function want(p,s){return[s+\"px '\"+p.lat+\"'\",\"bold \"+s+\"px '\"+p.lat+\"'\","
+    "s+\"px '\"+p.heb+\"'\",\"bold \"+s+\"px '\"+p.heb+\"'\"];}"
+    "function load(L){return(document.fonts&&document.fonts.load)?"
+    "Promise.all(L.map(function(f){return document.fonts.load(f).catch(function(){});}))"
+    ":Promise.resolve();}"
     "function apply(){var t=window.term;if(!t)return;"
-    "var lat=LAT[localStorage.getItem('chela_term_latin')]||LAT.jetbrains;"
-    "var heb=HEB[localStorage.getItem('chela_term_font')]||HEB.miriam;"
+    "var p=pick(),lat=p.lat,heb=p.heb;"
     "var s=window.__CHELA_GRID_FONT__||(parseInt(localStorage.getItem('chela_term_fontsize'),10)||14);"
     "var fam=\"'\"+lat+\"','Symbols Nerd Font','Symbola Fallback','\"+heb+\"',monospace\";"
     "function getSize(){return t.options?t.options.fontSize:"
@@ -1121,13 +1110,7 @@ _TERM_FONT_PREF_SHIM = (
     "function setFam(f){if(t.options)t.options.fontFamily=f;"
     "else if(t.setOption)t.setOption('fontFamily',f);}"
     "if(atlasFixed&&getSize()===s&&getFam()===fam)return;"
-    "var L=[s+\"px '\"+lat+\"'\",\"bold \"+s+\"px '\"+lat+\"'\",s+\"px '\"+heb+\"'\","
-    "\"bold \"+s+\"px '\"+heb+\"'\",s+\"px 'Symbols Nerd Font'\","
-    "s+\"px 'Symbola Fallback'\"];"
-    "var P=(document.fonts&&document.fonts.load)?"
-    "Promise.all(L.map(function(f){return document.fonts.load(f).catch(function(){});}))"
-    ":Promise.resolve();"
-    "P.then(function(){"
+    "load(want(p,s)).then(function(){"
     "try{setFam(fam);setSize(s);"
     "if(t.fit&&!window.__CHELA_GRID_FONT__)t.fit();"
     "if(t.refresh&&t.rows)t.refresh(0,t.rows-1);"
@@ -1148,6 +1131,15 @@ _TERM_FONT_PREF_SHIM = (
     "}catch(e){atlasFixed=true;}"
     "});}"
     "window.chelaApplyTermPrefs=apply;"
+    "try{load(want(pick(),14));}catch(e){}"
+    "var t0=Date.now();"
+    "(function first(){if(window.term)apply();"
+    "else if(Date.now()-t0<10000)raf().then(first);})();"
+    "var ICON={'Symbols Nerd Font':1,'Symbola Fallback':1};"
+    "if(document.fonts&&document.fonts.addEventListener)"
+    "document.fonts.addEventListener('loadingdone',function(e){"
+    "var f=(e&&e.fontfaces)||[];for(var i=0;i<f.length;i++){"
+    "if(ICON[String(f[i].family).replace(/[\"']/g,'')]){atlasFixed=false;apply();return;}}});"
     "var n=0,iv=setInterval(function(){apply();if(++n>60)clearInterval(iv);},500);"
     "document.addEventListener('visibilitychange',function(){"
     "if(!document.hidden){atlasFixed=false;apply();}});"
@@ -1196,6 +1188,67 @@ def _term_presence_shim(wid: str) -> str:
             '<script type="module" src="/' + asset_path("collab/presence-shim.js") + '"></script>')
 
 
+# CMX-322: ttyd ships its whole client (xterm.js + its app, ~720 kB) INLINE in its
+# HTML page, and term_http fetched that page uncompressed (urllib sends no
+# Accept-Encoding) and served it no-cache, so every pane open re-downloaded it.
+# term_http now lifts that script out to /term-bundle/<digest>.js, a URL named by
+# the script's bytes and served gzipped and immutable: the page shrinks to a few
+# kB and the bundle is downloaded once per ttyd build. An external classic script
+# with no async/defer, at the same spot, runs exactly where the inline one did.
+_TTYD_BUNDLE_MIN_BYTES = 64 * 1024   # only ttyd's client is this big; our shims are not
+_TTYD_BUNDLE_KEEP = 4                # ttyd builds remembered (one per upgrade in flight)
+_TTYD_BUNDLES: dict[str, tuple[bytes, bytes]] = {}   # digest -> (js, gzipped js)
+_TTYD_BUNDLES_LOCK = threading.Lock()
+_INLINE_SCRIPT_RE = re.compile(r"<script\b(?![^>]*\bsrc\s*=)[^>]*>(.*?)</script>", re.S | re.I)
+
+
+def _gzip(data: bytes) -> bytes:
+    return gzip.compress(data, compresslevel=6, mtime=0)
+
+
+def _accepts_gzip() -> bool:
+    return "gzip" in (request.headers.get("Accept-Encoding") or "").lower()
+
+
+def _externalize_ttyd_bundle(html: str) -> str:
+    """Replace every inline script of at least _TTYD_BUNDLE_MIN_BYTES with a
+    ``<script src="/term-bundle/<digest>.js">``, remembering its bytes for
+    :func:`term_bundle`. Smaller inline scripts are left where they are."""
+    def lift(m: re.Match) -> str:
+        js = m.group(1).encode("utf-8")
+        if len(js) < _TTYD_BUNDLE_MIN_BYTES:
+            return m.group(0)
+        digest = hashlib.sha256(js).hexdigest()[:16]
+        with _TTYD_BUNDLES_LOCK:
+            if digest not in _TTYD_BUNDLES:
+                while len(_TTYD_BUNDLES) >= _TTYD_BUNDLE_KEEP:
+                    _TTYD_BUNDLES.pop(next(iter(_TTYD_BUNDLES)))
+                _TTYD_BUNDLES[digest] = (js, _gzip(js))
+        return f'<script src="/term-bundle/{digest}.js"></script>'
+    return _INLINE_SCRIPT_RE.sub(lift, html)
+
+
+@app.route("/term-bundle/<digest>.js")
+@require_auth
+def term_bundle(digest):
+    """ttyd's client script, lifted out of its page by _externalize_ttyd_bundle. The
+    URL names these bytes, so it is immutable. A digest no page handed out since this
+    dashboard started is a 404: the page that names it is never cached (no-cache),
+    so a reload re-fetches the page and re-registers the bundle."""
+    _require_terminals()
+    with _TTYD_BUNDLES_LOCK:
+        entry = _TTYD_BUNDLES.get(digest)
+    if entry is None:
+        abort(404)
+    js, gz = entry
+    resp = Response(gz if _accepts_gzip() else js, mimetype="text/javascript")
+    if _accepts_gzip():
+        resp.headers["Content-Encoding"] = "gzip"
+    resp.headers["Vary"] = "Accept-Encoding"
+    resp.headers["Cache-Control"] = "public, max-age=31536000, immutable"
+    return resp
+
+
 @app.route("/term/<wid>/", defaults={"rest": ""}, methods=["GET", "POST"])
 @app.route("/term/<wid>/<path:rest>", methods=["GET", "POST"])
 @require_auth
@@ -1233,7 +1286,7 @@ def term_http(wid, rest):
     # is in _PROXY_DROP_HEADERS, so Flask recomputes it for the modified body.
     ctype = (resp.headers.get("Content-Type") or "")
     if "text/html" in ctype.lower():
-        html = body.decode("utf-8", "replace")
+        html = _externalize_ttyd_bundle(body.decode("utf-8", "replace"))
         shims = (_term_reconnect_shim()
                  + _term_theme_shim() + _TERM_FONT_CSS + _TERM_FONT_PREF_SHIM
                  + _term_presence_shim(wid)
@@ -1245,6 +1298,10 @@ def term_http(wid, rest):
         html = (html.replace("</head>", shims + "</head>", 1)
                 if "</head>" in html else html + shims)
         body = html.encode("utf-8")
+        if _accepts_gzip():
+            body = _gzip(body)
+            headers.append(("Content-Encoding", "gzip"))
+            headers.append(("Vary", "Accept-Encoding"))
     return Response(body, status=status, headers=headers)
 
 

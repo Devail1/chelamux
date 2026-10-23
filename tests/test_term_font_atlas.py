@@ -41,12 +41,12 @@ def _shim_js(tmp_path: Path) -> Path:
     return path
 
 
-def _run(shim_path: Path, mode: str, prefs: dict) -> dict:
+def _run(shim_path: Path, mode: str, prefs: dict, scenario: str = "") -> dict:
     node = shutil.which("node")
     if not node:
         pytest.skip("node not available for the terminal-font-atlas guard")
     proc = subprocess.run(
-        [node, str(_HARNESS), str(shim_path), mode, json.dumps(prefs)],
+        [node, str(_HARNESS), str(shim_path), mode, json.dumps(prefs), scenario],
         capture_output=True, timeout=30, cwd=str(_ROOT),
     )
     assert proc.returncode == 0, (
@@ -122,3 +122,39 @@ def test_no_regression_guard_against_the_diagnosed_bug(tmp_path):
         "corrupting the atlasFixed gate should reproduce the tofu bug — "
         f"got {result} instead, meaning the real guard doesn't actually test this"
     )
+
+
+# --- CMX-322: the font apply never waits on an icon face --------------------------------
+
+@pytest.mark.parametrize("prefs,latin,hebrew", [
+    ({}, "JetBrains Mono", "Miriam Mono CLM"),
+    ({"chela_term_latin": "firacode", "chela_term_font": "heebo"}, "Fira Code", "Heebo"),
+])
+def test_shim_waits_only_for_the_latin_and_hebrew_faces(tmp_path, prefs, latin, hebrew):
+    result = _run(_shim_js(tmp_path), "no-clear", prefs)
+    loads = set(result["loads"])
+    assert loads == {f"14px '{latin}'", f"bold 14px '{latin}'",
+                     f"14px '{hebrew}'", f"bold 14px '{hebrew}'"}, loads
+
+
+def test_an_icon_face_landing_after_the_walk_rebuilds_the_atlas(tmp_path):
+    """The icon blocks are unicode-range faces nobody waits for, so one can finish
+    loading after the walk built the atlas from a fallback: its `loadingdone` must
+    re-run the walk, or the icon stays tofu."""
+    result = _run(_shim_js(tmp_path), "no-clear", {}, "late-icons")
+    assert result["tofu"] is False, result
+
+
+def test_a_text_face_landing_late_does_not_rerun_the_walk(tmp_path):
+    """Only an icon face re-arms the walk (each walk is a visible size flicker): the
+    control, a text face's `loadingdone`, leaves the atlas as it was."""
+    result = _run(_shim_js(tmp_path), "no-clear", {}, "late-text")
+    assert result["tofu"] is True, result
+
+
+def test_the_first_apply_runs_on_the_first_frame_term_exists(tmp_path):
+    """A pane used to wait for the shim's first 500 ms interval tick before its fonts
+    were applied; the first apply now runs as soon as `window.term` exists."""
+    result = _run(_shim_js(tmp_path), "no-clear", {}, "first-frame")
+    assert result["tofu"] is False, result
+    assert result["loads"], result
