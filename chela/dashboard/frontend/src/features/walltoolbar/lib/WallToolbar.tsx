@@ -10,7 +10,7 @@ import { gridRowCollapsed } from '../../../../../static/js/wallmodel.ts';
 import { icons } from '../../../shared/icons/index.ts';
 import { useStore } from '../../../shared/store/index.ts';
 import { setWallAuto, setWallFocus, setWallLocked, setWallPreset, termMode, wallLayout, type WallLayout } from '../../../shared/store/wall.ts';
-import { TextButton } from '../../../shared/ui/index.ts';
+import { IconButton, TextButton } from '../../../shared/ui/index.ts';
 import { WALL_PRESETS, type Preset } from '../model.ts';
 
 const ROW_KEY = 'pc_wall_grid_collapsed';
@@ -116,13 +116,13 @@ export function WallToolbar() {
   return (
     // wall mode only: single mode (every phone) has one pane and nothing to lay out
     <span id="term-wall-grid" ref={bar} hidden={mode !== 'wall'}>
-      <button type="button" id="term-grid-toggle" ref={toggle} className={open ? 'gl-btn grid-open' : 'gl-btn'} aria-expanded={open} aria-controls="term-grid-row"
-        title={toggleTitle} aria-label={toggleTitle} onClick={flip}>
+      <IconButton id="term-grid-toggle" ref={toggle} className={open ? 'gl-btn grid-open' : 'gl-btn'} aria-expanded={open} aria-controls="term-grid-row"
+        label={toggleTitle} onClick={flip}>
         {glyph}
         <span className="grid-chevron" aria-hidden="true">
           <icons.chevronDown size={12} />
         </span>
-      </button>
+      </IconButton>
       <span id="term-grid-row" hidden={!open}>
         <span className="gl-label">Grid:</span>
         <span id="term-grid-presets">

@@ -8,12 +8,12 @@
     "src": "../static/fonts/Heebo.ttf"
   },
   "src/main.tsx": {
-    "file": "assets/main-DSmnLLif.js",
+    "file": "assets/main-Dk7XUg1m.js",
     "name": "main",
     "src": "src/main.tsx",
     "isEntry": true,
     "css": [
-      "assets/main-NS_K3UvW.css"
+      "assets/main-CuOhHamZ.css"
     ],
     "assets": [
       "assets/Geist-Variable-DPGgOCY9.woff2",

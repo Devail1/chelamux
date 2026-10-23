@@ -1,4 +1,4 @@
 {
-  "_doc": "CMX-199's no-emoji guard (tests/no_emoji.test.mjs): the legacy files that still render emoji, each with its EXACT count and the CMX-212 port slice that converts or deletes it. The guard fails on a new emoji anywhere, a count that rises, and a count that falls without this file being lowered. P35 (CMX-249) asserts `files` is empty.",
+  "_doc": "CMX-199's no-emoji guard (tests/no_emoji.test.mjs): the legacy files that still render emoji, each with its EXACT count and the CMX-212 port slice that converts or deletes it. The guard fails on a new emoji anywhere, a count that rises, and a count that falls without this file being lowered. The port emptied it; P35 (CMX-249) asserts `files` stays empty.",
   "files": {}
 }
