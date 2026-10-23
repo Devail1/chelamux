@@ -274,6 +274,9 @@ def test_the_pause_file_is_the_one_chela_fleet_writes(tmp_path, monkeypatch):
     assert sweep_nightly.paused(tmp_path) is True
     fleet.path().unlink()
     assert sweep_nightly.paused(tmp_path) is False
+    # A DANGLING symlink still counts as paused (lexists, not exists): unreadable ≠ unpaused.
+    fleet.path().symlink_to(tmp_path / "gone")
+    assert sweep_nightly.paused(tmp_path) is True
 
 
 def test_another_running_sweep_holds_the_lock(tmp_path):
@@ -1087,6 +1090,54 @@ def test_the_daemon_loop_calls_daemon_tick(monkeypatch):
     main_mod.cmd_run(argparse.Namespace())
     assert len(calls) == 1, "the daemon loop never called sweep_nightly.daemon_tick"
     assert calls[0][0] is main_mod.DISPATCH_WORKFLOWS and calls[0][1] is None
+
+
+def _quiet_loop(monkeypatch, n: int) -> None:
+    """``n`` real passes of ``cmd_run``'s loop with every other subsystem inert."""
+    from tests.test_doctor_notify import _run_daemon_ticks
+
+    _run_daemon_ticks(monkeypatch, n=n)
+    monkeypatch.setattr(main_mod.doctor, "check_and_notify", lambda red: red)
+    monkeypatch.setattr(main_mod.ops, "spawn", lambda child: child)
+
+
+def test_the_daemon_loop_hands_each_tick_the_child_the_last_one_returned(monkeypatch):
+    """🔴 WIRING (round-1 survivor of #838) — a single tick cannot see the loop DISCARDING
+    ``daemon_tick``'s return (a bare ``sweep_nightly.daemon_tick(...)`` statement): tick 1
+    looks the same either way. Over three ticks, each must be handed what the last returned
+    (defeat shape 328)."""
+    _quiet_loop(monkeypatch, n=3)
+    prevs, children = [], iter(["child-1", "child-2", "child-3"])
+    monkeypatch.setattr(main_mod.sweep_nightly, "daemon_tick",
+                        lambda workflows, prev: prevs.append(prev) or next(children))
+    main_mod.cmd_run(argparse.Namespace())
+    assert prevs == [None, "child-1", "child-2"]
+
+
+def test_the_daemon_loop_never_starts_a_second_sweep_while_one_runs(tmp_path, monkeypatch):
+    """The behaviour the carry exists for, through the REAL ``daemon_tick``: a workflow due on
+    every tick, a child that never exits — three ticks, ONE spawn. Dropping the loop's
+    assignment re-hands ``None`` each tick and spawns three."""
+    _quiet_loop(monkeypatch, n=3)
+    p = tmp_path / "WORKFLOW.md"
+    p.write_text(_workflow_text(tmp_path))
+    # The dispatcher reads DISPATCH_WORKFLOWS too, so only the sweep is pointed at `p`.
+    real = sweep_nightly.daemon_tick
+    monkeypatch.setattr(sweep_nightly, "daemon_tick", lambda workflows, prev: real([p], prev))
+    monkeypatch.setattr(sweep_nightly, "due", lambda wf, now, d=None: True)
+    monkeypatch.setattr(sweep_nightly, "mark_started", lambda wf, now, d=None: None)
+    spawned = []
+    monkeypatch.setattr(sweep_nightly, "spawn",
+                        lambda path, d=None: spawned.append(path) or _Child(True))
+    main_mod.cmd_run(argparse.Namespace())
+    assert spawned == [p]
+    # The other side: a child that has EXITED is replaced on the very next tick.
+    _quiet_loop(monkeypatch, n=3)
+    spawned.clear()
+    monkeypatch.setattr(sweep_nightly, "spawn",
+                        lambda path, d=None: spawned.append(path) or _Child(False))
+    main_mod.cmd_run(argparse.Namespace())
+    assert spawned == [p, p, p]
 
 
 def test_a_raising_daemon_tick_is_logged_and_the_loop_goes_on(monkeypatch, caplog):
