@@ -130,15 +130,3 @@ export function NewSessionButton() {
     </IconButton>
   );
 }
-
-/**
- * The phone's "+" (CMX-386): New session in one tap, with the drawer left closed. Outside the
- * sidebar, whose transform would trap it off-screen; desktop hides it.
- */
-export function NewSessionFab() {
-  return (
-    <IconButton className="mobile-new-fab" id="btn-new-mobile" label="New session" onClick={(e) => openLaunchMenu(e.currentTarget)}>
-      <icons.add aria-hidden />
-    </IconButton>
-  );
-}

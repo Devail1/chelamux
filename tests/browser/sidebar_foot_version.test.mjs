@@ -11,7 +11,7 @@
 // Harness: tests/browser/fixture.mjs. Local: `pnpm run test:browser`.
 import { after, before, describe, test } from 'node:test';
 import assert from 'node:assert/strict';
-import { ASSET_VERSION, launchChromium, openDashboard } from './fixture.mjs';
+import { ASSET_VERSION, launchChromium, openDashboard, DRAWER_OPENER } from './fixture.mjs';
 
 const { browser, why } = await launchChromium();
 after(() => browser && browser.close());
@@ -127,7 +127,7 @@ describe('CMX-291 phone 320×568: the narrowest drawer keeps the strip whole', {
     const ready = setup(async () => {
         ({ page, context } = await openDashboard(browser, { width: 320, height: 568, api: FULL, touch: true }));
         await waitForReadouts(page);
-        await page.locator('#btn-menu-mobile').click();
+        await page.locator(DRAWER_OPENER).click();
         await page.waitForFunction(() => Math.abs(document.querySelector('.sidebar').getBoundingClientRect().left) < 0.5,
             null, { timeout: 5000 });
     });

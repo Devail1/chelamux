@@ -279,7 +279,7 @@ async function mobile(browser) {
     await page.waitForTimeout(1600);
     await point(page, pill('worker'), { tap: true });
     await page.waitForTimeout(1600);
-    await point(page, '#btn-new-mobile', { tap: true });  // CMX-386
+    await point(page, '#term-stage.term-single .gs-head-menu', { tap: true });  // CMX-313: the drawer, with New session
     await page.waitForTimeout(2000);
     await page.keyboard.press('Escape');
     await page.mouse.click(200, 600).catch(() => {});

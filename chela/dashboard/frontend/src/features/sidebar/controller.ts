@@ -83,7 +83,8 @@ export function toggleSidebar(force?: boolean): void {
   document.getElementById('sidebar-scrim')?.classList.toggle('open', open);
   // CMX-377: the phone's floating opener hides while the drawer is open
   document.body.classList.toggle('sidebar-open', open);
-  document.getElementById('btn-menu-mobile')?.setAttribute('aria-expanded', open ? 'true' : 'false');
+  // CMX-313: and the pane title bar's hamburger opens the same drawer
+  for (const b of document.querySelectorAll('#btn-menu-mobile, .gs-head-menu')) b.setAttribute('aria-expanded', open ? 'true' : 'false');
 }
 
 /** Navigating dismisses the phone drawer; it never folds the desktop rail. */

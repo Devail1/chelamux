@@ -224,7 +224,7 @@ export async function renderTerminals(ctxRead?: Promise<unknown> | null): Promis
   if (sigOf(wids) === termSig) return;
   termSig = sigOf(wids);
   await resolveReady(wids); // before building: a ready pane draws its iframe with no placeholder
-  document.body.classList.remove('pane-is-maximized', 'term-mobile-full'); // their pane is going
+  document.body.classList.remove('pane-is-maximized'); // its pane is going
   const stage = $('term-stage');
   if (!stage) return;
   G.destroyGrid();

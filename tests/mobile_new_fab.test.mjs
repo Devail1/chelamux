@@ -1,21 +1,15 @@
-// CMX-386 — a phone's New session was two taps deep (☰, then "New session"
-// inside the drawer) once #529 removed the topbar. #btn-new-mobile is the
-// phone-only "+" beside the ☰ fab that opens the SAME #new-menu with the
-// drawer left CLOSED.
+// CMX-386 → CMX-313 — the phone's New session. CMX-386 added a phone-only "+"
+// beside the floating ☰; CMX-313 (Liav, 10-23: the Claude app's look) removed it
+// again: New session is the drawer's own button, and with a pane open the ☰
+// moved into the pane's title bar (tests/browser/phone_pane_titlebar.test.mjs).
 //
-// The load-bearing property is WHERE the button lives: the phone sidebar is an
+// What stays load-bearing is WHERE the floating ☰ lives: the phone sidebar is an
 // off-canvas drawer slid away with `transform`, and a transformed ancestor
-// becomes the containing block for every position:fixed descendant — so a "+"
+// becomes the containing block for every position:fixed descendant — so a fab
 // inside the sidebar would be trapped off-screen with it (the trap #529
 // documented for .safety-float). These guards boot the REAL index.html shell
 // and the REAL module graph, and resolve styles through cssForViewport at a
-// 390px phone and a 1440px desktop (jsdom alone ignores every @media rule).
-//
-// jsdom does no layout, so the pixel check ("the + is visible and the menu is on-screen at
-// 390px") belongs to the real-browser (Playwright) suite. Since CMX-219 the "+" and the menu
-// it opens are the launcher island's (frontend/src/features/launcher): the menu is a kit
-// popover portaled to <body>, placed by Radix inside the viewport, so the hand-rolled
-// placement arithmetic this file used to feed is gone with it.
+// 390px phone (jsdom alone ignores every @media rule).
 //
 // Run: pnpm exec vitest run tests/mobile_new_fab.test.mjs (pytest runs it via
 // tests/test_js_suites.py; needs `pnpm install` for jsdom).
@@ -25,13 +19,13 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { APP_BODY, bootDashboardDom, clickIsland, flush } from './js_helpers/dashboard_dom.mjs';
-import { cssForViewport, PHONE, DESKTOP } from './js_helpers/css_viewport.mjs';
+import { cssForViewport, PHONE } from './js_helpers/css_viewport.mjs';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const CSS = fs.readFileSync(path.join(here, '..', 'chela', 'dashboard', 'static', 'style.css'), 'utf8');
 
 let win, doc, sheet;
-let phone = true;
+const phone = true;
 beforeAll(async () => {
     // The REAL page (the shell): the sidebar (with its New session button), both fabs, the
     // scrim and the launch menu.
@@ -62,17 +56,23 @@ async function reset() {
     await flush();
 }
 
-test('@390: the "+" is outside the sidebar and NOT inside any transformed ancestor', () => {
+test('@390 CMX-313: there is no phone "+": New session is the drawer\'s own button', () => {
     mount(PHONE);
-    const plus = doc.getElementById('btn-new-mobile');
-    assert.ok(plus, '#btn-new-mobile is missing from index.html');
-    assert.equal(plus.getAttribute('aria-label'), 'New session');
-    assert.equal(plus.closest('.sidebar'), null,
-        'the "+" lives inside .sidebar — on a phone the closed drawer\'s transform traps it off-screen');
-    assert.equal(transformedAncestor(plus), null,
-        'the "+" sits inside a transformed ancestor, which becomes its containing block — ' +
+    assert.equal(doc.getElementById('btn-new-mobile'), null, 'the phone "+" is back on the page');
+    assert.equal(doc.querySelector('.mobile-new-fab'), null, 'the phone "+" is back on the page');
+    assert.ok(doc.querySelector('.sidebar .sidebar-new-btn'), 'the drawer lost its New session button');
+});
+
+test('@390: the floating ☰ is outside the sidebar and NOT inside any transformed ancestor', () => {
+    mount(PHONE);
+    const fab = doc.getElementById('btn-menu-mobile');
+    assert.ok(fab, '#btn-menu-mobile is missing from the page');
+    assert.equal(fab.closest('.sidebar'), null,
+        'the ☰ lives inside .sidebar — on a phone the closed drawer\'s transform traps it off-screen');
+    assert.equal(transformedAncestor(fab), null,
+        'the ☰ sits inside a transformed ancestor, which becomes its containing block — ' +
         'its position:fixed would place it (and clip it) against that box, not the screen');
-    assert.equal(win.getComputedStyle(plus).position, 'fixed');
+    assert.equal(win.getComputedStyle(fab).position, 'fixed');
 });
 
 test('@390 negative control: the detector DOES see the drawer\'s own New session button as trapped', () => {
@@ -85,36 +85,6 @@ test('@390 negative control: the detector DOES see the drawer\'s own New session
         'the phone sidebar no longer resolves a transform — this file\'s trap detector proves nothing');
 });
 
-test('@390: the "+" is displayed while the drawer is closed, and hides with the ☰ while it is open', async () => {
-    mount(PHONE);
-    await reset();
-    const plus = doc.getElementById('btn-new-mobile');
-    assert.notEqual(win.getComputedStyle(plus).display, 'none',
-        'the "+" is not displayed on a phone — New session is back to two taps deep');
-    clickIsland(doc.getElementById('btn-menu-mobile'));   // the ☰ opens the closed drawer
-    assert.equal(win.getComputedStyle(plus).display, 'none',
-        'the "+" still shows over the open drawer');
-    await reset();
-});
-
-test('@390: tapping the "+" opens the launch menu with the drawer left CLOSED, portaled to <body>', async () => {
-    // No stylesheet for this one: the popper re-measures every ancestor on open, and jsdom
-    // re-runs the whole cascade per getComputedStyle (minutes with style.css mounted).
-    sheet.textContent = '';
-    await reset();
-    clickIsland(doc.getElementById('btn-new-mobile'));
-    await flush();
-    assert.ok(menu(), 'the "+" did not open the launch menu');
-    assert.ok(menu().querySelector('#new-sandbox-item'), 'the "+" opened some other menu');
-    // a direct child of <body> (Radix's popper wrapper): never inside the sliding sidebar
-    assert.equal(menu().closest('[data-radix-popper-content-wrapper]')?.parentElement, doc.body,
-        'the launch menu is not portaled to <body>: a transformed ancestor could trap it');
-    assert.equal(doc.body.classList.contains('sidebar-open'), false,
-        'the "+" opened the drawer: the menu must appear with the drawer CLOSED');
-    assert.equal(doc.querySelector('.sidebar').classList.contains('open'), false);
-    await reset();
-});
-
 test('@390: the drawer path still opens the SAME launch menu (accepted case)', async () => {
     sheet.textContent = '';
     await reset();
@@ -123,12 +93,4 @@ test('@390: the drawer path still opens the SAME launch menu (accepted case)', a
     await flush();
     assert.ok(menu()?.querySelector('#new-sandbox-item'), 'the drawer\'s New session no longer opens the launch menu');
     await reset();
-});
-
-test('@1440: the "+" is not displayed on desktop', () => {
-    phone = false;
-    mount(DESKTOP);
-    assert.equal(win.getComputedStyle(doc.getElementById('btn-new-mobile')).display, 'none',
-        'the phone-only "+" shows on desktop');
-    phone = true;
 });

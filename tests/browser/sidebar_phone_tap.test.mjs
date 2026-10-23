@@ -18,7 +18,7 @@
 // Harness: tests/browser/fixture.mjs. Local: `pnpm run test:browser`.
 import { after, before, describe, test } from 'node:test';
 import assert from 'node:assert/strict';
-import { launchChromium, openDashboard } from './fixture.mjs';
+import { launchChromium, openDashboard, DRAWER_OPENER } from './fixture.mjs';
 
 const { browser, why } = await launchChromium();
 after(() => browser && browser.close());
@@ -32,7 +32,7 @@ function setup(fn) {
 const W = 390, H = 844;
 
 async function openDrawer(page) {
-    await page.locator('#btn-menu-mobile').tap();
+    await page.locator(DRAWER_OPENER).tap();
     await page.waitForFunction(() => Math.abs(document.querySelector('.sidebar').getBoundingClientRect().left) < 0.5,
         null, { timeout: 5000 });
 }
