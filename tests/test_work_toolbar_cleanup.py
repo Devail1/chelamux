@@ -1,6 +1,6 @@
 """CMX-207: the Work board toolbar lost its batch "Merge all mergeable" button (and the
 ``/api/dispatcher/merge-all`` route behind it) and the inline "Seed a starter ..." hint.
-Per-card Merge and the ``+ Init a repo`` button stay.
+Per-card Merge and Init a repo stay (CMX-316: Init a repo is a row of the header's ⋯).
 """
 from __future__ import annotations
 
@@ -37,11 +37,13 @@ def test_per_card_merge_route_still_answers(client):
 
 def test_toolbar_has_no_seed_hint_line_but_keeps_init_button():
     # CMX-233: the toolbar is the Work view island (features/work), not index.html markup.
-    # Its RTL suite clicks the button; this pins the CMX-207 cleanup in both places.
+    # CMX-316: the desktop's controls are one header row (DeskHead.tsx), Init a repo in its ⋯.
+    # Its RTL suite clicks the row; this pins the CMX-207 cleanup in every place.
     html = INDEX_HTML.read_text()
-    view = (INDEX_HTML.parent.parent / "frontend" / "src" / "features" / "work" / "lib" / "WorkView.tsx").read_text()
-    for src in (html, view):
+    lib = INDEX_HTML.parent.parent / "frontend" / "src" / "features" / "work" / "lib"
+    view, head = (lib / "WorkView.tsx").read_text(), (lib / "DeskHead.tsx").read_text()
+    for src in (html, view, head):
         assert "Seed a starter WORKFLOW.md + TODO.md into a repo</span>" not in src
         assert not re.search(r'work-toolbar-hint">\s*Seed a starter', src)
-    init = re.search(r'<Button [^\n]*title="Seed a starter WORKFLOW\.md \+ TODO\.md into a repo"[^\n]*>\+ Init a repo</Button>', view)
-    assert init, "the + Init a repo button must stay"
+    init = re.search(r"\{ label: 'Init a repo', icon: icons\.initRepo, onSelect: later\(\(\) => openInitRepo\(launcher\.get\(\)\)\) \}", head)
+    assert init, "Init a repo must stay, in the header's ⋯"

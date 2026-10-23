@@ -35,7 +35,26 @@ afterEach(() => {
 const posts = () => calls.filter((c) => c.method === 'POST');
 const reads = (u: string) => calls.filter((c) => c.url === u).length;
 const holdBtn = () => document.getElementById('dispatch-hold-btn') as HTMLButtonElement | null;
-const hint = () => document.getElementById('dispatch-hold-hint')?.textContent;
+// CMX-316: why the queue is held is the button's tooltip (the header's subtitle says "dispatch paused")
+const hint = () => holdBtn()?.getAttribute('title');
+/** Open the header's ⋯ and return the menu. */
+function more() {
+  const trigger = must(document.getElementById('work-more-btn'), 'the ⋯ button');
+  if (trigger.getAttribute('aria-expanded') !== 'true') fireEvent.keyDown(trigger, { key: 'Enter' });
+  return must(document.querySelector<HTMLElement>('.work-head-menu'), 'the open ⋯ menu');
+}
+const closeMore = () => {
+  const m = document.querySelector('.work-head-menu');
+  if (m) fireEvent.keyDown(m, { key: 'Escape' });
+};
+/** Pick a ⋯ row whose effect waits for the menu to close (a timer), and let it run. */
+async function pickMore(sel: string) {
+  const row = must(more().querySelector<HTMLElement>(sel), sel);
+  await act(async () => {
+    fireEvent.click(row);
+    await new Promise((r) => setTimeout(r, 0));
+  });
+}
 
 async function mount(data: WorkPayload | null) {
   dispatcher = data;
@@ -100,22 +119,31 @@ test('Schedules reads its own endpoint only while its segment shows on the Work 
 
 // --- the toolbar --------------------------------------------------------------------------
 
-test('"+ New task" shows only when a workflow\'s tracker is Linear, and opens the New-task dialog', async () => {
+test('New task is the one primary button: disabled (and says why) without a Linear tracker; with one it opens the New-task dialog', async () => {
   await mount({ configured: true, workflows: [{ path: '/m', tracker_kind: 'markdown' }] });
-  expect(document.getElementById('new-task-btn')).toBeNull();
+  const btn = () => must(document.querySelector<HTMLButtonElement>('.work-head #new-task-btn'));
+  expect([btn().className, btn().disabled, btn().title, btn().textContent]).toEqual(['btn btn-primary btn-md work-head-new', true, 'New task needs a workflow with a Linear tracker', 'New task']);
+  expect(document.querySelectorAll('.work-head .btn-primary')).toHaveLength(1);
   dispatcher = { configured: true, workflows: [{ path: '/m', tracker_kind: 'markdown' }, { path: '/l', tracker_kind: 'linear' }] };
   await act(async () => pollWork());
-  fireEvent.click(must(document.getElementById('new-task-btn')));
+  expect([btn().disabled, btn().title]).toEqual([false, '']);
+  fireEvent.click(btn());
   expect(screen.getByRole('dialog').querySelector('h3')?.textContent).toBe('New task');
   fireEvent.keyDown(screen.getByRole('dialog'), { key: 'Escape' });
   expect(screen.queryByRole('dialog')).toBeNull();
 });
 
-test('"+ Init a repo" opens the dialog suggesting the launcher\'s dirs', async () => {
+test('⋯ Init a repo opens the dialog suggesting the launcher\'s dirs', async () => {
   act(() => launcher.set({ favorites: [{ path: '/fav/repo' }], recent: [{ path: '/recent/repo' }, null] }));
   await mount({ configured: true, workflows: [] });
-  fireEvent.click(screen.getByRole('button', { name: '+ Init a repo' }));
+  const row = must([...more().querySelectorAll<HTMLElement>('[role="menuitem"]')].find((i) => i.textContent === 'Init a repo'));
+  await act(async () => {
+    fireEvent.click(row);
+    await new Promise((r) => setTimeout(r, 0));
+  });
   expect([...screen.getByRole('dialog').querySelectorAll('datalist option')].map((o) => o.getAttribute('value'))).toEqual(['/fav/repo', '/recent/repo']);
+  fireEvent.keyDown(screen.getByRole('dialog'), { key: 'Escape' });
+  expect(screen.queryByRole('dialog')).toBeNull();
 });
 
 // --- Pause / Resume dispatch (CMX-206) --------------------------------------------------------------
@@ -123,17 +151,20 @@ test('"+ Init a repo" opens the dialog suggesting the launcher\'s dirs', async (
 test('no Pause button before the first poll: it never flashes the wrong state', () => {
   render(<WorkView />);
   expect(holdBtn()).toBeNull();
+  expect(document.querySelector('.work-head-sub')?.textContent).toBe('Work');
 });
 
-test('a held queue shows Resume dispatch (warn look) and why; an unheld one Pause with no hint', async () => {
+test('a held queue shows Resume dispatch (warn look) and why; an unheld one a quiet outline Pause', async () => {
   await mount({ configured: true, workflows: [], dispatch_hold: { summary: 'held for a batch merge' } });
-  expect([holdBtn()?.textContent, holdBtn()?.className, hint()]).toEqual(['Resume dispatch', 'btn btn-md btn-warn', 'held for a batch merge']);
+  expect([holdBtn()?.textContent, holdBtn()?.className, hint()]).toEqual(['Resume dispatch', 'btn btn-md work-head-hold btn-warn', 'held for a batch merge']);
+  expect(document.querySelector('.work-head-sub')?.textContent).toBe('0 running · 0 queued · dispatch paused');
   dispatcher = { configured: true, workflows: [], dispatch_hold: {} };
   await act(async () => pollWork());
   expect(hint()).toBe('Dispatch is paused.');
   dispatcher = { configured: true, workflows: [], dispatch_hold: null };
   await act(async () => pollWork());
-  expect([holdBtn()?.textContent, holdBtn()?.className, hint()]).toEqual(['Pause dispatch', 'btn btn-primary btn-md', '']);
+  expect([holdBtn()?.textContent, holdBtn()?.className, hint()]).toEqual(['Pause dispatch', 'btn btn-md work-head-hold', 'No new task is claimed while paused.']);
+  expect(document.querySelector('.work-head-sub')?.textContent).toBe('0 running · 0 queued · dispatch on');
 });
 
 test('declining the confirm aborts a pause before any POST', async () => {
@@ -189,7 +220,7 @@ test('a refusal alerts its reason (or a fallback); a throw alerts too; the butto
 
 // --- Pause all agents / the paused fleet (CMX-252) ----------------------------------------------
 
-const fleetBtn = () => document.getElementById('fleet-pause-btn') as HTMLButtonElement | null;
+const PAUSE_ALL = '[data-action="pause-all"]';
 const panel = () => document.getElementById('fleet-pause');
 const FLEET = {
   since_ago: '3m', by: 'dashboard', expires_in: '27m',
@@ -197,21 +228,28 @@ const FLEET = {
   judges: [{ task: 'CMX-3', frozen_for: '2m', processes: 4 }],
 };
 
-test('confirming "Pause all agents" POSTs pause with all:true; declining POSTs nothing', async () => {
-  const ask = vi.spyOn(window, 'confirm').mockReturnValue(false);
+test('⋯ Pause all agents asks in a dialog first: Cancel posts nothing, confirming POSTs pause with all:true', async () => {
+  const ask = vi.spyOn(window, 'confirm');
   await mount({ configured: true, workflows: [] });
-  await act(async () => fireEvent.click(must(fleetBtn())));
-  expect(ask).toHaveBeenCalledWith('Pause every dispatched agent? Dispatch is held, each agent is told to start nothing until you resume, and running judges are frozen.');
+  expect(must(more().querySelector(PAUSE_ALL)).textContent).toBe('Pause all agents');
+  await pickMore(PAUSE_ALL);
+  const dialog = screen.getByRole('dialog', { name: 'Pause all agents?' });
+  expect(dialog.textContent).toContain('Pause every dispatched agent? Dispatch is held, each agent is told to start nothing until you resume, and running judges are frozen.');
+  fireEvent.click(screen.getByRole('button', { name: 'Cancel' }));
+  expect(screen.queryByRole('dialog')).toBeNull();
   expect(posts()).toEqual([]);
-  ask.mockReturnValue(true);
-  await act(async () => fireEvent.click(must(fleetBtn())));
+  await pickMore(PAUSE_ALL);
+  await act(async () => fireEvent.click(must(document.getElementById('wopt-pause-all-confirm'))));
   expect(posts()).toEqual([{ url: '/api/dispatcher/pause', method: 'POST', body: { all: true } }]);
+  expect(ask).not.toHaveBeenCalled();
 });
 
 test('a paused fleet: no "Pause all agents", Resume names the agents, and the panel lists agents, judges, since and expiry', async () => {
   await mount({ configured: true, workflows: [], dispatch_hold: { summary: 'held' }, fleet_pause: FLEET });
-  expect(fleetBtn()).toBeNull();
+  expect(more().querySelector(PAUSE_ALL)).toBeNull();
+  closeMore();
   expect(holdBtn()?.textContent).toBe('Resume agents and dispatch');
+  expect(document.querySelector('.work-head-sub')?.textContent).toBe('0 running · 0 queued · agents paused');
   expect(panel()?.querySelector('.fleet-pause-head')?.textContent).toBe('Agents paused 3m ago by dashboard. The hold expires in 27m; the agents resume then.');
   expect([...must(panel()).querySelectorAll('li')].map((li) => li.textContent)).toEqual([
     'agent CMX-1 in @5: interrupted', 'agent CMX-2 in @6: finishing (judge sweep)', 'judge CMX-3: frozen 2m (4 process(es))',
@@ -226,14 +264,19 @@ test('a fleet pause with no hold left and nothing running says so; no fleet paus
   expect(panel()?.querySelector('.fleet-pause-empty')?.textContent).toBe('No agent was running.');
   // the hold is gone but the agents are still paused: Resume, without a confirm
   const ask = vi.spyOn(window, 'confirm');
-  expect([holdBtn()?.textContent, fleetBtn()]).toEqual(['Resume agents and dispatch', null]);
+  expect([holdBtn()?.textContent, hint()]).toEqual(['Resume agents and dispatch', 'Agents are paused.']);
   await act(async () => fireEvent.click(must(holdBtn())));
   expect(ask).not.toHaveBeenCalled();
   expect(posts().map((p) => p.url)).toEqual(['/api/dispatcher/resume']);
   dispatcher = { configured: true, workflows: [], dispatch_hold: { summary: 'held' }, fleet_pause: null };
   await act(async () => pollWork());
   expect(panel()).toBeNull();
-  expect([holdBtn()?.textContent, fleetBtn()?.textContent]).toEqual(['Resume dispatch', 'Pause all agents']);
+  expect([holdBtn()?.textContent, more().querySelector(PAUSE_ALL)?.textContent]).toEqual(['Resume dispatch', 'Pause all agents']);
+});
+
+test('before the first poll ⋯ offers no Pause all agents', () => {
+  render(<WorkView />);
+  expect(more().querySelector(PAUSE_ALL)).toBeNull();
 });
 
 // --- the poll -----------------------------------------------------------------------------------

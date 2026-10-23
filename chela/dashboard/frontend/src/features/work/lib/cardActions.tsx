@@ -1,5 +1,5 @@
-// A card's actions, shared by the desktop card (its inline buttons) and the compact card and
-// Rows row (CMX-315: every action, the branch and the destructive ones, in the card's ⋮).
+// A card's actions, in the ⋮ of the compact card, the phone's Rows row (CMX-315) and the
+// desktop's Rows table (CMX-316): every action, the branch and the destructive ones.
 // Each server action asks first, shows that it is running, and surfaces a failure ON the card
 // in the server's own words for 15 s: never swallowed.
 import { useEffect, useState, type MouseEvent, type ReactNode } from 'react';
@@ -11,9 +11,9 @@ import { openTaskModal } from '../../taskmodal/index.ts';
 import { branchOrLine, mergeControl, type Card as CardData } from '../board.ts';
 import { mergeRun, promoteBacklog, requeueRun } from './actions.ts';
 
-export const stop = (e: MouseEvent) => e.stopPropagation();
+const stop = (e: MouseEvent) => e.stopPropagation();
 
-export const prName = (url: string | null | undefined) => {
+const prName = (url: string | null | undefined) => {
   const label = prLabel(url || '');
   return label === 'PR' ? 'this PR' : `PR ${label}`;
 };
@@ -26,10 +26,10 @@ export function deletePayload(card: CardData): DeletePayload | null {
   return card.task_id ? { kind: 'run', task_id: card.task_id } : null;
 }
 
-export type Confirm = 'ask' | 'busy' | { error: string };
+type Confirm = 'ask' | 'busy' | { error: string };
 
 /** The delete confirm strip (not window.confirm). On success the refetch drops the card. */
-export function DeleteStrip({ confirm, onDelete, onCancel }: { confirm: Confirm; onDelete: () => void; onCancel: () => void }) {
+function DeleteStrip({ confirm, onDelete, onCancel }: { confirm: Confirm; onDelete: () => void; onCancel: () => void }) {
   return (
     <div className="kanban-confirm" onClick={stop}>
       {confirm === 'ask' ? (
@@ -51,7 +51,7 @@ export function DeleteStrip({ confirm, onDelete, onCancel }: { confirm: Confirm;
 }
 
 /** Delete with its confirm: `ask()` shows the strip, `strip` is it (or null). */
-export function useDelete(payload: DeletePayload | null): { confirm: Confirm | null; ask: () => void; strip: ReactNode } {
+function useDelete(payload: DeletePayload | null): { confirm: Confirm | null; ask: () => void; strip: ReactNode } {
   const [confirm, setConfirm] = useState<Confirm | null>(null);
   async function remove() {
     if (!payload) return;
@@ -64,7 +64,7 @@ export function useDelete(payload: DeletePayload | null): { confirm: Confirm | n
 }
 
 /** A failure surfaced ON the card with the server's own words, for 15 s: never swallowed. */
-export function useCardError(): [{ cls: string; text: string } | null, (cls: string, text: string) => void] {
+function useCardError(): [{ cls: string; text: string } | null, (cls: string, text: string) => void] {
   const [err, setErr] = useState<{ cls: string; text: string } | null>(null);
   useEffect(() => {
     if (!err) return;
@@ -76,9 +76,9 @@ export function useCardError(): [{ cls: string; text: string } | null, (cls: str
 
 const ellipsize = (text: string) => (text.length > 80 ? text.slice(0, 77) + '...' : text);
 
-export const askMerge = (card: CardData) => window.confirm(`Squash-merge ${prName(card.pr_url)} and delete branch?`) && '';
-export const askPromote = (text: string) => window.confirm(`Promote backlog item to TODO?\n\n"${ellipsize(text)}"\n\nThis commits to the base branch and pushes.`) && '';
-export const askRequeue = (taskId: string) =>
+const askMerge = (card: CardData) => window.confirm(`Squash-merge ${prName(card.pr_url)} and delete branch?`) && '';
+const askPromote = (text: string) => window.confirm(`Promote backlog item to TODO?\n\n"${ellipsize(text)}"\n\nThis commits to the base branch and pushes.`) && '';
+const askRequeue = (taskId: string) =>
   (window.prompt(`Requeue ${taskId}: why? (recorded in its review history; the old PR is closed and the next tick claims a fresh attempt on a new branch)`) || '').trim() || false;
 
 function openUrl(url: string) {
@@ -151,7 +151,7 @@ export function useCardMenu(card: CardData): { menu: ReactNode; strip: ReactNode
   const strip = (
     <>
       {del.strip}
-      {running && <div className="wcard-running" role="status">{running}</div>}
+      {running && <div className="wcard-busy" role="status">{running}</div>}
       {err && <div className={`wcard-error ${err.cls}`} role="alert">{err.text}</div>}
     </>
   );

@@ -102,16 +102,16 @@ export function lanesFromBuckets(buckets: Record<Bucket, Card[]>): Record<Lane, 
   return lanes;
 }
 
+// A run (or task) keeps its key when a poll adds a card above it, so an open delete confirm or a
+// failure note survives the repaint; only an id-less backlog bullet falls back to its position.
+export const cardKey = (c: Card, i: number) => (c.task_id ? `${c.status}:${c.task_id}:${c.attempt ?? ''}` : `${c.status}:${i}:${c.title ?? ''}`);
+
 // --- The project filter (CMX-194: a multi-select) -------------------------------------------
-// `selected` holds workflow paths; EMPTY means every project. Each pill toggles its own
-// project; "All" clears the selection.
+// `selected` holds workflow paths; EMPTY means every project. CMX-315/316: the switcher picks
+// one project or all of them; a multi-select saved before then still reads.
 
 export function inFilter(selected: readonly string[], path: string | undefined): boolean {
   return !selected.length || selected.includes(path ?? '');
-}
-
-export function toggleProject(selected: readonly string[], path: string): string[] {
-  return selected.includes(path) ? selected.filter((p) => p !== path) : [...selected, path];
 }
 
 /** Drop a selected project the payload no longer has, so a vanished one never empties the board. */
