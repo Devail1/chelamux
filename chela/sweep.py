@@ -702,10 +702,16 @@ def js_mutations(rel: str, text: str, lines: set[int], *, ts: bool = False) -> l
     return muts
 
 
-def collect_mutations(worktree: Path, base: str) -> tuple[list[Mutation], str]:
-    changed, err = changed_lines(worktree, base)
-    if err:
-        return [], err
+def collect_mutations(worktree: Path, base: str,
+                      lines: dict[str, set[int]] | None = None) -> tuple[list[Mutation], str]:
+    """The mutations of the lines changed vs ``base`` — or (CMX-303) of exactly ``lines``,
+    ``{file: {1-based line numbers}}``, when the caller already knows which lines to sweep."""
+    if lines is None:
+        changed, err = changed_lines(worktree, base)
+        if err:
+            return [], err
+    else:
+        changed = {rel: set(ns) for rel, ns in lines.items() if _sweepable(rel)}
     muts: list[Mutation] = []
     for rel in sorted(changed):
         try:
@@ -921,8 +927,11 @@ def sweep(
     worktree: str | Path, base: str, test_cmd: str, *,
     timeout: float = judge.SUITE_TIMEOUT_SECONDS, select_tests: bool = True, progress=None,
     provision: bool = True, budget: SweepBudget | None = None,
+    lines: dict[str, set[int]] | None = None,
 ) -> SweepReport:
-    """``provision=False`` standalone: the repo's env is its owner's (no ``uv sync``)."""
+    """``provision=False`` standalone: the repo's env is its owner's (no ``uv sync``).
+    ``lines`` (CMX-303, the nightly sweep): mutate exactly these lines of the checkout instead
+    of the branch's diff vs ``base`` — ``base`` is then only the report's label."""
     worktree = Path(worktree).resolve()
     budget = budget if budget is not None else SweepBudget()
     started = _now()
@@ -930,7 +939,7 @@ def sweep(
     try:
         report = _sweep(worktree, base, test_cmd, timeout=timeout, select_tests=select_tests,
                         progress=progress, provision=provision, budget=budget,
-                        started=started)
+                        started=started, lines=lines)
     except _Interrupted as e:
         # The mutation's own `finally` has already restored the file by the time this runs.
         report = SweepReport(cannot_verify=f"interrupted by signal {e.args[0]} — the sweep "
@@ -945,21 +954,28 @@ def sweep(
 
 def _sweep(worktree: Path, base: str, test_cmd: str, *, timeout: float, select_tests: bool,
            progress, budget: SweepBudget, started: float,
-           provision: bool = True) -> SweepReport:
+           provision: bool = True, lines: dict[str, set[int]] | None = None) -> SweepReport:
     report = SweepReport(budget=budget)
     report.recovered, err = recover(worktree)
     if err:
         report.cannot_verify = err
         return report
-    muts, err = collect_mutations(worktree, base)
+    # Two shapes on purpose: callers (and tests) that replace `collect_mutations` keep its
+    # two-argument form for the judge's own sweep.
+    muts, err = (collect_mutations(worktree, base) if lines is None else
+                 collect_mutations(worktree, base, lines))
     if err:
         report.cannot_verify = err
         return report
-    report.unsupported, err = unsupported_files(worktree, base)
+    if lines is None:
+        report.unsupported, err = unsupported_files(worktree, base)
+    else:
+        report.unsupported = sorted(rel for rel in lines if _unsupported(rel))
     if err:
         report.cannot_verify = err
         return report
-    skipped, err = generated_files(worktree, base)
+    skipped, err = (generated_files(worktree, base) if lines is None else
+                    (sorted(rel for rel in lines if generated.is_generated(rel)), ""))
     if err:
         report.cannot_verify = err
         return report

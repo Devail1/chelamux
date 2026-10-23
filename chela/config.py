@@ -429,6 +429,11 @@ DISPATCH_KNOBS: tuple[DispatchKnob, ...] = (
                  "Max reworks — risk: normal", floor=0),
     DispatchKnob("max_reworks_low", "CHELA_MAX_REWORKS_LOW", 3, int,
                  "Max reworks — risk: low", floor=0),
+    # 🏗️🔁 CMX-192: the SEPARATE budget for rounds that were not a review verdict (a CI
+    # send-back, a rework agent that died without handing in). Higher than every rework cap
+    # on purpose: these are not evidence about the code, but a crash loop must still stop.
+    DispatchKnob("max_infra_restarts", "CHELA_MAX_INFRA_RESTARTS", 8, int,
+                 "Max infra restarts (CI failures, dead agents) before escalation", floor=0),
     # ⚖️🎚️ CMX-405: how many experiments the judge may RUN per risk level. `high` is the
     # pre-CMX-405 behaviour (judge.MAX_EXPERIMENTS). ⛔ It scales the SEARCH only — every
     # experiment that does run is adjudicated identically, and a survivor BLOCKS at every level.
@@ -831,6 +836,17 @@ def max_reworks_for(risk: object) -> int:
     from chela.sources import run_risk
     level = run_risk(risk)
     return min(max(0, dispatch_value(f"max_reworks_{level}")), max_reworks())
+
+
+def max_infra_restarts() -> int:
+    """🏗️🔁 CMX-192. How many rounds that were NOT a review verdict a run may spend — a CI
+    send-back, a rework agent whose window died or that stalled without handing in. They do
+    not spend the rework cap (:func:`max_reworks_for`): that one stops a PR that keeps
+    FAILING REVIEW, and CMX-180 burned all of it on a clock flake and a tmux death without a
+    single judge round. Past this cap the run escalates to ``needs_human`` with an infra
+    reason, so a crash loop still stops. Read per call (a Dispatch-tab knob).
+    """
+    return max(0, dispatch_value("max_infra_restarts"))
 
 
 def judge_max_experiments(risk: object) -> int:

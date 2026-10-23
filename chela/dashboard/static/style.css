@@ -17,7 +17,7 @@
     font-style: normal;
     font-display: swap;
 }
-/* Hebrew-capable chrome fallback — the SAME already-vendored fonts/Heebo.ttf
+/* Hebrew-capable chrome fallback — the SAME already-vendored fonts/Heebo.woff2
    app.py's _TERM_FONT_CSS offers the terminal font picker, re-declared here
    because that system only injects into the ttyd iframe, never the dashboard
    page itself — without this rule 'Heebo' in --ui-font's stack would never
@@ -25,7 +25,7 @@
    silently defeating the fallback for every Hebrew-reading viewer. */
 @font-face {
     font-family: 'Heebo';
-    src: url('fonts/Heebo.ttf') format('truetype');
+    src: url('fonts/Heebo.woff2') format('woff2');
     font-weight: 100 900;
     font-style: normal;
     font-display: swap;
@@ -56,7 +56,7 @@
        genuine code/diff content — see .term-frame below. Everything else
        (sidebar, pane headers, pane footers, modals, Work) reads --ui-font,
        the "calm desktop app" restyle's whole point ("sans chrome"). Heebo is
-       already vendored (fonts/Heebo.ttf) as the Hebrew-capable fallback the
+       already vendored (fonts/Heebo.woff2) as the Hebrew-capable fallback the
        brief asks for; it is loaded on demand the same way every other
        bundled font is (app.py's _TERM_FONT_CSS), so naming it here costs
        nothing until Hebrew text actually needs it. */

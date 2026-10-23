@@ -3,21 +3,21 @@
     "file": "assets/Geist-Variable-DPGgOCY9.woff2",
     "src": "../static/fonts/Geist-Variable.woff2"
   },
-  "../static/fonts/Heebo.ttf": {
-    "file": "assets/Heebo-B1dyC2ym.ttf",
-    "src": "../static/fonts/Heebo.ttf"
+  "../static/fonts/Heebo.woff2": {
+    "file": "assets/Heebo-CZLdcoYQ.woff2",
+    "src": "../static/fonts/Heebo.woff2"
   },
   "src/main.tsx": {
-    "file": "assets/main-D3q9IKj4.js",
+    "file": "assets/main-B7D_CeUX.js",
     "name": "main",
     "src": "src/main.tsx",
     "isEntry": true,
     "css": [
-      "assets/main-BlD-mwIo.css"
+      "assets/main-BvTDbb7T.css"
     ],
     "assets": [
       "assets/Geist-Variable-DPGgOCY9.woff2",
-      "assets/Heebo-B1dyC2ym.ttf"
+      "assets/Heebo-CZLdcoYQ.woff2"
     ]
   }
 }

@@ -26,6 +26,7 @@ from chela.config import (
     judge_wall_ceiling_seconds,
     judge_wall_grace_seconds,
     judge_wall_per_experiment_seconds,
+    max_infra_restarts,
     max_reworks_for,
     judge_max_experiments,
     worktree_disk_budget_bytes,
@@ -1495,6 +1496,21 @@ def ensure_schema(conn: sqlite3.Connection) -> sqlite3.Connection:
         # that is NOT charged against the cap (see `effective_rework_cap`).
         ("conflict_sha", "ALTER TABLE runs ADD COLUMN conflict_sha TEXT"),
         ("conflict_reworks", "ALTER TABLE runs ADD COLUMN conflict_reworks INTEGER DEFAULT 0"),
+        # 🏗️🔁 CMX-192. The rework cap bounds a PR that keeps FAILING REVIEW — and CMX-180
+        # hit "rework cap reached 3/3: the PR still fails review" with zero judge rounds (a
+        # clock flake, a human retry, a tmux death), because `rework_count` counts EVERY
+        # re-spawn. It still does (the round number, `_is_rework`); the cap reads these:
+        #   `rework_cause`   — why the run is (or last was) in `changes_requested`: `review`
+        #                      (a verdict — judge, reviewer, conflict) or `infra` (a CI
+        #                      send-back, a rework agent that died without handing in). NULL
+        #                      on a pre-CMX-192 row reads as `review`. `chela retry` keeps it.
+        #   `review_reworks` — re-spawns whose cause was `review`, the number the rework cap
+        #                      bounds. NULL on a pre-CMX-192 row reads as `rework_count`.
+        #   `infra_restarts` — infra EVENTS, counted when they happen, bounded by their own
+        #                      higher cap (`max_infra_restarts`) so a crash loop still stops.
+        ("rework_cause", "ALTER TABLE runs ADD COLUMN rework_cause TEXT"),
+        ("review_reworks", "ALTER TABLE runs ADD COLUMN review_reworks INTEGER"),
+        ("infra_restarts", "ALTER TABLE runs ADD COLUMN infra_restarts INTEGER DEFAULT 0"),
         # ⚖️🔒 CMX-389. The merge gate's BACKSTOP: set on the reconcile tick that finds a
         # run's PR MERGED without a clean judge on its merged head and without an audited
         # override (`merged_outside_gate`) — a human in a plain terminal, a non-Claude
@@ -3901,6 +3917,7 @@ def mark_rework_disputed(task_id: str, reason: str) -> dict:
                          "— nothing was changed. Re-read it and decide again.",
             }
         rework_count = fresh["rework_count"] or 0
+        review_round = review_reworks(fresh)        # 🏗️🔁 CMX-192: what the cap counts
         reviews = reviews_of(dict(fresh))
         reviews.append({
             "round": len(reviews) + 1, "at": _now(), "body": reason, "verdict": "disputed",
@@ -3912,7 +3929,7 @@ def mark_rework_disputed(task_id: str, reason: str) -> dict:
         if head_moved:
             new_status = "awaiting_review"
             text = (
-                f"🔀 Rework round {rework_count}/{_rework_cap(fresh)} disputed by the agent, "
+                f"🔀 Rework round {review_round}/{_rework_cap(fresh)} disputed by the agent, "
                 f"but the PR's head already moved past the disputed verdict "
                 f"(`{judge_sha[:12]}` → `{ci.head_sha[:12]}`) — routed back to automatic "
                 f"review instead of a human; the new head still goes through the judge "
@@ -3926,7 +3943,7 @@ def mark_rework_disputed(task_id: str, reason: str) -> dict:
         else:
             new_status = "needs_human"
             text = _format_escalation(
-                f"🔁🚫 Rework round {rework_count}/{_rework_cap(fresh)} disputed by the agent — "
+                f"🔁🚫 Rework round {review_round}/{_rework_cap(fresh)} disputed by the agent — "
                 f"nothing was pushed: {reason}",
                 recommendation="Read the agent's reasoning against the verdict. If it's right, "
                                 "`chela retry` to send the same head through the loop again "
@@ -3972,6 +3989,7 @@ def mark_rework_disputed(task_id: str, reason: str) -> dict:
         "ok": True, "task_id": task_id, "status": new_status,
         "branch_name": row.get("branch_name"), "pr_url": pr_url,
         "rework_count": rework_count, "max_reworks": _rework_cap(row),
+        "review_reworks": review_round,
         "comment_posted": posted, "comment_detail": detail,
         "head_moved": head_moved,
     }
@@ -4349,7 +4367,7 @@ def adopt_pr(pr_ident: str, workflow_path: str | Path, *, reason: str = "") -> d
 
 def request_changes(
     ident: str, body: str, *, post_comment: bool = True, mutations: list[dict] | None = None,
-    judge_state: str | None = None,
+    judge_state: str | None = None, cause: str = "review",
 ) -> dict:
 
     """FAIL a PR under review: the run goes to ``changes_requested`` and the loop turns.
@@ -4383,6 +4401,10 @@ def request_changes(
     It increments nothing. ``rework_count`` is spent when the dispatcher actually spawns
     the rework (:func:`_respawn_rework`) — a verdict that never gets a concurrency slot
     must not burn a round of the cap.
+
+    🏗️🔁 CMX-192: ``cause`` is written to ``rework_cause`` in the same write — ``review``
+    (the default: a judge, a reviewer, a conflict) spends a rework-cap round when it is
+    re-spawned; ``infra`` (the CI send-back) does not, and is counted in ``infra_restarts``.
     """
     body = (body or "").strip()
     if not body:
@@ -4414,9 +4436,11 @@ def request_changes(
         # `_cancel_moot_judges` would read as sent back by someone else and kill mid-verdict.
         cur = conn.execute(
             "UPDATE runs SET status='changes_requested', review_history=?, "
-            "judge_state=COALESCE(?, judge_state) "
+            "judge_state=COALESCE(?, judge_state), rework_cause=? "
             "WHERE task_id=? AND status='awaiting_review'",
-            (json.dumps(reviews), judge_state, task_id),
+            (json.dumps(reviews), judge_state,
+             REWORK_CAUSE_INFRA if cause == REWORK_CAUSE_INFRA else REWORK_CAUSE_REVIEW,
+             task_id),
         )
         conn.commit()
         if cur.rowcount == 0:
@@ -4450,6 +4474,7 @@ def request_changes(
         "ok": True, "task_id": task_id, "status": "changes_requested",
         "branch_name": run.get("branch_name"), "pr_url": run.get("pr_url"),
         "round": len(reviews), "rework_count": run.get("rework_count") or 0,
+        "review_reworks": review_reworks(run),
         "max_reworks": _rework_cap(run), "comment_posted": posted, "comment_detail": detail,
         # The CLI checks that SOMETHING will actually come and pick this run up before it
         # tells the reviewer so (main._rework_prospects). It needs the workflow to check.
@@ -4744,6 +4769,7 @@ def reopen(ident: str, reason: str = "") -> dict:
         "ok": True, "task_id": task_id, "status": "awaiting_review",
         "branch_name": run.get("branch_name"), "pr_url": run.get("pr_url"),
         "rework_count": run.get("rework_count") or 0, "max_reworks": _rework_cap(run),
+        "review_reworks": review_reworks(run),
         "reopen_count": new_reopen_count,
         "comment_posted": posted, "comment_detail": detail,
     }
@@ -4842,6 +4868,7 @@ def retry(ident: str, reason: str = "") -> dict:
         "ok": True, "task_id": task_id, "status": "changes_requested",
         "branch_name": run.get("branch_name"), "pr_url": run.get("pr_url"),
         "rework_count": run.get("rework_count") or 0, "max_reworks": cap,
+        "review_reworks": review_reworks(run),
         "retry_count": new_retry_count,
         "comment_posted": posted, "comment_detail": detail,
     }
@@ -6545,13 +6572,21 @@ def tick(workflow_path: str | Path) -> dict:
             # this line costs at most ONE missed verdict (a human still sees the red PR),
             # while a crash before it would re-fire the same red every tick and burn the
             # whole rework budget on a single commit — the very bug this guard exists for.
-            conn.execute("UPDATE runs SET ci_failed_sha=? WHERE task_id=?", (sha, task_id))
+            # 🏗️🔁 CMX-192: a CI send-back is an INFRA restart, not a review round — charged
+            # in the same write, BEFORE the verdict (as 1c″ grants its conflict round), so 1d
+            # never sees this round as a review one; undone below if the verdict is not
+            # written. The dispatcher cannot tell a flake that failed its re-run twice (the
+            # CMX-188 clock flake, on CMX-180) from a real red, so every CI send-back counts
+            # here; a PR that keeps going red is still stopped, by `max_infra_restarts`.
+            conn.execute("UPDATE runs SET ci_failed_sha=?, "
+                         "infra_restarts=COALESCE(infra_restarts, 0) + 1 WHERE task_id=?",
+                         (sha, task_id))
             conn.commit()
             # CMX-86: tell the orchestrator NOW, with the failing job and line — and mark the
             # rework edge below as already said, so it does not hear the same red twice.
             _inbox_ci_red(row, sha, ci, log_tail, sent_back=True)
             try:
-                result = request_changes(task_id, body)
+                result = request_changes(task_id, body, cause=REWORK_CAUSE_INFRA)
             except sqlite3.Error as e:
                 _inbox_forget_ci_edge(task_id)
                 # request_changes opens its OWN connection, and a busy DB can refuse it. Two
@@ -6563,24 +6598,30 @@ def tick(workflow_path: str | Path) -> dict:
                 log.error("CI: %s is red but the verdict could not be written: %s — the sha is "
                           "un-burned and this red will be retried next tick", task_id, e)
                 try:
-                    conn.execute("UPDATE runs SET ci_failed_sha=? WHERE task_id=?",
-                                 (row["ci_failed_sha"], task_id))
+                    conn.execute("UPDATE runs SET ci_failed_sha=?, infra_restarts=? "
+                                 "WHERE task_id=?",
+                                 (row["ci_failed_sha"], infra_restarts(row), task_id))
                     conn.commit()
                 except sqlite3.Error:
                     pass   # the DB is the thing that is broken; next tick re-reads the red
                 continue
             if not result.get("ok"):
                 # The CAS refused it — the row moved (a human merged it, or a reviewer got
-                # there first). Nothing was written, and nothing should be.
+                # there first). Nothing was written, and nothing should be — so the infra
+                # restart charged above is handed back (CMX-192).
+                conn.execute("UPDATE runs SET infra_restarts=? WHERE task_id=?",
+                             (infra_restarts(row), task_id))
+                conn.commit()
                 _inbox_forget_ci_edge(task_id)
                 log.info("CI: %s is red, but the verdict was not written: %s",
                          task_id, result.get("error"))
                 continue
             summary["ci_failed"] += 1
             log.warning(
-                "CI is RED on %s (%s) — run %s sent back for rework (round %s, cap %s): %s",
+                "CI is RED on %s (%s) — run %s sent back for rework (round %s, infra restart "
+                "%s/%s, not charged to the review cap): %s",
                 row["pr_url"] or "?", sha[:12], task_id, result.get("round"),
-                result.get("max_reworks"), ", ".join(ci.failing),
+                infra_restarts(row) + 1, infra_restart_cap(row), ", ".join(ci.failing),
             )
 
         # 1c″. 🔀 CMX-262: A PR THAT CONFLICTS WITH ITS BASE IS MERGED FORWARD, OR SENT BACK.
@@ -6655,12 +6696,34 @@ def tick(workflow_path: str | Path) -> dict:
             # 🔁🚪 CMX-237: a `chela retry` grants extra rounds ON TOP of that budget — see
             # `effective_rework_cap`, which the inbox reads too (CMX-58).
             effective_cap = effective_rework_cap(row)
-            if rework_cap_reached(row):
+            # 🏗️🔁 CMX-192: the infra budget FIRST, and with its own reason — a run that
+            # never failed a review must not be told it "still fails review".
+            if infra_cap_reached(row):
                 _escalate(
                     conn, row,
-                    f"rework cap reached ({row['rework_count'] or 0}/{effective_cap}) — the "
-                    "PR still fails review. Branch, worktree and PR are preserved; every "
-                    "verdict is on the run row (review_history).",
+                    f"infra restart cap reached ({infra_restarts(row)}/"
+                    f"{infra_restart_cap(row)}) — CI failures and rework agents that died "
+                    "without handing in (window gone, stalled, launch failed), not review "
+                    f"verdicts (review reworks: {review_reworks(row)}/{effective_cap}). "
+                    "Branch, worktree and PR are preserved; every verdict is on the run row "
+                    "(review_history).",
+                    recommendation="Fix the infrastructure, then `chela retry` — check the "
+                                    "PR's Checks tab for a red that is not the PR's fault and "
+                                    "`chela doctor` for tmux or launch trouble first.",
+                    options=[
+                        "Fix the infrastructure, then `chela retry`",
+                        "Fix it yourself on the branch and `chela reopen`",
+                        "Close the PR and let the task be redispatched fresh",
+                    ],
+                )
+                summary["escalated"] += 1
+            elif review_cap_reached(row):
+                _escalate(
+                    conn, row,
+                    f"rework cap reached ({review_reworks(row)}/{effective_cap}; infra "
+                    f"restarts: {infra_restarts(row)}) — the PR still fails review. Branch, "
+                    "worktree and PR are preserved; every verdict is on the run row "
+                    "(review_history).",
                     recommendation="Fix it yourself on the branch and `chela reopen` — read "
                                     "the review history on the run first for what every rework "
                                     "round already tried, then push the fix and reopen to put "
@@ -7229,23 +7292,75 @@ def _rework_cap(row) -> int:
     return max_reworks_for(_row_risk(row))
 
 
+def _col(row, name: str):
+    """An optional column, tolerantly: a hand-built dict or an old Row may lack it."""
+    try:
+        return row[name]
+    except (IndexError, KeyError):
+        return None
+
+
+REWORK_CAUSE_REVIEW = "review"
+REWORK_CAUSE_INFRA = "infra"
+
+
+def rework_cause(row) -> str:
+    """🏗️🔁 CMX-192. Why the run was last sent back — ``infra`` only when it says so; a
+    NULL (a pre-CMX-192 row) is a review verdict, which is what every send-back was then."""
+    return REWORK_CAUSE_INFRA if _col(row, "rework_cause") == REWORK_CAUSE_INFRA \
+        else REWORK_CAUSE_REVIEW
+
+
+def review_reworks(row) -> int:
+    """🏗️🔁 CMX-192. The re-spawns a REVIEW verdict caused (judge blocked, a reviewer's
+    changes_requested, a conflict) — the number the rework cap bounds. A pre-CMX-192 row
+    never split its rounds, so it reads as ``rework_count``, exactly the old cap's count."""
+    value = _col(row, "review_reworks")
+    return (row["rework_count"] or 0) if value is None else value
+
+
+def infra_restarts(row) -> int:
+    """🏗️🔁 CMX-192. How many times this run was sent round again by infrastructure, not
+    review: CI send-backs plus rework agents that died without handing in."""
+    return _col(row, "infra_restarts") or 0
+
+
 def effective_rework_cap(row) -> int:
     """🔁🚪 CMX-237. THIS run's rework budget INCLUDING human-granted rounds: its risk cap
     plus every ``chela retry`` grant. The grant is never folded into :func:`_rework_cap`
     itself, so a run with no grant escalates at EXACTLY its risk cap."""
-    try:
-        free = row["conflict_reworks"] or 0     # 🔀 CMX-262: conflict rounds are free
-    except (IndexError, KeyError):
-        free = 0
+    free = _col(row, "conflict_reworks") or 0   # 🔀 CMX-262: conflict rounds are free
     return _rework_cap(row) + (row["retry_count"] or 0) + free
+
+
+def infra_restart_cap(row) -> int:
+    """🏗️🔁 CMX-192. THIS run's infra budget: ``max_infra_restarts`` plus every ``chela
+    retry`` grant (a retry after an infra escalation buys a round, as one does for review)."""
+    return max_infra_restarts() + (row["retry_count"] or 0)
+
+
+def infra_cap_reached(row) -> bool:
+    """🏗️🔁 CMX-192. Has this run restarted on infrastructure as often as it may — and is the
+    round it is waiting for an infra one? A review verdict on a run with a spent infra budget
+    is the review cap's call, with the review reason: the infra budget is not what it spends."""
+    return (rework_cause(row) == REWORK_CAUSE_INFRA
+            and infra_restarts(row) >= infra_restart_cap(row))
+
+
+def review_cap_reached(row) -> bool:
+    """Has this run spent every round a REVIEW verdict may spend — and is the round it is
+    waiting for a review one? An infra send-back is not stopped by the review cap: that is
+    what spent CMX-180's whole budget without a single judge round (CMX-192)."""
+    return (rework_cause(row) == REWORK_CAUSE_REVIEW
+            and review_reworks(row) >= effective_rework_cap(row))
 
 
 def rework_cap_reached(row) -> bool:
     """Is a ``changes_requested`` run out of rounds — will the next tick ESCALATE it to
     ``needs_human`` instead of re-spawning it? The tick's own cap check (1d) and the inbox's
     "sent back for rework" notice (CMX-58) both ask THIS, so the notice can never promise a
-    round the dispatcher is about to refuse."""
-    return (row["rework_count"] or 0) >= effective_rework_cap(row)
+    round the dispatcher is about to refuse. Either budget counts (CMX-192)."""
+    return infra_cap_reached(row) or review_cap_reached(row)
 
 
 # 🗂️🔁 CMX-65. The columns a requeued claim KEEPS from the closed run's row: the task's own
@@ -7913,18 +8028,31 @@ def _rework_failed(conn: sqlite3.Connection, row: sqlite3.Row, error: str) -> No
     #                         exits non-zero) would otherwise retry every tick forever. This
     #                         is what makes the failure path terminate — in `needs_human`,
     #                         where a person sees it.
+    #
+    # 🏗️🔁 CMX-192: either way the death is INFRA, not review — `infra_restarts` counts it,
+    # bounded by its own cap (`max_infra_restarts`), where it escalates with a reason that
+    # names infra. The termination argument above now rests on that cap: the review cap never
+    # sees these rounds. `rework_cause` turns `infra` (the next re-spawn is free on the review
+    # cap) only when the round in flight had actually been spawned — the DB row says
+    # `running`; a re-spawn that died before its own write never charged its verdict, so that
+    # verdict's cause stays as it was and the next re-spawn charges it.
     spent = (row["rework_count"] or 0)
     if row["status"] != "running":
         spent += 1
+    now = conn.execute("SELECT status FROM runs WHERE task_id=?", (task_id,)).fetchone()
+    spawned = now is not None and now["status"] == "running"
     conn.execute(
         "UPDATE runs SET status='changes_requested', rework_count=?, last_error=?, "
-        "window_id=NULL, window_epoch=NULL WHERE task_id=?",
-        (spent, error, task_id),
+        "window_id=NULL, window_epoch=NULL, "
+        "infra_restarts=COALESCE(infra_restarts, 0) + 1, "
+        "rework_cause=CASE WHEN ? THEN ? ELSE rework_cause END WHERE task_id=?",
+        (spent, error, spawned, REWORK_CAUSE_INFRA, task_id),
     )
     conn.commit()
     log.warning(
         "Task %s: rework round %d FAILED (%s) — back to changes_requested, verdict intact "
-        "(cap %d)", task_id, spent, error, _rework_cap(row),
+        "(cap %d, infra restart %d/%d)", task_id, spent, error, _rework_cap(row),
+        infra_restarts(row) + 1, infra_restart_cap(row),
     )
 
 
@@ -8017,6 +8145,8 @@ def _respawn_rework(
                  task_id, worktree, branch)
 
     rework_round = (row["rework_count"] or 0) + 1
+    # 🏗️🔁 CMX-192: only a round a REVIEW verdict caused spends the rework cap.
+    review_round = review_reworks(row) + (1 if rework_cause(row) == REWORK_CAUSE_REVIEW else 0)
     verdict = latest_verdict(dict(row))
     hook_vars = _rework_vars(
         wf, row, worktree, verdict, rework_round, latest_required_mutations(dict(row)), task,
@@ -8033,9 +8163,9 @@ def _respawn_rework(
         "UPDATE runs SET status='running', rework_count=?, started_at=?, ended_at=NULL, "
         "last_error=NULL, idle_nudged_at=NULL, window_id=NULL, window_epoch=NULL, "
         "parked_at=NULL, parked_reason=NULL, parked_until=NULL, parked_by=NULL, "
-        "worktree_path=? "
+        "worktree_path=?, review_reworks=? "
         "WHERE task_id=?",
-        (rework_round, _now(), str(worktree), task_id),
+        (rework_round, _now(), str(worktree), review_round, task_id),
     )
     conn.commit()
 

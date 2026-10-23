@@ -128,6 +128,8 @@ def test_registry_has_exactly_the_twelve_settings_inventory_knobs(mods):
         # ⏳⚖️ CMX-431: the battery-scaled judge wall.
         "judge_wall_base_seconds", "judge_wall_per_experiment_seconds",
         "judge_wall_ceiling_seconds", "judge_wall_grace_seconds",
+        # 🏗️🔁 CMX-192: the infra-restart budget, separate from the rework caps.
+        "max_infra_restarts",
     }
 
 
@@ -151,6 +153,7 @@ def test_exactly_four_knobs_are_restart_required(mods):
         # ⏳⚖️ CMX-431: the battery-scaled judge wall.
         "judge_wall_base_seconds", "judge_wall_per_experiment_seconds",
         "judge_wall_ceiling_seconds", "judge_wall_grace_seconds",
+        "max_infra_restarts",
     }
 
 
@@ -168,6 +171,7 @@ def test_named_readers_return_their_own_knobs_stored_value(mods):
         "judge_wall_per_experiment_seconds": config.judge_wall_per_experiment_seconds,
         "judge_wall_ceiling_seconds": config.judge_wall_ceiling_seconds,
         "judge_wall_grace_seconds": config.judge_wall_grace_seconds,
+        "max_infra_restarts": config.max_infra_restarts,
     }
     for key, reader in readers.items():
         knob = next(k for k in config.DISPATCH_KNOBS if k.key == key)
@@ -176,7 +180,8 @@ def test_named_readers_return_their_own_knobs_stored_value(mods):
     distinct = {"max_reworks": 11, "judge_max_unknown_retries": 12,
                 "worktree_disk_budget_bytes": 999_000, "judge_outage_backoff_seconds": 42.0,
                 "judge_wall_base_seconds": 43.0, "judge_wall_per_experiment_seconds": 44.0,
-                "judge_wall_ceiling_seconds": 45.0, "judge_wall_grace_seconds": 46.0}
+                "judge_wall_ceiling_seconds": 45.0, "judge_wall_grace_seconds": 46.0,
+                "max_infra_restarts": 13}
     for key, value in distinct.items():
         userconfig.set_(key, value)
     for key, reader in readers.items():

@@ -56,6 +56,7 @@ from chela import (
     sessionids,
     sidebar_archive,
     spawn,
+    sweep_nightly,
     ticklock,
     update,
     userconfig,
@@ -260,6 +261,7 @@ def cmd_run(args) -> None:
     # CMX-260: the ops scan is a detached child — the loop only ever starts it.
     last_ops_scan = 0.0
     ops_child = None
+    nightly_child = None      # CMX-303: the nightly sweep — one detached child at a time
     # Held in memory, exactly like `waiting_seen`: it is the PREVIOUS status snapshot
     # the inbox edge-triggers against. Starting empty means a fresh daemon baselines
     # silently on its first tick instead of announcing every already-idle agent. (A
@@ -434,6 +436,13 @@ def cmd_run(args) -> None:
                 except Exception:
                     log.exception("Ops scan spawn failed")
                 last_ops_scan = now
+
+            # ⚖️🧹🌙 CMX-303: the nightly sweep of what the standard tier merged unjudged —
+            # spawned detached at `sweep.nightly_at`, one at a time, never waited on.
+            try:
+                nightly_child = sweep_nightly.daemon_tick(DISPATCH_WORKFLOWS, nightly_child)
+            except Exception:
+                log.exception("Nightly sweep spawn failed")
 
             # Self-update: informs by default (CMX-142 part 1) — `chela update` is a
             # human-run act, and `update.check_and_notify` never pulls. `CHELA_AUTO_UPDATE`
@@ -1516,8 +1525,10 @@ def _format_awaiting_run(r: dict, *, now: datetime | None = None) -> str:
     retry_n = r.get("retry_count") or 0
     reopen_chip = f"reopen={reopen_n}  " if reopen_n else ""
     retry_chip = f"retry={retry_n}  " if retry_n else ""
+    infra_n = r.get("infra_restarts") or 0      # 🏗️🔁 CMX-192
+    infra_chip = f"infra={infra_n}  " if infra_n else ""
     return (f"  {task_id}  {status:<16}  {_ci_chip(r):<11}  age={age:<5}  "
-            f"{reopen_chip}{retry_chip}{pr:<45}  {title}")
+            f"{reopen_chip}{retry_chip}{infra_chip}{pr:<45}  {title}")
 
 
 def cmd_dispatch_runs(args) -> None:
@@ -2767,10 +2778,10 @@ def cmd_rework_disputed(args) -> None:
     if status == "awaiting_review":
         print(f"🔀 Task {result['task_id']} disputed — the head already moved past the "
               "judged verdict, routed back to awaiting_review for automatic re-judging "
-              f"(rework {result.get('rework_count')}/{result.get('max_reworks')})")
+              f"(rework {result.get('review_reworks', result.get('rework_count'))}/{result.get('max_reworks')})")
     else:
         print(f"🔁🚫 Task {result['task_id']} disputed — needs_human "
-              f"(rework {result.get('rework_count')}/{result.get('max_reworks')})")
+              f"(rework {result.get('review_reworks', result.get('rework_count'))}/{result.get('max_reworks')})")
     if result.get("comment_posted"):
         print(f"  PR comment posted: {result.get('pr_url') or ''}")
     else:
@@ -2864,7 +2875,7 @@ def cmd_review(args) -> None:
     task_id, status = result["task_id"], result["status"]
     if args.request_changes:
         print(f"Run {task_id} ({result.get('branch_name') or '?'}) → changes_requested "
-              f"(verdict {result['round']}, rework {result['rework_count']}/{result['max_reworks']})")
+              f"(verdict {result['round']}, rework {result.get('review_reworks', result['rework_count'])}/{result['max_reworks']})")
         for line in _rework_prospects(result.get("workflow_path")):
             print(f"  {line}")
     else:
@@ -2986,6 +2997,22 @@ def cmd_judge_self_check(args) -> None:
         sys.exit(2)
     print(f"✓ every guard held ({len(result['outcomes'])} experiment(s), all KILLED) — "
           "safe to commit.")
+
+
+def cmd_judge_nightly_sweep(args) -> None:
+    """⚖️🧹🌙 CMX-303: one nightly sweep of a workflow (see :mod:`chela.sweep_nightly`) — the
+    daemon's detached child, or a hand run. Exit 0 clean/skipped, 1 survivors to file (filed,
+    would file, or refused), 2 CANNOT VERIFY or an unreadable workflow."""
+    try:
+        wf = workflow.load_workflow(args.workflow)
+    except Exception as e:  # noqa: BLE001 — a WORKFLOW.md that does not parse
+        print(f"nightly-sweep: {args.workflow} could not be read: {e}", file=sys.stderr)
+        sys.exit(2)
+    result = sweep_nightly.run(wf)
+    line = f"nightly sweep: {result['status']}" + (f" — {result['why']}" if result.get("why")
+                                                    else "")
+    print(json.dumps(result, indent=2) if args.json else line)
+    sys.exit({sweep_nightly.CANNOT_VERIFY: 2, sweep_nightly.SURVIVORS: 1}.get(result["status"], 0))
 
 
 def cmd_judge_sweep(args) -> None:
@@ -3542,7 +3569,7 @@ def cmd_reopen(args) -> None:
         print(f"reopen: {result.get('error', 'unknown error')}")
         sys.exit(1)
     print(f"🔓 Run {result['task_id']} ({result.get('branch_name') or '?'}) → awaiting_review "
-          f"(rework {result.get('rework_count')}/{result.get('max_reworks')}, "
+          f"(rework {result.get('review_reworks', result.get('rework_count'))}/{result.get('max_reworks')}, "
           f"reopen #{result.get('reopen_count')}) — back under judge/review/merge.")
     if result.get("comment_posted"):
         print(f"  PR comment posted: {result.get('pr_url') or ''}")
@@ -3569,7 +3596,7 @@ def cmd_retry(args) -> None:
         print(f"retry: {result.get('error', 'unknown error')}")
         sys.exit(1)
     print(f"🔁 Run {result['task_id']} ({result.get('branch_name') or '?'}) → "
-          f"changes_requested (rework {result.get('rework_count')}/{result.get('max_reworks')}, "
+          f"changes_requested (rework {result.get('review_reworks', result.get('rework_count'))}/{result.get('max_reworks')}, "
           f"+{result.get('retry_count')} human-granted) — the dispatcher will re-spawn it "
           "next tick.")
     if result.get("comment_posted"):
@@ -4190,6 +4217,16 @@ def main() -> None:
         help="Measure at most N mutations (highest priority first); the rest are UNRUN. "
              "Default: judge.sweep_max_mutations, else 60. 0 = the default",
     )
+    p_jnightly = judge_sub.add_parser(
+        "nightly-sweep",
+        help="⚖️🧹🌙 Mutation-sweep the lines STANDARD-tier PRs merged to the base branch in the "
+             "last 24h and hand each surviving guard to the filer once (the daemon runs it at "
+             "sweep.nightly_at)",
+    )
+    p_jnightly.add_argument("--workflow", metavar="PATH", required=True,
+                            help="The WORKFLOW.md whose base branch, judge suite and sweep "
+                                 "settings to use")
+    p_jnightly.add_argument("--json", action="store_true", help="Print the result as JSON")
     from chela.judge_eval import cli as judge_eval_cli
     judge_eval_cli.add_parser(judge_sub)
     p_jshow = judge_sub.add_parser(
@@ -4713,6 +4750,8 @@ def main() -> None:
             cmd_judge_self_check(args)
         elif args.judge_cmd == "sweep":
             cmd_judge_sweep(args)
+        elif args.judge_cmd == "nightly-sweep":
+            cmd_judge_nightly_sweep(args)
         elif args.judge_cmd == "ack-blocked-race":
             cmd_judge_ack_blocked_race(args)
         elif args.judge_cmd == "eval":
