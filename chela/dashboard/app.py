@@ -1097,6 +1097,31 @@ def _term_theme_shim() -> str:
 # fixed, later ticks are a cheap no-op; it also re-applies (and re-arms the
 # walk) on tab refocus and on storage changes, and covers `window.term` not
 # existing yet at first tick.
+#
+# CMX-321 — the pane must not visibly change font or size while it loads. ttyd
+# opens xterm at its own built-in defaults (13px Consolas) and paints; the
+# SET_PREFERENCES frame then re-fonts it to the server's client-options; then this
+# shim applies the viewer's prefs and walks the atlas through a decoy size. Each
+# step reflowed in view. Three changes:
+#   * hidden until settled: `_TERM_BOOT_CSS` keeps `.xterm` at opacity 0 (not
+#     display:none — fit() must still measure, and the helper textarea must stay
+#     focusable) while <html> carries `chela-term-booting`, which this shim adds at
+#     head time and removes one frame after the first apply's final fit (so xterm
+#     has rendered the final rows while still hidden). The decoy walk therefore
+#     runs unseen. A fallback reveals the pane TERM_BOOT_FALLBACK_MS after
+#     window.term appears, so a font that never loads cannot leave it blank;
+#   * at the source: ttyd merges `location.search` into SET_PREFERENCES LAST
+#     (its parseOptsFromUrlQuery), so the shim pins the viewer's fontSize/
+#     fontFamily into the URL (history.replaceState, before ttyd's body script
+#     runs). The server default never lands, on load or on a WS reconnect;
+#   * no wait: a hook on the `window.term` setter runs apply() the moment ttyd
+#     creates the terminal (not on the first 500ms tick), and the chosen faces
+#     start loading at head time.
+# The CHELA_GRID_FONT presenter size is not pinned (it is known only later).
+TERM_BOOT_FALLBACK_MS = 1500
+
+_TERM_BOOT_CSS = "<style>html.chela-term-booting .xterm{opacity:0!important}</style>"
+
 _TERM_FONT_PREF_SHIM = (
     "<script>(function(){"
     "var LAT={jetbrains:'JetBrains Mono',firacode:'Fira Code',"
@@ -1104,14 +1129,35 @@ _TERM_FONT_PREF_SHIM = (
     "var HEB={miriam:'Miriam Mono CLM',noto:'Noto Sans Hebrew',heebo:'Heebo',"
     "assistant:'Assistant',rubik:'Rubik',frankruhl:'Frank Ruhl Libre',"
     "david:'David Libre'};"
-    "var atlasFixed=false;"
+    "var atlasFixed=false,seen=false,shown=false;"
+    "var root=document.documentElement;"
+    "try{root.classList.add('chela-term-booting');}catch(e){}"
+    "function reveal(){if(shown)return;shown=true;"
+    "try{root.classList.remove('chela-term-booting');}catch(e){}}"
     "function raf(){return new Promise(function(res){"
     "if(window.requestAnimationFrame)requestAnimationFrame(res);else setTimeout(res,16);});}"
-    "function apply(){var t=window.term;if(!t)return;"
+    "function want(){"
     "var lat=LAT[localStorage.getItem('chela_term_latin')]||LAT.jetbrains;"
     "var heb=HEB[localStorage.getItem('chela_term_font')]||HEB.miriam;"
-    "var s=window.__CHELA_GRID_FONT__||(parseInt(localStorage.getItem('chela_term_fontsize'),10)||14);"
+    "var ps=parseInt(localStorage.getItem('chela_term_fontsize'),10)||14;"
     "var fam=\"'\"+lat+\"','Symbols Nerd Font','Symbola Fallback','\"+heb+\"',monospace\";"
+    "return{lat:lat,heb:heb,ps:ps,s:window.__CHELA_GRID_FONT__||ps,fam:fam};}"
+    "function pin(w){try{var q=new URLSearchParams(location.search);"
+    "if(q.get('fontSize')===String(w.ps)&&q.get('fontFamily')===w.fam)return;"
+    "q.set('fontSize',String(w.ps));q.set('fontFamily',w.fam);"
+    "history.replaceState(history.state,'',location.pathname+'?'+q.toString()+location.hash);"
+    "}catch(e){}}"
+    "function load(w){var s=w.s,lat=w.lat,heb=w.heb;"
+    "var L=[s+\"px '\"+lat+\"'\",\"bold \"+s+\"px '\"+lat+\"'\",s+\"px '\"+heb+\"'\","
+    "\"bold \"+s+\"px '\"+heb+\"'\",s+\"px 'Symbols Nerd Font'\","
+    "s+\"px 'Symbola Fallback'\"];"
+    "return (document.fonts&&document.fonts.load)?"
+    "Promise.all(L.map(function(f){return document.fonts.load(f).catch(function(){});}))"
+    ":Promise.resolve();}"
+    "try{var w0=want();pin(w0);load(w0);}catch(e){}"
+    "function apply(){var t=window.term;if(!t)return;"
+    "if(!seen){seen=true;setTimeout(reveal," + str(TERM_BOOT_FALLBACK_MS) + ");}"
+    "var w=want(),s=w.s,fam=w.fam;pin(w);"
     "function getSize(){return t.options?t.options.fontSize:"
     "(t.getOption?t.getOption('fontSize'):undefined);}"
     "function getFam(){return t.options?t.options.fontFamily:"
@@ -1121,13 +1167,7 @@ _TERM_FONT_PREF_SHIM = (
     "function setFam(f){if(t.options)t.options.fontFamily=f;"
     "else if(t.setOption)t.setOption('fontFamily',f);}"
     "if(atlasFixed&&getSize()===s&&getFam()===fam)return;"
-    "var L=[s+\"px '\"+lat+\"'\",\"bold \"+s+\"px '\"+lat+\"'\",s+\"px '\"+heb+\"'\","
-    "\"bold \"+s+\"px '\"+heb+\"'\",s+\"px 'Symbols Nerd Font'\","
-    "s+\"px 'Symbola Fallback'\"];"
-    "var P=(document.fonts&&document.fonts.load)?"
-    "Promise.all(L.map(function(f){return document.fonts.load(f).catch(function(){});}))"
-    ":Promise.resolve();"
-    "P.then(function(){"
+    "load(w).then(function(){"
     "try{setFam(fam);setSize(s);"
     "if(t.fit&&!window.__CHELA_GRID_FONT__)t.fit();"
     "if(t.refresh&&t.rows)t.refresh(0,t.rows-1);"
@@ -1138,7 +1178,7 @@ _TERM_FONT_PREF_SHIM = (
     "var decoy=s>1?s-1:s+1;"
     "setSize(decoy);"
     "if(t.refresh&&t.rows)t.refresh(0,t.rows-1);"
-    "raf().then(raf).then(function(){"
+    "return raf().then(raf).then(function(){"
     "try{setSize(s);"
     "if(t.refresh&&t.rows)t.refresh(0,t.rows-1);"
     "if(t.fit&&!window.__CHELA_GRID_FONT__)t.fit();"
@@ -1146,8 +1186,17 @@ _TERM_FONT_PREF_SHIM = (
     "atlasFixed=true;"
     "});"
     "}catch(e){atlasFixed=true;}"
-    "});}"
+    "}).catch(function(){}).then(raf).then(reveal);}"
     "window.chelaApplyTermPrefs=apply;"
+    # Chain onto the theme shim's window.term accessor (or own the property when
+    # there is none), so apply() starts the moment ttyd assigns the terminal.
+    "try{var d=Object.getOwnPropertyDescriptor(window,'term');"
+    "if(!d||d.configurable){var cur=d&&!d.get?d.value:undefined;"
+    "Object.defineProperty(window,'term',{configurable:true,"
+    "get:d&&d.get?d.get:function(){return cur;},"
+    "set:function(v){if(d&&d.set)d.set.call(window,v);else cur=v;"
+    "try{apply();}catch(e){}}});}"
+    "}catch(e){}"
     "var n=0,iv=setInterval(function(){apply();if(++n>60)clearInterval(iv);},500);"
     "document.addEventListener('visibilitychange',function(){"
     "if(!document.hidden){atlasFixed=false;apply();}});"
@@ -1235,7 +1284,7 @@ def term_http(wid, rest):
     if "text/html" in ctype.lower():
         html = body.decode("utf-8", "replace")
         shims = (_term_reconnect_shim()
-                 + _term_theme_shim() + _TERM_FONT_CSS + _TERM_FONT_PREF_SHIM
+                 + _term_theme_shim() + _TERM_FONT_CSS + _TERM_BOOT_CSS + _TERM_FONT_PREF_SHIM
                  + _term_presence_shim(wid)
                  + _term_upload_shim()
                  + _TERM_PASTE_SHIM + _TERM_PASTE_KEY_SHIM + _TERM_CONTEXTMENU_SHIM

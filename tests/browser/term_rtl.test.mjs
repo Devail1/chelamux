@@ -24,17 +24,10 @@
 // Harness: tests/browser/fixture.mjs. Local: `pnpm run test:browser`.
 import { after, describe, test } from 'node:test';
 import assert from 'node:assert/strict';
-import { execFileSync, spawn, spawnSync } from 'node:child_process';
-import { existsSync, readFileSync } from 'node:fs';
-import { createServer } from 'node:net';
-import { dirname, join } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { launchChromium } from './fixture.mjs';
-
-const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
-const SCRIPT = join(ROOT, 'scripts', 'agent-terminals.sh');
-const FONTS = join(ROOT, 'chela', 'dashboard', 'static', 'fonts');
-const VENDOR = join(ROOT, 'chela', 'collab-relay', 'public', 'vendor');
+import { FONTS, VENDOR, startTtyd, termShims, ttydClientOptions, ttydMissing } from './term_page.mjs';
 
 // A pane's reply line, and Claude Code's prompt box with Hebrew typed into it.
 const OUTPUT = 'abc שלום עולם xyz';
@@ -48,35 +41,6 @@ const VIEWPORTS = [
     { name: 'desktop', viewport: { width: 1280, height: 400 } },
     { name: 'phone', viewport: { width: 390, height: 300 }, deviceScaleFactor: 3, isMobile: true, hasTouch: true },
 ];
-
-// Every `--client-option` spawn() hands ttyd, with the script's own defaults expanded by
-// bash (no CHELA_TERM_* override leaks in from this environment).
-function ttydClientOptions() {
-    const sh = readFileSync(SCRIPT, 'utf8');
-    const spawnBody = sh.slice(sh.indexOf('\nspawn() {'), sh.indexOf('\ndespawn() {'));
-    const opts = spawnBody.split('\n')
-        .map(l => l.match(/^\s*--client-option\s+(.+?)\s*\\$/))
-        .filter(Boolean).map(m => m[1]);
-    const defs = sh.split('\n').filter(l => /^(FONT_FAMILY|FONT_SIZE|TERM_THEME|TERM_RENDERER)=/.test(l));
-    const env = Object.fromEntries(Object.entries(process.env).filter(([k]) => !k.startsWith('CHELA_TERM_')));
-    const out = execFileSync('bash', ['-c', `${defs.join('\n')}\nprintf '%s\\0' ${opts.join(' ')}`], { env });
-    return Object.fromEntries(out.toString('utf8').split('\0').filter(Boolean).map(kv => {
-        const i = kv.indexOf('=');
-        return [kv.slice(0, i), kv.slice(i + 1)];
-    }));
-}
-
-// term_http's real font CSS and font-preference shim, from app.py (the interpreter
-// agent-terminals.sh would pick: $PYTHON, else the repo venv, else python3).
-function termShims() {
-    const python = process.env.PYTHON
-        || (existsSync(join(ROOT, '.venv', 'bin', 'python')) ? join(ROOT, '.venv', 'bin', 'python') : 'python3');
-    const out = execFileSync(python, ['-c',
-        'import sys\nfrom chela.dashboard import app\n'
-        + 'sys.stdout.write(app._TERM_FONT_CSS + "\\0" + app._TERM_FONT_PREF_SHIM)'], { cwd: ROOT });
-    const [fontCss, prefShim] = out.toString('utf8').split('\0');
-    return { fontCss, prefShim };
-}
 
 // The non-space characters of every xterm row on the page, each row left to right by
 // where the browser actually drew it.
@@ -166,39 +130,17 @@ describe('Hebrew in a wall pane renders right to left (vendored xterm.js)', { sk
 
 // --- 2. a real ttyd -----------------------------------------------------------------
 
-const TTYD = process.env.TTYD || 'ttyd';
-const noTtyd = why || (spawnSync(TTYD, ['--version']).status === 0 ? false
-    : 'ttyd is not installed: the real-ttyd RTL check DID NOT RUN (set TTYD=<path> to run it)');
-
-function freePort() {
-    return new Promise((res, rej) => {
-        const srv = createServer();
-        srv.on('error', rej);
-        srv.listen(0, '127.0.0.1', () => { const { port } = srv.address(); srv.close(() => res(port)); });
-    });
-}
+const noTtyd = why || ttydMissing();
 
 describe('Hebrew in a wall pane renders right to left (real ttyd, agent-terminals.sh options)', { skip: noTtyd }, () => {
     let ttyd = null;
-    let base = '';
-    after(() => { if (ttyd) try { process.kill(-ttyd.pid, 'SIGTERM'); } catch { /* already gone */ } });
+    after(() => ttyd && ttyd.stop());
     const shims = noTtyd ? {} : termShims();
 
     for (const vp of VIEWPORTS) {
         test(`${vp.name}: output and input rows read in visual order`, async () => {
-            if (!ttyd) {
-                const port = await freePort();
-                const args = ['--interface', '127.0.0.1', '--port', String(port), '--writable'];
-                for (const [k, v] of Object.entries(options)) args.push('--client-option', `${k}=${v}`);
-                // Its own process group, so `after` takes the shell's sleep down with it.
-                ttyd = spawn(TTYD, [...args, 'bash', '-c', `printf '%s\\r\\n%s' '${OUTPUT}' '${INPUT}'; exec sleep 120`],
-                    { stdio: 'ignore', detached: true, env: { ...process.env, LANG: 'C.UTF-8' } });
-                base = `http://127.0.0.1:${port}`;
-                for (let i = 0; i < 50; i++) {
-                    try { if ((await fetch(base + '/')).ok) break; } catch { /* not up yet */ }
-                    await new Promise(r => setTimeout(r, 100));
-                }
-            }
+            ttyd ||= await startTtyd(`printf '%s\\r\\n%s' '${OUTPUT}' '${INPUT}'; exec sleep 120`, options);
+            const base = ttyd.base;
             const context = await browser.newContext(vp);
             try {
                 await context.route('**/*', async route => {
