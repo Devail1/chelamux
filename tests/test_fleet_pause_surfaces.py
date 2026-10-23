@@ -59,6 +59,7 @@ def test_snapshot_lists_agents_and_judges_sorted_with_since_and_the_holds_expiry
                    {"task": "T2", "wid": "@6", "state": "finishing",
                     "finishing": "judge sweep"}],
         "judges": [{"task": "T3", "frozen_at": 1060.0, "frozen_for": "2m", "processes": 3}],
+        "services": [],
     }
 
 

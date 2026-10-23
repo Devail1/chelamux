@@ -85,6 +85,8 @@ export type FleetPause = {
   expires_in?: string | null;
   agents?: { task: string; wid?: string | null; state?: string | null; finishing?: string | null }[];
   judges?: { task: string; frozen_for?: string | null; processes?: number }[];
+  /** CMX-319: the configured extra PM2 services and what the pause did to each. */
+  services?: { name: string; state?: string | null }[];
 } | null;
 
 export type WorkPayload = { configured?: boolean; workflows?: Workflow[]; dispatch_hold?: DispatchHold; fleet_pause?: FleetPause };

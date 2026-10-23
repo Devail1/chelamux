@@ -53,6 +53,8 @@ def resume_all() -> str:
                   for task, ok in sorted(sent.items()) if not ok]
         lines += [f"judge {task}: " + ("thawed" if ok else "⚠️ NOT fully thawed. Check it.")
                   for task, ok in sorted(resumed["thawed"].items())]
+        lines += [f"service {name}: " + ("started" if ok else "⚠️ did NOT start. pm2 start it.")
+                  for name, ok in resumed.get("services", {}).items()]
     if released is None:
         lines.append("Dispatch was not held. Nothing to resume.")
     else:

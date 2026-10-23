@@ -226,6 +226,7 @@ const FLEET = {
   since_ago: '3m', by: 'dashboard', expires_in: '27m',
   agents: [{ task: 'CMX-1', wid: '@5', state: 'interrupted' }, { task: 'CMX-2', wid: '@6', state: 'finishing', finishing: 'judge sweep' }],
   judges: [{ task: 'CMX-3', frozen_for: '2m', processes: 4 }],
+  services: [{ name: 'game-mirror', state: 'stopped' }, { name: 'game-agent', state: 'not running' }],
 };
 
 test('⋯ Pause all agents asks in a dialog first: Cancel posts nothing, confirming POSTs pause with all:true', async () => {
@@ -253,6 +254,7 @@ test('a paused fleet: no "Pause all agents", Resume names the agents, and the pa
   expect(panel()?.querySelector('.fleet-pause-head')?.textContent).toBe('Agents paused 3m ago by dashboard. The hold expires in 27m; the agents resume then.');
   expect([...must(panel()).querySelectorAll('li')].map((li) => li.textContent)).toEqual([
     'agent CMX-1 in @5: interrupted', 'agent CMX-2 in @6: finishing (judge sweep)', 'judge CMX-3: frozen 2m (4 process(es))',
+    'service game-mirror: stopped', 'service game-agent: not running',
   ]);
   await act(async () => fireEvent.click(must(holdBtn())));
   expect(posts().map((p) => p.url)).toEqual(['/api/dispatcher/resume']);

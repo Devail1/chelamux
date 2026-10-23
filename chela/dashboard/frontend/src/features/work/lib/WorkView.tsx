@@ -42,13 +42,14 @@ function FleetPaused({ fleet }: { fleet: NonNullable<Fleet> }) {
   const since = fleet.since_ago ? ` ${fleet.since_ago} ago` : '';
   const agents = fleet.agents || [];
   const judges = fleet.judges || [];
+  const services = fleet.services || [];
   return (
     <section className="fleet-pause" id="fleet-pause" aria-label="Paused agents">
       <p className="fleet-pause-head">
         Agents paused{since} by {fleet.by || '?'}.{' '}
         {fleet.expires_in ? `The hold expires in ${fleet.expires_in}; the agents resume then.` : 'The hold is gone; the next dispatch tick resumes the agents.'}
       </p>
-      {agents.length + judges.length === 0 ? (
+      {agents.length + judges.length + services.length === 0 ? (
         <p className="fleet-pause-empty">No agent was running.</p>
       ) : (
         <ul className="fleet-pause-list">
@@ -60,6 +61,11 @@ function FleetPaused({ fleet }: { fleet: NonNullable<Fleet> }) {
           {judges.map((j) => (
             <li key={`j-${j.task}`} data-task={j.task}>
               judge {j.task}: frozen{j.frozen_for ? ` ${j.frozen_for}` : ''} ({j.processes ?? 0} process(es))
+            </li>
+          ))}
+          {services.map((s) => (
+            <li key={`s-${s.name}`} data-service={s.name}>
+              service {s.name}: {s.state || '?'}
             </li>
           ))}
         </ul>

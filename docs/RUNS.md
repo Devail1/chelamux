@@ -196,3 +196,24 @@ suspended; it finishes, and no new one starts. `--resume` sends "resume" to ever
 paused. `--hold-status` lists each agent and its state (`interrupted`, `finishing <command>`
 or `failed`). If `--resume` finds the pause record unreadable, it sends nothing and leaves
 the record at `$CHELA_DIR/fleet-pause.json.resuming`, so you can see who to resume by hand.
+
+It can also stop PM2 services that are not chela's, such as a game server you want off while
+the machine is yours. List them under `pause_all` in `~/.chela/config.json`:
+
+```json
+{
+  "pause_all": {
+    "extra_services": ["game-agent", "game-tracker", "game-mirror"],
+    "resume_order": ["game-mirror", "game-agent", "game-tracker"]
+  }
+}
+```
+
+`--pause --all` runs `pm2 stop` on each one that is up. `--resume`, the dashboard and
+Telegram resumes and a lapsed `--ttl` run `pm2 start` on the ones this pause stopped, one at
+a time in `resume_order` (any it does not name start last, in `extra_services` order). A
+service that was already down before the pause stays down. If `pm2 jlist` cannot be read, no
+service is stopped. Every pm2 call runs under `env -i` with only `HOME`, `PATH` and
+`PM2_HOME`, so pm2 never reads variables a pm2-run parent leaked. `--hold-status` and the
+dashboard list each service as `stopped`, `not running`, `failed` or `unknown`. With no
+`pause_all` entry nothing changes.

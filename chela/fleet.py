@@ -9,6 +9,11 @@ claims it by an atomic rename, so two callers never both send "resume".
 
 A running judge is FROZEN instead (SIGSTOP to its agent's and run's trees, SIGCONT on resume),
 recorded first in its ledger so neither the watchdog nor the suite deadline counts frozen time.
+
+CMX-319: ``pause_all.extra_services`` in ``~/.chela/config.json`` names PM2 services (a game
+server, its trackers) the pause also stops; resume starts them again in
+``pause_all.resume_order``. Only a service this pause stopped is restarted, never one that
+was already down; the state file records which.
 """
 from __future__ import annotations
 
@@ -16,10 +21,11 @@ import json
 import logging
 import os
 import signal
+import subprocess
 import time
 from pathlib import Path
 
-from chela import config, hold, inbox, judge, messenger, procguard
+from chela import config, hold, inbox, judge, messenger, procguard, userconfig
 from chela.hold import human_duration
 
 log = logging.getLogger(__name__)
@@ -35,6 +41,11 @@ RESUME_MESSAGE = "resume: continue your plan"
 MUTATING = ("task-finished self-check", "judge sweep", "judge self-check")
 # Every state may have stopped on our word, so each is owed a "resume".
 INTERRUPTED, FINISHING, FAILED = "interrupted", "finishing", "failed"
+# CMX-319: an extra service's record. Only STOPPED (this pause stopped it) is started again.
+STOPPED, NOT_RUNNING, UNKNOWN = "stopped", "not running", "unknown"
+# pm2 statuses a service is up (or coming up) in; anything else was already down.
+PM2_RUNNING = ("online", "launching", "waiting restart")
+PM2_TIMEOUT_SECONDS = 60
 
 
 def path() -> Path:
@@ -83,6 +94,96 @@ def _pause(wid: str, finishing: str | None) -> str:
     return (FINISHING if finishing else INTERRUPTED) if ok else FAILED
 
 
+def extra_services() -> tuple[list[str], list[str]]:
+    """``(stop list, start order)`` from ``pause_all`` in ``~/.chela/config.json``. Missing
+    or malformed config reads as no extra services. The start order is ``resume_order``
+    first, then any stopped service it does not name, in ``extra_services`` order."""
+    try:
+        cfg = userconfig.get("pause_all")
+    except Exception:  # noqa: BLE001 — a bad config must never stop a pause
+        cfg = None
+    if not isinstance(cfg, dict):
+        return [], []
+
+    def names(key: str) -> list[str]:
+        raw = cfg.get(key)
+        if not isinstance(raw, list):
+            return []
+        return list(dict.fromkeys(n.strip() for n in raw if isinstance(n, str) and n.strip()))
+
+    stop = names("extra_services")
+    order = [n for n in names("resume_order") if n in stop]
+    return stop, order + [n for n in stop if n not in order]
+
+
+def _pm2(*args: str) -> subprocess.CompletedProcess | None:
+    """``pm2 <args>`` from a clean env: ``env -i`` HOME and PATH (and PM2_HOME, which names
+    the daemon), since pm2 reads any leaked ``pm2_env`` var over the app's own config.
+    None when it cannot run or hangs."""
+    keep = [f"{k}={os.environ[k]}" for k in ("HOME", "PATH", "PM2_HOME") if k in os.environ]
+    argv = ["env", "-i", *keep, "pm2", *args]
+    try:
+        return subprocess.run(argv, capture_output=True, text=True,
+                              timeout=PM2_TIMEOUT_SECONDS, check=False)
+    except (OSError, subprocess.SubprocessError) as e:
+        log.warning("fleet pause: %s failed: %s", " ".join(argv[-2:]), e)
+        return None
+
+
+def _pm2_running() -> set[str] | None:
+    """Names of the pm2 processes that are up, or None when pm2 could not be read."""
+    cp = _pm2("jlist")
+    if cp is None or cp.returncode != 0:
+        return None
+    try:
+        procs = json.loads(cp.stdout)
+    except ValueError:
+        return None
+    if not isinstance(procs, list):
+        return None
+    return {p.get("name") for p in procs if isinstance(p, dict)
+            and (p.get("pm2_env") or {}).get("status") in PM2_RUNNING}
+
+
+def _stop_services(state: dict) -> None:
+    """Stop each configured service that is up, recording what happened to each. One
+    already down is recorded NOT_RUNNING and never started by resume; when pm2 cannot be
+    read, nothing is stopped (UNKNOWN). A service this pause already stopped is kept."""
+    stop, _ = extra_services()
+    if not stop:
+        return
+    services = state.setdefault("services", {})
+    todo = [n for n in stop if services.get(n) != STOPPED]
+    if not todo:
+        return
+    running = _pm2_running()
+    for name in todo:
+        if running is None:
+            services[name] = UNKNOWN
+        elif name not in running:
+            services[name] = NOT_RUNNING
+        else:
+            cp = _pm2("stop", name)
+            ok = cp is not None and cp.returncode == 0
+            if not ok:
+                log.warning("fleet pause: pm2 stop %s failed", name)
+            services[name] = STOPPED if ok else FAILED
+
+
+def _start_services(state: dict) -> dict[str, bool]:
+    """``pm2 start`` every service this pause stopped, one at a time in the configured
+    order; ``{name: started}``, in the order tried."""
+    stopped = [n for n, s in state.get("services", {}).items() if s == STOPPED]
+    _, order = extra_services()
+    started = {}
+    for name in [n for n in order if n in stopped] + [n for n in stopped if n not in order]:
+        cp = _pm2("start", name)
+        started[name] = cp is not None and cp.returncode == 0
+        if not started[name]:
+            log.warning("fleet resume: pm2 start %s failed: start it by hand", name)
+    return started
+
+
 def pause_all(by: str = "") -> dict:
     """Pause every dispatched agent and record it. Call AFTER the hold is taken. Re-running
     it keeps the original ``since`` and does not message an agent already paused."""
@@ -99,6 +200,7 @@ def pause_all(by: str = "") -> dict:
                                  **({"finishing": what} if what else {})}
     try:
         _freeze_judges(state)
+        _stop_services(state)
     finally:                                       # every tree it stopped is on record
         config.CHELA_DIR.mkdir(parents=True, exist_ok=True)
         path().write_text(json.dumps(state) + "\n", encoding="utf-8")
@@ -170,12 +272,15 @@ def tick(held) -> list[str]:
     lines += [f"fleet resume: judge {task} thawed" if ok else
               f"fleet resume: judge {task} NOT fully thawed: check its tree for state T"
               for task, ok in sorted(resumed["thawed"].items())]
+    lines += [f"fleet resume: service {name} started" if ok else
+              f"fleet resume: service {name} did NOT start: pm2 start it by hand"
+              for name, ok in resumed.get("services", {}).items()]
     return lines
 
 
 def resume_all() -> dict | None:
     """Send "resume" to every agent this pause stopped; returns ``{"since", "resumed":
-    {task_id: delivered}}`` or None when no fleet pause was in force.
+    {task_id: delivered}, "thawed", "services": {name: started}}`` or None when no fleet pause was in force.
 
     The window is re-read from the run ROW: an agent whose run is no longer active is not
     messaged (its window may be someone else's now).
@@ -191,6 +296,7 @@ def resume_all() -> dict | None:
         log.warning("fleet pause state kept at %s", claimed)
         return None
     thawed = _thaw_judges(state)                   # before the record of who is frozen goes
+    services = _start_services(state)
     claimed.unlink(missing_ok=True)
     runs, resumed = _active_runs(), {}
     for task, agent in state["agents"].items():
@@ -198,7 +304,8 @@ def resume_all() -> dict | None:
             continue
         wid = inbox.run_wid(runs[task])
         resumed[task] = bool(wid) and messenger.send_message(SENDER, wid, RESUME_MESSAGE)
-    return {"since": state.get("since"), "resumed": resumed, "thawed": thawed}
+    return {"since": state.get("since"), "resumed": resumed, "thawed": thawed,
+            "services": services}
 
 
 def resume_fleet(*, by: str) -> tuple[dict | None, hold.Hold | None]:
@@ -234,6 +341,8 @@ def snapshot(state: dict | None = None, held: hold.Hold | None = None,
                     if isinstance(frozen.get("frozen_at"), (int, float)) else None,
                     "processes": len(frozen.get("pids") or [])}
                    for task, frozen in sorted(state.get("judges", {}).items())],
+        "services": [{"name": name, "state": st}
+                     for name, st in state.get("services", {}).items()],
     }
 
 
@@ -251,4 +360,6 @@ def status_lines(state: dict | None = None) -> list[str]:
     for task, frozen in sorted(state.get("judges", {}).items()):
         lines.append(f"  judge {task}: suspended {human_duration(time.time() - frozen['frozen_at'])}"
                      f" (SIGSTOP, {len(frozen.get('pids') or [])} process(es))")
+    for name, st in state.get("services", {}).items():
+        lines.append(f"  service {name}: {st}" + (" (pm2 stop)" if st == STOPPED else ""))
     return lines

@@ -1340,6 +1340,9 @@ def cmd_dispatch_hold(args) -> bool:
                     print(f"  ⚠ {task}: 'resume' was NOT delivered — tell it by hand")
             for task, ok in sorted(fleet_resumed["thawed"].items()):
                 print(f"  judge {task}: " + ("thawed" if ok else "⚠ NOT fully thawed — check it"))
+            for name, ok in fleet_resumed.get("services", {}).items():
+                print(f"  service {name}: " + ("started" if ok else
+                                               "⚠ did NOT start — pm2 start it by hand"))
         released = hold.release(by=orchestrator.self_wid() or "", orchestrator=mine)
         if released is None:
             print("Dispatch was not held. Nothing to resume.")
