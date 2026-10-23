@@ -212,7 +212,7 @@ function fakeGridStack() {
     };
 }
 
-let terminals, util, wall;
+let terminals, agentsStore, viewStore, wall;
 
 beforeAll(async () => {
     const dom = new JSDOM(`<!doctype html><html><body>${PANEL}</body></html>`,
@@ -247,12 +247,13 @@ beforeAll(async () => {
     // import anything else first and nav.js's `let`s are in their TDZ).
     globalThis.setInterval = () => 0;
     await mountIslands(dom.window);   // CMX-276: the sidebar island draws #sidebar-agents
-    await import('../chela/dashboard/frontend/src/boot.ts');
-    util = await import('../chela/dashboard/static/js/util.js');
+    (await import('../chela/dashboard/frontend/src/boot.ts')).start();
+    ({ agents: agentsStore } = await import('../chela/dashboard/frontend/src/shared/store/agents.ts'));
+    ({ view: viewStore } = await import('../chela/dashboard/frontend/src/shared/store/view.ts'));
     terminals = await import('../chela/dashboard/frontend/src/features/wall/index.ts');
     wall = await import('../chela/dashboard/frontend/src/shared/store/wall.ts');
-    util.setCurrentTab('terminals');
-    util.setAgentsCache(AGENTS);
+    viewStore.set('terminals');
+    agentsStore.set(AGENTS);
     await terminals.renderTerminals();
     // CMX-85: Alt+N targets the sidebar's rows — draw them.
     (await import('../chela/dashboard/frontend/src/features/sidebar/controller.ts')).renderSidebarAgents(AGENTS);
@@ -712,7 +713,7 @@ test('an empty-query palette floats live wall panes to the top, in wall order, b
 // ahead of idle peers even though it trails them in wall order — the sidebar's own
 // status word/rank, reused so the two never disagree about what needs you.
 test('a pane that wants the human floats ahead of idle panes, still inside the panes section', async () => {
-    util.setAgentsCache([
+    agentsStore.set([
         { name: 'alpha', window_id: '@1', online: true },
         { name: 'bravo', window_id: '@2', online: true, session_status: 'waiting' },
         { name: 'charlie', window_id: '@3', online: true },
@@ -722,7 +723,7 @@ test('a pane that wants the human floats ahead of idle panes, still inside the p
     assert.deepEqual(paneRows.map(r => r.querySelector('.pi-title').textContent), ['bravo', 'alpha', 'charlie'],
         'bravo (waiting on the human) must float ahead of idle alpha/charlie despite trailing them in wall order');
     await closePalette();
-    util.setAgentsCache(AGENTS);   // restore for any test that runs after this one
+    agentsStore.set(AGENTS);   // restore for any test that runs after this one
 });
 
 // 10c — TYPING ESCAPES THE "PANES ONLY" TRAP. A non-empty query drops the panes-first
@@ -1504,7 +1505,7 @@ test('starting a wire from the badge menu closes the menu immediately, and Escap
 // is the fixed bar's measured footprint; the pane must subtract it. Static
 // source-text facts, same honest-scoping as the ctx-bar-h guards above — jsdom can't
 // resolve the rendered overlap itself.
-test('CMX-133: mobile keeps the pane header (shorter) instead of hiding it, and hides only the inapplicable window-control keys (not the × kill button)', () => {
+test('CMX-133/CMX-313: mobile keeps the pane header, and never hides its hamburger', () => {
     // A media-aware rule parser — source-text parsing, jsdom can't resolve the actual
     // cascade (see the honest-scoping note above the keybar-h test below), but tracking
     // the FULL nested @media stack per leaf rule rather than flattening it away. A
@@ -1644,75 +1645,15 @@ test('CMX-133: mobile keeps the pane header (shorter) instead of hiding it, and 
         '.gs-head must not be hidden on mobile — alone, via a more specific selector, or via a rule ' +
         'neutered by @media — the header\'s dot/menu (Share/Orchestrator/Pin) must stay reachable on phones');
 
-    // The shape-only regex this replaced (`padding: Npx Npx; font-size: Npx;`) never
-    // compared magnitudes to the desktop rule, so inflating the mobile numbers past
-    // desktop's satisfied it while making the "shorter" bar taller than desktop.
-    const gsHeadBlocks = rules.filter((r) => r.selector.split(',').map((s) => s.trim()).includes('.gs-head'));
-    assert.equal(gsHeadBlocks.length, 2,
-        'expected exactly one desktop .gs-head rule and one mobile override — found ' + gsHeadBlocks.length);
-    // CMX-230 tokenised .gs-head's desktop font-size onto :root's
-    // --wall-pane-font-size (a bare px literal there is exactly what that
-    // ticket's own type-scale guard now forbids — see
-    // tests/dashboard_scale_nav_a11y.test.mjs) — so a `font-size:` value here
-    // may be a literal Npx (the mobile override still is) OR a `var(--name)`
-    // reference, resolved against its :root declaration.
-    const rootTokenPx = (name) => {
-        const root = CSS.match(/:root\s*\{([^}]*)\}/);
-        assert.ok(root, ':root block not found');
-        const m = root[1].match(new RegExp('--' + name + ':\\s*([0-9.]+)px'));
-        assert.ok(m, `--${name} not declared as a px value on :root`);
-        return parseFloat(m[1]);
-    };
-    // CMX-377: the desktop rule moved from a padding-derived height to a FIXED
-    // `height: 40px` (the brief's own spec) — vertical padding is no longer a
-    // meaningful "how tall is the bar" proxy for it, so the desktop side reads
-    // `height` directly instead of padding's first number. Mobile keeps its
-    // own pre-existing padding-derived compact bar (CMX-133, untouched by this
-    // restyle) — its total is approximated as 2×vertical-padding + font-size
-    // (a single-line bar's content-box height), a reasonable proxy this file
-    // already used for the pre-CMX-377 desktop rule.
-    const fontSize = (body) => {
-        const fsLiteral = body.match(/font-size:\s*([0-9.]+)px/);
-        const fsVar = body.match(/font-size:\s*var\(--([\w-]+)\)/);
-        assert.ok(fsLiteral || fsVar, 'each .gs-head rule must declare font-size: Npx or font-size: var(--token)');
-        return fsLiteral ? parseFloat(fsLiteral[1]) : rootTokenPx(fsVar[1]);
-    };
-    const desktopHeight = (() => {
-        const m = gsHeadBlocks[0].body.match(/height:\s*([0-9.]+)px/);
-        assert.ok(m, 'the desktop .gs-head rule must declare a fixed height: Npx');
-        return parseFloat(m[1]);
-    })();
-    const desktopFs = fontSize(gsHeadBlocks[0].body);
-    const mobilePad = gsHeadBlocks[1].body.match(/padding:\s*([0-9.]+)px\s+([0-9.]+)px/);
-    assert.ok(mobilePad, 'the mobile .gs-head override must declare padding: Npx Npx');
-    const mobileFs = fontSize(gsHeadBlocks[1].body);
-    const mobileHeightEstimate = 2 * parseFloat(mobilePad[1]) + mobileFs;
-    assert.ok(mobileHeightEstimate < desktopHeight,
-        `the mobile .gs-head's estimated height (${mobileHeightEstimate}px, from its own padding+font-size) must ` +
-        `be smaller than desktop's fixed height (${desktopHeight}px) — this is the "shorter bar" the PR claims`);
-    assert.ok(mobileFs < desktopFs,
-        `the mobile .gs-head font-size (${mobileFs}px) must be smaller than desktop's (${desktopFs}px)`);
-
-    // CMX-133: `.gs-keys` — and its `.gs-win-ctl` wrapper, which is where min/max/kill
-    // actually live — must NOT be hidden on mobile any more, by any route. Hiding
-    // either one swallows the × kill button, the only way to tear a session down on
-    // phones, while leaving every individual-button assertion below satisfied.
-    assert.equal(hiddenOnMobile('gs-keys'), false,
-        '.gs-keys must not be hidden on mobile — directly, via a more specific descendant selector like ' +
-        '`.term-single .gs-keys`, or via a rule nested in a @media that never actually matches a phone — ' +
-        'any of those hides the × kill button along with the inapplicable drag/min/max controls');
-    assert.equal(hiddenOnMobile('gs-win-ctl'), false,
-        '.gs-win-ctl (the wrapper `.gs-keys` holds — min/max/kill all live inside it) must not be hidden ' +
-        'on mobile either; hiding the wrapper drops the × kill button while every `.gs-keys`/`.gs-min-btn`/' +
-        '`.gs-max-btn`/`.gs-kill-btn` assertion here stays satisfied');
-
-    // The individual window-control buttons that genuinely don't apply to a forced
-    // single pane (drag has nothing to drag onto, minimize has no dock, maximize is
-    // already full-screen) must still be hidden ON AN ACTUAL PHONE — but NOT gs-kill-btn.
-    assert.ok(hiddenOnMobile('gs-min-btn'), '.gs-min-btn must stay hidden on mobile — no dock to minimize to');
-    assert.ok(hiddenOnMobile('gs-max-btn'), '.gs-max-btn must stay hidden on mobile — already full-screen');
-    assert.equal(hiddenOnMobile('gs-kill-btn'), false,
-        '.gs-kill-btn must NOT be hidden on mobile — it is the only way to close/kill a session there');
+    // CMX-313 (Liav, 10-23) retired the compact phone header and its × (CMX-133): the phone's
+    // single pane now draws the Claude-app title bar (PaneHead `.gs-head-bar`), whose
+    // hamburger opens the drawer and whose ⋮ menu holds Close. No .gs-keys is rendered there
+    // at all, so the stylesheet no longer hides its buttons; what matters is that the
+    // hamburger is never hidden on a phone. The rendered layout is measured in
+    // tests/browser/phone_pane_titlebar.test.mjs.
+    assert.equal(hiddenOnMobile('gs-head-menu'), false,
+        '.gs-head-menu (the title bar\'s hamburger) must not be hidden on mobile — with the pane open it is ' +
+        'the only way into the drawer');
 });
 
 // 133-WIRING — the CSS guard above only proves the mobile stylesheet keeps `.gs-keys`
@@ -1730,7 +1671,7 @@ test('CMX-133: mobile keeps the pane header (shorter) instead of hiding it, and 
 // stay green. Stub matchMedia to report a PHONE width for the extent of this one
 // test, so `_isMobileTerm()` really is true while the header renders — the only way
 // to prove `kill` isn't gated on it.
-test('CMX-133: the single-pane header includes the × kill button on an ACTUAL phone (matchMedia stubbed to a phone width), not gated on draggable or _isMobileTerm()', async () => {
+test('CMX-313: the single-pane header on an ACTUAL phone (matchMedia stubbed to a phone width) is the title bar: hamburger, no ✕, no maximize', async () => {
     const origMatchMedia = window.matchMedia;
     window.matchMedia = (q) => ({
         media: q, matches: true, addEventListener() {}, removeEventListener() {},
@@ -1744,12 +1685,10 @@ test('CMX-133: the single-pane header includes the × kill button on an ACTUAL p
             'setTermMode("single") must force the single-pane layout for this assertion to be meaningful');
         const head = stage.querySelector('.gs-head');
         assert.ok(head, 'single-pane mode must still render a pane header');
-        assert.ok(head.querySelector('.gs-kill-btn'),
-            'the single-pane header must include the × kill button on an ACTUAL phone (matchMedia stubbed ' +
-            'to report a phone-width match, so `_isMobileTerm()` is really true here) — gating it on ' +
-            '`draggable` (true only for wall tiles) or on `_isMobileTerm()` (this file\'s other guards never ' +
-            'exercise it, since every other test runs under the desktop-width matchMedia stub) silently ' +
-            'reproduces the exact CMX-133 bug: no × on any real phone');
+        assert.ok(head.classList.contains('gs-head-bar'), 'the phone single pane must draw the title bar');
+        assert.ok(head.querySelector('.gs-head-menu'), 'the phone title bar must carry the drawer\'s hamburger');
+        assert.equal(head.querySelector('.gs-kill-btn'), null, 'the phone title bar must not draw ✕ (Close is in ⋮)');
+        assert.equal(head.querySelector('.gs-max-btn'), null, 'the phone title bar must not draw maximize');
     } finally {
         // Restore the desktop-width stub and wall mode so any test appended after
         // this one sees the same environment every other test in this file expects.
@@ -1850,7 +1789,7 @@ test('CMX-130: --term-keybar-h (declared on :root) is consumed by EXACT name in 
 const paneTitle = wid => tile(wid).querySelector('.gs-grip .pane-title').textContent;
 test('CMX-146: a pane\'s ai_title renders as a dim subtitle under the name, and only when present', () => {
     const withTitle = AGENTS.map(a => a.window_id === '@1' ? { ...a, ai_title: 'Fix the flaky wall test' } : a);
-    util.setAgentsCache(withTitle);
+    agentsStore.set(withTitle);
     try {
         terminals.refreshPaneLabels();
         const sub1 = tile('@1').querySelector('.gs-grip .pane-subtitle');
@@ -1864,7 +1803,7 @@ test('CMX-146: a pane\'s ai_title renders as a dim subtitle under the name, and 
         assert.equal(tile('@2').querySelector('.gs-grip .pane-subtitle'), null,
             'a pane with no ai_title must render NO .pane-subtitle element');
     } finally {
-        util.setAgentsCache(AGENTS);
+        agentsStore.set(AGENTS);
         terminals.refreshPaneLabels();
     }
 });
@@ -1879,14 +1818,14 @@ test('CMX-146: a pane\'s ai_title renders as a dim subtitle under the name, and 
 test('CMX-146: a NEW pane (never refreshed) still shows its ai_title from PaneHead\'s first render', async () => {
     const withNewAgent = [...AGENTS, { name: 'delta', window_id: '@4', online: true, ai_title: 'Ship the delta feature' }];
     try {
-        util.setAgentsCache(withNewAgent);
+        agentsStore.set(withNewAgent);
         await terminals.renderTerminals();
         const sub = tile('@4').querySelector('.gs-grip .pane-subtitle');
         assert.ok(sub, 'a freshly-built tile (via PaneHead, not _refreshPaneLabels) must carry the subtitle');
         assert.equal(paneTitle('@4'), 'Ship the delta feature');
         assert.equal(sub.textContent, 'delta');
     } finally {
-        util.setAgentsCache(AGENTS);
+        agentsStore.set(AGENTS);
         await terminals.renderTerminals();
         assert.equal(tile('@4'), null, 'the injected 4th pane must not leak into later tests');
     }
@@ -1897,7 +1836,7 @@ test('CMX-146: a NEW pane (never refreshed) still shows its ai_title from PaneHe
 // title beats the window name, and with no title the header is the window name.
 test('CMX-62: pane header — manual name beats the title, the title beats the window name', () => {
     try {
-        util.setAgentsCache(AGENTS.map(a =>
+        agentsStore.set(AGENTS.map(a =>
             a.window_id === '@1' ? { ...a, manual_name: true, ai_title: 'Review the auth PR' }
                 : a.window_id === '@2' ? { ...a, ai_title: 'Open-MMO game on Windows PC' } : a));
         terminals.refreshPaneLabels();
@@ -1912,7 +1851,7 @@ test('CMX-62: pane header — manual name beats the title, the title beats the w
         // A manual name whose ai_title says the same thing: nothing distinct to add,
         // so no subtitle repeating the header. And with both titles present the
         // ai_title — not the live session name — leads a non-manual header.
-        util.setAgentsCache(AGENTS.map(a =>
+        agentsStore.set(AGENTS.map(a =>
             a.window_id === '@1' ? { ...a, manual_name: true, ai_title: 'alpha' }
                 : a.window_id === '@2' ? { ...a, ai_title: 'Open-MMO game', session_name: 'stale session' } : a));
         terminals.refreshPaneLabels();
@@ -1921,7 +1860,7 @@ test('CMX-62: pane header — manual name beats the title, the title beats the w
             'a subtitle that only repeats the header must not render');
         assert.equal(paneTitle('@2'), 'Open-MMO game', 'ai_title must outrank the live session name');
     } finally {
-        util.setAgentsCache(AGENTS);
+        agentsStore.set(AGENTS);
         terminals.refreshPaneLabels();
     }
 });
@@ -1931,7 +1870,7 @@ test('CMX-146: _refreshPaneLabels tracks ai_title live — added, changed, and r
         // starts absent (restored AGENTS fixture carries no ai_title)
         assert.equal(tile('@3').querySelector('.gs-grip .pane-subtitle'), null);
 
-        util.setAgentsCache(AGENTS.map(a => a.window_id === '@3' ? { ...a, ai_title: 'Investigate flaky CI' } : a));
+        agentsStore.set(AGENTS.map(a => a.window_id === '@3' ? { ...a, ai_title: 'Investigate flaky CI' } : a));
         terminals.refreshPaneLabels();
         let sub = tile('@3').querySelector('.gs-grip .pane-subtitle');
         assert.ok(sub, 'a fresh ai_title must appear on the next refresh, no full rebuild required');
@@ -1939,7 +1878,7 @@ test('CMX-146: _refreshPaneLabels tracks ai_title live — added, changed, and r
         assert.equal(sub.textContent, 'charlie');
 
         // a revised title (Claude re-titles as the conversation evolves) must replace it in place
-        util.setAgentsCache(AGENTS.map(a => a.window_id === '@3' ? { ...a, ai_title: 'Investigate and fix flaky CI' } : a));
+        agentsStore.set(AGENTS.map(a => a.window_id === '@3' ? { ...a, ai_title: 'Investigate and fix flaky CI' } : a));
         terminals.refreshPaneLabels();
         sub = tile('@3').querySelector('.gs-grip .pane-subtitle');
         assert.ok(sub, 'the subtitle element must still be there after a revision');
@@ -1948,13 +1887,13 @@ test('CMX-146: _refreshPaneLabels tracks ai_title live — added, changed, and r
 
         // and it must be removed again once the field goes back to empty/absent — not left
         // stale, which would read as a title Claude never actually confirmed.
-        util.setAgentsCache(AGENTS);
+        agentsStore.set(AGENTS);
         terminals.refreshPaneLabels();
         assert.equal(tile('@3').querySelector('.gs-grip .pane-subtitle'), null,
             'the subtitle must be REMOVED once ai_title is gone, not left stale from the prior refresh');
         assert.equal(paneTitle('@3'), 'charlie', 'no title ⇒ the window name is the header again');
     } finally {
-        util.setAgentsCache(AGENTS);
+        agentsStore.set(AGENTS);
         terminals.refreshPaneLabels();
     }
 });

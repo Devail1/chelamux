@@ -2,17 +2,15 @@
 // not START until ~1.7 s (each loads in ~50 ms): main.js booted refresh() twice (selectView
 // runs it too) plus enter*() re-seeds, so almost every boot read ran 2-5×, and refresh()
 // chained summary → sidebar → /api/restore → … → overrides with the wall's tick LAST.
-// Real index.html + the legacy graph; each boot is a fresh page from its own copy (copyDashboard).
+// The real page (the shell); each boot is a fresh page from its own copy (copyDashboard).
 import { afterAll, test } from 'vitest';
 import assert from 'node:assert/strict';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { bootDashboardDom, copyDashboard, flush, sliceTemplate, SIDEBAR, WALL } from './js_helpers/dashboard_dom.mjs';
+import { APP_BODY, bootDashboardDom, copyDashboard, flush, SIDEBAR, WALL, AGENTS_STORE, VIEW_STORE, NAV } from './js_helpers/dashboard_dom.mjs';
 
-const END = '<script type="application/json" id="chela-boot">';
-const BODY = sliceTemplate('<div class="app">', END, { terminals_enabled: true, wall_tile_dispatched: false })
-    .slice(0, -END.length);
+const BODY = APP_BODY;
 const WIDS = ['@1', '@2', '@3'];
 const AGENTS = WIDS.map((w, i) => ({ name: `agent-${i}`, window_id: w, online: true, session_status: 'idle' }));
 const tmp = mkdtempSync(join(tmpdir(), 'chela-cmx166-')); afterAll(() => rmSync(tmp, { recursive: true, force: true }));
@@ -42,7 +40,7 @@ async function boot(fetchOpts = {}) {
     globalThis.GridStack = { init: () => GRID };
     const { modules } = await bootDashboardDom({
         body: BODY, canvasStub: true, fetchImpl: makeFetch(log, fetchOpts),
-        jsRoot, extraModules: ['util.js', 'nav.js', WALL, SIDEBAR],
+        jsRoot, extraModules: [AGENTS_STORE, VIEW_STORE, NAV, WALL, SIDEBAR],
     });
     const scheduler = await import(new URL('../../frontend/src/shared/scheduler/index.ts', jsRoot).href);
     for (let i = 0; i < 30; i++) await flush();
@@ -101,36 +99,36 @@ test('/api/update/status waits for the wall on boot, and is asked at once on a l
 });
 
 test('a non-list /api/agents reply keeps the sidebar\'s last agent list', async () => {
-    const { util, sidebar, log } = await boot();
+    const { agents: { agents: agentsStore }, sidebar, log } = await boot();
     globalThis.fetch = makeFetch(log, { agents: { error: 'tmux unavailable' } });
     await sidebar.refreshSidebar();
-    assert.ok(Array.isArray(util._agentsCache), 'an error body replaced the agent list');
-    assert.deepEqual(util._agentsCache.map(a => a.window_id), WIDS, 'the last good agent list was dropped');
+    assert.ok(Array.isArray(agentsStore.get()), 'an error body replaced the agent list');
+    assert.deepEqual(agentsStore.get().map(a => a.window_id), WIDS, 'the last good agent list was dropped');
     assert.equal(rows(), AGENTS.length);
 });
 
 test('with no agent list cached, the wall reads /api/agents itself; a non-list reply is "no panes"', async () => {
-    const { util, terminals, log } = await boot();
-    util.setAgentsCache([]);
+    const { agents: { agents: agentsStore }, terminals, log } = await boot();
+    agentsStore.set([]);
     globalThis.fetch = makeFetch(log, { agents: AGENTS.slice(0, 2) });
     const before = n(log, '/api/agents');
     await terminals.renderTerminals();
     assert.equal(n(log, '/api/agents'), before + 1, 'an empty cache was not refilled');
     assert.equal(frames().length, 2, 'the wall did not render the panes it just read');
-    util.setAgentsCache([]);
+    agentsStore.set([]);
     globalThis.fetch = makeFetch(log, { agents: { error: 'tmux unavailable' } });
     await assert.doesNotReject(terminals.renderTerminals());
-    assert.ok(Array.isArray(util._agentsCache), 'an error body became the agent cache');
+    assert.ok(Array.isArray(agentsStore.get()), 'an error body became the agent cache');
     assert.match(document.getElementById('term-stage').textContent, /No active agents/);
 });
 
 test('a non-list context reply never poisons the wall: the next rebuild still paints', async () => {
-    const { util, terminals, log } = await boot();
-    util.setAgentsCache(AGENTS.slice(0, 2));
+    const { agents: { agents: agentsStore }, terminals, log } = await boot();
+    agentsStore.set(AGENTS.slice(0, 2));
     await terminals.renderTerminals(Promise.resolve({ error: 'boom' }));
     for (let i = 0; i < 5; i++) await flush();
     globalThis.fetch = makeFetch(log);
-    util.setAgentsCache(AGENTS);   // a pane added: a full rebuild
+    agentsStore.set(AGENTS);   // a pane added: a full rebuild
     await assert.doesNotReject(terminals.renderTerminals());
     assert.equal(frames().length, WIDS.length);
 });

@@ -7,7 +7,7 @@
 // never one of them, is its own RTL suite (features/primarymenu/tests/PrimaryMenu.test.tsx).
 // This file keeps what only the REAL page can show:
 //
-//   1. 🔴 ONE TRIGGER, NOT THREE, in the real template: the foot holds the menu's slot and
+//   1. 🔴 ONE TRIGGER, NOT THREE, on the real page: the foot holds the menu's slot and
 //      no other button; the old ids are gone; #btn-shares stays in .safety-float.
 //   2. 🔴 ⌘K still opens the palette directly, independent of the menu.
 //   3. 🔴 CMX-377: the rendered DOM has no topbar, and the inbox, the wordmark, the
@@ -17,58 +17,48 @@
 // it needs `pnpm install` for jsdom — CHELA_REQUIRE_JS_TESTS makes a missing jsdom a FAILURE.)
 import { beforeAll, test } from 'vitest';
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
-import { fileURLToPath } from 'node:url';
-import { dirname, join } from 'node:path';
-import { bootDashboardDom, closePalette, flush, paletteOpen, sliceTemplate } from './js_helpers/dashboard_dom.mjs';
+import { APP_BODY, bootDashboardDom, closePalette, flush, paletteOpen } from './js_helpers/dashboard_dom.mjs';
 
-const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..', 'chela', 'dashboard');
-const HTML = readFileSync(join(ROOT, 'templates', 'index.html'), 'utf8');
-
-// --- 1. 🔴 one trigger, not three, in the real template ------------------------------
-
-test('the old three primaries are gone; the gear is the primary-menu island', () => {
-    assert.ok(HTML.includes('id="primary-menu-island"'), 'the primary-menu island slot is missing from index.html');
-    assert.ok(!HTML.includes('id="btn-palette"'), '#btn-palette is still in index.html: not folded');
-    assert.ok(!HTML.includes('id="btn-new"'), '#btn-new is still in index.html: not folded');
-    assert.ok(!HTML.includes('id="btn-overflow"'), '#btn-overflow is still in index.html: not folded');
-});
-
-test('.sidebar-foot in the REAL index.html holds the readouts and the ONE menu, no other button', () => {
-    const foot = HTML.match(/<div class="sidebar-foot">[\s\S]*?\n    <\/div>/)[0];
-    assert.deepEqual([...foot.matchAll(/<button[^>]*\bid="([^"]+)"/g)].map(m => m[1]), [],
-        '.sidebar-foot has a button of its own besides the menu island');
-    assert.deepEqual([...foot.matchAll(/<span class="island-slot" id="([^"]+)"/g)].map(m => m[1]),
-        ['resources-island', 'primary-menu-island']);
-});
-
-test('#btn-decisions lives in .sidebar-head in the REAL index.html (CMX-393)', () => {
-    // CMX-228: the Decisions island draws the button into its slot, after the toggle.
-    const head = HTML.match(/<div class="sidebar-head">[\s\S]*?\n    <\/div>/)[0];
-    const ids = [...head.matchAll(/<(?:button|span)[^>]*\bid="([^"]+)"/g)].map(m => m[1]);
-    assert.deepEqual(ids, ['btn-menu', 'decisions-island'],
-        `.sidebar-head has unexpected controls: ${ids.join(', ')}`);
-});
-
-test('#btn-shares lives in .safety-float, not .sidebar-foot, in the REAL index.html', () => {
-    const foot = HTML.match(/<div class="sidebar-foot">[\s\S]*?\n    <\/div>/)[0];
-    assert.ok(!foot.includes('btn-shares'), '#btn-shares is inside .sidebar-foot: it must stay in .safety-float');
-    const safetyFloat = HTML.match(/<div class="safety-float">[\s\S]*?\n<\/div>/);
-    assert.ok(safetyFloat, '.safety-float block not found in index.html');
-    // CMX-240: #btn-shares is the share feature's pill island, mounted into this slot
-    // (SharesPill.test.tsx pins that the slot gets it).
-    assert.ok(safetyFloat[0].includes('id="shares-pill-float"'), "#btn-shares's island slot is missing from .safety-float");
-});
-
-// --- the real page ----------------------------------------------------------------------
+// --- 1. 🔴 one trigger, not three, on the real page (the shell, CMX-248) ----------------
 
 beforeAll(async () => {
-    const APP_HTML = sliceTemplate('<div class="app">', '</main>\n\n</div>');
-    // CMX-221: the palette is the overlays island's React dialog.
-    await bootDashboardDom({ body: APP_HTML + '<div id="overlays-island"></div>' });
+    // CMX-221: the palette is the overlays' React dialog.
+    await bootDashboardDom({ body: APP_BODY });
     // The islands commit on a later turn than the boot's own reads: wait for the inbox's.
     for (let i = 0; i < 100 && !document.querySelector('#btn-decisions'); i++) await flush();
     for (let i = 0; i < 5; i++) await flush();
+});
+
+/** The ids of `el`'s controls and slots, not counting what a slot draws inside itself. */
+const ownIds = (el, sel) => [...el.querySelectorAll(sel)]
+    .filter(n => !n.parentElement.closest('.island-slot, .decisions-island'))
+    .map(n => n.id);
+
+test('the old three primaries are gone; the gear is the primary-menu island', () => {
+    assert.ok(document.querySelector('#primary-menu-island #btn-primary-menu'), 'the gear is not in the primary-menu slot');
+    for (const id of ['btn-palette', 'btn-new', 'btn-overflow']) {
+        assert.equal(document.getElementById(id), null, `#${id} is back on the page: not folded`);
+    }
+});
+
+test('.sidebar-foot holds the readouts and the ONE menu, no other button', () => {
+    const foot = document.querySelector('.sidebar-foot');
+    assert.deepEqual(ownIds(foot, 'button[id]'), [], '.sidebar-foot has a button of its own besides the menu island');
+    assert.deepEqual(ownIds(foot, '.island-slot[id]'), ['resources-island', 'primary-menu-island']);
+});
+
+test('#btn-decisions lives in .sidebar-head (CMX-393)', () => {
+    // CMX-228: the Decisions inbox draws the button into its slot, after the toggle.
+    const head = document.querySelector('.sidebar-head');
+    assert.deepEqual(ownIds(head, 'button[id], span[id]'), ['btn-menu', 'decisions-island'], '.sidebar-head has unexpected controls');
+    assert.ok(head.querySelector('#decisions-island #btn-decisions'));
+});
+
+test('#btn-shares lives in .safety-float, not .sidebar-foot', () => {
+    assert.equal(document.querySelector('.sidebar-foot #shares-pill-float, .sidebar-foot #btn-shares'), null,
+        '#btn-shares is inside .sidebar-foot: it must stay in .safety-float');
+    // CMX-240: #btn-shares is the share feature's pill, drawn into this slot.
+    assert.ok(document.querySelector('.safety-float > #shares-pill-float > #btn-shares'), "#btn-shares is not in .safety-float's slot");
 });
 
 // --- 2. 🔴 ⌘K, independent of the menu ------------------------------------------------

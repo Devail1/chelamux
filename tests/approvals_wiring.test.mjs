@@ -18,12 +18,11 @@
 // Run: pnpm exec vitest run tests/approvals_wiring.test.mjs (tests/test_js_suites.py runs it).
 import { beforeAll, test } from 'vitest';
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
 import { JSDOM } from 'jsdom';   // needs `pnpm install` — tests/test_js_suites.py enforces it
 import { exposeDomConstructors, mountIslands, pickOption } from './js_helpers/dashboard_dom.mjs';
 
-const TEMPLATE = readFileSync(new URL('../chela/dashboard/templates/index.html', import.meta.url), 'utf8');
-const PILL = TEMPLATE.match(/<span class="island-slot" id="approvals-island"><\/span>/)[0];
+// The pill's shell slot: mountIslands draws it from the shell's own table (features/shell).
+const PILL = '<span class="island-slot" id="approvals-island"></span>';
 
 const PANEL = `
 <header><span id="hdr-agents"></span><span id="hdr-next"></span><span id="hdr-updated"></span></header>
@@ -112,7 +111,7 @@ beforeAll(async () => {
 
     exposeDomConstructors(dom.window);
     await mountIslands(dom.window);
-    await import('../chela/dashboard/frontend/src/boot.ts');
+    (await import('../chela/dashboard/frontend/src/boot.ts')).start();
     // refresh() awaits a chain of polls before tickApprovals(); let them settle. Only the
     // page's own load is allowed to show the pill — nothing below has run yet.
     const shown = () => document.getElementById('btn-approvals')?.hidden === false;

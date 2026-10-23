@@ -1,15 +1,19 @@
 // CMX-241 (CMX-212 P26): a Wall pane's header: the status dot, the title (double-click to
 // rename the WINDOW), the facepile and room badge slots, the web chip, the UNSANDBOXED
 // banner, the state pill, the ⋯ menu (Wire, Share, Orchestrator, Pin) and the window controls
-// (minimize, maximize or phone fill, kill with its confirm). From terminals.js `paneHead` and
-// its handlers. `wall` is a Gridstack tile; otherwise it is the single pane (a phone).
-import { useRef, useState, type MouseEvent as ReactMouseEvent } from 'react';
+// (minimize, maximize, kill with its confirm). From terminals.js `paneHead` and its handlers.
+// `wall` is a Gridstack tile; otherwise it is the single pane. CMX-313: on a phone the single
+// pane's header is the screen's one title bar (the Claude app's): the drawer's hamburger on
+// the left, the title over its subtitle in the middle, the status chip and ⋯ on the right,
+// and Close in the ⋯ menu. No maximize there: the phone pane is always full.
+import { useEffect, useRef, useState, type MouseEvent as ReactMouseEvent } from 'react';
 import { api, BASE_PATH } from '../../../shared/api/index.ts';
 import { icons } from '../../../shared/icons/index.ts';
 import { orchestratorRelease, orchestratorSubscribe } from '../../../shared/orchestrator/index.ts';
 import { agents } from '../../../shared/store/agents.ts';
 import { setPinned } from '../../../shared/store/wall.ts';
 import { IconButton, InlineEdit, Menu, TextButton, useMediaQuery, type MenuItem } from '../../../shared/ui/index.ts';
+import { toggleSidebar } from '../../sidebar/controller.ts';
 import { paneToast, SHARE_MODE_UI, shareSession, unsafeBannerText, type ShareEntry, type ShareMode } from '../../share/index.ts';
 import { dotState, headLabel, headState, type HeadAgent } from '../model.ts';
 
@@ -91,9 +95,9 @@ export function PaneHead({ wid, wall, agent, orchWid, share, pinned, now, host }
   const [menuOpen, setMenuOpen] = useState(false);
   const [orchBusy, setOrchBusy] = useState(false);
   const [maxed, setMaxed] = useState(false);
-  const [full, setFull] = useState(false);
   const [kill, setKill] = useState<Kill>({ phase: 'idle' });
   const phone = useMediaQuery('(max-width: 768px)');
+  const titleBar = phone && !wall;
 
   const label = headLabel(agent, wid);
   const state = headState(agent);
@@ -133,9 +137,18 @@ export function PaneHead({ wid, wall, agent, orchWid, share, pinned, now, host }
     setMaxed(on);
   };
 
-  // The phone's one window control: the single pane takes the whole screen (style.css
-  // .term-mobile-full). This same button is the way back, so it never hides.
-  const toggleFull = () => setFull(document.body.classList.toggle('term-mobile-full'));
+  // A pane maximized on a desktop that narrows to a phone: the title bar has no restore, so
+  // undo it (the phone pane is always full anyway). The state resets during the render, the
+  // page classes in the effect.
+  if (titleBar && maxed) setMaxed(false);
+  useEffect(() => {
+    if (!titleBar) return;
+    const pane = head.current?.closest('.term-pane, .grid-stack-item-content');
+    if (pane?.classList.contains('pane-maximized')) {
+      pane.classList.remove('pane-maximized');
+      document.body.classList.remove('pane-is-maximized');
+    }
+  }, [titleBar]);
 
   const confirmKill = async () => {
     setKill({ phase: 'killing' });
@@ -201,10 +214,19 @@ export function PaneHead({ wid, wall, agent, orchWid, share, pinned, now, host }
           onSelect: () => setPinned(wid, !pinned),
         }]
       : []),
+    ...(titleBar
+      ? [{
+          label: 'Close session',
+          icon: icons.kill,
+          className: 'gs-kill-item',
+          title: 'Kill this session',
+          disabled: kill.phase !== 'idle',
+          onSelect: () => setKill({ phase: 'confirm' }),
+        }]
+      : []),
   ];
 
   const Max = maxed ? icons.restore : icons.maximize;
-  const Full = full ? icons.restore : icons.maximize;
   const titleEl = editing ? (
     <InlineEdit className="pane-title-edit" label="Window name" initial={agent?.name ?? wid} onCommit={(v) => void commitRename(v)} onCancel={() => setEditing(false)} />
   ) : (
@@ -220,73 +242,100 @@ export function PaneHead({ wid, wall, agent, orchWid, share, pinned, now, host }
       {label.subtitle}
     </span>
   );
+  // CMX-32: the orchestrator ring is on the WRAPPER: the dot's shapes are clip-paths
+  const dot = (
+    <span className={orch ? 'gs-dot-ring gs-dot-orch' : 'gs-dot-ring'} data-wid={wid}>
+      <span className={`gs-dot term-status-dot ${dotState(agent)}`} data-status-for={wid} data-wid={wid} title={state.title} />
+    </span>
+  );
+  // the owner-presence facepile (collab/presence-owner.js draws into it)
+  const presence = <span className="gs-presence" data-presence-for={wid} />;
+  const badges = (
+    <>
+      <span className="gs-net-badge" data-net-for={wid} title={WEB_TITLE} hidden={agent?.share_net !== 'web'}>
+        <icons.web size={11} aria-hidden /> web
+      </span>
+      <span className="gs-unsafe-banner" data-banner-for={wid} role="status" hidden={mode !== 'unsandboxed'}>
+        {mode === 'unsandboxed' && (
+          <>
+            <icons.unsandboxed size={11} aria-hidden /> {unsafeBannerText(share?.expiresAt, now)}
+          </>
+        )}
+      </span>
+    </>
+  );
+  const menu = (
+    <span className="gs-menu-wrap">
+      <Menu className="pane-overflow-menu" open={menuOpen} onOpenChange={setMenuOpen} items={items}
+        trigger={
+          <IconButton className="gs-menu-btn" label="Session actions">
+            <icons.paneMenu size={titleBar ? 18 : 14} aria-hidden />
+          </IconButton>
+        } />
+    </span>
+  );
 
   return (
     <>
-      <div className="gs-head" ref={head}>
-        {/* CMX-32: the orchestrator ring is on the WRAPPER: the dot's shapes are clip-paths */}
-        <span className={orch ? 'gs-dot-ring gs-dot-orch' : 'gs-dot-ring'} data-wid={wid}>
-          <span className={`gs-dot term-status-dot ${dotState(agent)}`} data-status-for={wid} data-wid={wid} title={state.title} />
-        </span>
-        {/* the NAME is Gridstack's drag handle on the wall (CMX-117) */}
-        <span className={wall ? 'gs-grip' : 'gs-label'} title={wall ? 'drag to move' : undefined}>
-          {titleEl}
-          {subtitle}
-        </span>
-        {wall && (
-          // wire.ts applyRoomAccents shows it and writes the room's name
-          <TextButton className="gs-room" hidden onClick={(e) => host.leaveRoom(e.currentTarget, wid)}>
-            <icons.room size={11} aria-hidden />
-            <span className="gs-room-name" />
-          </TextButton>
-        )}
-        {/* the owner-presence facepile (collab/presence-owner.js draws into it) */}
-        <span className="gs-presence" data-presence-for={wid} />
-        <span className="gs-net-badge" data-net-for={wid} title={WEB_TITLE} hidden={agent?.share_net !== 'web'}>
-          <icons.web size={11} aria-hidden /> web
-        </span>
-        <span className="gs-unsafe-banner" data-banner-for={wid} role="status" hidden={mode !== 'unsandboxed'}>
-          {mode === 'unsandboxed' && (
-            <>
-              <icons.unsandboxed size={11} aria-hidden /> {unsafeBannerText(share?.expiresAt, now)}
-            </>
+      {titleBar ? (
+        <div className="gs-head gs-head-bar" ref={head}>
+          {/* the drawer's opener, where the floating ☰ used to be (the controller keeps aria-expanded) */}
+          <IconButton className="gs-head-menu" label="Open menu" aria-expanded={document.body.classList.contains('sidebar-open')}
+            onClick={() => toggleSidebar()}>
+            <icons.menu size={18} aria-hidden />
+          </IconButton>
+          <span className="gs-label">
+            {titleEl}
+            {subtitle}
+          </span>
+          <span className="gs-head-end">
+            {presence}
+            {badges}
+            <span className="gs-status-chip">{dot}</span>
+            {menu}
+          </span>
+        </div>
+      ) : (
+        <div className="gs-head" ref={head}>
+          {dot}
+          {/* the NAME is Gridstack's drag handle on the wall (CMX-117) */}
+          <span className={wall ? 'gs-grip' : 'gs-label'} title={wall ? 'drag to move' : undefined}>
+            {titleEl}
+            {subtitle}
+          </span>
+          {wall && (
+            // wire.ts applyRoomAccents shows it and writes the room's name
+            <TextButton className="gs-room" hidden onClick={(e) => host.leaveRoom(e.currentTarget, wid)}>
+              <icons.room size={11} aria-hidden />
+              <span className="gs-room-name" />
+            </TextButton>
           )}
-        </span>
-        {wall && (
-          <span className={`gs-state gs-state-${state.cls}`} data-state-for={wid} title={state.title}>
-            <span className="gs-state-word">{state.word}</span>
+          {presence}
+          {badges}
+          {wall && (
+            <span className={`gs-state gs-state-${state.cls}`} data-state-for={wid} title={state.title}>
+              <span className="gs-state-word">{state.word}</span>
+            </span>
+          )}
+          {menu}
+          <span className="gs-keys">
+            <span className="gs-win-ctl">
+              {wall && (
+                <IconButton className="gs-min-btn" label="Minimize to dock" onClick={() => host.minimize(wid)}>
+                  <icons.minimize size={14} aria-hidden />
+                </IconButton>
+              )}
+              <IconButton className="gs-max-btn" label={maxed ? 'Restore pane' : 'Maximize pane'} aria-pressed={maxed} onClick={toggleMax}>
+                <Max size={14} aria-hidden />
+              </IconButton>
+              <IconButton className="gs-kill-btn" label="Kill this session" style={kill.phase === 'idle' ? undefined : { visibility: 'hidden' }}
+                onClick={() => setKill({ phase: 'confirm' })}>
+                <icons.kill size={14} aria-hidden />
+              </IconButton>
+            </span>
           </span>
-        )}
-        <span className="gs-menu-wrap">
-          <Menu className="pane-overflow-menu" open={menuOpen} onOpenChange={setMenuOpen} items={items}
-            trigger={
-              <IconButton className="gs-menu-btn" label="Session actions">
-                <icons.paneMenu size={14} aria-hidden />
-              </IconButton>
-            } />
-        </span>
-        <span className="gs-keys">
-          <span className="gs-win-ctl">
-            {wall && (
-              <IconButton className="gs-min-btn" label="Minimize to dock" onClick={() => host.minimize(wid)}>
-                <icons.minimize size={14} aria-hidden />
-              </IconButton>
-            )}
-            <IconButton className="gs-max-btn" label={maxed ? 'Restore pane' : 'Maximize pane'} aria-pressed={maxed} onClick={toggleMax}>
-              <Max size={14} aria-hidden />
-            </IconButton>
-            {!wall && phone && (
-              <IconButton className="gs-mobile-full-btn" label={full ? 'Exit fullscreen' : 'Fill screen'} aria-pressed={full} onClick={toggleFull}>
-                <Full size={14} aria-hidden />
-              </IconButton>
-            )}
-            <IconButton className="gs-kill-btn" label="Kill this session" style={kill.phase === 'idle' ? undefined : { visibility: 'hidden' }}
-              onClick={() => setKill({ phase: 'confirm' })}>
-              <icons.kill size={14} aria-hidden />
-            </IconButton>
-          </span>
-        </span>
-      </div>
+        </div>
+      )}
       {kill.phase !== 'idle' && (
         // over the middle of the pane, never window.confirm; the pane is its containing block
         <div className="kanban-confirm pane-kill-confirm" data-agent={wid} role="alertdialog" aria-label={`Kill ${label.title}`}>

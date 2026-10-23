@@ -101,7 +101,7 @@ beforeAll(async () => {
 
     exposeDomConstructors(dom.window);
     await mountIslands(dom.window);
-    await import('../chela/dashboard/frontend/src/boot.ts');
+    (await import('../chela/dashboard/frontend/src/boot.ts')).start();
     // the boot's refresh runs every lane; let them all settle
     for (let i = 0; i < 40 && document.getElementById('btn-access-req')?.hidden !== false; i++) {
         await new Promise(resolve => setTimeout(resolve, 5));

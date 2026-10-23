@@ -3,7 +3,7 @@
 // and the REAL module graph (same idiom as tests/mobile_new_fab.test.mjs).
 //
 // Guards (each corrupt→RED, recorded in the PR's self-check experiments):
-//   - the desktop sidebar "New session" button AND the phone "+" each open the launch menu
+//   - the sidebar "New session" button (the drawer's, on a phone too: CMX-313 removed the "+") opens the launch menu
 //     (the launcher island since CMX-219), which contains "Sandboxed session…";
 //   - clicking it asks for a project directory and POSTs it to /api/agents/spawn-sandboxed,
 //     the share_sandbox launcher's route, never the plain /api/agents/spawn a shell window
@@ -13,19 +13,18 @@
 // tests/test_js_suites.py; needs `pnpm install` for jsdom).
 import { test, beforeAll, beforeEach } from 'vitest';
 import assert from 'node:assert/strict';
-import { bootDashboardDom, clickIsland, sliceTemplate, flush } from './js_helpers/dashboard_dom.mjs';
+import { APP_BODY, bootDashboardDom, clickIsland, flush } from './js_helpers/dashboard_dom.mjs';
 
 let win, doc;
 let calls = [];
 
 beforeAll(async () => {
-    const body = sliceTemplate('<div class="app">', '<div id="overlays-island"></div>');
     const fetchImpl = (url, opts) => {
         calls.push({ url: String(url), opts: opts || {} });
         const b = String(url).endsWith('/api/launcher') ? { recent: [{ path: '/work/proj' }], favorites: [] } : { ok: true };
         return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve(b) });
     };
-    const { dom } = await bootDashboardDom({ body, fetchImpl });
+    const { dom } = await bootDashboardDom({ body: APP_BODY, fetchImpl });
     win = dom.window;
     doc = win.document;
     win.prompt = () => '/work/proj';
@@ -57,11 +56,6 @@ test('the desktop "New session" menu offers Sandboxed session…', async () => {
     const item = await openedMenuItem(doc.querySelector('.sidebar-new-btn'));
     assert.ok(item, 'no Sandboxed session entry in the desktop New session menu');
     assert.match(item.textContent, /Sandboxed session/);
-});
-
-test('the phone "+" menu offers Sandboxed session…', async () => {
-    const item = await openedMenuItem(doc.getElementById('btn-new-mobile'));
-    assert.ok(item, 'no Sandboxed session entry in the phone "+" menu');
 });
 
 test('Sandboxed session… POSTs the project to the sandboxed launcher route', async () => {

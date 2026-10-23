@@ -60,7 +60,7 @@ async function open({ width, height, shared, approvals = shared }) {
 async function stable(page) {
     await page.evaluate(() => { window.__cmx422Sig = null; });
     await page.waitForFunction(() => {
-        const sig = [...document.querySelectorAll('.term-toolbar, .term-toolbar button, .safety-float, .safety-float button, .mobile-new-fab, .mobile-menu-fab')]
+        const sig = [...document.querySelectorAll('.term-toolbar, .term-toolbar button, .safety-float, .safety-float button, .mobile-menu-fab, #term-stage.term-single .gs-head button')]
             .map(e => { const r = e.getBoundingClientRect(); return [r.x, r.y, r.width, r.height].map(Math.round).join(','); })
             .join('|');
         const now = performance.now();
@@ -70,7 +70,8 @@ async function stable(page) {
 }
 
 // Every pill copy the viewer actually sees, every other control the row shows
-// (plus the phone's ☰ and "+"), and what the browser hit-tests at each centre.
+// (plus the phone's ☰, or with a pane open its title bar's hamburger and ⋮: CMX-313), and
+// what the browser hit-tests at each centre.
 const PILLS = ['term-shares', 'btn-shares', 'term-approvals', 'btn-approvals'];
 const measure = page => page.evaluate(PILLS => {
     const shown = e => !!e && e.getClientRects().length > 0 && getComputedStyle(e).visibility !== 'hidden';
@@ -81,7 +82,7 @@ const measure = page => page.evaluate(PILLS => {
             hitsSelf: !!top && (top === e || e.contains(top)) };
     };
     const pills = PILLS.map(id => document.getElementById(id)).filter(shown).map(info);
-    const controls = [...document.querySelectorAll('.term-toolbar button, .mobile-new-fab, .mobile-menu-fab')]
+    const controls = [...document.querySelectorAll('.term-toolbar button, .mobile-menu-fab, #term-stage.term-single .gs-head button')]
         .filter(e => shown(e) && !PILLS.includes(e.id)).map(info);
     const row = document.querySelector('.term-toolbar');
     const rr = row.getBoundingClientRect();
@@ -102,7 +103,7 @@ for (const [width, height] of [[1440, 900], [725, 900], [390, 844]]) {
                 let page;
                 ({ context, page } = await open({ width, height, shared: live }));
                 m = await measure(page);
-                await page.evaluate(() => window.chela.selectView('work'));
+                await page.evaluate(() => document.querySelector('.side-item[data-view="work"]').click());
                 await stable(page);
                 offWall = await measure(page);
             });

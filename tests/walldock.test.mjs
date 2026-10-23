@@ -90,7 +90,7 @@ function fakeGridStack() {
     return { init: () => grid };
 }
 
-let terminals, util;
+let terminals, agentsStore, viewStore;
 
 beforeAll(async () => {
     const dom = new JSDOM(`<!doctype html><html><body>${PANEL}</body></html>`,
@@ -125,14 +125,15 @@ beforeAll(async () => {
     // behind it through the module graph (nav ↔ main is a cycle — import anything else
     // first and nav.js's `let`s are in their TDZ). main.js also arms the poll timers.
     globalThis.setInterval = () => 0;
-    await import('../chela/dashboard/frontend/src/boot.ts');
-    util = await import('../chela/dashboard/static/js/util.js');
+    (await import('../chela/dashboard/frontend/src/boot.ts')).start();
+    ({ agents: agentsStore } = await import('../chela/dashboard/frontend/src/shared/store/agents.ts'));
+    ({ view: viewStore } = await import('../chela/dashboard/frontend/src/shared/store/view.ts'));
     terminals = await import('../chela/dashboard/frontend/src/features/wall/index.ts');
-    util.setCurrentTab('terminals');
+    viewStore.set('terminals');
 
     // The worker is WORKING when the wall first paints — the state the feature is about.
     AGENTS = fleet();
-    util.setAgentsCache(AGENTS);
+    agentsStore.set(AGENTS);
     await terminals.renderTerminals();
 });
 

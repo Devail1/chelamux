@@ -99,10 +99,11 @@ beforeAll(async () => {
     // it has not resolved yet), and main.js's own trailing refreshOrchestratorStatus()
     // call is what must repaint it afterward, with nothing else in this test
     // triggering a second read.
-    await import('../chela/dashboard/frontend/src/boot.ts');
-    const util = await import('../chela/dashboard/static/js/util.js');
+    (await import('../chela/dashboard/frontend/src/boot.ts')).start();
+    const { agents: agentsStore } = await import('../chela/dashboard/frontend/src/shared/store/agents.ts');
+    const { view: viewStore } = await import('../chela/dashboard/frontend/src/shared/store/view.ts');
     orchestrator = await import('../chela/dashboard/frontend/src/shared/orchestrator/index.ts');
-    util.setAgentsCache(AGENTS);
+    agentsStore.set(AGENTS);
 
     // Flush the seed fetch's microtask chain (fetch -> res.json() -> _apply ->
     // listeners) without dispatching any SSE frame or opening any tab.

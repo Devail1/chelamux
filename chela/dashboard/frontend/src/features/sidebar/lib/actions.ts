@@ -1,5 +1,5 @@
 // CMX-277: what the sidebar's rows and menus call, the handlers on window.chela (mount.tsx).
-// CMX-278: the commands are controller.ts's; selectAgent / selectView stay nav.js's.
+// CMX-278: the commands are controller.ts's; selectAgent / selectView are the shell's.
 import type { RecentRow } from '../model.ts';
 
 /** The sidebar's commands (window.chela), what the rows, menus, nav, Recent and the handle call. */

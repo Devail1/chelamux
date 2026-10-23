@@ -196,21 +196,6 @@ body {
     white-space: nowrap;
 }
 
-.stat-pill {
-    background: var(--bg);
-    border: 1px solid var(--border);
-    border-radius: 6px;
-    padding: 4px 10px;
-    font-size: 12px;
-    white-space: nowrap;
-}
-
-.stat-pill .label { color: var(--text-dim); }
-.stat-pill .value { color: var(--text); font-weight: 600; }
-.stat-pill .value.green { color: var(--green); }
-.stat-pill .value.red { color: var(--red); }
-.stat-pill .value.yellow { color: var(--yellow); }
-
 /* ---- Tabs ---- */
 
 .tabs {
@@ -271,8 +256,6 @@ body {
        overlaid the terminal's live last row instead of blank space. */
     margin-bottom: var(--term-ctx-bar-h);
 }
-.term-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(380px, 1fr)); gap: 10px; }
-.term-grid .term-frame { height: 42vh; }
 
 /* Focus ring (CMX-377: "a thin inset ring in --accent — no glow, no thick
    border"): the pane whose embedded terminal currently holds browser focus
@@ -628,12 +611,6 @@ body {
 }
 
 .gs-keys { flex: 0 0 auto; display: flex; align-items: stretch; gap: 3px; }
-/* Vertical divider separating the nav/key buttons from the window controls
-   (minimize / maximize / close), so the three window buttons read as a group. */
-.gs-keys-sep {
-    width: 1px; align-self: stretch; margin: 2px 4px;
-    background: var(--border);
-}
 .gs-win-ctl { display: inline-flex; align-items: center; gap: 3px; }
 .gs-keys button {
     font: inherit; font-size: 11px; line-height: 1; padding: 4px 7px;
@@ -645,15 +622,6 @@ body {
    `.gs-min-btn, .gs-max-btn { display: none }` mobile rule below (same trap
    the pane-header-v2 comment above already flags for this pair of classes). */
 .gs-min-btn svg, .gs-max-btn svg { vertical-align: middle; }
-/* Mobile single-pane fullscreen toggle (paneHead, terminals.js) — same
-   base-hide/mobile-reveal shape as `.term-keybar` below
-   (not the specificity-trap shape the comment above warns about: this is a
-   *different* selector, not `.gs-min-btn`/`.gs-max-btn` themselves). Belt and
-   suspenders: paneHead() only ever renders this button when
-   !draggable && _isMobileTerm(), so it never exists in a desktop DOM at all —
-   this base rule only guards a stale render surviving a resize past 768px. */
-.gs-mobile-full-btn { display: none; }
-.gs-mobile-full-btn svg { vertical-align: middle; }
 .gs-keys button:hover { border-color: var(--accent); }
 .gs-keys button.btn-accent { background: var(--accent); color: var(--on-accent); border-color: var(--accent); }
 /* × kill — only rendered for non-managed sessions. Red hover signals it's
@@ -726,20 +694,6 @@ body {
 .gs-presence .gs-owner-fp {
     display: inline-flex; align-items: center; height: 18px;
     transform: scale(0.78); transform-origin: right center;
-}
-.gs-presence .pf-dot {
-    width: 17px; height: 17px; border-radius: 50%; color: #fff;
-    display: inline-flex; align-items: center; justify-content: center;
-    font-size: 9px; font-weight: 700; box-shadow: 0 0 0 1.5px var(--surface);
-}
-.gs-presence .pf-more { font-size: 10px; color: var(--text-dim); font-weight: 600; }
-.gs-presence .pf-agent {
-    position: relative; display: inline-flex; align-items: center;
-    font-size: 12px; color: var(--text-dim); margin-left: 1px;
-}
-.gs-presence .pf-agent .pf-pip {
-    position: absolute; bottom: -1px; right: -3px; width: 6px; height: 6px;
-    border-radius: 50%; box-shadow: 0 0 0 1.5px var(--surface);
 }
 /* Share toast — throwaway bubble anchored under the pane header. */
 .term-share-toast {
@@ -1510,60 +1464,6 @@ body.term-dragging { overflow: hidden; }
     --ok-purple: #CC79A7;   /* ▸ prompt    */
 }
 
-.feed-list { display: flex; flex-direction: column; gap: 12px; font-size: 12px; }
-
-/* --- the chips (one per row class, rendered from feedmodel.js) --- */
-.feed-chips { display: flex; gap: 6px; flex-wrap: wrap; }
-.feed-chip {
-    border: 1px solid var(--border); background: transparent; color: var(--text-dim);
-    border-radius: 999px; padding: 4px 10px; font-size: 12px; cursor: pointer;
-}
-.feed-chip:hover { color: var(--text); border-color: var(--accent); }
-/* Active = fill + weight + ring, never hue alone. */
-.feed-chip.active {
-    background: var(--surface); color: var(--text); font-weight: 600;
-    border-color: var(--text-dim); box-shadow: inset 0 0 0 1px var(--border);
-}
-
-/* --- a lane --- */
-.feed-lane { border: 1px solid var(--border); border-radius: 8px; background: var(--surface); }
-/* An agent that needs you: a heavy left rule + the ◆ NEEDS YOU badge in the header.
-   The rule is thickness, not hue — it reads in greyscale. */
-.feed-lane.lane-attention { border-left: 4px solid var(--ok-orange); }
-.feed-lane.lane-system { opacity: 0.85; }
-.lane-head {
-    display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
-    padding: 8px 12px; cursor: pointer; border-bottom: 1px solid var(--border);
-}
-.lane-head:hover { background: var(--surface-2, var(--surface)); }
-.lane-fold { color: var(--text-dim); width: 10px; }
-.lane-name { font-weight: 600; color: var(--text); }
-.lane-wid, .lane-count { color: var(--text-dim); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
-.lane-project { color: var(--text-dim); }
-.lane-count { margin-left: auto; }
-.lane-status { font-size: 11px; }
-.lane-status-waiting { color: var(--ok-orange); font-weight: 600; }
-.lane-status-busy { color: var(--ok-blue); }
-.lane-status-idle, .lane-status-gone, .lane-status-system { color: var(--text-dim); }
-.lane-needs {
-    font-size: 11px; font-weight: 700; letter-spacing: 0.04em;
-    padding: 2px 8px; border-radius: 999px;
-    border: 1px solid var(--ok-orange); color: var(--text);
-    background: rgba(230, 159, 0, 0.16);
-}
-/* A dead window whose PR is still open (CMX-62). Same shape as NEEDS YOU because it is
-   the same kind of claim on you — but a different WORD, and a dotted rule so the two
-   read apart in greyscale: hue is decoration, never the signal. */
-.lane-needs.lane-review { border-style: dotted; background: rgba(86, 180, 233, 0.14); }
-.lane-rows { display: flex; flex-direction: column; }
-
-/* The folded graveyard: one row for every finished agent, saying what it holds. */
-.feed-graveyard {
-    border: 1px dashed var(--border); border-radius: 8px;
-    padding: 8px 12px; cursor: pointer; background: var(--surface);
-}
-.feed-graveyard:hover { border-color: var(--accent); }
-
 /* --- a row --- */
 .feed-row {
     display: grid; grid-template-columns: 56px 72px 108px auto 1fr;
@@ -1571,7 +1471,7 @@ body.term-dragging { overflow: hidden; }
     padding: 5px 10px; border-bottom: 1px solid var(--border);
 }
 .feed-row:last-child { border-bottom: none; }
-.feed-seq, .feed-ts, .feed-wid { color: var(--text-dim); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+.feed-ts, .feed-wid { color: var(--text-dim); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
 .feed-glyph { font-weight: 600; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; white-space: nowrap; }
 .feed-summary { color: var(--text); overflow-wrap: anywhere; }
 .feed-cls-gate .feed-glyph { color: var(--ok-orange); }
@@ -1582,18 +1482,6 @@ body.term-dragging { overflow: hidden; }
 .feed-cls-other .feed-glyph { color: var(--ok-sky); }
 .feed-cls-tool .feed-glyph { color: var(--text-dim); }
 
-/* What the filter is hiding — counted and named, never swallowed. */
-.feed-hidden {
-    display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
-    padding: 6px 10px; color: var(--text-dim); font-size: 11px;
-    border-bottom: 1px solid var(--border);
-}
-.feed-show-btn {
-    border: 1px solid var(--border); background: transparent; color: var(--text);
-    border-radius: 6px; padding: 2px 8px; font-size: 11px; cursor: pointer;
-}
-.feed-show-btn:hover { border-color: var(--accent); }
-
 .feed-gap {
     padding: 8px 10px; margin-bottom: 8px; border-radius: 6px;
     background: rgba(210, 153, 34, 0.12); border: 1px solid var(--yellow);
@@ -1602,11 +1490,14 @@ body.term-dragging { overflow: hidden; }
 @media (max-width: 768px) {
     .feed-row { grid-template-columns: 48px 64px 1fr; }
     .feed-wid, .feed-summary { grid-column: 1 / -1; }
-    .lane-count { margin-left: 0; }
 }
 
 .work-toolbar { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; margin-bottom: 14px; }
 .work-toolbar-hint { color: var(--text-dim); font-size: 12px; }
+.fleet-pause { border: 1px solid var(--border); border-radius: 6px; padding: 8px 12px; margin-bottom: 14px; font-size: 12px; }
+.fleet-pause-head { margin: 0 0 4px; }
+.fleet-pause-empty { margin: 0; color: var(--text-dim); }
+.fleet-pause-list { margin: 0; padding-left: 18px; }
 
 .work-empty {
     max-width: 560px;
@@ -1644,47 +1535,6 @@ body.term-dragging { overflow: hidden; }
 .init-result.ok { color: var(--text); }
 .init-result.err { color: var(--red); }
 
-/* ---- Agent grid ---- */
-
-.agent-grid {
-    display: flex;
-    gap: 12px;
-    align-items: stretch;
-    flex-wrap: wrap;
-}
-.agent-card { flex: 1 1 280px; min-width: 280px; max-width: 400px; }
-.pipeline-arrow {
-    display: flex;
-    align-items: center;
-    color: var(--text-dim);
-    font-size: 20px;
-    padding: 0 2px;
-    flex-shrink: 0;
-}
-.pipeline-arrow::after { content: '→'; }
-
-.agent-card {
-    background: var(--surface);
-    border: 1px solid var(--border);
-    border-radius: 8px;
-    padding: 14px;
-    position: relative;
-    display: flex;
-    flex-direction: column;
-}
-.agent-card .context-bar-wrap {
-    margin-top: auto;
-}
-
-.agent-card .agent-name {
-    font-size: 14px;
-    font-weight: 600;
-    margin-bottom: 6px;
-}
-/* The name links to the agent's live pane (selectAgent → focusPaneByWid). */
-.agent-name-link { cursor: pointer; }
-.agent-name-link:hover { color: var(--accent); text-decoration: underline; }
-
 .context-bar-wrap {
     margin-top: 8px;
 }
@@ -1708,14 +1558,6 @@ body.term-dragging { overflow: hidden; }
     color: var(--text-dim);
 }
 
-.agent-card .agent-meta {
-    font-size: 11px;
-    color: var(--text-dim);
-    line-height: 1.8;
-}
-
-.agent-card .agent-meta span { display: block; }
-
 .health-dot {
     display: inline-block;
     width: 8px;
@@ -1730,36 +1572,7 @@ body.term-dragging { overflow: hidden; }
 .health-dot.red { background: var(--red); box-shadow: 0 0 6px var(--red); }
 .health-dot.grey { background: var(--text-dim); }
 
-.agent-header {
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
-    min-width: 0;
-    gap: 6px;
-}
-
-.agent-header > .agent-name {
-    min-width: 0;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-}
-
-.claude-badge {
-    font-size: 9px;
-    padding: 1px 5px;
-    border-radius: 3px;
-    font-weight: 600;
-    text-transform: uppercase;
-    margin-left: 6px;
-    vertical-align: middle;
-}
-
-.claude-on { background: #0d4429; color: var(--green); }
-.claude-off { background: #3d1c1c; color: var(--red); }
-
-/* PR badge — clickable link to the latest PR opened from this session.
-   Lives in the agent header row alongside claude-on/off, same compact look. */
+/* PR badge — clickable link to the latest PR opened from this session. */
 .pr-badge {
     font-size: 9px;
     padding: 1px 6px;
@@ -1774,204 +1587,6 @@ body.term-dragging { overflow: hidden; }
     text-decoration: none;
 }
 .pr-badge:hover { background: #1f6feb; color: #0d1117; border-color: #1f6feb; }
-
-/* Recap (latest away_summary) — collapsed by default, click to expand */
-.agent-recap {
-    margin-top: 8px;
-    font-size: 11px;
-    color: var(--text-dim);
-    line-height: 1.5;
-}
-.agent-recap > summary {
-    cursor: pointer;
-    list-style: none;
-    display: flex;
-    gap: 6px;
-    align-items: baseline;
-    overflow: hidden;
-    min-width: 0;
-}
-.agent-recap > summary::-webkit-details-marker { display: none; }
-.agent-recap[open] > summary > .recap-head { display: none; }
-.recap-label {
-    flex: 0 0 auto;
-    color: var(--text-dim);
-    text-transform: uppercase;
-    font-size: 9px;
-    letter-spacing: 0.5px;
-    padding: 1px 5px;
-    border-radius: 3px;
-    background: var(--border);
-}
-.recap-age {
-    flex: 0 0 auto;
-    color: var(--text-dim);
-    font-size: 9px;
-    font-variant-numeric: tabular-nums;
-}
-.recap-age.stale { color: var(--yellow, #d6a700); }
-.recap-head {
-    flex: 1 1 auto;
-    min-width: 0;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-    color: var(--text);
-}
-.recap-body {
-    margin-top: 6px;
-    padding: 6px 8px;
-    background: var(--bg);
-    border-left: 2px solid var(--accent);
-    border-radius: 3px;
-    color: var(--text);
-    white-space: pre-wrap;
-    word-break: break-word;
-}
-
-/* Kebab menu */
-
-.kebab-wrap { position: relative; }
-
-.kebab-btn {
-    background: none;
-    border: none;
-    color: var(--text-dim);
-    font-size: 18px;
-    padding: 2px 6px;
-    line-height: 1;
-    cursor: pointer;
-    border-radius: 4px;
-}
-
-.kebab-btn:hover { background: var(--border); color: var(--text); }
-
-.kebab-menu {
-    display: none;
-    position: absolute;
-    top: 100%;
-    right: 0;
-    background: var(--surface);
-    border: 1px solid var(--border);
-    border-radius: 6px;
-    min-width: 160px;
-    z-index: 50;
-    box-shadow: 0 4px 12px rgba(0,0,0,0.4);
-    padding: 4px 0;
-}
-
-.kebab-menu.open { display: block; }
-
-.menu-item {
-    padding: 6px 12px;
-    font-size: 12px;
-    cursor: pointer;
-    color: var(--text);
-}
-
-.menu-item:hover { background: var(--border); }
-.menu-danger { color: var(--red); }
-.menu-danger:hover { background: rgba(248,81,73,0.1); }
-.menu-disabled { color: var(--text-dim); cursor: default; pointer-events: none; }
-
-.menu-sep {
-    height: 1px;
-    background: var(--border);
-    margin: 4px 0;
-}
-.menu-group { position: relative; }
-.menu-group summary { list-style: none; }
-.menu-group summary::-webkit-details-marker { display: none; }
-.menu-group[open] > .menu-item { padding-left: 20px; font-size: 11px; }
-
-.menu-toggle {
-    display: flex;
-    align-items: center;
-    gap: 6px;
-    cursor: pointer;
-}
-
-.menu-toggle input[type="checkbox"] {
-    accent-color: var(--accent);
-    cursor: pointer;
-}
-
-.agent-functions {
-    margin-top: 8px;
-    display: flex;
-    flex-wrap: wrap;
-    gap: 4px;
-}
-
-.fn-badge {
-    background: var(--bg);
-    border: 1px solid var(--border);
-    border-radius: 4px;
-    font-size: 10px;
-    color: var(--text-dim);
-    font-family: var(--ui-font);
-}
-
-.fn-badge summary {
-    padding: 2px 6px;
-    cursor: pointer;
-    list-style: none;
-}
-
-.fn-badge summary::-webkit-details-marker { display: none; }
-
-.fn-badge .fn-desc {
-    display: block;
-    padding: 2px 6px 4px;
-    font-size: 9px;
-    color: var(--text-dim);
-}
-
-.fn-badge[open],
-.fn-badge:hover {
-    color: var(--accent);
-    border-color: var(--accent);
-}
-
-.fn-cross-agent {
-    border-color: #d29922;
-    background: rgba(210, 153, 34, 0.08);
-}
-
-.fn-cross-agent:hover,
-.fn-cross-agent[open] {
-    border-color: #d29922;
-    color: #d29922;
-}
-
-.cross-agent-icon {
-    display: inline-block;
-    font-size: 10px;
-    margin-right: 3px;
-    cursor: help;
-    vertical-align: middle;
-    color: #d29922;
-}
-
-.fn-ai {
-    border-color: #8957e5;
-    background: rgba(137, 87, 229, 0.08);
-}
-
-.fn-ai:hover,
-.fn-ai[open] {
-    border-color: #8957e5;
-    color: #8957e5;
-}
-
-.ai-icon {
-    display: inline-block;
-    font-size: 10px;
-    margin-right: 3px;
-    cursor: help;
-    vertical-align: middle;
-    color: #8957e5;
-}
 
 /* ---- Buttons ---- */
 
@@ -2050,16 +1665,7 @@ tr:hover td { background: rgba(88, 166, 255, 0.04); }
    "shipped" grey; matches the board's Archived-lane orange (.kanban-state-chip.st-closed-unmerged). */
 .badge-closed { background: #3a2a13; color: var(--orange, #d18616); }
 
-.badge-priority-critical { background: #6e1b1b; color: #ff7b72; }
-.badge-priority-high { background: #3d1c1c; color: var(--red); }
-.badge-priority-normal { background: #1c2d3d; color: var(--accent); }
 .badge-priority-low { background: #21262d; color: var(--text-dim); }
-
-.badge-activity-signal { background: #1c2d3d; color: var(--accent); }
-.badge-activity-order { background: #2d2b1c; color: var(--yellow); }
-.badge-activity-fill { background: #0d4429; color: var(--green); }
-.badge-activity-reject { background: #3d1c1c; color: var(--red); }
-.badge-activity-close { background: #21262d; color: var(--text); }
 
 /* ---- Inputs ---- */
 
@@ -2108,7 +1714,6 @@ input[type="text"]:focus, textarea:focus, select:focus {
 .modal-newtask { width: 560px; }
 .modal-newtask .newtask-error { color: var(--red); font-size: 12px; min-height: 1em; white-space: pre-wrap; }
 
-.modal .form-actions,
 .modal .modal-actions {
     display: flex;
     gap: 8px;
@@ -2307,7 +1912,7 @@ input[type="text"]:focus, textarea:focus, select:focus {
 /* .md: the timeline body is now rendered through knMd (verdict text like
    "## ✅ KEEP AS-IS …" has real headings/lists/code), not shown as a raw
    pre-wrapped string — so it needs the same block-element rules as
-   .task-modal-brief.md/.kn-body, just smaller to match the timeline's scale. */
+   .task-modal-brief.md, just smaller to match the timeline's scale. */
 .task-modal-timeline-body.md p { margin: 4px 0; }
 .task-modal-timeline-body.md p:first-child { margin-top: 0; }
 .task-modal-timeline-body.md :is(h1, h2, h3, h4) {
@@ -2440,24 +2045,6 @@ input[type="text"]:focus, textarea:focus, select:focus {
 
 .table-wrap table {
     min-width: 600px;
-}
-
-/* ---- Section divider (managed / unmanaged) ---- */
-
-.section-divider {
-    width: 100%;
-    font-size: 11px;
-    color: var(--text-dim);
-    text-transform: uppercase;
-    letter-spacing: 0.5px;
-    padding: 8px 0 4px;
-    border-top: 1px solid var(--border);
-    margin-top: 4px;
-}
-
-.agent-card-session {
-    border-style: dashed;
-    border-color: #1b2028;
 }
 
 /* ---- Kanban board ---- */
@@ -2862,26 +2449,6 @@ a.kanban-tracker-link:focus-visible { text-decoration: underline; }
     white-space: pre-wrap;
 }
 
-/* Floating summary toast for board-level messages (not card-anchored). */
-.kanban-toast {
-    position: fixed;
-    bottom: 16px;
-    right: 16px;
-    max-width: 420px;
-    z-index: 1000;
-    padding: 10px 14px;
-    background: var(--surface);
-    border: 1px solid var(--border);
-    border-radius: 6px;
-    color: var(--text);
-    font-size: 12px;
-    line-height: 1.5;
-    white-space: pre-wrap;
-    word-break: break-word;
-    box-shadow: 0 4px 16px rgba(0, 0, 0, 0.4);
-    cursor: pointer;
-}
-
 /* Run-state review toasts (dispatcher run → awaiting_review / done / failed).
    Stacked bottom-right so several transitions don't overlap; each reuses the
    .kanban-toast surface treatment. */
@@ -3044,19 +2611,6 @@ summary.runs-section { cursor: pointer; }
 @media (max-width: 768px) {
     .header { padding: 8px 12px; gap: 10px; flex-wrap: wrap; }
     .content { padding: 10px 12px; }
-    /* Drop flex layout in favor of plain block stacking — flex-column with
-       wrap + flex-shrink:0 lets unmanaged session cards exceed the
-       container width when their content has a wide min-content. */
-    .agent-grid { display: block; }
-    .agent-card { max-width: none; min-width: 0; flex: none; width: 100%; }
-    .agent-recap > summary { flex-wrap: wrap; }
-    /* Block layout needs explicit margin between cards (previously the flex
-       gap handled this). */
-    .agent-grid > .agent-card { margin-bottom: 12px; }
-    .agent-grid > .agent-card:last-child { margin-bottom: 0; }
-    .pipeline-arrow { align-self: center; transform: rotate(90deg); }
-    #panel-agents > div:first-child { flex-wrap: wrap; }
-    #broadcast-input { min-width: 0; width: 100%; flex-basis: 100%; }
 
     /* Tab strip: horizontal scroll instead of wrap/break. Terminals' inline
        margin-left:auto pushes it off-screen in the scroller, override it. */
@@ -3252,31 +2806,8 @@ summary.runs-section { cursor: pointer; }
        renderTerminals() also force-switches to single. */
     #term-wall-grid { display: none !important; }
     #panel-terminals > div:first-child { flex-wrap: wrap; }
-    /* Fill the screen: 100dvh (NOT vh — the mobile address bar collapses and
-       vh overshoots the real visible height) minus the chrome that sits
-       above/below the pane on a phone. CMX-130's 70vh was a rough guess
-       tuned against the old collapsible #term-bar and left dead space below
-       the pane once the v2 fixed keybar replaced it (this fixes that).
-       --gs-head-h below is a measured constant: the mobile .gs-head row
-       itself (2px+2px padding around the title+subtitle label: two lines now
-       the ai-title subtitle is shown again, above). CMX-202 dropped the
-       agent-pill strip above the pane (and its 38px --term-switcher-h): the
-       sidebar is the phone's session switcher, so the pane gets that height
-       back. --term-keybar-h (47px, below) and --term-ctx-bar-h
-       (30px, :root) already existed. Subtracting the keybar's footprint AND
-       env(safe-area-inset-bottom) separately still matters (CMX-130): the
-       keybar's own bottom padding is `calc(6px + env(safe-area-inset-bottom))`,
-       so on a home-indicator phone the bar is 47px + inset tall — subtracting
-       only the 47px would leave the inset's worth of the pane's bottom row
-       (input box + "auto mode on") still under the bar. */
-    :root { --gs-head-h: 32px; }
-    .term-single .term-pane {
-        height: calc(100dvh - var(--gs-head-h) - var(--term-keybar-h, 0px) - var(--term-ctx-bar-h) - env(safe-area-inset-bottom) - var(--kb-occluded, 0px));
-    }
-    /* NB: the pane is DELIBERATELY left inset by .content's horizontal padding
-       (no width reclaim). That side gutter is what lets a touch-drag beside the
-       terminal scroll the PAGE instead of being swallowed by the iframe — a
-       full-bleed pane traps the scroll. Do not re-add a negative margin here. */
+    /* The phone pane's box (full-bleed, pinned to the viewport) is the mobile
+       keybar block's `.term-single .term-pane` rule (CMX-313). */
     #term-bar { max-height: 60vh; overflow-y: auto; }
 
     /* Dense layout: Special & Ctrl as full-width rows; D-pad + Nav + Scroll
@@ -3424,7 +2955,7 @@ summary.runs-section { cursor: pointer; }
 /* Phone-only floating trigger for the off-canvas drawer (CMX-377) — see the
    mobile media query below for when it shows. Desktop never needs it: the
    sidebar's own toggle in .sidebar-head is always on screen there. */
-.mobile-menu-fab, .mobile-new-fab {
+.mobile-menu-fab {
     display: none; position: fixed; z-index: 46;
     top: max(14px, env(safe-area-inset-top)); left: max(14px, env(safe-area-inset-left));
     width: 42px; height: 42px; border-radius: 50%;
@@ -3432,11 +2963,8 @@ summary.runs-section { cursor: pointer; }
     background: var(--surface); border: 1px solid var(--border); color: var(--text);
     box-shadow: 0 2px 10px rgba(0, 0, 0, 0.35);
 }
-/* CMX-386: the "+" (New session) sits one fab-width + an 8px gap to the right
-   of the ☰, off the same safe-area inset. */
-.mobile-new-fab { left: calc(max(14px, env(safe-area-inset-left)) + 50px); }
-.mobile-menu-fab svg, .mobile-new-fab svg { width: 20px; height: 20px; display: block; }
-.mobile-menu-fab:hover, .mobile-new-fab:hover { border-color: var(--accent); color: var(--accent); }
+.mobile-menu-fab svg { width: 20px; height: 20px; display: block; }
+.mobile-menu-fab:hover { border-color: var(--accent); color: var(--accent); }
 
 /* Always-on-top safety cluster (CMX-377) — see index.html's comment on why
    #status-health-warn and #btn-shares live here, outside the sidebar, on
@@ -3780,23 +3308,13 @@ body.sidebar-resizing iframe { pointer-events: none; }
 .ar-ctx.warn { color: var(--yellow); background: color-mix(in srgb, var(--yellow) 14%, transparent); }
 .ar-ctx.danger { color: var(--red); background: color-mix(in srgb, var(--red) 14%, transparent); }
 .ar-sub { display: flex; align-items: baseline; gap: 5px; min-width: 0; font-size: var(--card-font-size); line-height: var(--card-line-height); color: var(--text-dim); }
-/* CMX-377 round 2: the state word stays dim (inherits .ar-sub's colour) in
-   every state — the shape (.term-status-dot) carries the state, colour is
-   never the only cue AND is no longer a second, redundant cue here either. */
-.ar-state { flex: 0 0 auto; font-weight: 600; text-transform: capitalize; }
 /* CMX-417: the row's tmux window id ("idle · 74% ctx · @32") — the same dim,
    monospace `@N` the pane footer's .gs-wid shows, never shrunk or wrapped. */
 .ar-wid { flex: 0 0 auto; font-family: var(--font); font-size: 0.95em; white-space: nowrap; opacity: 0.85; }
 /* CMX-377: recent-sessions rows still use .ar-recap for their cwd sub-line
-   (nav.js renderRecentSessions) — the live agent row's OWN recap/ai_title
-   lines are gone (folded into the row's title tooltip; see .ar-ago below). */
+   (features/sidebar's Recent) — the live agent row's OWN recap/ai_title
+   lines are gone (folded into the row's title tooltip). */
 .ar-recap { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; opacity: 0.85; }
-/* CMX-377: the row's right-aligned relative time (mockup's `{{r.ago}}`) — a
-   ROW-level sibling of .ar-main, not part of it, so it sits at the row's far
-   right (comes after .ar-main's flex: 1 in source order). Vertical offset
-   matches the status dot's own margin-top so it lines up with the row's
-   first line, not its vertical center. */
-.ar-ago { flex: 0 0 auto; margin-top: 4px; font-size: var(--card-font-size); color: var(--text-dim); opacity: 0.75; white-space: nowrap; }
 
 .side-badges { display: flex; gap: 4px; }
 .badge {
@@ -3871,13 +3389,6 @@ body.sidebar-resizing iframe { pointer-events: none; }
 }
 
 /* --- Command palette (⌘K) --- */
-/* .pt-kbd: the small "⌘K" hint badge, now inside the primary menu's "Jump to…"
-   row (index.html #primary-menu) — its own dedicated .palette-trigger topbar
-   button folded away in CMX-109 / CMX-108 Part A re-filed. */
-.pt-kbd {
-    font-size: 10px; font-weight: 600; color: var(--text-dim);
-    border: 1px solid var(--border); border-radius: 5px; padding: 0 5px; line-height: 16px;
-}
 
 .palette-overlay {
     position: fixed; inset: 0; z-index: 200;
@@ -4174,7 +3685,6 @@ body.sidebar-resizing iframe { pointer-events: none; }
     margin-bottom: 8px;
 }
 .s-row:last-child { margin-bottom: 0; }
-.s-rowlabel { color: var(--text); font-size: 12px; }
 /* CMX-57: a select sizes to its LONGEST option ("bypassPermissions · ⚠ no prompts
    at all"), and a flex item never shrinks below its content unless told
    min-width: 0 — so at phone width it pushed the row past the card. It may now
@@ -4206,13 +3716,6 @@ body.sidebar-resizing iframe { pointer-events: none; }
    (workflow paths, a branch name) keep the free-text .s-input's full width. */
 .s-dispatch-rows .s-input.s-num { flex: 0 1 90px; text-align: right; }
 .s-dispatch-rows .s-input:disabled, .s-dispatch-rows .s-select:disabled { opacity: 0.55; cursor: not-allowed; }
-.s-rowunit { color: var(--text-dim); font-size: 11px; min-width: 44px; }
-.s-badge {
-    font-size: 10px; text-transform: uppercase; letter-spacing: 0.04em;
-    padding: 3px 9px; border-radius: 999px; border: 1px solid var(--border);
-}
-.s-badge.on { color: var(--green); border-color: var(--green); }
-.s-badge.off { color: var(--text-dim); }
 
 /* Live "Connections & Status" surface — READ-ONLY status rows.
    Colorblind-safe: the ●/○ glyph + the state word carry the state; colour is a
@@ -4412,13 +3915,11 @@ body.sidebar-resizing iframe { pointer-events: none; }
        own toggle button sitting right behind it. */
     .mobile-menu-fab { display: inline-flex; }
     body.sidebar-open .mobile-menu-fab { display: none; }
-    /* CMX-386: its "+" sibling opens #new-menu with the drawer closed. It
-       hides with the ☰ while the drawer is open — the drawer's own "New
-       session" button is right there, and the "+" would float over it. */
-    .mobile-new-fab { display: inline-flex; }
-    body.sidebar-open .mobile-new-fab { display: none; }
-    /* ...and the menu it opens (anchored under it by openNewMenu, clamped to
-       the 8px left edge) never runs off the right: a long nowrap project label
+    /* CMX-313: with a pane open the pane's title bar carries the opener
+       (.gs-head-menu), so the floating one steps aside. The phone "+" is gone
+       (CMX-386 → CMX-313): New session is the drawer's own button. */
+    body:has(#panel-terminals.active .gs-head-menu) .mobile-menu-fab { display: none; }
+    /* The launch menu never runs off the right: a long nowrap project label
        would otherwise size the popover past a 390px screen. */
     .launch-menu { max-width: calc(100vw - 16px); }
 }
@@ -4434,61 +3935,66 @@ body.sidebar-resizing iframe { pointer-events: none; }
     /* The persistent v2 bar replaces the old collapsible keybar on phones. */
     #term-bar { display: none !important; }
 
-    /* CMX-130: the pane header is back — a prior pass hid it outright reasoning
-       the agent name/status already lived in the switcher pills, but losing it
-       also loses the only place the header's dot/menu (Share/Orchestrator/Pin)
-       live on phones. Keep it, just shorter (tighter padding/font) than the
-       desktop bar. See CMX-133 below for what happens to the window-control
-       keys (drag/min/max/kill) themselves. */
-    .gs-head { padding: 2px 8px; font-size: 11px; }
-    /* CMX-146 hid the dim ai-title subtitle here (single mobile pane was tight
-       on vertical space); un-hidden per Liav's 2026-07-25 call — it already
-       truncates to one line via the base rule above (overflow/ellipsis/
-       nowrap), just trimmed a touch smaller than .gs-head's 11px so it reads
-       as clearly secondary without growing the compact header. */
-    .pane-subtitle { display: block; font-size: 9.5px; }
-    /* CMX-133: drag/minimize genuinely don't apply to the forced single pane,
-       but × kill is the only way to tear a session down on phones (no wall,
-       no overflow-menu equivalent) — keep just that button. */
-    .gs-keys { display: flex; }
-    /* Maximize doesn't apply either (there's nothing else on the wall to
-       overlay over) — replaced by ONE mobile-only fullscreen toggle instead
-       (.gs-mobile-full-btn, revealed just below): it grows the pane to
-       100dvh and hides the surrounding chrome, tap again to restore. */
-    .gs-min-btn, .gs-max-btn { display: none; }
-    .gs-mobile-full-btn { display: inline-flex; }
+    /* CMX-313 (Liav, 10-23): the phone pane looks like the Claude app. ONE
+       title bar, the pane's own header (PaneHead's `.gs-head-bar`): the
+       drawer's round hamburger on the left, the title over its subtitle in the
+       middle, the status chip and ⋯ on the right. Close lives in the ⋯ menu
+       (easy to hit by accident in a bar), and there is no maximize: the pane is
+       always full. The title is centred in the room between the two sides and
+       ellipsises; the right side is capped, so a long UNSANDBOXED banner or
+       facepile cannot squeeze the title out. The bar's top padding is the
+       notch's safe area, so its background runs under the status bar. */
+    .gs-head.gs-head-bar {
+        display: grid; grid-template-columns: auto minmax(0, 1fr) auto;
+        align-items: center; gap: 8px; height: auto; min-height: 52px; box-sizing: border-box;
+        padding: max(6px, env(safe-area-inset-top)) max(10px, env(safe-area-inset-right)) 6px max(10px, env(safe-area-inset-left));
+        font-size: 14px; color: var(--text);
+    }
+    .gs-head-bar .gs-label {
+        flex-direction: column; align-items: center; gap: 1px; text-align: center; max-width: 100%;
+    }
+    .gs-head-bar .pane-title { max-width: 100%; font-weight: 600; }
+    .gs-head-bar .gs-label .pane-subtitle { flex: 0 0 auto; max-width: 100%; font-size: 11.5px; }
+    .gs-head-bar .pane-subtitle.pane-cwd::before { content: none; }
+    .gs-head-end { display: flex; align-items: center; justify-content: flex-end; gap: 6px; min-width: 0; max-width: 45vw; }
+    .gs-head-end .gs-unsafe-banner { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    /* The round buttons and the chip: the Claude app's 40px pills, a filled
+       disc a step lighter than the bar so each reads as a button. */
+    .gs-head-menu, .gs-head-bar .gs-menu-btn, .gs-status-chip {
+        display: inline-flex; align-items: center; justify-content: center; flex: 0 0 auto;
+        width: 40px; height: 40px; padding: 0; box-sizing: border-box; border-radius: 50%;
+        background: color-mix(in srgb, var(--text) 10%, var(--surface)); border: 1px solid var(--border); color: var(--text);
+    }
+    .gs-head-menu { cursor: pointer; }
+    .gs-head-menu svg, .gs-head-bar .gs-menu-btn svg { width: 18px; height: 18px; display: block; }
+    .gs-head-menu:hover { border-color: var(--accent); color: var(--accent); }
 
-    /* term-mobile-full: body class toggled by the pane header's fill-screen
-       button (.gs-mobile-full-btn above): the single pane claims nearly the
-       whole screen (the height rule below). Three things deliberately stay:
-       the compact .gs-head (with its collapse toggle + × kill — the only way
-       back OUT of fullscreen), the keybar (Liav, 2026-07-25), because it is
-       not clutter but the mobile INPUT METHOD: Esc/Tab/Ctrl/arrows/Paste are
-       unreachable without it, and the pane's own footer (Liav, 2026-10-19:
-       its window id, model and context % beat the status line, so it shows
-       in every pane mode; CMX-242). */
-    /* True overlay, not just a tall box: the pane normally sits inside
-       .canvas's own top padding (CMX-377: clearance for the floating
-       .mobile-menu-fab/.safety-float, no topbar to measure against any more),
-       so a bare `height:100dvh` overshoots the viewport and pushes the
-       terminal's bottom rows under the fold. Pin it to the viewport (fixed +
-       top/left/right:0) so the height below is measured against the whole
-       screen instead. Subtract the keybar's FULL footprint (--term-keybar-h +
-       the safe-area inset its own bottom padding carries — same CMX-130
-       reasoning as the non-fullscreen rule above) so the fixed bar sits past
-       the pane instead of painting over the terminal's bottom row. z-index
-       100 clears the floating fab/safety cluster (46/47); the pane no longer
-       overlaps the keybar (35) geometrically, so their z-order is moot, and
-       both stay under modals (200). */
-    body.term-mobile-full .term-single .term-pane {
+    /* The pane: full width and full height between the screen's top edge (the
+       bar pads the safe area) and the keybar. No margin, border, radius, focus
+       ring or waiting glow: the status chip says waiting, and the terminal gets
+       the room. Pinned to the viewport (fixed) because the pane sits inside
+       .canvas's padding (60px clears the floating opener on the other views).
+       The height subtracts the keybar's FULL footprint (--term-keybar-h + the
+       safe-area inset its own bottom padding carries, CMX-130) and the soft
+       keyboard (--kb-occluded, published by pin.ts from VisualViewport: dvh
+       does not track the keyboard, so without it the line you type into hides
+       behind it). The keybar, the footer and the context bar stay (Liav,
+       2026-07-25 and 10-19). z-index 30: under the keybar (35), the drawer's
+       scrim and drawer (40/45, the hamburger opens it OVER the pane), the
+       safety float (47) and modals (200). The pane fills the screen, so the
+       page has nothing to scroll and a touch-drag needs no side gutter. */
+    .term-single .term-pane {
         position: fixed;
         top: 0; left: 0; right: 0;
-        /* --kb-occluded (published by _kbPin from VisualViewport) is how much
-           the SOFTWARE KEYBOARD covers — 0 when it's closed. dvh does not track
-           it, so without this the terminal's input line hides behind the
-           keyboard exactly when you're typing into it. */
         height: calc(100dvh - var(--term-keybar-h, 0px) - env(safe-area-inset-bottom) - var(--kb-occluded, 0px));
-        z-index: 100;
+        z-index: 30;
+        border: 0; border-radius: 0; box-shadow: none;
+    }
+    .term-single .term-pane::before { box-shadow: none; }
+    /* The safety pills float under the bar, never over its ⋯: the bar is its
+       40px buttons + its padding (the safe area or 6px, and 6px), at least 52px. */
+    body:has(#panel-terminals.active .gs-head-bar) .safety-float {
+        top: calc(max(52px, max(6px, env(safe-area-inset-top)) + 46px) + 8px);
     }
     /* CMX-102: keyboard OPEN → the pane's height is MEASURED by _kbPin/_kbFitPane
        (terminals.js) so its box ends exactly at the keybar's top edge. The calc()
@@ -4585,158 +4091,6 @@ body.sidebar-resizing iframe { pointer-events: none; }
     to   { opacity: 1; transform: translateY(0); }
 }
 
-/* ---------------------------------------------------------------------------
- * Knowledge (OKF viewer) — glance / browse / concept / search / graph.
- * ------------------------------------------------------------------------- */
-.kn-loading, .kn-dim { color: var(--text-dim); font-size: 12px; padding: 8px 0; }
-.kn-section-title { font-size: 13px; font-weight: 600; margin: 18px 0 8px; }
-.kn-section-title:first-child { margin-top: 4px; }
-.kn-sub { font-size: 11px; font-weight: 600; color: var(--text-dim);
-    text-transform: uppercase; letter-spacing: .04em; margin: 4px 0 8px; }
-
-/* type chips (counts) */
-.kn-chips { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 6px; }
-.kn-chip { background: var(--surface); border: 1px solid var(--border);
-    color: var(--text); border-radius: 999px; padding: 4px 12px; font-size: 12px;
-    cursor: pointer; font-family: var(--ui-font); }
-.kn-chip:hover { border-color: var(--accent); }
-.kn-chip-n { color: var(--accent); font-weight: 700; margin-right: 4px; }
-
-.kn-cols { display: grid; grid-template-columns: 1fr 1fr; gap: 18px; margin-bottom: 6px; }
-@media (max-width: 720px) { .kn-cols { grid-template-columns: 1fr; } }
-
-/* concept cards (rows in glance / browse / search / backlinks) */
-.kn-card { display: flex; align-items: center; gap: 8px; padding: 8px 10px;
-    border: 1px solid var(--border); border-radius: 8px; background: var(--surface);
-    margin-bottom: 6px; cursor: pointer; }
-.kn-card:hover { border-color: var(--accent); }
-.kn-card-title { font-weight: 600; font-size: 13px; white-space: nowrap; }
-.kn-card-desc { color: var(--text-dim); font-size: 12px; overflow: hidden;
-    text-overflow: ellipsis; white-space: nowrap; flex: 1; }
-.kn-card-ts { margin-left: auto; color: var(--text-dim); font-size: 11px; flex-shrink: 0; }
-.kn-snippet { color: var(--text-dim); font-size: 11px; width: 100%; margin-top: 4px;
-    border-left: 2px solid var(--border); padding-left: 8px; }
-
-.kn-dir { margin-bottom: 14px; }
-.kn-dir-head { font-size: 12px; font-weight: 600; color: var(--text); margin: 8px 0 6px;
-    text-transform: lowercase; }
-.kn-dir-head .kn-dim { padding: 0; margin-left: 4px; }
-
-.kn-log :is(h1,h2) { font-size: 12px; margin: 10px 0 4px; color: var(--text-dim); }
-.kn-log :is(ul) { margin: 0 0 6px; padding-left: 16px; }
-.kn-log li { font-size: 12px; margin: 2px 0; }
-
-/* type badges + graph node colours */
-.kn-badge { font-size: 10px; font-weight: 700; text-transform: uppercase;
-    letter-spacing: .03em; padding: 2px 7px; border-radius: 5px; flex-shrink: 0;
-    border: 1px solid transparent; }
-.kn-badge-agent   { color: var(--green);  border-color: var(--green);  background: color-mix(in srgb, var(--green) 12%, transparent); }
-.kn-badge-run     { color: var(--accent); border-color: var(--accent); background: color-mix(in srgb, var(--accent) 12%, transparent); }
-.kn-badge-sched   { color: var(--yellow); border-color: var(--yellow); background: color-mix(in srgb, var(--yellow) 12%, transparent); }
-.kn-badge-project { color: #a371f7; border-color: #a371f7; background: color-mix(in srgb, #a371f7 14%, transparent); }
-.kn-badge-other   { color: var(--text-dim); border-color: var(--border); background: var(--surface); }
-
-/* concept detail */
-.kn-back { color: var(--accent); cursor: pointer; font-size: 12px; display: inline-block; margin-bottom: 12px; }
-.kn-back:hover { text-decoration: underline; }
-.kn-head-card { border: 1px solid var(--border); border-radius: 10px;
-    background: var(--surface); padding: 14px 16px; margin-bottom: 16px; }
-.kn-head-top { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
-.kn-title { font-size: 18px; margin: 0; font-weight: 700; }
-.kn-resource { display: inline-block; margin-top: 8px; color: var(--accent);
-    font-size: 12px; word-break: break-all; }
-.kn-tags { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
-.kn-tag { font-size: 11px; color: var(--text-dim); border: 1px solid var(--border);
-    border-radius: 999px; padding: 1px 9px; }
-
-.kn-body { font-size: 13px; line-height: 1.6; max-width: 760px; }
-.kn-body :is(.kn-mh) { font-size: 14px; font-weight: 700; margin: 16px 0 6px; }
-.kn-body p { margin: 6px 0; }
-.kn-body :is(.kn-ul, .kn-ol) { margin: 6px 0; padding-left: 20px; }
-.kn-body li { margin: 3px 0; }
-.kn-body blockquote { border-left: 3px solid var(--border); margin: 8px 0;
-    padding: 2px 0 2px 12px; color: var(--text-dim); }
-.kn-body code { background: var(--bg); border: 1px solid var(--border);
-    border-radius: 4px; padding: 1px 5px; font-size: 12px; }
-.kn-body .kn-code { background: var(--bg); border: 1px solid var(--border);
-    border-radius: 8px; padding: 10px 12px; overflow-x: auto; }
-.kn-body .kn-code code { background: none; border: none; padding: 0; }
-.kn-link { color: var(--accent); cursor: pointer; }
-.kn-link:hover { text-decoration: underline; }
-
-.kn-panel { margin-top: 20px; border-top: 1px solid var(--border); padding-top: 14px; }
-.kn-raw { margin-top: 18px; }
-.kn-raw summary { cursor: pointer; color: var(--text-dim); font-size: 12px; }
-.kn-raw-tbl { width: 100%; max-width: 760px; margin-top: 8px; border-collapse: collapse; font-size: 12px; }
-.kn-raw-tbl td { border: 1px solid var(--border); padding: 4px 8px; vertical-align: top; }
-.kn-raw-k { color: var(--text-dim); white-space: nowrap; width: 1%; }
-
-/* graph — sigma.js (WebGL) canvas, sized container (sigma sizes itself off it) */
-.kn-graph-wrap { border: 1px solid var(--border); border-radius: 10px;
-    background: var(--surface); padding: 8px; }
-.kn-graph-canvas { width: 100%; height: 520px; position: relative; }
-.kn-graph-error { padding: 16px 0; }
-
-/* Knowledge glance — digest + sessions feed + project chips */
-.kn-digest { font-size: 13px; color: var(--text); margin: 2px 0 18px;
-    padding-bottom: 12px; border-bottom: 1px solid var(--border); }
-.kn-feed-row { display: flex; align-items: flex-start; gap: 10px; padding: 10px 12px;
-    border: 1px solid var(--border); border-radius: 8px; background: var(--surface);
-    margin-bottom: 8px; cursor: pointer; }
-.kn-feed-row:hover { border-color: var(--accent); }
-.kn-feed-main { flex: 1; min-width: 0; }
-.kn-feed-top { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
-.kn-feed-arrow { color: var(--text-dim); }
-.kn-feed-proj { color: var(--accent); font-size: 12px; cursor: pointer; }
-.kn-feed-proj:hover { text-decoration: underline; }
-.kn-feed-top .kn-card-ts { margin-left: auto; }
-.kn-feed-desc { color: var(--text-dim); font-size: 12px; margin-top: 3px;
-    overflow: hidden; text-overflow: ellipsis; display: -webkit-box;
-    -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
-.kn-pr { flex-shrink: 0; align-self: center; color: var(--accent); font-size: 11px;
-    font-weight: 600; border: 1px solid var(--border); border-radius: 6px;
-    padding: 2px 8px; text-decoration: none; }
-.kn-pr:hover { border-color: var(--accent); background: color-mix(in srgb, var(--accent) 12%, transparent); }
-.kn-pchips { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 6px; }
-.kn-pchip { display: inline-flex; align-items: baseline; gap: 8px; background: var(--surface);
-    border: 1px solid var(--border); border-radius: 8px; padding: 7px 12px; cursor: pointer;
-    font-family: var(--ui-font); color: var(--text); }
-.kn-pchip:hover { border-color: #a371f7; }
-.kn-pchip-name { font-weight: 600; font-size: 13px; }
-.kn-pchip .kn-dim { padding: 0; font-size: 11px; }
-.kn-browse { margin-top: 20px; border-top: 1px solid var(--border); padding-top: 12px; }
-.kn-browse > summary { cursor: pointer; color: var(--text-dim); font-size: 12px;
-    font-weight: 600; text-transform: uppercase; letter-spacing: .04em; }
-.kn-browse[open] > summary { margin-bottom: 10px; }
-
-/* Personas — the declared persona layer (judge · critic · orchestrator), read-only. */
-.personas-intro { color: var(--text-dim); font-size: 13px; line-height: 1.5;
-    margin: 4px 0 16px; max-width: 720px; }
-.personas-intro strong { color: var(--text); }
-.personas-list { display: grid; gap: 14px;
-    grid-template-columns: repeat(auto-fill, minmax(320px, 1fr)); }
-.persona-card { background: var(--surface); border: 1px solid var(--border);
-    border-radius: 8px; padding: 14px 16px; }
-.persona-head { display: flex; align-items: center; justify-content: space-between;
-    gap: 8px; margin-bottom: 8px; }
-.persona-title { font-weight: 600; font-size: 14px; }
-.persona-state { font-size: 11px; font-weight: 600; padding: 2px 8px; border-radius: 999px;
-    text-transform: uppercase; letter-spacing: .03em; border: 1px solid var(--border);
-    color: var(--text-dim); }
-.persona-state.on { color: var(--accent); border-color: var(--accent); }
-.persona-state.dormant { color: var(--text-dim); }
-.persona-summary { color: var(--text-dim); font-size: 12.5px; line-height: 1.5;
-    margin-bottom: 12px; }
-.persona-rows { display: grid; gap: 6px; }
-.persona-row { display: grid; grid-template-columns: 108px 1fr; gap: 10px;
-    font-size: 12px; align-items: baseline; }
-.persona-row-key { color: var(--text-dim); text-transform: uppercase; font-size: 10.5px;
-    letter-spacing: .04em; font-weight: 600; }
-.persona-row-val { color: var(--text); line-height: 1.45; }
-.persona-docs { margin-top: 12px; display: flex; flex-wrap: wrap; gap: 6px; }
-.persona-doc { font-size: 10.5px; color: var(--text-dim); background: var(--bg);
-    border: 1px solid var(--border); border-radius: 4px; padding: 2px 6px; }
-
 /* Decisions — the durable, owner-independent log (frontend/src/features/
    decisions), a centered dialog (the kit's Dialog, .modal.modal-decisions,
    opened off #btn-decisions; cmx-106 first shipped this
@@ -4793,7 +4147,6 @@ body.sidebar-resizing iframe { pointer-events: none; }
     display: flex; flex-wrap: wrap; align-items: baseline; column-gap: 8px; row-gap: 2px;
     padding: 6px 10px; font-size: 11px;
 }
-.decisions-list .feed-seq { display: none; }
 .decisions-list .feed-summary { flex: 1 1 100%; font-size: 12px; }
 /* CMX-178: a row whose payload names a task_id (model.ts's
    itemFromDecisionPayload) click-throughs to the task-detail modal — cursor

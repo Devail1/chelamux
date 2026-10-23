@@ -97,7 +97,7 @@ beforeAll(async () => {
     // CMX-219: the banner is the update island's (features/update), mounted as the page does
     exposeDomConstructors(dom.window);
     await mountIslands(dom.window);
-    await import('../chela/dashboard/frontend/src/boot.ts');
+    (await import('../chela/dashboard/frontend/src/boot.ts')).start();
     // refresh() awaits a chain of polls before the version check; let them all settle.
     for (let i = 0; i < 20 && !document.getElementById('update-banner'); i++) {
         await new Promise(resolve => setTimeout(resolve, 5));

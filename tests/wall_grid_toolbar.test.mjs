@@ -3,8 +3,8 @@
 // Liav keeps Focus ON as his default view, so the "Grid:" row of six presets +
 // lock/auto/focus was mostly noise. It is not removed: it folds into ONE button
 // showing the CURRENT layout/mode glyph and a chevron, and expands inline on a
-// click. This runs the REAL terminals.js (like tests/walldock.test.mjs) against
-// the terminals panel cut from the REAL templates/index.html, with the toolbar the
+// click. This runs the REAL Wall (features/wall, like tests/walldock.test.mjs) on
+// the REAL page (the shell, CMX-248), with the toolbar the
 // walltoolbar island draws into its slot there (CMX-242), clicked for real.
 //
 // Run: pnpm exec vitest run tests/wall_grid_toolbar.test.mjs (pytest runs it via

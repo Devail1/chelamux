@@ -1,11 +1,8 @@
 // CMX-290, on the ported board (CMX-233): a real CLICK on a real Work board card opens the task
 // modal, on the REAL page. features/work's RTL suite proves the Board and the TaskModal
-// together; this one proves the page around them: the template's #panel-work and
-// #task-modal-island slots, both islands mounted by the real entry, the one /api/dispatcher
-// poll feeding the board, and a click crossing from one island's root to the other's.
-//
-// Both fixtures are `sliceTemplate()`d out of the REAL templates/index.html, so renaming a slot
-// shows up here, not just in a hand-typed fixture that happens to agree with today's markup.
+// together; this one proves the page around them: the REAL page (the shell, CMX-248) with its
+// #panel-work and #task-modal-island, mounted by the real entry, the one /api/dispatcher poll
+// feeding the board, and a click on the board opening the modal.
 //
 // Run: pnpm exec vitest run tests/kanban_task_modal_wiring.test.mjs (tests/test_js_suites.py
 // runs every .test.mjs inside pytest, by discovery).
@@ -15,13 +12,11 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { JSDOM } from 'jsdom';   // needs `pnpm install` — tests/test_js_suites.py enforces it
-import { bootDashboardDom, clickIsland, flush, sliceTemplate } from './js_helpers/dashboard_dom.mjs';
+import { APP_BODY, bootDashboardDom, clickIsland, flush } from './js_helpers/dashboard_dom.mjs';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const STYLE_CSS = fs.readFileSync(path.join(HERE, '..', 'chela', 'dashboard', 'static', 'style.css'), 'utf8');
 
-const PANEL = sliceTemplate('<div class="panel active" id="panel-work">', '</div>', { terminals_enabled: false });
-const MODAL = sliceTemplate('<div id="task-modal-island">', '</div>');
 
 let payload = {};
 let pollWork, closeTaskModal;
@@ -30,7 +25,7 @@ beforeAll(async () => {
     const fetchImpl = url => Promise.resolve({
         ok: true, status: 200, json: () => Promise.resolve(String(url).endsWith('/api/dispatcher') ? payload : {}),
     });
-    await bootDashboardDom({ body: `${PANEL}\n${MODAL}`, fetchImpl, terminalsEnabled: false });
+    await bootDashboardDom({ body: APP_BODY, fetchImpl, terminalsEnabled: false });
     ({ pollWork } = await import('../chela/dashboard/frontend/src/features/work/index.ts'));
     ({ closeTaskModal } = await import('../chela/dashboard/frontend/src/features/taskmodal/index.ts'));
 });

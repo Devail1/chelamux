@@ -89,11 +89,12 @@ beforeAll(async () => {
     globalThis.window.chela = globalThis.window.chela || {};
     globalThis.setInterval = () => 0;
 
-    await import('../chela/dashboard/frontend/src/boot.ts');
-    const util = await import('../chela/dashboard/static/js/util.js');
+    (await import('../chela/dashboard/frontend/src/boot.ts')).start();
+    const { agents: agentsStore } = await import('../chela/dashboard/frontend/src/shared/store/agents.ts');
+    const { view: viewStore } = await import('../chela/dashboard/frontend/src/shared/store/view.ts');
     terminals = await import('../chela/dashboard/frontend/src/features/wall/index.ts');
-    util.setAgentsCache(AGENTS);
-    util.setCurrentTab('terminals');
+    agentsStore.set(AGENTS);
+    viewStore.set('terminals');
     terminals.setTermMode('wall');
     await terminals.renderTerminals();
     const wall = await import('../chela/dashboard/frontend/src/shared/store/wall.ts');

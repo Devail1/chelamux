@@ -24,7 +24,7 @@ import { after, before, describe, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdirSync } from 'node:fs';
 import { join } from 'node:path';
-import { launchChromium, openDashboard } from './fixture.mjs';
+import { launchChromium, openDashboard, DRAWER_OPENER } from './fixture.mjs';
 
 const { browser, why } = await launchChromium();
 after(() => browser && browser.close());
@@ -138,7 +138,7 @@ async function openPhone(kbAtLoad, kbAtBoot = 0) {
 
 // Switch panes the phone's way: the ☰ drawer, then a row other than the open session's.
 async function switchViaSidebar(page) {
-    await page.click('#btn-menu-mobile');
+    await page.click(DRAWER_OPENER);
     const other = await page.evaluate(() => {
         const open = document.querySelector('#term-stage .term-pane [data-head-for]').dataset.headFor;
         const row = [...document.querySelectorAll('#sidebar-agents .agent-row[data-item^="w:"]')]
@@ -209,9 +209,9 @@ describe('CMX-154: phone — the terminal fits its tile on first view and on a t
 
         test('keyboard closed: the unchanged calc() layout, last row visible', () => {
             ready();
-            assert.equal(closed.paneHeight, H - 32 - 47 - 30, 'the closed pane height is the calc(), with no pill strip');
-            // The closed layout is CMX-102's calc(), deliberately untouched — it leaves the
-            // phone scroller a few px of slack, so only row visibility is asserted here.
+            // CMX-313: the full-bleed pane runs from the top edge to the keybar
+            assert.equal(closed.paneHeight, H - 47, 'the closed pane height is the calc(), with no pill strip');
+            // Only row visibility is asserted here: the scroller's slack is not this test's.
             assertFullyVisible(closed, 'keyboard closed', { scrolls: true });
         });
         test('⭐ keyboard opened: the terminal re-fits to the shrunk tile', () => {

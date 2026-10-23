@@ -41,7 +41,7 @@ from pathlib import Path
 from typing import Callable
 
 from chela import config, messenger
-from chela.telegram import gateanswers, media
+from chela.telegram import fleetcmd, gateanswers, media
 from chela.telegram.format import to_code_block
 from chela.telegram.interactive import (
     MIRROR_CB_PREFIX,
@@ -100,6 +100,8 @@ BRIDGE_COMMANDS: list[tuple[str, str]] = [
     ("new", "Start a Claude session (browse to a folder)"),
     ("screenshot", "Snapshot the terminal (with control keys)"),
     ("esc", "Send Escape to interrupt the agent"),
+    ("pauseall", "Hold dispatch and pause every dispatched agent"),
+    ("resumeall", "Resume the paused agents and release the hold"),
 ]
 
 # Claude Code slash commands worth surfacing in Telegram's "/" autocomplete menu
@@ -435,6 +437,10 @@ def build_application(
     agent. Browser navigation state (current path + subdir list) lives in PTB's
     per-user ``context.user_data`` so callback payloads stay tiny.
 
+    ``/pauseall [reason]`` and ``/resumeall`` (CMX-252) are ``chela dispatch --pause --all``
+    and ``--resume`` (:mod:`chela.telegram.fleetcmd`). Fleet-wide, so like ``/new`` they gate
+    on the bound ``chat_id`` alone and work from General.
+
     Taps on an **override request's** ✅ Approve / ❌ Deny (the ``ov:`` callbacks, CMX-79 —
     posted by :class:`chela.telegram.overridewatch.OverrideRelay`) route to ``_on_override``.
     Like ``/new`` it gates on the bound ``chat_id`` alone (the request is posted to the
@@ -709,6 +715,22 @@ def build_application(
             return
         ok = send_escape(window_id)
         await msg.reply_text("⎋ Sent Escape" if ok else "❌ Couldn't send Escape.")
+
+    # -- /pauseall, /resumeall: the fleet pause (CMX-252) -------------------------
+    # Fleet-wide, so gated like /new on the bound CHAT alone: they work from General too.
+    async def _on_pauseall(update, _context: "ContextTypes.DEFAULT_TYPE") -> None:
+        msg = update.message
+        if msg is None or not _new_chat_ok(update):
+            return  # wrong chat — stay silent, exactly like the other commands
+        parts = (msg.text or "").split(maxsplit=1)  # drop the "/pauseall[@bot]" token
+        reason = parts[1].strip() if len(parts) > 1 else ""
+        await msg.reply_text(await asyncio.to_thread(fleetcmd.pause_all, reason))
+
+    async def _on_resumeall(update, _context: "ContextTypes.DEFAULT_TYPE") -> None:
+        msg = update.message
+        if msg is None or not _new_chat_ok(update):
+            return
+        await msg.reply_text(await asyncio.to_thread(fleetcmd.resume_all))
 
     # -- /new: launch a Claude session from anywhere -----------------------------
     # State keys in PTB's per-user context.user_data: the folder currently being
@@ -1146,6 +1168,8 @@ def build_application(
     application.add_handler(CommandHandler("new", _gated(_on_new)))
     application.add_handler(CommandHandler("screenshot", _gated(_on_screenshot)))
     application.add_handler(CommandHandler("esc", _gated(_on_esc)))
+    application.add_handler(CommandHandler("pauseall", _gated(_on_pauseall)))
+    application.add_handler(CommandHandler("resumeall", _gated(_on_resumeall)))
     # AskUserQuestion taps (``qa:``) and mirror D-pad taps (``m:``) are matched FIRST
     # via patterns so they route to their own handlers; PTB runs one handler per group,
     # and the pattern-less _on_key below picks up the /screenshot ``k:`` taps (and

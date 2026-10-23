@@ -26,7 +26,7 @@ import { after, before, describe, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdirSync } from 'node:fs';
 import { join } from 'node:path';
-import { launchChromium, openDashboard } from './fixture.mjs';
+import { launchChromium, openDashboard, OPEN_DRAWER_IN_PAGE } from './fixture.mjs';
 
 const { browser, why } = await launchChromium();
 after(() => browser && browser.close());
@@ -56,9 +56,9 @@ const drawerShut = page => page.evaluate(() => {
 });
 
 async function openDrawer(page) {
-    // The ☰'s own handler: with three safety pills lit (this fixture's queues), the float
-    // reaches over the ☰ at 390px, which is not what this suite is about.
-    await page.evaluate(() => window.chela.toggleSidebar(true));
+    // The ☰'s own click, dispatched: with three safety pills lit (this fixture's queues), the
+    // float reaches over the ☰ at 390px, which is not what this suite is about.
+    await page.evaluate(`if (!document.querySelector('.sidebar').classList.contains('open')) (${OPEN_DRAWER_IN_PAGE})()`);
     await page.waitForFunction(() => Math.abs(document.querySelector('.sidebar').getBoundingClientRect().left) < 0.5,
         null, { timeout: 5000 });
 }
@@ -104,7 +104,7 @@ function measure(dlg) {
 // Between rows: nothing left open (Escape is the keyboard's close; the rows test touch).
 async function reset(page) {
     for (let i = 0; i < 4 && await page.locator('[role="dialog"]').count(); i++) await page.keyboard.press('Escape');
-    await page.evaluate(() => window.chela.toggleSidebar(false));
+    await page.evaluate(() => { if (document.querySelector('.sidebar').classList.contains('open')) document.getElementById('sidebar-scrim').click(); });
 }
 
 // One row per ported overlay: how a phone opens it, its accessible name, and whether any of
@@ -183,7 +183,7 @@ describe(`CMX-306 phone ${W}×${H}, touch: every overlay opens on top and closes
             await o.open(page);
             const dlg = dialog(page, o.dialog ?? o.name);
             await dlg.waitFor({ state: 'visible', timeout: 5000 });
-            await page.evaluate(() => window.chela.toggleSidebar(true));
+            await page.evaluate(`if (!document.querySelector('.sidebar').classList.contains('open')) (${OPEN_DRAWER_IN_PAGE})()`);
             await page.waitForFunction(() => Math.abs(document.querySelector('.sidebar').getBoundingClientRect().left) < 0.5,
                 null, { timeout: 5000 });
             const hit = await dlg.evaluate(d => {
@@ -201,7 +201,7 @@ describe(`CMX-306 phone ${W}×${H}, touch: every overlay opens on top and closes
             });
             assert.equal(hit.overlap, true, `${o.name}: the drawer and the dialog do not overlap, so this measures nothing`);
             assert.equal(hit.inside, true, `${o.name}: the drawer (${hit.at}) is drawn over it`);
-            await page.evaluate(() => window.chela.toggleSidebar(false));
+            await page.evaluate(() => { if (document.querySelector('.sidebar').classList.contains('open')) document.getElementById('sidebar-scrim').click(); });
         });
     }
 

@@ -9,7 +9,7 @@
 // Run: pnpm exec vitest run tests/sse_owners.test.mjs (tests/test_js_suites.py runs it in pytest).
 import { beforeAll, beforeEach, test } from 'vitest';
 import assert from 'node:assert/strict';
-import { bootDashboardDom, flush, WALL } from './js_helpers/dashboard_dom.mjs';
+import { bootDashboardDom, flush, WALL, AGENTS_STORE, VIEW_STORE } from './js_helpers/dashboard_dom.mjs';
 
 const PANEL = `
 <div class="panel" id="panel-terminals">
@@ -57,14 +57,14 @@ async function settle() { for (let i = 0; i < 10; i++) await flush(); }
 const toasts = () => [...document.querySelectorAll('#work-toasts .run-toast')];
 const dispatcherReads = () => requests.filter(r => r.split('?')[0].endsWith('/api/dispatcher')).length;
 
-let util, terminals, toastStore;
+let agentsStore, viewStore, terminals, toastStore;
 beforeAll(async () => {
     const grid = new Proxy({ engine: { nodes: [] }, save: () => [], getGridItems: () => [] },
         { get: (t, k) => (k in t ? t[k] : el => el) });
     globalThis.GridStack = { init: () => grid };
-    ({ modules: { util, terminals } } = await bootDashboardDom({
+    ({ modules: { agents: { agents: agentsStore }, view: { view: viewStore }, terminals } } = await bootDashboardDom({
         body: PANEL, canvasStub: true, fetchImpl: fakeFetch, EventSource: FakeEventSource,
-        extraModules: ['util.js', WALL],
+        extraModules: [AGENTS_STORE, VIEW_STORE, WALL],
     }));
     ({ toasts: toastStore } = await import('../chela/dashboard/frontend/src/features/work/index.ts'));
     await settle();
@@ -75,7 +75,7 @@ beforeAll(async () => {
 beforeEach(async () => {
     requests = [];
     localStorage.clear();
-    util.setCurrentTab('terminals');
+    viewStore.set('terminals');
     toastStore.set([]);
     await settle();
 });
@@ -118,7 +118,7 @@ test('muted run toasts stay silent, and the board still redraws', async () => {
 });
 
 test('windows on the Wall: vanished panes drop, new ones are absorbed, by window id', async () => {
-    util.setAgentsCache([agent('@1'), agent('@2')]);
+    agentsStore.set([agent('@1'), agent('@2')]);
     await terminals.renderTerminals();
     await settle();
     assert.deepEqual([...terminals.renderedWids].sort(), ['@1', '@2']);
@@ -127,16 +127,16 @@ test('windows on the Wall: vanished panes drop, new ones are absorbed, by window
     await settle();
     assert.ok(requests.includes('/api/agents'), 'the Wall did not refetch the live agent set');
     assert.deepEqual([...terminals.renderedWids].sort(), ['@1', '@3']);
-    assert.deepEqual(util._agentsCache.map(a => a.window_id), ['@1', '@3']);
+    assert.deepEqual(agentsStore.get().map(a => a.window_id), ['@1', '@3']);
 });
 
 test('windows off the Wall only invalidates the agent cache: no refetch, no tile change', async () => {
-    util.setCurrentTab('work');
-    util.setAgentsCache([agent('@1')]);
+    viewStore.set('work');
+    agentsStore.set([agent('@1')]);
     const before = [...terminals.renderedWids];
     frame('windows', {});
     await settle();
-    assert.deepEqual(util._agentsCache, []);
+    assert.deepEqual(agentsStore.get(), []);
     assert.ok(!requests.includes('/api/agents'), 'a windows frame off the Wall refetched /api/agents');
     assert.deepEqual([...terminals.renderedWids], before);
 });
@@ -144,15 +144,15 @@ test('windows off the Wall only invalidates the agent cache: no refetch, no tile
 test('term-ready swaps a pending placeholder for its iframe, only on the Wall', async () => {
     notReady = new Set(['@4']);
     liveAgents = [agent('@1'), agent('@4')];
-    util.setAgentsCache(liveAgents);
+    agentsStore.set(liveAgents);
     await terminals.renderTerminals();
     await settle();
     const pending = () => document.querySelector('#term-stage .term-pending[data-pending="@4"]');
     assert.ok(pending(), 'the fixture never rendered @4 as pending');
-    util.setCurrentTab('work');
+    viewStore.set('work');
     frame('term-ready', { ready: ['@4'] });
     assert.ok(pending(), 'term-ready swapped a placeholder while the Wall was not showing');
-    util.setCurrentTab('terminals');
+    viewStore.set('terminals');
     frame('term-ready', { ready: ['@9', '@4'] });
     assert.equal(pending(), null);
     const frames = [...document.querySelectorAll('#term-stage iframe.term-frame')].map(f => f.getAttribute('src'));

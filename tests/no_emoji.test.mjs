@@ -1,13 +1,12 @@
 // CMX-199: the dashboard draws Lucide icons, not emoji. The rule lives here, not in
 // prose: every rendered literal in static/js/*.js and every template's text is scanned,
-// and an emoji outside tests/no_emoji_allowlist.json fails the build. The allowlist is
-// a per-file ratchet the CMX-212 port slices empty. Run: pnpm exec vitest run <this file>.
+// and an emoji outside tests/no_emoji_allowlist.json fails the build. The allowlist was
+// a per-file ratchet the CMX-212 port slices emptied; it stays empty. Run: pnpm exec vitest run <this file>.
 import { test } from 'vitest';
 import assert from 'node:assert/strict';
 import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
-import { JSDOM } from 'jsdom';
 import { checkTree, guardedFiles, scanHtml, scanJs } from './js_helpers/emoji_scan.mjs';
 
 const ROOT = new URL('..', import.meta.url).pathname;
@@ -20,7 +19,7 @@ test('the real tree is green against the allowlist', () => {
 
 test('the guard covers the dashboard JS and templates', () => {
     const files = guardedFiles(ROOT);
-    for (const f of ['static/js/util.js', 'static/js/icons.js', 'static/js/wire.ts', 'templates/index.html']) {
+    for (const f of ['static/js/wire.ts', 'templates/index.html', 'frontend/src/features/shell/lib/App.tsx']) {
         assert.ok(files.includes(`chela/dashboard/${f}`), f);
     }
     assert.ok(!files.some(f => f.includes('/vendor/') || f.includes('/collab/')));
@@ -95,26 +94,8 @@ test('the ratchet: a count above, below or for a vanished file each fail', () =>
         ['chela/dashboard/static/js/gone.js: allowlisted but not a guarded file. Delete its entry.']);
 });
 
-test('every allowlist entry names the port slice that removes it', () => {
-    for (const [f, e] of Object.entries(ALLOW)) assert.match(e.removed_by, /P\d+/, f);
-});
-
-test('icons.js: every meaning draws a vendored Lucide <svg>, and no glyph', async () => {
-    const dom = new JSDOM('<!doctype html><title>t</title>');
-    globalThis.window = dom.window;
-    globalThis.document = dom.window.document;
-    const { icon } = await import('../chela/dashboard/static/js/util.js');
-    const { ICONS } = await import('../chela/dashboard/static/js/icons.js');
-    assert.ok(Object.isFrozen(ICONS));
-    assert.deepEqual([ICONS.judge, ICONS.warning, ICONS.blocked], ['scale', 'triangle-alert', 'ban']);
-    for (const meaning of Object.keys(ICONS)) {
-        const svg = icon(meaning, 14);
-        assert.match(svg, /^<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" /, meaning);
-        assert.match(svg, /<(path|circle|rect|line|polyline|polygon) /, meaning);
-        assert.deepEqual(scanJs(JSON.stringify(svg)), [], meaning);
-    }
-    // the scale's beam, from lucide's scale.svg
-    assert.ok(icon('judge').includes('<path d="M3 7h1a17 17 0 0 0 8-2 17 17 0 0 0 8 2h1"/>'));
-    assert.throws(() => icon('scale'), /icon: unknown meaning "scale"/);
-    assert.throws(() => icon('toString'), /unknown meaning/);
+// CMX-249 (FRONTEND_PORT_PLAN.md §5, P35): the port slices emptied the ratchet. A new emoji
+// is fixed, never allowlisted.
+test('the legacy allowlist is empty', () => {
+    assert.deepEqual(ALLOW, {});
 });

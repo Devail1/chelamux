@@ -83,7 +83,7 @@ function fakeGridStack() {
     return { init: () => grid };
 }
 
-let terminals, util, wire;
+let terminals, agentsStore, viewStore, wire;
 
 beforeAll(async () => {
     const dom = new JSDOM(`<!doctype html><html><body>${PANEL}</body></html>`,
@@ -120,12 +120,13 @@ beforeAll(async () => {
     // their TDZ when main's bootstrap runs — a browser-faithful import, not a mock.
     // main.js also arms the app's poll timers, which a test has no use for.
     globalThis.setInterval = () => 0;
-    await import('../chela/dashboard/frontend/src/boot.ts');
-    util = await import('../chela/dashboard/static/js/util.js');
+    (await import('../chela/dashboard/frontend/src/boot.ts')).start();
+    ({ agents: agentsStore } = await import('../chela/dashboard/frontend/src/shared/store/agents.ts'));
+    ({ view: viewStore } = await import('../chela/dashboard/frontend/src/shared/store/view.ts'));
     wire = await import('../chela/dashboard/static/js/wire.ts');
     terminals = await import('../chela/dashboard/frontend/src/features/wall/index.ts');
-    util.setCurrentTab('terminals');
-    util.setAgentsCache(AGENTS);
+    viewStore.set('terminals');
+    agentsStore.set(AGENTS);
     await terminals.renderTerminals();   // ONE wall, built once — as in a live session
 });
 

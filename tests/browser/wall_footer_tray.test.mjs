@@ -81,21 +81,17 @@ describe('CMX-242 1440×900: the footer shows on a wall tile and on a MAXIMIZED 
     test('the same tile maximized', () => { ready(); assertFooter(maxed, '@1', 'maximized'); });
 });
 
-describe('CMX-242 390×844: the phone pane shows its footer, filling the screen too', { skip: why }, () => {
-    let ctx, page, single, full;
+describe('CMX-242 390×844: the phone pane shows its footer (the pane is always full, CMX-313)', { skip: why }, () => {
+    let ctx, page, single;
     const ready = setup(async () => {
         ({ context: ctx, page } = await openDashboard(browser, { width: 390, height: 844, api: api(2), touch: true }));
         await settle(page);
         const wid = await page.$eval('#term-stage .term-pane .term-ctx-bar', b => b.dataset.ctxFor);
         single = { wid, f: await footer(page, wid) };
-        await page.click('#term-stage .term-pane .gs-mobile-full-btn');
-        await page.waitForFunction(() => document.body.classList.contains('term-mobile-full'), null, { timeout: 5000 });
-        full = await footer(page, wid);
     });
     after(() => ctx && ctx.close());
 
     test('the single pane', () => { ready(); assertFooter(single.f, single.wid, 'phone'); });
-    test('the single pane filling the screen', () => { ready(); assertFooter(full, single.wid, 'phone-full'); });
 });
 
 describe('CMX-242 1440×900: the focus ring never covers the context fill', { skip: why }, () => {

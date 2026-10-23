@@ -1,17 +1,17 @@
 // CMX-278 (CMX-172 slice C): the sidebar's state and commands, moved out of nav.js. It owns
 // the /api/agents read the sidebar draws, the per-device collapsed groups, the server layout
 // and archive, Recent sessions, the nav rows' state, the collapsed rail / phone drawer and the
-// Alt fast switch. The islands (mount.tsx) draw what it publishes to the bridge; their clicks
-// come back here through window.chela. What belongs to the rest of the page (the wall, the
-// agent detail view, the launcher, the orchestrator slot) it reaches through the host nav.js
-// configures, so this module imports no legacy code.
+// Alt fast switch. Its components draw what it publishes to the bridge; their clicks come back
+// here through the actions the shell hands them (features/shell). What belongs to the rest of
+// the page (the wall, the agent detail view, the launcher, the orchestrator slot) it reaches
+// through the host the shell configures.
 import { api, BOOT } from '../../shared/api/index.ts';
 import { registerLane } from '../../shared/scheduler/index.ts';
 import { type Agent, agents as agentsStore } from '../../shared/store/agents.ts';
 import { onOverlayOpen } from '../../shared/ui/index.ts';
 import { archivedKeys, archivedSessions, pruneHidden, refreshArchive, setArchive } from './lib/archive.ts';
 import { getLayout, refreshLayout, writeLayout } from './lib/layout.ts';
-import { chelaNs, isObj, lsJson, lsRead, lsSet, postJson, publish, say, sayRefused } from './lib/page.ts';
+import { isObj, lsJson, lsRead, lsSet, postJson, publish, say, sayRefused } from './lib/page.ts';
 import {
   ARCHIVED_SECTION_KEY, type AgentRow, clampWidth, type Custom, dismissKey, type Group, type Item, isArchivable,
   moveGroup, type NavState, normalizeView, type RecentRow, type RecentState, recentView, sidebarModel,
@@ -83,7 +83,8 @@ export function toggleSidebar(force?: boolean): void {
   document.getElementById('sidebar-scrim')?.classList.toggle('open', open);
   // CMX-377: the phone's floating opener hides while the drawer is open
   document.body.classList.toggle('sidebar-open', open);
-  document.getElementById('btn-menu-mobile')?.setAttribute('aria-expanded', open ? 'true' : 'false');
+  // CMX-313: and the pane title bar's hamburger opens the same drawer
+  for (const b of document.querySelectorAll('#btn-menu-mobile, .gs-head-menu')) b.setAttribute('aria-expanded', open ? 'true' : 'false');
 }
 
 /** Navigating dismisses the phone drawer; it never folds the desktop rail. */
@@ -579,11 +580,3 @@ export async function resumeSession(r: RecentRow): Promise<boolean> {
   await refreshSidebar(); // the live list and Recent sessions both
   return true;
 }
-
-// --- window.chela: the islands' clicks and index.html's handlers ---------------------------
-Object.assign(chelaNs(), {
-  toggleSidebar, closeSidebar, setSidebarWidth, toggleGroup, toggleArchivedSection, unarchiveRow, archiveKeys,
-  unarchiveKeys, groupMenuAction, groupNewSession, rowMenuAction, moveToGroup, newCustomGroup, renameCustomGroup,
-  deleteCustomGroup, viewMenuAction, sidebarOrder, jumpToOrchestrator, resumeSession, dismissRecentSession,
-  clearRecentSessions, undoDismissRecent, closeRecentUndo, toggleDispatcherSessions,
-});

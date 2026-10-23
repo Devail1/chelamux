@@ -6,7 +6,7 @@
 // Escape is each dialog's own: the top one closes, so one Esc closes one layer.
 import { toggleSettings } from '../../settings/index.ts';
 import { isPaletteKey, isSettingsKey } from '../model.ts';
-import { movePalette, palette, runPalette, sidebarJumpInput, togglePalette } from './state.ts';
+import { movePalette, palette, runPalette, togglePalette } from './state.ts';
 
 function onKey(e: KeyboardEvent): void {
   if (isPaletteKey(e)) {
@@ -30,14 +30,8 @@ function onKey(e: KeyboardEvent): void {
   }
 }
 
-/**
- * Listen for the keys on `win`'s document, and give index.html's sidebar "Jump to session"
- * box (legacy markup: its inline handlers call `chela.sidebarJumpInput(this)`) its handler.
- * Returns the uninstall.
- */
+/** Listen for the keys on `win`'s document. Returns the uninstall. */
 export function installPalette(win: Window = window): () => void {
-  const ns = ((win as unknown as { chela?: Record<string, unknown> }).chela ??= {});
-  ns.sidebarJumpInput = sidebarJumpInput;
   // One module-level handler: a second install on the same page adds no second listener (the
   // DOM drops a duplicate), so Ctrl+K never toggles twice.
   win.document.addEventListener('keydown', onKey);

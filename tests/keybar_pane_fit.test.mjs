@@ -58,7 +58,7 @@ let barH = 47;
 let vv;            // the fake VisualViewport
 let roCallbacks = [];
 let terminals;
-let util;
+let agentsStore, viewStore;
 let keybar;
 let model;
 
@@ -120,11 +120,12 @@ beforeAll(async () => {
     await mountIslands(dom.window);
     keybar = await import('../chela/dashboard/frontend/src/features/keybar/index.ts');
     model = await import('../chela/dashboard/frontend/src/features/keybar/model.ts');
-    await import('../chela/dashboard/frontend/src/boot.ts');
-    util = await import('../chela/dashboard/static/js/util.js');
+    (await import('../chela/dashboard/frontend/src/boot.ts')).start();
+    ({ agents: agentsStore } = await import('../chela/dashboard/frontend/src/shared/store/agents.ts'));
+    ({ view: viewStore } = await import('../chela/dashboard/frontend/src/shared/store/view.ts'));
     terminals = await import('../chela/dashboard/frontend/src/features/wall/index.ts');
-    util.setCurrentTab('terminals');
-    util.setAgentsCache(AGENTS);
+    viewStore.set('terminals');
+    agentsStore.set(AGENTS);
     await terminals.renderTerminals();
 });
 
@@ -192,15 +193,17 @@ test('desktop: even with the visual viewport shrunk (browser zoom), no override'
     assert.equal(fitVar(), '');
 });
 
-test('style.css applies the fit to the phone pane, after the fullscreen rule', () => {
+test('style.css applies the fit to the phone pane, after the full-bleed pane rule', () => {
     const css = readFileSync(new URL('../chela/dashboard/static/style.css', import.meta.url), 'utf8')
         .replace(/\/\*[\s\S]*?\*\//g, '');
     const rule = /html\.kb-fit\s+\.term-single\s+\.term-pane\s*\{\s*height:\s*var\(\s*--kb-pane-fit-h\s*\)\s*;?\s*\}/;
     const m = rule.exec(css);
     assert.ok(m, 'missing `html.kb-fit .term-single .term-pane { height: var(--kb-pane-fit-h) }`');
-    const full = css.indexOf('body.term-mobile-full .term-single .term-pane {');
+    // CMX-313: the phone pane is always full-bleed, pinned to the viewport (it was the
+    // opt-in body.term-mobile-full rule before)
+    const full = css.search(/\.term-single\s+\.term-pane\s*\{[^}]*position:\s*fixed/);
     assert.ok(full >= 0 && m.index > full,
-        'the kb-fit rule must come AFTER the fullscreen pane rule (equal specificity — source order decides)');
+        'the kb-fit rule must come AFTER the full-bleed pane rule (the fit must win the height)');
     const mq = css.lastIndexOf('@media', m.index);
     assert.match(css.slice(mq, m.index), /^@media\s*\(max-width:\s*768px\)/, 'the kb-fit rule must be phone-only');
 });
@@ -273,13 +276,13 @@ test('⭐ a freshly rebuilt pane re-fits if the keyboard is already up (renderTe
     keyboard(true);                       // keyboard up, but NO event: only the render may notice
     const before = document.querySelector('#term-stage .term-pane');
     // A second agent appears → the stage signature changes → the single pane is rebuilt.
-    util.setAgentsCache([...AGENTS, { name: 'two', window_id: '@2', online: true }]);
+    agentsStore.set([...AGENTS, { name: 'two', window_id: '@2', online: true }]);
     await terminals.renderTerminals();
     const after = document.querySelector('#term-stage.term-single .term-pane');
     assert.ok(after && after !== before, 'the single pane must have been rebuilt');
     assert.ok(root().classList.contains('kb-fit'), 'the rebuilt pane must be fitted by renderTerminals itself');
     assert.equal(fitVar(), openFit());
-    util.setAgentsCache(AGENTS);
+    agentsStore.set(AGENTS);
     await terminals.renderTerminals();
 });
 

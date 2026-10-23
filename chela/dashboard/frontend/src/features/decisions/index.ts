@@ -4,4 +4,3 @@ export { DecisionsButton, type JumpToOrchestrator } from './lib/DecisionsButton.
 export { DecisionsDialog } from './lib/DecisionsDialog.tsx';
 export { CHIP_META } from './lib/chip.ts';
 export { DECISION_TYPES, LAST_SEEN_KEY, closeDecisions, inbox, inboxOpen, inboxQuery, openDecisionTicket, openDecisions, refreshLog, tickDecisions, type InboxState } from './lib/inbox.ts';
-export { legacyJump, mountDecisions } from './lib/mount.tsx';

@@ -4,15 +4,20 @@
 // features/paneframe's termKey() to /api/term/key; Paste through its termPaste().
 import { useEffect, useRef, useState } from 'react';
 import { icons } from '../../../shared/icons/index.ts';
+import { TextButton } from '../../../shared/ui/index.ts';
 import { termMode } from '../../../shared/store/wall.ts';
 import { useStore } from '../../../shared/store/index.ts';
 import { ARROWS, ARROW_FACE, type Arrow, CHARS, CTRL_LETTERS, type CtrlState, DESK_NAV, type Key, PAGING, afterCtrlLetter, nextCtrl } from '../model.ts';
+import { termKey, termPaste } from '../../paneframe/index.ts';
 import { bindKeybarPin } from './pin.ts';
 
 export interface KeybarActions {
   termKey: (key: string) => void;
   termPaste: (btn: HTMLButtonElement) => void;
 }
+
+/** The single pane's keys and Paste (features/paneframe, CMX-246). */
+export const paneKeybarActions: KeybarActions = { termKey: (key) => void termKey(key), termPaste: (btn) => void termPaste(btn) };
 
 /** localStorage's remembered collapse; collapsed unless the user opened it. */
 const COLLAPSED_KEY = 'pc_kb_collapsed';
@@ -26,9 +31,9 @@ function readCollapsed(): boolean {
 
 function KeyButton({ k, className, onPress }: { k: Key; className?: string; onPress: () => void }) {
   return (
-    <button type="button" className={className} title={k.title} aria-label={k.label} onClick={onPress}>
+    <TextButton className={className} title={k.title} aria-label={k.label} onClick={onPress}>
       {k.face}
-    </button>
+    </TextButton>
   );
 }
 
@@ -53,12 +58,12 @@ function DeskBar({ actions }: { actions: KeybarActions }) {
   };
   return (
     <div id="term-bar" className={collapsed ? 'kb-collapsed' : undefined} style={{ display: single ? 'flex' : 'none' }}>
-      <button className="kb-toggle" id="kb-toggle" type="button" onClick={toggle} aria-expanded={!collapsed} aria-controls="kb-body" title="Show/hide on-screen keys">
+      <TextButton className="kb-toggle" id="kb-toggle" onClick={toggle} aria-expanded={!collapsed} aria-controls="kb-body" title="Show/hide on-screen keys">
         <span>
           <icons.keyboard aria-hidden size={14} /> Keys
         </span>
         <icons.chevronUp className="kb-chevron" aria-hidden size={12} />
-      </button>
+      </TextButton>
       <div className="kb-body" id="kb-body">
         <div className="kb-row">
           <div className="kb-group" aria-label="Special keys">
@@ -73,7 +78,7 @@ function DeskBar({ actions }: { actions: KeybarActions }) {
             <KeyButton k={{ key: 'C-b', face: '^B', title: 'Ctrl-B (tmux prefix)' }} onPress={send('C-b')} />
           </div>
           <div className="kb-group" aria-label="Scrollback">
-            <button id="term-scroll-btn" type="button" className={scrolling ? 'btn-accent' : undefined} onClick={scroll}>
+            <TextButton id="term-scroll-btn" className={scrolling ? 'btn-accent' : undefined} onClick={scroll}>
               {scrolling ? (
                 'Exit Scroll'
               ) : (
@@ -81,7 +86,7 @@ function DeskBar({ actions }: { actions: KeybarActions }) {
                   <icons.scrollback aria-hidden size={14} /> Scroll
                 </>
               )}
-            </button>
+            </TextButton>
           </div>
         </div>
         <div className="kb-row">
@@ -117,21 +122,20 @@ function PhoneBar({ actions }: { actions: KeybarActions }) {
       {key({ key: 'Tab', face: 'Tab' })}
       {key({ key: 'BTab', face: '⇧Tab', title: 'Shift-Tab (back-tab · toggle agent mode)', label: 'Shift Tab' })}
       {key({ key: 'Enter', face: '⏎', label: 'Enter' }, 'kb2-key kb2-go')}
-      <button type="button" className="kb2-key" title="Paste from clipboard" onClick={(e) => actions.termPaste(e.currentTarget)}>
+      <TextButton className="kb2-key" title="Paste from clipboard" onClick={(e) => actions.termPaste(e.currentTarget)}>
         Paste
-      </button>
+      </TextButton>
       {sep(1)}
       {key({ key: 'C-c', face: '^C', title: 'Ctrl-C (interrupt)' }, 'kb2-key kb2-strong')}
-      <button
+      <TextButton
         id="kb2-ctrl"
-        type="button"
         className="kb2-key kb2-mod"
         aria-pressed={ctrl !== 'off'}
         onClick={() => setCtrl(nextCtrl)}
         title="Ctrl (tap: arm for next key · tap again: lock · again: off)"
       >
         Ctrl
-      </button>
+      </TextButton>
       <span className="kb2-ctrl-letters" id="kb2-ctrl-letters">
         {CTRL_LETTERS.map((k) => (
           <KeyButton

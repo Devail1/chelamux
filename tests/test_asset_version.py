@@ -54,12 +54,12 @@ def test_every_script_and_stylesheet_in_the_page_is_versioned(client):
     module = [a["src"] for t, a in refs if t == "script" and a.get("type") == "module" and "src" in a]
     styles = [a["href"] for t, a in refs
               if t == "link" and "stylesheet" in (a.get("rel") or "").split()]
-    # The page as it ships: gridstack + the Vite bundle (CMX-215: the islands and the legacy
-    # main.js graph, one module script), gridstack.css + style.css. A count that drops means a
-    # tag stopped being recognised — not that it stopped needing a version.
+    # The page as it ships: gridstack + the Vite bundle (CMX-215, one module script),
+    # gridstack.css + the bundle's stylesheet (CMX-248: style.css, imported by the entry). A
+    # count that drops means a tag stopped being recognised — not that it stopped needing a version.
     assert module == [_prefix() + dash.APP_ENTRY]
     assert len(scripts) >= 2 and len(styles) >= 2
-    assert _prefix() + "style.css" in styles
+    assert dash.APP_CSS and _prefix() + dash.APP_CSS in styles
     for url in scripts + styles:
         assert url.startswith(_prefix()), f"{url!r} is not versioned — it keeps the pre-deploy cache"
     # ANY reference to a static file — icon, image, script, stylesheet — carries the version.
@@ -117,7 +117,7 @@ def test_the_import_scan_reaches_modules_converted_to_typescript():
 def test_every_module_import_inherits_the_version():
     """A relative specifier resolves against the importing module's versioned URL; an
     absolute ``/static/…`` one would escape it. Dynamic imports of our own modules must go
-    through ``staticUrl()`` (util.js), which adds the version."""
+    through ``staticUrl()`` (shared/api), which adds the version."""
     seen = 0
     for p in _js_files():
         src = p.read_text(encoding="utf-8")
@@ -136,8 +136,9 @@ def test_every_module_import_inherits_the_version():
         code = "\n".join(ln for ln in src.splitlines() if not ln.lstrip().startswith(("//", "*")))
         bare = re.findall(r"['\"]/static/[^'\"]+['\"]", code)
         assert not bare, f"{p.name} names a bare static URL: {bare}"
-    # CMX-212: each port slice moves imports out of static/js; the floor follows them down.
-    assert seen > 20, "the import scan found almost nothing — the regexes no longer match"
+    # CMX-212: each port slice moves imports out of static/js; the floor follows them down
+    # (CMX-248: three pure modules are left, wallmodel.ts, windowid.ts and wire.ts).
+    assert seen >= 5, "the import scan found almost nothing — the regexes no longer match"
 
 
 def test_version_is_stable_within_a_deploy(client):
@@ -194,7 +195,7 @@ def test_cache_headers(client):
     r = client.get("/" + _prefix() + dash.APP_ENTRY)
     assert r.status_code == 200
     assert r.headers["Cache-Control"] == "public, max-age=31536000, immutable"
-    assert b'closest(".kebab-wrap")' in r.get_data(), "the bundle lacks the legacy graph (util.js)"
+    assert b"sidebar-jump-input" in r.get_data(), "the bundle lacks the shell (features/shell)"
     r.close()
     old = client.get("/static/v/000000000000/" + dash.APP_ENTRY)
     assert old.status_code == 200
@@ -205,15 +206,6 @@ def test_cache_headers(client):
     assert plain.status_code == 200
     plain.close()
     assert client.get("/api/version").headers["Cache-Control"] == "no-cache"
-
-
-def test_the_bundle_installs_the_islands_bridge_before_the_legacy_graph_runs():
-    """Rollup lays modules out in evaluation order: the islands (bridge + mounts) must come
-    before util.js, the first legacy module, or legacy publishes to no bridge."""
-    bundle = (STATIC / dash.APP_ENTRY).read_text(encoding="utf-8")
-    islands, legacy = bundle.find("overlays-island"), bundle.find('closest(".kebab-wrap")')   # util.js
-    assert islands >= 0 and legacy >= 0
-    assert islands < legacy
 
 
 def test_versioned_route_does_not_escape_static(client):

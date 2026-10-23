@@ -10,7 +10,7 @@
 // Run: pnpm exec vitest run tests/sidebar_view.test.mjs  (pytest runs it via tests/test_js_suites.py)
 import { beforeAll, beforeEach, test } from 'vitest';
 import assert from 'node:assert/strict';
-import { bootDashboardDom, flush, ORCHESTRATOR, SIDEBAR } from './js_helpers/dashboard_dom.mjs';
+import { bootDashboardDom, flush, ORCHESTRATOR, SIDEBAR, AGENTS_STORE, VIEW_STORE, NAV } from './js_helpers/dashboard_dom.mjs';
 import { clickMenu, closeMenu, menu, menuItems, openMenu, rightClick } from './js_helpers/side_menu.mjs';
 import { fakeArchiveServer } from './js_helpers/fake_archive.mjs';
 import {
@@ -27,16 +27,16 @@ const BODY = `
 <div id="agent-detail"></div>
 <span id="hdr-agents"></span><span id="hdr-next"></span><span id="hdr-updated"></span>`;
 
-let nav, util, orch, sidebar;
+let nav, agentsStore, viewStore, orch, sidebar;
 // what /api/orchestrator/status answers (a test sets it to Pin a row), and the spawns a
 // group's "+" posted
 let orchStatus = {};
 const spawns = [];
 // CMX-75: the archive is SERVER state — this stands in for /api/sidebar/archive.
-const server = fakeArchiveServer(() => util && util._agentsCache);
+const server = fakeArchiveServer(() => agentsStore && agentsStore.get());
 
 beforeAll(async () => {
-    ({ modules: { util, nav, orchestrator: orch, sidebar } } = await bootDashboardDom({
+    ({ modules: { agents: { agents: agentsStore }, view: { view: viewStore }, nav, orchestrator: orch, sidebar } } = await bootDashboardDom({
         body: BODY,
         canvasStub: true,
         terminalsEnabled: false,
@@ -50,7 +50,7 @@ beforeAll(async () => {
                 : /\/api\/(agents|summary)/.test(u) ? [] : {};
             return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve(body) });
         },
-        extraModules: ['util.js', 'nav.js', ORCHESTRATOR, SIDEBAR],
+        extraModules: [AGENTS_STORE, VIEW_STORE, NAV, ORCHESTRATOR, SIDEBAR],
     }));
 });
 
@@ -79,7 +79,7 @@ const WT = '/srv/.chela/worktrees/chelamux';
 const runCard = (task, title, role, over = {}) => ({ task_id: task, title, status: 'running', judge_state: '', role, ...over });
 
 function render(rows) {
-    util.setAgentsCache(rows);
+    agentsStore.set(rows);
     sidebar.renderSidebarAgents(rows);
 }
 const host = () => document.getElementById('sidebar-agents');
@@ -202,7 +202,7 @@ test('archive state is read from the SERVER: what another device archived shows 
     assert.equal(archSection(), null, 'nothing archived: no Archived group');
     server.st.sessions.push({ key: 's:sid-x', session_id: 'sid-x', name: 'elsewhere', cwd: '/srv/code/beta', archived_at: 1 });
     await sidebar.refreshArchive();
-    sidebar.renderSidebarAgents(util._agentsCache);
+    sidebar.renderSidebarAgents(agentsStore.get());
     assert.equal(archSection().querySelector('.archived-count').textContent, '1');
     assert.ok(archSection().classList.contains('collapsed'));
     view('status:archived');

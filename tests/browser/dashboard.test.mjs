@@ -22,7 +22,7 @@
 // CHELA_REQUIRE_JS_TESTS=1 — a browser that cannot launch is a FAILURE there.
 import { after, before, describe, test } from 'node:test';
 import assert from 'node:assert/strict';
-import { AGENTS, STATE_OF, launchChromium, openDashboard } from './fixture.mjs';
+import { AGENTS, DRAWER_OPENER, STATE_OF, launchChromium, openDashboard } from './fixture.mjs';
 
 const { browser, why } = await launchChromium();
 after(() => browser && browser.close());
@@ -264,10 +264,10 @@ describe('phone 390×844: off-canvas drawer, menu FAB, always-visible safety clu
         await assertOnScreen('#btn-shares');   // the fixture's shared @2 lights the kill-switch
     });
 
-    test('the menu FAB is visible and opens the drawer', async () => {
+    test('the pane title bar\'s hamburger is visible and opens the drawer (CMX-313: no floating ☰ over a pane)', async () => {
         ready();
-        await assertOnScreen('#btn-menu-mobile');
-        await page.locator('#btn-menu-mobile').click();
+        await assertOnScreen('#term-stage.term-single .gs-head-menu');
+        await page.locator('#term-stage.term-single .gs-head-menu').click();
         await page.waitForFunction(() => {
             const r = document.querySelector('.sidebar').getBoundingClientRect();
             return r.left >= -1 && r.width > 0 && r.left < window.innerWidth;
@@ -610,7 +610,7 @@ describe('CMX-393 fonts: pane headers, pane footers and modals are the Geist chr
     });
 });
 
-describe('CMX-393 phone 390×844: the drawer foot is one row, the "+" opens the launch menu with the drawer closed', { skip: why }, () => {
+describe('CMX-393 phone 390×844: the drawer foot is one row, the drawer\'s New session opens the launch menu', { skip: why }, () => {
     let page, context;
     const ready = setup(async () => {
         ({ page, context } = await openDashboard(browser, { width: 390, height: 844 }));
@@ -619,30 +619,6 @@ describe('CMX-393 phone 390×844: the drawer foot is one row, the "+" opens the 
         await stable(page);
     });
     after(() => context && context.close());
-
-    test('the phone "+" is on screen with the drawer closed and opens the launch menu', async () => {
-        ready();
-        const side = await box(page, '.sidebar');
-        assert.ok(side.x + side.width <= px, 'the drawer is not closed at the start of this test');
-        const plus = await box(page, '#btn-new-mobile');
-        assert.ok(plus.x >= 0 && plus.y >= 0 && plus.x + plus.width <= 390 && plus.y + plus.height <= 844,
-            `#btn-new-mobile ${JSON.stringify(plus)} is not inside the viewport`);
-        await page.locator('#btn-new-mobile').click();
-        // the launch menu (CMX-219: the launcher island, a kit popover)
-        await page.waitForSelector('.popover.launch-menu', { state: 'visible', timeout: 5000 });
-        const menu = await box(page, '.popover.launch-menu');
-        assert.ok(menu.width > 0 && menu.x >= 0 && menu.x + menu.width <= 390 + px,
-            `the launch menu ${JSON.stringify(menu)} is not on screen`);
-        const closed = await box(page, '.sidebar');
-        assert.ok(closed.x + closed.width <= px, 'opening the launch menu also opened the drawer');
-        // The popover arms its light-dismiss listener in a setTimeout(0). CDP input can
-        // outrun that timer on a loaded runner (CI 3.11, PR #555), so the click landed
-        // before the listener existed and the menu never closed. A later setTimeout(0)
-        // fires after the earlier one, so awaiting one means armed.
-        await page.evaluate(() => new Promise(r => setTimeout(r, 0)));
-        await page.mouse.click(380, 830);   // light-dismiss
-        await page.waitForSelector('.popover.launch-menu', { state: 'detached', timeout: 5000 });
-    });
 
     test('.safety-float is still on screen with the drawer closed', async () => {
         ready();
@@ -653,7 +629,7 @@ describe('CMX-393 phone 390×844: the drawer foot is one row, the "+" opens the 
 
     test('opened drawer: its foot is one row, and the inbox sits in its head', async () => {
         ready();
-        await page.locator('#btn-menu-mobile').click();
+        await page.locator(DRAWER_OPENER).click();
         await page.waitForFunction(() => {
             const r = document.querySelector('.sidebar').getBoundingClientRect();
             return r.left >= -1 && r.width > 0;
@@ -721,7 +697,7 @@ for (const vp of [{ width: 1920, height: 916 }, { width: 1440, height: 900 }]) {
     });
 }
 
-describe('CMX-398 phone 390×844: the "+" New-session menu is still wholly on screen', { skip: why }, () => {
+describe('CMX-398 phone 390×844: the New-session menu is still wholly on screen', { skip: why }, () => {
     const vp = { width: 390, height: 844 };
     let page, context;
     const ready = setup(async () => {
@@ -731,12 +707,12 @@ describe('CMX-398 phone 390×844: the "+" New-session menu is still wholly on sc
     });
     after(() => context && context.close());
 
-    test('the launch menu from #btn-new-mobile is inside the 390×844 viewport, below the "+"', async () => {
+    test('the launch menu from the drawer\'s New session is inside the 390×844 viewport (CMX-313: no phone "+")', async () => {
         ready();
-        await page.locator('#btn-new-mobile').click();
+        await page.locator(DRAWER_OPENER).click();
+        await page.waitForFunction(() => document.querySelector('.sidebar')?.classList.contains('open'), null, { timeout: 5000 });
+        await page.locator('.sidebar .sidebar-new-btn').click();
         await page.waitForSelector('.popover.launch-menu', { state: 'visible', timeout: 5000 });
-        const menu = await assertInViewport(page, '.popover.launch-menu', vp);
-        const plus = await box(page, '#btn-new-mobile');
-        assert.ok(menu.y >= plus.y + plus.height - px, `the launch menu ${JSON.stringify(menu)} is not below the "+"`);
+        await assertInViewport(page, '.popover.launch-menu', vp);
     });
 });

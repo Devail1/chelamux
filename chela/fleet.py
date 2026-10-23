@@ -19,7 +19,7 @@ import signal
 import time
 from pathlib import Path
 
-from chela import config, inbox, judge, messenger, procguard
+from chela import config, hold, inbox, judge, messenger, procguard
 from chela.hold import human_duration
 
 log = logging.getLogger(__name__)
@@ -199,6 +199,42 @@ def resume_all() -> dict | None:
         wid = inbox.run_wid(runs[task])
         resumed[task] = bool(wid) and messenger.send_message(SENDER, wid, RESUME_MESSAGE)
     return {"since": state.get("since"), "resumed": resumed, "thawed": thawed}
+
+
+def resume_fleet(*, by: str) -> tuple[dict | None, hold.Hold | None]:
+    """``chela dispatch --resume`` for the dashboard and Telegram (CMX-252): the fleet first,
+    while the hold still stands, then the hold. Returns ``(resume_all(), the released
+    hold)``; either is None when not in force. When resuming the fleet raises, the hold
+    is NOT released: it still stands, and the caller says so."""
+    resumed = resume_all()
+    return resumed, hold.release(by=by)
+
+
+def snapshot(state: dict | None = None, held: hold.Hold | None = None,
+             now: float | None = None) -> dict | None:
+    """The fleet pause as the dashboard draws it: who, since when, each agent and judge, and
+    when ``held`` (the hold it rides on) lapses, which is when the daemon resumes them."""
+    state = read() if state is None else state
+    if not state:
+        return None
+    now = time.time() if now is None else now
+    since = state.get("since")
+    return {
+        "expires_at": held.expires_at if held else None,
+        "expires_in": (human_duration(held.remaining(now))
+                       if held and held.remaining(now) > 0 else None),
+        "since": since,
+        "since_ago": human_duration(now - since) if isinstance(since, (int, float)) else None,
+        "by": state.get("by") or "",
+        "agents": [{"task": task, "wid": agent.get("wid"), "state": agent.get("state"),
+                    "finishing": agent.get("finishing")}
+                   for task, agent in sorted(state["agents"].items())],
+        "judges": [{"task": task, "frozen_at": frozen.get("frozen_at"),
+                    "frozen_for": human_duration(now - frozen["frozen_at"])
+                    if isinstance(frozen.get("frozen_at"), (int, float)) else None,
+                    "processes": len(frozen.get("pids") or [])}
+                   for task, frozen in sorted(state.get("judges", {}).items())],
+    }
 
 
 def status_lines(state: dict | None = None) -> list[str]:

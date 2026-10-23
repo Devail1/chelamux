@@ -17,7 +17,7 @@
 // Harness: tests/browser/fixture.mjs — never a live dashboard or daemon.
 import { after, before, describe, test } from 'node:test';
 import assert from 'node:assert/strict';
-import { launchChromium, openDashboard } from './fixture.mjs';
+import { DRAWER_OPENER, launchChromium, openDashboard } from './fixture.mjs';
 
 const { browser, why } = await launchChromium();
 after(() => browser && browser.close());
@@ -89,7 +89,7 @@ const geometry = page => page.evaluate(() => {
         canvasPadTop: parseFloat(getComputedStyle(canvas).paddingTop),
         paneBottom: panes.length ? Math.max(...panes.map(p => p.bottom)) : null,
         canvasContentBottom: canvas.getBoundingClientRect().bottom - parseFloat(getComputedStyle(canvas).paddingBottom),
-        newFabShown: shown(document.querySelector('.mobile-new-fab')),
+        newFab: document.querySelectorAll('#btn-new-mobile, .mobile-new-fab').length,
         vw: innerWidth,
     };
 });
@@ -199,10 +199,10 @@ describe('CMX-414 390×844: the phone layout is unchanged', { skip: why }, () =>
     });
     after(() => context && context.close());
 
-    test('no toolbar control shows on a phone, but the "+" FAB does', () => {
+    test('no toolbar control shows on a phone, and no "+" (CMX-313: New session is in the drawer)', () => {
         ready();
         assert.equal(g.controls.length, 0, `phone shows toolbar controls: ${g.controls.map(c => c.id)}`);
-        assert.ok(g.newFabShown, 'the phone "+" (CMX-386) is gone');
+        assert.equal(g.newFab, 0, 'the phone "+" is back');
     });
 
     test('CMX-202: no pill strip is rendered above the pane', () => {
@@ -210,18 +210,18 @@ describe('CMX-414 390×844: the phone layout is unchanged', { skip: why }, () =>
         assert.equal(g.pillStrip, 0, 'the phone still renders a session pill strip');
     });
 
-    test('CMX-202: the pane starts where the pills did (the empty row\'s 12px under the canvas padding) and gets their 38px back', () => {
+    test('CMX-202/CMX-313: the pane is full-bleed, from the top edge to the keybar (no strip, no canvas padding above it)', () => {
         ready();
         assert.ok(g.singlePane, 'the phone did not render its single pane');
-        assert.ok(Math.abs(g.singlePane.top - (g.canvasPadTop + 12)) <= 0.5,
-            `pane at ${g.singlePane.top}px, expected ${g.canvasPadTop + 12}px`);
-        // 100dvh minus the pane header, keybar and context bar: no --term-switcher-h.
-        assert.equal(g.singlePane.height, 844 - 32 - 47 - 30, 'the pane did not get the strip\'s height back');
+        assert.equal(g.singlePane.top, 0, `pane at ${g.singlePane.top}px, expected the top edge`);
+        // 100dvh minus the keybar's 47px: the header and the context bar are inside the pane
+        assert.equal(g.singlePane.height, 844 - 47, 'the pane does not fill the screen down to the keybar');
     });
 });
 
 // CMX-135: with the row's "+ New shell" gone, the New menu is the one entry point.
-for (const [width, height, opener] of [[1440, 900, '.sidebar-new-btn'], [725, 900, '#btn-new-mobile'], [390, 844, '#btn-new-mobile']]) {
+// A phone (≤768px) has no "+" since CMX-313: its New session is the drawer's own button.
+for (const [width, height, opener] of [[1440, 900, '.sidebar-new-btn'], [725, 900, 'drawer'], [390, 844, 'drawer']]) {
     describe(`CMX-135 ${width}×${height}: New menu → Shell window spawns a shell`, { skip: why }, () => {
         let context, post, dialogs = [];
         const ready = setup(async () => {
@@ -233,7 +233,12 @@ for (const [width, height, opener] of [[1440, 900, '.sidebar-new-btn'], [725, 90
             page.on('dialog', d => { dialogs.push(d.message()); d.dismiss().catch(() => {}); });
             const req = page.waitForRequest(r => r.method() === 'POST' && new URL(r.url()).pathname === '/api/agents/spawn', { timeout: 15000 });
             const res = page.waitForResponse(r => new URL(r.url()).pathname === '/api/agents/spawn', { timeout: 15000 });
-            await page.click(opener);
+            if (opener === 'drawer') {
+                await page.click(DRAWER_OPENER);
+                await page.click('.sidebar .sidebar-new-btn');
+            } else {
+                await page.click(opener);
+            }
             await page.click('#new-shell-item');
             post = await req;
             await res;

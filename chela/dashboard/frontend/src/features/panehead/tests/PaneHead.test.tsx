@@ -384,24 +384,93 @@ test('maximize outside a pane does nothing', () => {
   expect(container.querySelector('.gs-max-btn')?.getAttribute('aria-pressed')).toBe('false');
 });
 
-test('on a phone the single pane gets Fill screen, which toggles the full-screen view', () => {
+// --- the phone title bar (CMX-313: the Claude app's look) ---------------------------------
+
+test('on a phone the single pane is the title bar: hamburger, title over subtitle, status chip, ⋯; no window controls', () => {
   viewport(true);
-  const h = head({ wall: false });
-  const btn = must(h.q('.gs-mobile-full-btn'));
-  expect(btn.getAttribute('aria-label')).toBe('Fill screen');
-  fireEvent.click(btn);
-  expect(document.body.classList.contains('term-mobile-full')).toBe(true);
-  expect(btn.getAttribute('aria-pressed')).toBe('true');
-  expect(btn.getAttribute('aria-label')).toBe('Exit fullscreen');
-  fireEvent.click(btn);
-  expect(document.body.classList.contains('term-mobile-full')).toBe(false);
+  const h = head({ wall: false, agent: { ...SESSION, session_name: 'fix-the-bug', session_status: 'waiting' } });
+  const bar = must(h.q('.gs-head'));
+  expect(bar.classList.contains('gs-head-bar')).toBe(true);
+  expect([...bar.children].map((c) => c.className)).toEqual(['gs-head-menu', 'gs-label', 'gs-head-end']);
+  expect(text(h.q('.gs-label .pane-title'))).toBe('fix-the-bug');
+  expect(text(h.q('.gs-label .pane-subtitle'))).toBe('liavedunix-2');
+  const dot = must(h.q('.gs-head-end .gs-status-chip .gs-dot'));
+  expect(dot.getAttribute('data-status-for')).toBe('@1');
+  expect(must(h.q('.gs-head-end > .gs-menu-wrap .gs-menu-btn')).getAttribute('aria-label')).toBe('Session actions');
+  for (const sel of ['.gs-keys', '.gs-kill-btn', '.gs-max-btn', '.gs-min-btn', '.gs-mobile-full-btn']) expect(h.q(sel)).toBeNull();
 });
 
-test('Fill screen exists only for the single pane on a phone', () => {
+test('the title bar\'s hamburger opens the sidebar drawer', () => {
   viewport(true);
-  expect(head({ wall: true }).q('.gs-mobile-full-btn')).toBeNull();
-  viewport(false);
-  expect(head({ wall: false }).q('.gs-mobile-full-btn')).toBeNull();
+  document.body.innerHTML = '<aside class="sidebar"></aside><div id="sidebar-scrim"></div>';
+  const h = head({ wall: false });
+  const ham = must(h.q('.gs-head-menu'));
+  expect(ham.getAttribute('aria-label')).toBe('Open menu');
+  expect(ham.getAttribute('aria-expanded')).toBe('false');
+  fireEvent.click(ham);
+  expect(document.querySelector('.sidebar')?.classList.contains('open')).toBe(true);
+  expect(document.body.classList.contains('sidebar-open')).toBe(true);
+  expect(ham.getAttribute('aria-expanded')).toBe('true');
+});
+
+test('a title bar mounted with the drawer already open says so', () => {
+  viewport(true);
+  document.body.classList.add('sidebar-open');
+  expect(must(head({ wall: false }).q('.gs-head-menu')).getAttribute('aria-expanded')).toBe('true');
+});
+
+test('a pane maximized on a desktop is restored when the window narrows to a phone (the title bar has no restore)', () => {
+  const tile = document.createElement('div');
+  tile.className = 'term-pane';
+  document.body.append(tile);
+  const props: PaneHeadProps = { wid: '@1', wall: false, agent: SESSION, orchWid: null, share: undefined, pinned: false, now: 0, host: spyHost() };
+  const r = render(<PaneHead {...props} />, { container: tile });
+  fireEvent.click(must(tile.querySelector('.gs-max-btn')));
+  expect(tile.classList.contains('pane-maximized')).toBe(true);
+  expect(document.body.classList.contains('pane-is-maximized')).toBe(true);
+  viewport(true);   // useMediaQuery re-reads matchMedia on the next render
+  r.rerender(<PaneHead {...props} now={1} />);
+  expect(tile.querySelector('.gs-head-bar')).not.toBeNull();
+  expect(tile.classList.contains('pane-maximized')).toBe(false);
+  expect(document.body.classList.contains('pane-is-maximized')).toBe(false);
+});
+
+test('on a phone Close is a ⋯ row that asks first, over the pane', async () => {
+  viewport(true);
+  const calls = stubFetch(() => [200, { ok: true }]);
+  const h = head({ wall: false });
+  const close = must([...openMenu().querySelectorAll<HTMLElement>('[role="menuitem"]')].find((r) => r.classList.contains('gs-kill-item')));
+  expect(text(close)).toBe('Close session');
+  fireEvent.click(close);
+  const bar = must(h.q('.pane-kill-confirm'));
+  expect(text(bar.querySelector('.kanban-confirm-msg'))).toBe('Kill liavedunix-2?');
+  fireEvent.click(must(h.q('.pane-kill-confirm .btn-confirm')));
+  await settle();
+  expect(calls).toEqual([{ url: '/api/agents/kill', method: 'POST', body: { agent: '@1' } }]);
+  expect(h.host.dropPane).toHaveBeenCalledWith('@1');
+});
+
+test('the Close row is disabled while a kill is asked or in flight', () => {
+  viewport(true);
+  const h = head({ wall: false });
+  fireEvent.click(must(openMenu().querySelector<HTMLElement>('.gs-kill-item')));
+  expect(h.q('.pane-kill-confirm')).not.toBeNull();
+  const row = must(openMenu().querySelector<HTMLElement>('.gs-kill-item'));
+  expect(row.getAttribute('aria-disabled') ?? row.getAttribute('data-disabled')).not.toBeNull();
+});
+
+test.each([
+  ['a desktop single pane', false, false],
+  ['a desktop wall tile', false, true],
+  ['a wall tile at phone width', true, true],
+] as const)('%s keeps its window controls and no title bar, and its menu has no Close', (_, phone, wall) => {
+  viewport(phone);
+  const h = head({ wall });
+  expect(must(h.q('.gs-head')).classList.contains('gs-head-bar')).toBe(false);
+  expect(h.q('.gs-head-menu')).toBeNull();
+  expect(h.q('.gs-kill-btn')).not.toBeNull();
+  expect(h.q('.gs-max-btn')).not.toBeNull();
+  expect(openMenu().querySelector('.gs-kill-item')).toBeNull();
 });
 
 // --- kill, with its confirm ---------------------------------------------------------------

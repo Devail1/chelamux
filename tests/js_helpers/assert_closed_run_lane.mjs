@@ -12,24 +12,23 @@
 //     node node_modules/vitest/vitest.mjs run --config tests/js_helpers/closed_run_lane.config.mjs
 // Exit 0 when every assertion holds; nonzero, with the failed assertion in the report, otherwise.
 //
-// The shared jsdom bootstrap (dashboard_dom.mjs, CMX-290), booting the page's real entry, so the
-// Work view island mounts into the real template's #panel-work.
+// The shared jsdom bootstrap (dashboard_dom.mjs, CMX-290), booting the page's real entry into the
+// real page (the shell, CMX-248), so the Work view mounts in its #panel-work.
 import { readFileSync } from 'node:fs';
 import assert from 'node:assert/strict';
 import { test } from 'vitest';
-import { bootDashboardDom, flush, sliceTemplate } from './dashboard_dom.mjs';
+import { APP_BODY, bootDashboardDom, flush } from './dashboard_dom.mjs';
 
 const { CLOSED_RUN_PAYLOAD: payloadPath, CLOSED_RUN_TASK: closedTaskId } = process.env;
 if (!payloadPath || !closedTaskId) throw new Error('CLOSED_RUN_PAYLOAD and CLOSED_RUN_TASK must be set');
 const payload = JSON.parse(readFileSync(payloadPath, 'utf8'));
 
-const PANEL = sliceTemplate('<div class="panel active" id="panel-work">', '</div>', { terminals_enabled: false });
 
 test('the closed run renders in the Archived lane, labelled, never as done', async () => {
     const fetchImpl = url => Promise.resolve({
         ok: true, status: 200, json: () => Promise.resolve(String(url).endsWith('/api/dispatcher') ? payload : {}),
     });
-    await bootDashboardDom({ body: PANEL, fetchImpl, terminalsEnabled: false });
+    await bootDashboardDom({ body: APP_BODY, fetchImpl, terminalsEnabled: false });
     const { pollWork } = await import('../../chela/dashboard/frontend/src/features/work/index.ts');
     await pollWork();
     for (let i = 0; i < 4; i++) await flush();

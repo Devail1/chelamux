@@ -12,7 +12,7 @@ import { createServer } from 'node:net';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { launchChromium } from './fixture.mjs';
+import { launchChromium, DRAWER_OPENER } from './fixture.mjs';
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
 const VENV_PY = join(ROOT, '.venv', 'bin', 'python');
@@ -165,15 +165,15 @@ test('dragging the sidebar edge resizes it, the width persists via the layout AP
     const other = await open({ width: 1280, height: 800 });
     await other.page.waitForFunction(() => Math.round(document.querySelector('aside.sidebar').getBoundingClientRect().width) === 480,
         null, { timeout: 5_000 });
-    await other.page.evaluate(() => window.chela.toggleSidebar());
+    await other.page.locator('#btn-menu').click();
     assert.equal(await width(other.page), 60, 'the collapsed rail is not 60px');
     assert.equal(await other.page.locator('.sidebar-resize').isVisible(), false, 'the rail shows the handle');
-    await other.page.evaluate(() => window.chela.toggleSidebar());
+    await other.page.locator('#btn-menu').click();
     await other.page.close();
 
     // the phone drawer keeps its own width, and has no handle
     const phone = await open({ width: 390, height: 844 });
-    await phone.page.evaluate(() => window.chela.toggleSidebar(true));
+    await phone.page.locator(DRAWER_OPENER).click();
     assert.equal(await width(phone.page), 264);
     assert.equal(await phone.page.locator('.sidebar-resize').isVisible(), false, 'the phone drawer shows the handle');
     assert.deepEqual(phone.errors, []);

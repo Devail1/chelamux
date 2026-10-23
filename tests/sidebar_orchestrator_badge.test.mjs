@@ -17,24 +17,15 @@
 import { closeMenu, menu, menuItems, openMenu } from './js_helpers/side_menu.mjs';
 import { beforeAll, beforeEach, test } from 'vitest';
 import assert from 'node:assert/strict';
-import { bootDashboardDom, clickIsland, flush, sliceTemplate, ORCHESTRATOR, SIDEBAR } from './js_helpers/dashboard_dom.mjs';
+import { APP_BODY, bootDashboardDom, clickIsland, flush, ORCHESTRATOR, SIDEBAR, AGENTS_STORE, VIEW_STORE, NAV } from './js_helpers/dashboard_dom.mjs';
 
-const INBOX_SLOT = sliceTemplate('<span class="decisions-island" id="decisions-island"', '</span>');
-
-const BODY = `
-<aside class="sidebar">
-  <div class="sidebar-head">${INBOX_SLOT}</div>
-  <div class="side-list" id="sidebar-agents"></div>
-</aside>
-<div id="agent-detail"></div>
-<span id="hdr-agents"></span><span id="hdr-next"></span><span id="hdr-updated"></span>`;
 
 const ok = body => Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve(body) });
-let nav, util, orchestrator, sidebar, decisions;
+let nav, agentsStore, viewStore, orchestrator, sidebar, decisions;
 
 beforeAll(async () => {
-    ({ modules: { util, nav, orchestrator, sidebar } } = await bootDashboardDom({
-        body: BODY,
+    ({ modules: { agents: { agents: agentsStore }, view: { view: viewStore }, nav, orchestrator, sidebar } } = await bootDashboardDom({
+        body: APP_BODY,
         canvasStub: true,
         // Off, so the jump lands on the agent-detail view — a real DOM node to read back.
         terminalsEnabled: false,
@@ -51,7 +42,7 @@ beforeAll(async () => {
             if (u.includes('/api/sidebar/archive')) return ok({ hidden: [], sessions: [] });
             return ok(/\/api\/(agents|summary|log)/.test(u) && !u.includes('/api/log') ? [] : {});
         },
-        extraModules: ['util.js', 'nav.js', ORCHESTRATOR, SIDEBAR],
+        extraModules: [AGENTS_STORE, VIEW_STORE, NAV, ORCHESTRATOR, SIDEBAR],
     }));
     decisions = await import('../chela/dashboard/frontend/src/features/decisions/index.ts');
 });
@@ -66,7 +57,7 @@ const ROWS = [
 ];
 
 function render(rows = ROWS) {
-    util.setAgentsCache(rows);
+    agentsStore.set(rows);
     sidebar.renderSidebarAgents(rows);
 }
 
@@ -144,7 +135,7 @@ test('CMX-76: the jump expands the orchestrator\'s folder group when it is colla
 
 test('CMX-76: with no orchestrator the inbox icon only opens the log, as before', async () => {
     await setOrchestrator(null);
-    window.chela.selectAgent('proj');   // something else is selected; the click must not move it
+    nav.selectAgent('proj');   // something else is selected; the click must not move it
     clickIsland(document.getElementById('btn-decisions'));
     assert.ok(menuOpen(), 'the inbox icon stopped opening the decisions log');
     assert.equal(document.querySelector('#agent-detail .detail-title').textContent, 'proj');
