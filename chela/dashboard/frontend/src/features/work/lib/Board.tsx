@@ -1,20 +1,21 @@
-// The Board segment of WORK: the project filter, the columns and the Hidden columns panel
-// (CMX-136). Ported from static/js/kanban.js by CMX-233 (CMX-212 P12 + P13). It reads the
-// payload the one /api/dispatcher poll published; it never fetches. CMX-315: on a phone the
-// project is the title bar's (WorkView) and the layout is Rows (one list grouped by status) or
-// Board (the status tabs ARE the swiped columns), both drawing the compact card.
-import { useEffect, useRef, useState, type CSSProperties, type DragEvent, type KeyboardEvent } from 'react';
+// The Board segment of WORK. Ported from static/js/kanban.js by CMX-233 (CMX-212 P12 + P13).
+// It reads the payload the one /api/dispatcher poll published; it never fetches. The project is
+// the title bar's (WorkView), and every layout draws the compact card (Compact.tsx).
+// CMX-315, on a phone: Rows (one list grouped by status) or Board (the status tabs ARE the
+// swiped columns). CMX-316, wider: Board, with Todo, In Progress and In Review as fixed-width
+// columns and Backlog and Done collapsed to rails at the edges (each remembers whether it was
+// left open, per project view), or Rows, a sortable table (RowsTable.tsx).
+import { useEffect, useRef, useState, type KeyboardEvent } from 'react';
 import { icons } from '../../../shared/icons/index.ts';
-import { TextButton, useMediaQuery } from '../../../shared/ui/index.ts';
+import { IconButton, TextButton, useMediaQuery } from '../../../shared/ui/index.ts';
 import type { WorkPayload } from '../../../shared/store/work.ts';
-import { wfShort } from '../../taskmodal/model.ts';
-import { boardColumns, pruneFilter, toggleProject, type Card as CardData, type Column } from '../board.ts';
-import { hiddenSummary, loadColPrefs, saveColPrefs, splitColumns, type ColPrefs } from '../hidden.ts';
+import { boardColumns, cardKey, pruneFilter, type Column } from '../board.ts';
+import { arrange, loadRails, saveRails, shownColumns, viewKey, type Side } from '../desktop.ts';
+import { loadColPrefs, splitColumns } from '../hidden.ts';
 import { rowGroups } from '../phone.ts';
-import { Card } from './Card.tsx';
 import { CompactCard, RowItem } from './Compact.tsx';
 import { LS, read, save, useWorkPrefs, type WorkPrefs } from './prefs.ts';
-import { showToast } from './toasts.ts';
+import { RowsTable } from './RowsTable.tsx';
 
 const COLLAPSED_KEY = 'chela_kanban_collapsed';
 // The Rows list's low-traffic groups start collapsed. Review is NOT here: a failed run lives
@@ -32,14 +33,6 @@ function loadCollapsed(): Set<string> {
   }
 }
 
-/** CMX-136: a card dropped on a hidden column. chela has no "move a card" API yet, so the drop
- * announces itself (`chela:kanban-move`) and says plainly that nothing moved; the follow-up
- * that writes to the tracker replaces only this function. */
-export function moveCard(card: CardData, col: Column) {
-  document.dispatchEvent(new CustomEvent('chela:kanban-move', { detail: { card, to: col.key, label: col.label } }));
-  showToast(`Moving cards between columns is not wired to the tracker yet: ${card.task_id || card.title || 'this card'} was not moved to ${col.label}.`);
-}
-
 const onEnter = (fn: () => void) => (e: KeyboardEvent) => {
   if (e.key === 'Enter' || e.key === ' ') {
     e.preventDefault();
@@ -47,35 +40,59 @@ const onEnter = (fn: () => void) => (e: KeyboardEvent) => {
   }
 };
 
-// A run (or task) keeps its key when a poll adds a card above it, so an open delete confirm or a
-// failure note survives the repaint; only an id-less backlog bullet falls back to its position.
-const cardKey = (c: CardData, i: number) => (c.task_id ? `${c.status}:${c.task_id}:${c.attempt ?? ''}` : `${c.status}:${i}:${c.title ?? ''}`);
-
-type ColumnProps = {
-  col: Column;
-  pinned: boolean;
-  onHide: () => void;
-  onDragStart: (card: CardData, e: DragEvent) => void;
-  onDragEnd: () => void;
-};
-
-function BoardColumn({ col, pinned, onHide, onDragStart, onDragEnd }: ColumnProps) {
+/** A column of the desktop board. An edge column (Backlog, Done) that is open carries the
+ * control that folds it back to its rail. */
+function BoardColumn({ col, edge, onCollapse }: { col: Column; edge?: Side; onCollapse?: () => void }) {
   return (
-    <div className={`kanban-col kanban-col-${col.key}`} data-col={col.key}>
+    <section className={`kanban-col kanban-col-${col.key}${edge ? ` kanban-col-edge kanban-col-edge-${edge}` : ''}`} data-col={col.key} aria-label={col.label}>
       <div className="kanban-col-head">
         <span className="kanban-col-label">{col.label}</span>
         <span className="col-count">{col.cards.length}</span>
-        {pinned && !col.cards.length && (
-          <TextButton className="kanban-col-hide" title="Hide this column when it is empty" onClick={(e) => { e.stopPropagation(); onHide(); }}>Hide</TextButton>
+        {onCollapse && (
+          <IconButton className="kanban-col-collapse" label={`Collapse ${col.label}`} aria-expanded onClick={onCollapse}>
+            <icons.close size={14} aria-hidden />
+          </IconButton>
         )}
       </div>
       <div className="kanban-cards">
-        {col.cards.length ? (
-          col.cards.map((c, i) => <Card key={cardKey(c, i)} card={c} onDragStart={onDragStart} onDragEnd={onDragEnd} />)
-        ) : (
-          <div className="kanban-empty-col">Nothing here</div>
-        )}
+        {col.cards.length ? col.cards.map((c, i) => <CompactCard key={cardKey(c, i)} card={c} />) : <div className="kanban-empty-col">Nothing here</div>}
       </div>
+    </section>
+  );
+}
+
+/** A collapsed edge column: its count over its name, written down the rail. A click opens it. */
+function Rail({ col, side, onExpand }: { col: Column; side: Side; onExpand: () => void }) {
+  const n = col.cards.length;
+  return (
+    <TextButton className={`kanban-rail kanban-rail-${side} kanban-col-${col.key}`} data-col={col.key} aria-expanded={false}
+      aria-label={`Expand ${col.label}, ${n} ${n === 1 ? 'task' : 'tasks'}`} title={`Expand ${col.label}`} onClick={onExpand}>
+      <span className="kanban-rail-count">{n}</span>
+      <span className="kanban-rail-label">{col.label}</span>
+    </TextButton>
+  );
+}
+
+/** The desktop board: the left edge, the fixed columns (which scroll sideways when there are
+ * many), the right edge. The edges never scroll away, so Done is never cut off. */
+function DeskBoard({ columns, view }: { columns: Column[]; view: string }) {
+  // Keyed by `view` (the caller's), so another project view reads back its own rails.
+  const [open, setOpen] = useState(() => loadRails(LS, view));
+  function toggle(key: string) {
+    const next = open.includes(key) ? open.filter((k) => k !== key) : [...open, key];
+    setOpen(next);
+    saveRails(LS, view, next);
+  }
+  const { left, middle, right } = arrange(columns);
+  const edge = (side: Side) => (c: Column) =>
+    open.includes(c.key) ? <BoardColumn key={c.key} col={c} edge={side} onCollapse={() => toggle(c.key)} /> : <Rail key={c.key} col={c} side={side} onExpand={() => toggle(c.key)} />;
+  return (
+    <div className="kanban-board" id="kanban-board">
+      {left.map(edge('left'))}
+      <div className="kanban-middle">
+        {middle.map((c) => <BoardColumn key={c.key} col={c} />)}
+      </div>
+      {right.map(edge('right'))}
     </div>
   );
 }
@@ -160,25 +177,18 @@ function SwipeBoard({ columns }: { columns: Column[] }) {
   );
 }
 
-/** The #work-board pane. `live` is the latest payload; a drag in flight freezes what is drawn,
- * so a poll that lands mid-drag never moves a drop row under the cursor. `prefs` is the Work
- * view's (the title bar picks the project and the layout); a Board on its own keeps its own. */
-export function Board({ live, active, prefs }: { live: WorkPayload | null; active: boolean; prefs?: WorkPrefs }) {
+/** The #work-board pane. `live` is the latest payload; `prefs` is the Work view's (the title
+ * bar picks the project and the layout); a Board on its own keeps its own. */
+export function Board({ live: data, active, prefs }: { live: WorkPayload | null; active: boolean; prefs?: WorkPrefs }) {
   const own = useWorkPrefs();
-  const { filter: selected, pickFilter, layout } = prefs ?? own;
-  const [frozen, setFrozen] = useState<WorkPayload | null>(null);
-  const dragging = useRef<CardData | null>(null);
+  const { filter: selected, layout, deskLayout, hiddenCols } = prefs ?? own;
   const [collapsed, setCollapsed] = useState(loadCollapsed);
-  const [colPrefs, setColPrefs] = useState<ColPrefs>(() => loadColPrefs(LS));
-  const [hiddenOpen, setHiddenOpen] = useState(true);
-  const [overRow, setOverRow] = useState<string | null>(null);
   const phone = useMediaQuery(PHONE);
 
-  const data = frozen ?? live;
   const configured = !!(data?.configured && data.workflows?.length);
   const workflows = configured ? (data.workflows || []).map((wf) => wf.path) : [];
   const filter = pruneFilter(selected, workflows);
-  const { visible, hidden } = splitColumns(configured ? boardColumns(data, filter) : [], colPrefs);
+  const columns = configured ? boardColumns(data, filter) : [];
 
   function toggleCol(key: string) {
     const next = new Set(collapsed);
@@ -186,30 +196,10 @@ export function Board({ live, active, prefs }: { live: WorkPayload | null; activ
     setCollapsed(next);
     save(COLLAPSED_KEY, JSON.stringify([...next]));
   }
-  function pin(key: string, show: boolean) {
-    const next: ColPrefs = Object.fromEntries(Object.entries(colPrefs).filter(([k]) => k !== key));
-    if (show) next[key] = 'show';
-    setColPrefs(next);
-    saveColPrefs(LS, next);
-  }
-  function dragStart(card: CardData, e: DragEvent) {
-    dragging.current = card;
-    setFrozen(live);
-    // Firefox starts no drag without data on the transfer.
-    e.dataTransfer?.setData('text/plain', card.task_id || card.title || 'card');
-  }
-  function dragEnd() {
-    dragging.current = null;
-    setOverRow(null);
-    setFrozen(null);
-  }
-  function drop(e: DragEvent, col: Column) {
-    e.preventDefault();
-    setOverRow(null);
-    if (dragging.current) moveCard(dragging.current, col);
-  }
 
   if (phone) {
+    // CMX-136: a phone leaves an empty column out (unless the viewer pinned it).
+    const { visible } = splitColumns(columns, loadColPrefs(LS));
     return (
       <div className={['work-pane', active && 'active', `work-phone-${layout}`].filter(Boolean).join(' ')} id="work-board" data-seg="board" data-layout={layout}>
         {/* Nothing before the first poll: an empty list would read as an empty project. */}
@@ -217,54 +207,15 @@ export function Board({ live, active, prefs }: { live: WorkPayload | null; activ
       </div>
     );
   }
+  const shown = shownColumns(columns, hiddenCols);
   return (
-    <div className={active ? 'work-pane active' : 'work-pane'} id="work-board" data-seg="board">
-      <div className="kanban-filters" id="kanban-filters" role="group" aria-label="Projects">
-        {configured && (
-          <>
-            <TextButton className={`kanban-filter-chip${filter.length ? '' : ' active'}`} aria-pressed={!filter.length} onClick={() => pickFilter([])}>
-              All ({workflows.length})
-            </TextButton>
-            {workflows.map((wf) => (
-              <TextButton key={wf} className={`kanban-filter-chip${filter.includes(wf) ? ' active' : ''}`} data-wf={wf} aria-pressed={filter.includes(wf)} title={wf}
-                onClick={() => pickFilter(toggleProject(filter, wf))}>
-                {wfShort(wf) || '?'}
-              </TextButton>
-            ))}
-          </>
-        )}
-      </div>
-      {data && !configured ? (
+    <div className={active ? 'work-pane active' : 'work-pane'} id="work-board" data-seg="board" data-layout={deskLayout}>
+      {!data ? null : !configured ? (
         <Empty />
+      ) : deskLayout === 'rows' ? (
+        <RowsTable columns={shown} collapsed={collapsed} onToggle={toggleCol} />
       ) : (
-        <div className="kanban-board-wrap">
-          <div className="kanban-board" id="kanban-board" style={{ '--kanban-cols': String(visible.length) } as CSSProperties}>
-            {configured && visible.map((c) => (
-              <BoardColumn key={c.key} col={c} pinned={colPrefs[c.key] === 'show'} onHide={() => pin(c.key, false)} onDragStart={dragStart} onDragEnd={dragEnd} />
-            ))}
-          </div>
-          {/* Next to the board, never inside it, so the swipe carousel's columns stay its only children. */}
-          {configured && hidden.length > 0 && (
-            <aside id="kanban-hidden" className="kanban-hidden-panel" aria-label="Hidden columns">
-              <details className="kanban-hidden-details" open={hiddenOpen} onToggle={(e) => setHiddenOpen(e.currentTarget.open)}>
-                <summary className="kanban-hidden-head">Hidden columns</summary>
-                <ul className="kanban-hidden-rows">
-                  {hidden.map((c) => (
-                    <li key={c.key} className={`kanban-hidden-row kanban-col-${c.key}${overRow === c.key ? ' kanban-hidden-row-over' : ''}`} data-col={c.key} role="button" tabIndex={0}
-                      title={`Show ${c.label} as a column`} onClick={() => pin(c.key, true)} onKeyDown={onEnter(() => pin(c.key, true))}
-                      onDragOver={(e) => { if (!dragging.current) return; e.preventDefault(); setOverRow(c.key); }}
-                      onDragLeave={() => setOverRow(null)} onDrop={(e) => drop(e, c)}>
-                      <span className="kanban-hidden-dot" aria-hidden="true">●</span>
-                      <span className="kanban-hidden-label">{c.label}</span>
-                      <span className="col-count">{c.cards.length}</span>
-                    </li>
-                  ))}
-                </ul>
-              </details>
-              <div className="kanban-hidden-inline">{hiddenSummary(hidden)}</div>
-            </aside>
-          )}
-        </div>
+        <DeskBoard key={viewKey(filter)} columns={shown} view={viewKey(filter)} />
       )}
     </div>
   );

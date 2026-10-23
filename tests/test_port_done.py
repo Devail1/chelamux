@@ -295,7 +295,6 @@ def test_every_definition_of_done_item_names_tests_that_exist():
 # the template text in it that builds them.
 BUILT = [
     (("gs-state-",), "frontend/src/features/panehead/lib/PaneHead.tsx", "gs-state-${"),
-    (("kanban-card-",), "frontend/src/features/work/lib/Card.tsx", "kanban-card-${"),
     (("kanban-col-",), "frontend/src/features/work/lib/Board.tsx", "kanban-col-${"),
     (("feed-cls-",), "frontend/src/features/decisions/lib/DecisionsDialog.tsx", "feed-cls-${"),
     (("decisions-chip-",), "frontend/src/features/decisions/lib/DecisionsDialog.tsx", "decisions-chip-${"),

@@ -42,6 +42,7 @@ concurrency:
                             # two heavy LEAN backtests never run in parallel (memcap/OOM).
 
 agent:
+  standing_rules: docs/AGENT_STANDING_RULES.md   # rendered into {{standing_rules}} below
   # 🧱 #502 §6.4 step 4 — the sandbox TRIAL ran 2026-09-15 and is REVERTED. ⛔ Do not
   # re-enable until #513 lands. What the trial proved: the boundary itself works (the
   # --settings flag reaches the process; ~/.chela and the gh token are denied; the
@@ -221,6 +222,8 @@ repo (a public AGPL-3.0-or-later project: a tmux-driven orchestrator for Claude 
 
 This run is **{{project_key}}-{{task_number}}** — use it as the PR-title prefix.
 Task ID `{{task_id}}`.
+
+{{standing_rules}}
 
 ## Your workspace
 

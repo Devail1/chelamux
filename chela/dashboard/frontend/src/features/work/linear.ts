@@ -8,13 +8,10 @@
 // disagree again: before this, four cards sat in chela's Review lane marked "failed" while
 // Linear showed them in Todo / In Progress (Liav, 2026-10-07).
 //
-// chela's run state (running, judging, rework N, failed, needs a human, ...) is a BADGE on the
-// card (board.ts's STATUS_CHIPS + runStateBadges below), never a column. The Canceled and
-// Duplicate columns are `hidden`, as Linear collapses them: the API flags them.
+// chela's run state (running, rework N, failed, needs a human, ...) rides ON the card (the
+// compact card's state and flags lines, phone.ts), never a column. The Canceled and Duplicate
+// columns are `hidden`, as Linear collapses them: the API flags them.
 // ---------------------------------------------------------------------------
-import { ageStr } from '../../shared/format/index.ts';
-import type { IconName } from '../../shared/icons/index.ts';
-import type { RunPark } from '../../shared/store/work.ts';
 
 export type TrackerColumn = { name: string; type: string; hidden: boolean };
 export type BoardColumn<C> = { key: string; label: string; cards: C[] };
@@ -119,31 +116,4 @@ export function trackerBoard<C extends Placeable>(columns: TrackerColumn[], card
  * (`recent_runs_capped`) cut some off: its count is the latest runs, not every one. */
 export function sampledLabel(label: string, capped: boolean): string {
   return capped ? `${label} · latest` : label;
-}
-
-export type StateBadge = { label: string; cls: string; icon: IconName; title?: string };
-
-const PARK_REASON_MAX = 48;
-
-/** CMX-318: a parked run's badge — what holds it, its reason and since when. */
-function parkBadge(park: RunPark, now: number): StateBadge {
-  const word = park.kind === 'slot' ? 'waiting' : 'parked';
-  const age = park.since == null ? 'since ?' : ageStr(now - park.since);
-  const reason = park.reason.length > PARK_REASON_MAX ? `${park.reason.slice(0, PARK_REASON_MAX - 1)}…` : park.reason;
-  const until = park.until ? ` · until ${park.until}` : '';
-  const by = park.by ? ` · by ${park.by}` : '';
-  return { label: `${word} ${age}: ${reason}`, cls: park.kind === 'slot' ? 'st-slot-wait' : 'st-parked', icon: park.kind === 'slot' ? 'slotWait' : 'pause', title: `${park.reason}${until}${by}` };
-}
-
-/** The run-state badges a card carries ON TOP of its status pill: the states that used to
- * need a column of their own. Each is a word plus an icon (colour is never the only signal). */
-export function runStateBadges(card: { judge_state?: string | null; rework_count?: unknown; park?: RunPark | null } | null | undefined, now: number = Date.now() / 1000): StateBadge[] {
-  const out: StateBadge[] = [];
-  if (!card) return out;
-  if (card.park) out.push(parkBadge(card.park, now));
-  if (card.judge_state === 'running') out.push({ label: 'judging', cls: 'st-judging', icon: 'judging' });
-  if (card.judge_state === 'blocked_race') out.push({ label: 'blocked race', cls: 'st-blocked-race', icon: 'blockedRace' });
-  const rework = Number(card.rework_count) || 0;
-  if (rework > 0) out.push({ label: `rework ${rework}`, cls: 'st-rework', icon: 'retry' });
-  return out;
 }

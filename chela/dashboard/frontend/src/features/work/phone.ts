@@ -5,6 +5,7 @@
 // ⚠️ Colour is never the signal (Liav is red-weak): every flag is a WORD, and `warn` (orange)
 // only marks the real warnings: risk high, a rework round, CI failing.
 // ---------------------------------------------------------------------------
+import { ageStr } from '../../shared/format/index.ts';
 import type { IconName } from '../../shared/icons/index.ts';
 import type { Run, Workflow, WorkPayload } from '../../shared/store/work.ts';
 import { prLabel, runCardNote, runDisplayId, runHandoffNote, runStallNote } from '../runs/model.ts';
@@ -156,6 +157,7 @@ export function cardFlags(card: Card): Flag[] {
 export function cardState(card: Card): { label: string; icon: IconName } {
   if (card.status === 'backlog') return { label: 'backlog', icon: 'statusOpen' };
   if (card.status === 'parked') return { label: 'parked', icon: 'parked' };
+  if (card.park) return card.park.kind === 'slot' ? { label: 'waiting', icon: 'slotWait' } : { label: 'parked', icon: 'pause' };
   const chip = Object.hasOwn(STATUS_CHIPS, card.status) ? STATUS_CHIPS[card.status] : undefined;
   return chip ? { label: chip.label, icon: chip.icon } : { label: card.status.replace(/_/g, ' '), icon: 'ciUnknown' };
 }
@@ -175,11 +177,19 @@ export function cardIds(card: Card): { id: string; pr: string } {
   return { id: runDisplayId(card), pr: card.pr_url ? prLabel(card.pr_url) : '' };
 }
 
+/** CMX-318: a held run's note — its reason, since when, and what it waits for. */
+function parkNote(park: NonNullable<Card['park']>, now: number): string {
+  const age = park.since == null ? 'since ?' : ageStr(now - park.since);
+  return [park.reason, age, park.until ? `until ${park.until}` : '', park.by ? `by ${park.by}` : ''].filter(Boolean).join(' · ');
+}
+
 /** The one note a compact card shows (two lines at most): a failure or close reason first,
- * then a stall, then the agent's handoff, then a parked bullet's reason. */
-export function cardNote(card: Card): { text: string; warn: boolean } | null {
+ * then a park (CMX-318: a held run is not a stall), then a stall, then the agent's handoff,
+ * then a parked bullet's reason. */
+export function cardNote(card: Card, now: number = Date.now() / 1000): { text: string; warn: boolean } | null {
   const note = runCardNote(card);
   if (note) return { text: note.text, warn: !note.closed };
+  if (card.park) return { text: parkNote(card.park, now), warn: false };
   const stall = runStallNote(card);
   if (stall) return { text: stall, warn: true };
   const handoff = runHandoffNote(card);

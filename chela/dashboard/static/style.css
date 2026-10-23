@@ -1493,7 +1493,6 @@ body.term-dragging { overflow: hidden; }
 }
 
 .work-toolbar { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; margin-bottom: 14px; }
-.work-toolbar-hint { color: var(--text-dim); font-size: 12px; }
 .fleet-pause { border: 1px solid var(--border); border-radius: 6px; padding: 8px 12px; margin-bottom: 14px; font-size: 12px; }
 .fleet-pause-head { margin: 0 0 4px; }
 .fleet-pause-empty { margin: 0; color: var(--text-dim); }
@@ -1662,7 +1661,7 @@ tr:hover td { background: rgba(88, 166, 255, 0.04); }
 /* Grey by choice, not by fallthrough — see runstate.js. */
 .badge-done { background: #21262d; color: var(--text-dim); }
 /* A closed-not-merged run (CMX-265) — its own colour so it never reads as `.badge-done`'s
-   "shipped" grey; matches the board's Archived-lane orange (.kanban-state-chip.st-closed-unmerged). */
+   "shipped" grey; matches the board's Archived-lane orange (.kanban-col-archived). */
 .badge-closed { background: #3a2a13; color: var(--orange, #d18616); }
 
 .badge-priority-low { background: #21262d; color: var(--text-dim); }
@@ -2021,8 +2020,6 @@ input[type="text"]:focus, textarea:focus, select:focus {
 }
 .gs-files:hover { color: var(--text); }
 
-.kanban-pr-wrap { display: inline-flex; }
-
 /* ---- Timestamp ---- */
 
 .ts { color: var(--text-dim); font-size: 11px; }
@@ -2049,94 +2046,72 @@ input[type="text"]:focus, textarea:focus, select:focus {
 
 /* ---- Kanban board ---- */
 
-.kanban-filters {
-    display: flex;
-    flex-wrap: wrap;
-    gap: 6px;
-    margin-bottom: 12px;
-    align-items: center;
-}
-
-.kanban-filter-chip {
-    background: var(--bg);
-    border: 1px solid var(--border);
-    color: var(--text-dim);
-    border-radius: 12px;
-    padding: 3px 10px;
-    font-size: 11px;
-    cursor: pointer;
-    transition: background 0.15s, border-color 0.15s, color 0.15s;
-    font-family: var(--ui-font);
-}
-
-.kanban-filter-chip:hover { color: var(--text); border-color: var(--accent); }
-.kanban-filter-chip.active { background: var(--accent); border-color: var(--accent); color: var(--on-accent); font-weight: 600; }
-
 .kanban-board {
-    display: grid;
-    /* --kanban-cols: set by the board (features/work): chela's 6 lanes, or a Linear team's
-       visible states (CMX-23). A column is a lane, not a share of the window (Liav,
-       2026-10-19): it never grows past 400px, so one visible column leaves the rest of the
-       row empty instead of drawing 1400px-wide cards, and many columns scroll sideways
-       instead of squeezing below 240px. */
-    grid-template-columns: repeat(var(--kanban-cols, 6), minmax(240px, 400px));
+    /* CMX-316 (Liav, 10-23): Backlog and Done are 44px rails at the board's edges (or, opened,
+       a column there); Todo, In Progress and In Review are fixed 320px columns in the middle
+       (.kanban-middle), which scrolls sideways when there are many. A column is a lane, not a
+       share of the window (Liav, 2026-10-19): it never grows past 400px. The edges never
+       scroll, so Done is never cut off. */
+    display: flex;
+    gap: 12px;
+    align-items: stretch;
+    min-width: 0;
+}
+.kanban-middle {
+    display: flex;
+    gap: 12px;
+    flex: 0 1 auto;
+    min-width: 0;
     overflow-x: auto;
-    gap: 10px;
     align-items: stretch;
 }
 
 .kanban-col {
+    flex: 0 0 320px;
+    width: 320px;
     max-width: 400px;
-    background: var(--surface);
-    border: 1px solid var(--border);
-    border-radius: 8px;
-    padding: 10px;
     display: flex;
     flex-direction: column;
     min-height: 200px;
     min-width: 0;
+    box-sizing: border-box;
 }
+/* An opened edge column sits on a faint well, so it reads as the rail it folds back to. */
+.kanban-col-edge { padding: 0 8px 8px; border: 1px solid var(--border); border-radius: 12px; background: color-mix(in srgb, var(--surface) 45%, var(--bg)); }
 
 .kanban-col-head {
-    font-size: 11px;
+    font: 600 12px var(--ui-font);
     text-transform: uppercase;
-    letter-spacing: 0.5px;
+    letter-spacing: 0.08em;
     color: var(--text-dim);
-    padding-bottom: 8px;
-    border-bottom: 1px solid var(--border);
-    margin-bottom: 8px;
+    padding: 6px 4px 10px;
     display: flex;
-    justify-content: space-between;
     align-items: center;
+    gap: 8px;
 }
 
-.kanban-col-head .kanban-col-label { flex: 1 1 auto; min-width: 0; }
+.kanban-col-head .kanban-col-label { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.kanban-col-collapse {
+    flex: 0 0 auto; display: inline-flex; align-items: center; justify-content: center; width: 24px; height: 24px; padding: 0;
+    border: 0; border-radius: 6px; background: none; color: var(--text-dim); cursor: pointer;
+}
+.kanban-col-collapse:hover, .kanban-col-collapse:focus-visible { color: var(--text); background: var(--surface); }
 
-/* 🙈 CMX-136 — Hidden columns (Linear-style): empty columns leave the grid and are listed
-   in a narrow panel to the board's right. Desktop: board + panel side by side; the board
-   (its grid sized to the VISIBLE columns) takes the freed width. */
-.kanban-board-wrap { display: flex; gap: 10px; align-items: flex-start; }
-.kanban-board-wrap > .kanban-board { flex: 1 1 auto; min-width: 0; }
-.kanban-board-wrap > .kanban-hidden-panel { flex: 0 0 180px; }
-.kanban-hidden-panel { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 8px; font-size: 12px; }
-.kanban-hidden-head { cursor: pointer; color: var(--text-dim); font-size: 11px; text-transform: uppercase; letter-spacing: 0.5px; }
-.kanban-hidden-rows { list-style: none; margin: 6px 0 0; padding: 0; }
-.kanban-hidden-row { display: flex; align-items: center; gap: 6px; padding: 5px 6px; border-radius: 6px; cursor: pointer; color: var(--text-dim); outline: 2px solid transparent; }
-.kanban-hidden-row:hover, .kanban-hidden-row:focus-visible { background: var(--bg); color: var(--text); }
-.kanban-hidden-row.kanban-hidden-row-over { outline-color: var(--accent); background: var(--bg); }
-.kanban-hidden-label { flex: 1 1 auto; min-width: 0; color: var(--text); }
-.kanban-hidden-dot { font-size: 9px; }
-.kanban-hidden-row .col-count { border: 1px solid var(--border); border-radius: 10px; padding: 0 6px; font-size: 10px; }
-.kanban-hidden-inline { display: none; color: var(--text-dim); }
-.kanban-col-hide { flex: 0 0 auto; margin-left: 6px; background: none; border: 1px solid var(--border); border-radius: 4px; color: var(--text-dim); font-size: 10px; padding: 0 5px; cursor: pointer; }
+/* A collapsed edge column: its count over its name written down the rail. */
+.kanban-rail {
+    flex: 0 0 44px; width: 44px; min-height: 200px; box-sizing: border-box;
+    display: flex; flex-direction: column; align-items: center; gap: 10px; padding: 14px 0;
+    border: 1px solid var(--border); border-radius: 12px; background: color-mix(in srgb, var(--surface) 45%, var(--bg));
+    color: var(--text-dim); font-family: var(--ui-font); cursor: pointer;
+}
+.kanban-rail:hover, .kanban-rail:focus-visible { color: var(--text); border-color: var(--accent); }
+.kanban-rail-count { font: 12px var(--font); }
+.kanban-rail-label { writing-mode: vertical-rl; font-size: 12px; font-weight: 600; letter-spacing: 0.08em; text-transform: uppercase; white-space: nowrap; }
 
 .kanban-col-head .col-count {
-    background: var(--bg);
-    border: 1px solid var(--border);
-    border-radius: 10px;
-    padding: 1px 7px;
-    font-size: 10px;
-    color: var(--text);
+    font: 12px var(--font);
+    letter-spacing: 0;
+    color: var(--text-dim);
     flex: 0 0 auto;
 }
 
@@ -2157,36 +2132,9 @@ input[type="text"]:focus, textarea:focus, select:focus {
 .kanban-cards {
     display: flex;
     flex-direction: column;
-    gap: 6px;
+    gap: 10px;
     overflow-y: auto;
     max-height: 70vh;
-}
-
-.kanban-card {
-    background: var(--bg);
-    border: 1px solid var(--border);
-    border-left: 3px solid var(--border);
-    border-radius: 5px;
-    padding: 7px 9px;
-    font-size: 12px;
-    line-height: 1.35;
-    min-width: 0;
-}
-
-.kanban-card-title {
-    color: var(--text);
-    margin-bottom: 4px;
-    word-break: break-word;
-    overflow-wrap: anywhere;
-}
-
-.kanban-card-meta {
-    display: flex;
-    flex-wrap: wrap;
-    gap: 6px;
-    align-items: center;
-    font-size: 10px;
-    color: var(--text-dim);
 }
 
 .kanban-card-id {
@@ -2217,104 +2165,7 @@ a.kanban-tracker-link:focus-visible { text-decoration: underline; }
     font-weight: 600;
 }
 
-.kanban-section-chip {
-    background: var(--surface);
-    border: 1px solid var(--border);
-    color: var(--text-dim);
-    border-radius: 10px;
-    padding: 0 8px;
-    font-size: 10px;
-}
-
-.kanban-parked-reason {
-    background: var(--surface);
-    border: 1px solid var(--border);
-    color: var(--text-dim);
-    border-radius: 10px;
-    padding: 0 8px;
-    font-size: 10px;
-    max-width: 100%;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-}
-
-.kanban-promote-btn {
-    font-size: 9px;
-    padding: 1px 6px;
-    border-radius: 3px;
-    font-weight: 600;
-    text-transform: uppercase;
-    background: rgba(88, 166, 255, 0.12);
-    color: var(--accent);
-    border: 1px solid rgba(88, 166, 255, 0.4);
-    cursor: pointer;
-    font-family: inherit;
-    line-height: 1.4;
-}
-.kanban-promote-btn:hover:not(:disabled) { background: var(--accent); color: var(--on-accent); border-color: var(--accent); }
-.kanban-promote-btn:disabled { opacity: 0.6; cursor: wait; }
-
-.kanban-promote-toast {
-    margin-top: 6px;
-    padding: 4px 6px;
-    background: rgba(248, 81, 73, 0.1);
-    border: 1px solid rgba(248, 81, 73, 0.4);
-    border-radius: 3px;
-    color: var(--red);
-    font-size: 10px;
-    word-break: break-word;
-    white-space: pre-wrap;
-}
-
-.kanban-card-backlog         { border-left-color: var(--border); opacity: 0.85; background: transparent; }
-.kanban-card-parked          { border-left-color: var(--text-dim); opacity: 0.85; background: transparent; }
-.kanban-card-open            { border-left-color: var(--text-dim); }
-.kanban-card-claimed         { border-left-color: var(--accent); }
-.kanban-card-running         { border-left-color: var(--green); }
-.kanban-card-awaiting_review { border-left-color: var(--yellow); background: rgba(210, 153, 34, 0.04); }
-.kanban-card-failed          { border-left-color: var(--red); background: rgba(248, 81, 73, 0.04); }
-.kanban-card-done            { border-left-color: var(--text-dim); opacity: 0.75; }
-.kanban-card-closed          { border-left-color: var(--orange, #d18616); opacity: 0.75; }
-
-/* The rework loop's two other states, plus failed, share the Review lane. The border is a
-   secondary cue only — the card also carries a WORD (.kanban-state-chip), because a
-   colour on its own is not a signal anyone can be assumed to read. */
-.kanban-card-changes_requested { border-left-color: var(--orange, #d18616); background: rgba(209, 134, 22, 0.06); }
-.kanban-card-needs_human       { border-left-color: var(--red); background: rgba(248, 81, 73, 0.07); }
-
-/* Per-card status pill (features/work/board.ts's STATUS_CHIPS) — shown on every non-backlog card so a
-   reader can tell two cards sharing a lane apart (claimed vs running in In Progress;
-   awaiting/changes/needs-human/failed in Review). The base rule is a neutral outline; each
-   `.st-*` modifier only ADDS a colour — the pill's WORD (set in board.ts) is what actually
-   carries the meaning, exactly like .kanban-ci-chip below. */
-.kanban-state-chip {
-    background: var(--surface);
-    border: 1px solid var(--border);
-    color: var(--text-dim);
-    border-radius: 10px;
-    padding: 0 8px;
-    font-size: 10px;
-    white-space: nowrap;
-}
-.kanban-state-chip.st-open         { color: var(--text-dim); }
-.kanban-state-chip.st-claimed      { color: var(--accent); border-color: rgba(88, 166, 255, 0.45); background: rgba(88, 166, 255, 0.10); }
-.kanban-state-chip.st-running      { color: var(--green); border-color: rgba(63, 185, 80, 0.45); background: rgba(63, 185, 80, 0.10); }
-.kanban-state-chip.st-awaiting     { color: var(--yellow); border-color: rgba(210, 153, 34, 0.45); background: rgba(210, 153, 34, 0.10); }
-.kanban-state-chip.st-changes      { color: var(--orange, #d18616); border-color: rgba(209, 134, 22, 0.45); background: rgba(209, 134, 22, 0.10); }
-.kanban-state-chip.st-needs-human  { color: var(--red); border-color: rgba(248, 81, 73, 0.5); background: rgba(248, 81, 73, 0.10); font-weight: 600; }
-.kanban-state-chip.st-failed       { color: var(--red); border-color: rgba(248, 81, 73, 0.55); background: rgba(248, 81, 73, 0.14); font-weight: 600; }
-.kanban-state-chip.st-done         { color: var(--text-dim); }
-/* 🗂️📐 CMX-23 — run-state badges that ride beside the status pill (features/work/linear.ts). */
-.kanban-state-chip.st-judging      { color: var(--accent); border-color: rgba(88, 166, 255, 0.45); background: rgba(88, 166, 255, 0.10); }
-.kanban-state-chip.st-rework       { color: var(--orange, #d18616); border-color: rgba(209, 134, 22, 0.45); background: rgba(209, 134, 22, 0.10); }
-.kanban-state-chip.st-blocked-race { color: var(--red); border-color: rgba(248, 81, 73, 0.5); background: rgba(248, 81, 73, 0.10); }
-/* CMX-318: a run held on purpose — parked by the orchestrator, or waiting for a suite slot */
-.kanban-state-chip.st-parked,
-.kanban-state-chip.st-slot-wait    { color: var(--text-dim); border-color: rgba(139, 148, 158, 0.45); background: rgba(139, 148, 158, 0.10); }
-.kanban-state-chip.st-closed-unmerged { color: var(--orange, #d18616); border-color: rgba(209, 134, 22, 0.45); background: rgba(209, 134, 22, 0.10); }
-
-/* ⚖️🎚️ CMX-405 — the run's RISK level (the board card / the task modal via riskChip). The WORD
+/* ⚖️🎚️ CMX-405 — the run's RISK level (the Runs table / the task modal via riskChip). The WORD
    ("risk: high") carries it; the colour only agrees. */
 .kanban-risk-chip {
     background: var(--surface);
@@ -2359,82 +2210,7 @@ a.kanban-tracker-link:focus-visible { text-decoration: underline; }
     color: var(--text-dim);
 }
 
-.kanban-card-error {
-    color: var(--red);
-    font-size: 10px;
-    margin-top: 4px;
-    word-break: break-word;
-}
-
-/* A hand-closed run's reason (CMX-406) — a note, not an error: dim, never red. */
-.kanban-card-closed-note {
-    color: var(--text-dim);
-    font-size: 10px;
-    margin-top: 4px;
-    word-break: break-word;
-}
-
-/* CMX-52: the agent's own handoff note — informational, dim, never a warning colour. */
-.kanban-card-handoff {
-    color: var(--text-dim);
-    font-size: 10px;
-    margin-top: 4px;
-    word-break: break-word;
-}
-
-/* CMX-68: a closed run silently holding a READY task — a warning, not a note. */
-.task-progress-chip svg, .kanban-card-stall svg, .init-line svg { vertical-align: -2px; }
-.kanban-card-stall {
-    color: var(--yellow, #d29922);
-    font-size: 10px;
-    margin-top: 4px;
-    word-break: break-word;
-}
-
-.kanban-requeue-btn {
-    font-size: 9px;
-    padding: 1px 6px;
-    border-radius: 3px;
-    font-weight: 600;
-    text-transform: uppercase;
-    background: transparent;
-    color: var(--text-dim);
-    border: 1px solid var(--border, rgba(139, 148, 158, 0.4));
-    cursor: pointer;
-    font-family: inherit;
-    line-height: 1.4;
-}
-.kanban-requeue-btn:hover:not(:disabled) { color: var(--text, #e6edf3); }
-.kanban-requeue-btn:disabled { opacity: 0.6; cursor: wait; }
-
-.kanban-merge-btn {
-    font-size: 9px;
-    padding: 1px 6px;
-    border-radius: 3px;
-    font-weight: 600;
-    text-transform: uppercase;
-    background: #1c3d2a;
-    color: var(--green);
-    border: 1px solid rgba(35, 134, 54, 0.4);
-    cursor: pointer;
-    font-family: inherit;
-    line-height: 1.4;
-}
-.kanban-merge-btn:hover:not(:disabled) { background: var(--green); color: #0d1117; border-color: var(--green); }
-.kanban-merge-btn:disabled { opacity: 0.6; cursor: wait; }
-
-.kanban-merged-badge {
-    font-size: 9px;
-    padding: 1px 6px;
-    border-radius: 3px;
-    font-weight: 600;
-    text-transform: uppercase;
-    background: rgba(35, 134, 54, 0.15);
-    color: var(--text-dim);
-    border: 1px solid rgba(35, 134, 54, 0.3);
-    line-height: 1.4;
-    cursor: default;
-}
+.task-progress-chip svg, .init-line svg { vertical-align: -2px; }
 
 .kanban-merge-toast {
     margin-top: 6px;
@@ -2486,40 +2262,9 @@ a.kanban-tracker-link:focus-visible { text-decoration: underline; }
     font-style: italic;
 }
 
-/* Delete (×) button — top-right of each kanban card. Hidden until hover/focus
-   on desktop so it doesn't compete with the title text; always visible on
-   touch (no :hover) via the @media block below. */
-.kanban-card { position: relative; }
-.kanban-delete-btn {
-    position: absolute;
-    top: 4px;
-    right: 4px;
-    width: 18px;
-    height: 18px;
-    padding: 0;
-    line-height: 1;
-    font-size: 14px;
-    border-radius: 3px;
-    background: transparent;
-    border: 1px solid transparent;
-    color: var(--text-dim);
-    cursor: pointer;
-    opacity: 0;
-    transition: opacity 0.15s, color 0.15s, background 0.15s, border-color 0.15s;
-}
-.kanban-card:hover .kanban-delete-btn,
-.kanban-card:focus-within .kanban-delete-btn {
-    opacity: 1;
-}
-.kanban-delete-btn:hover {
-    color: var(--red);
-    border-color: var(--red);
-    background: rgba(248, 81, 73, 0.1);
-}
-
-/* Inline confirm: replaces the card body when the × is clicked. Plain DOM,
-   not window.confirm — survives the next refresh cleanly via a per-card
-   data attribute on the card root. */
+/* Inline confirm: shown on the card when its ⋮ Delete is picked. Plain DOM,
+   not window.confirm, so it survives the next poll's repaint (the card keeps
+   its key). */
 .kanban-confirm {
     margin-top: 6px;
     padding: 6px 8px;
@@ -2593,8 +2338,6 @@ summary.runs-section { cursor: pointer; }
 .field-control .s-textarea, .field-control .s-multi { flex: 1 1 auto; }
 
 @media (max-width: 768px) {
-    /* Touch — no hover, so always show the × */
-    .kanban-delete-btn { opacity: 1; }
     /* Mobile dispatcher row is a stacked grid; confirm row uses full width */
     .dispatcher-table tr.row-confirming td:not(.row-confirm-cell) { display: none; }
     .dispatcher-table tr.row-confirming .row-confirm-cell { display: block; padding: 4px 0; }
@@ -3882,7 +3625,8 @@ body.sidebar-resizing iframe { pointer-events: none; }
     color: var(--text-dim); display: inline-flex; align-items: center; justify-content: center; cursor: pointer;
 }
 .wcard-menu-btn:hover, .wcard-menu-btn[aria-expanded="true"] { color: var(--accent); }
-.wcard-running { font-size: 12px; color: var(--text-dim); }
+/* An action in flight. Not .wcard-running: that is a running card's own class (wcard-<status>). */
+.wcard-busy { font-size: 12px; color: var(--text-dim); }
 .wcard-error { font-size: 12px; color: var(--red); }
 .wcard-overflow-menu .wcard-branch-item .ov-label { font-family: var(--font); font-size: 12px; overflow-wrap: anywhere; }
 
@@ -3943,6 +3687,88 @@ body.sidebar-resizing iframe { pointer-events: none; }
 .wopt-hint { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; font-weight: 400; color: var(--text-dim); }
 .popover-item.wopt-warn { color: var(--ok-orange); font-weight: 600; }
 .work-confirm-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 14px; }
+
+/* ---- CMX-316: the desktop Work view (Liav's mockup, 10-23) ----
+   ONE header row: the project switcher (the project and a chevron over its
+   counts and dispatch state), the segmented Board | Runs | Schedules, then
+   Pause dispatch (a quiet outline), New task (the one primary button) and ⋯. */
+.work-head {
+    display: flex; align-items: center; gap: 16px; min-width: 0;
+    margin: 0 0 16px; padding: 0 0 14px; border-bottom: 1px solid var(--border); font-family: var(--ui-font);
+}
+/* The safety pills float in the top-right corner: the row ends short of them while one shows
+   (DeskHead measures them into --work-head-float). */
+#panel-work.active .work-head { padding-right: var(--work-head-float, 0px); }
+.work-head-title {
+    display: flex; flex-direction: column; align-items: flex-start; gap: 1px; min-width: 0; max-width: 360px; flex: 0 0 auto;
+    margin-left: -8px; padding: 4px 8px; border: 0; border-radius: 8px; background: none; color: var(--text); cursor: pointer; text-align: left; font-family: inherit;
+}
+.work-head-title:hover, .work-head-title[aria-expanded="true"] { background: var(--surface); }
+.work-head-name { display: inline-flex; align-items: center; gap: 6px; max-width: 100%; font-size: 18px; font-weight: 600; }
+.work-head-name svg { flex: 0 0 auto; }
+.work-head-project, .work-head-sub { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.work-head-sub { max-width: 100%; font-size: 12px; color: var(--text-dim); }
+.work-head .work-seg {
+    flex: 0 1 300px; min-width: 216px; display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); box-sizing: border-box;
+    padding: 3px; border-radius: 10px; background: var(--surface);
+}
+.work-head .work-seg-btn { height: 30px; padding: 0 10px; border-radius: 8px; font-size: 13px; }
+.work-head .work-seg-btn + .work-seg-btn { border-left: 0; }
+.work-head .work-seg-btn.active { box-shadow: none; background: color-mix(in srgb, var(--text) 14%, var(--surface)); }
+.work-head-spacer { flex: 1 1 auto; }
+.work-head .btn { display: inline-flex; align-items: center; gap: 6px; height: 34px; white-space: nowrap; flex: 0 0 auto; }
+/* Pause dispatch: an outline that reads the state; held, it reads Resume in the warn look. */
+.work-head .work-head-hold:not(.btn-warn) { background: transparent; }
+.work-head .work-head-new:disabled { opacity: 0.5; cursor: not-allowed; }
+.work-head-more {
+    flex: 0 0 auto; display: inline-flex; align-items: center; justify-content: center; width: 34px; height: 34px; padding: 0;
+    border: 1px solid var(--border); border-radius: 8px; background: transparent; color: var(--text); cursor: pointer;
+}
+.work-head-more:hover, .work-head-more[aria-expanded="true"] { border-color: var(--accent); color: var(--accent); }
+.popover-item.wmenu-warn { color: var(--ok-orange); font-weight: 600; }
+/* The switcher: the phone sheet's list in a dropdown under the title. */
+.popover.work-switcher { width: 320px; padding: 8px 0; }
+.work-switcher .wproj-search { padding: 0 10px 8px; }
+.work-switcher .wproj-search .s-input { min-height: 34px; font-size: 13px; }
+.work-switcher .wproj-list { max-height: min(60vh, 440px); }
+.work-switcher .ui-radio-opt.wproj-row { min-height: 44px; padding: 4px 14px; border-bottom: 0; }
+.work-switcher .wproj-name { font-size: 14px; }
+.work-switcher .wproj-none { padding: 8px 14px; }
+
+/* The compact card on the desktop board: a 14px title, as the mockup. */
+.kanban-col .wcard { gap: 7px; padding: 12px 14px; }
+.kanban-col .wcard-title { font-size: 14px; }
+.kanban-col .wcard-meta, .kanban-col .wcard-flags, .kanban-col .wcard-note { font-size: 12px; }
+.kanban-col .wcard-menu-btn { width: 28px; height: 28px; margin: -4px -6px 0 0; }
+
+/* Rows on the desktop: a table, grouped by status; a column head sorts. */
+.wtable-wrap { overflow-x: auto; }
+.wtable { width: 100%; border-collapse: collapse; font: 13px var(--ui-font); color: var(--text); }
+.wtable-th { padding: 0; text-align: left; border-bottom: 1px solid var(--border); white-space: nowrap; }
+.wtable-sort {
+    display: inline-flex; align-items: center; gap: 4px; width: 100%; padding: 8px 10px; border: 0; background: none;
+    color: var(--text-dim); font: 600 12px var(--ui-font); letter-spacing: 0.06em; text-transform: uppercase; cursor: pointer;
+}
+.wtable-sort:hover, .wtable-sort:focus-visible, .wtable-th[aria-sort="ascending"] .wtable-sort, .wtable-th[aria-sort="descending"] .wtable-sort { color: var(--text); }
+.wtable-group-head th { padding: 0; text-align: left; }
+.wtable-group-btn {
+    display: flex; align-items: center; gap: 8px; width: 100%; padding: 16px 10px 6px; border: 0; background: none; cursor: pointer;
+    color: var(--text-dim); font: 600 12px var(--ui-font); letter-spacing: 0.06em; text-transform: uppercase; text-align: left;
+}
+.wtable-group-btn:hover, .wtable-group-btn:focus-visible { color: var(--text); }
+.wtable-group.folded .wrows-caret { transform: none; }
+.wtable-row { cursor: pointer; border-bottom: 1px solid var(--border); }
+.wtable-row:hover { background: var(--surface); }
+.wtable-row:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.wtable-row td { padding: 8px 10px; vertical-align: middle; white-space: nowrap; color: var(--text-dim); }
+.wtable-row .wtable-title { width: 100%; max-width: 0; color: var(--text); white-space: normal; }
+.wtable-title-text { font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.wtable-row td.wtable-id { font-family: var(--font); color: var(--accent); }
+.wtable-row td.wtable-pr, .wtable-row td.wtable-age { font-family: var(--font); }
+.wtable-row td.wtable-state { color: var(--text); }
+.wtable-row td.warn { color: var(--ok-orange); font-weight: 600; }
+.wtable-row td.wtable-menu { width: 36px; padding: 0 4px; }
+.wtable-menu .wcard-menu-btn { margin: 0; width: 32px; height: 32px; }
 
 /* ---- Mobile keybar v2 (Moshi-style accessory row) ----
    A persistent, horizontally-scrollable key row pinned to the bottom (above the

@@ -3,69 +3,31 @@
 // "Work · N running · M queued", New task (+) and ⋯. The title opens the project switcher (a
 // bottom sheet, single-select, replacing the desktop's project pills), ⋯ the Work options
 // sheet (the layout, Init a repo, Pause dispatch, Pause all agents, which asks to confirm).
-import { useState, type MouseEvent } from 'react';
+import { useState } from 'react';
 import { icons } from '../../../shared/icons/index.ts';
 import { launcher } from '../../../shared/store/launcher.ts';
 import type { WorkPayload } from '../../../shared/store/work.ts';
-import { Button, Dialog, DialogClose, IconButton, ItemButton, RadioGroup, Sheet, TextButton, TextInput } from '../../../shared/ui/index.ts';
+import { IconButton, ItemButton, Sheet, TextButton } from '../../../shared/ui/index.ts';
 import { openNewTask } from '../../newtask/index.ts';
 import { openInitRepo } from '../../runs/index.ts';
 import { toggleSidebar } from '../../sidebar/controller.ts';
 import { pruneFilter } from '../board.ts';
-import { barSubtitle, countsLine, projectRows, projectTitle, SEARCH_AFTER, totalCounts } from '../phone.ts';
-import { PAUSE_ALL_ASK, useDispatchHold, type Hold } from './hold.ts';
+import { barSubtitle, projectTitle, SEARCH_AFTER } from '../phone.ts';
+import { useDispatchHold, type Hold } from './hold.ts';
+import { PauseAllConfirm } from './PauseAll.tsx';
 import type { PhoneLayout, WorkPrefs } from './prefs.ts';
-
-/** RadioGroup's value for "All projects" (a radio's value cannot be empty). */
-const ALL = '*';
+import { ProjectList } from './ProjectPicker.tsx';
 
 function ProjectSheet({ open, onOpenChange, data, prefs }: { open: boolean; onOpenChange: (open: boolean) => void; data: WorkPayload | null; prefs: WorkPrefs }) {
   const [query, setQuery] = useState('');
-  const paths = (data?.workflows || []).map((wf) => wf.path);
-  const filter = pruneFilter(prefs.filter, paths);
-  const search = paths.length > SEARCH_AFTER;
-  const rows = projectRows(data, prefs.recent, search ? query : '');
-  // A desktop multi-select of several projects is none of these single choices.
-  const value = !filter.length ? ALL : filter.length === 1 ? (filter[0] ?? ALL) : '';
-  const all = totalCounts(data, []);
-  const options = [
-    { value: ALL, className: 'wproj-row', label: <span className="wproj-name">All projects</span>, hint: <span className="wproj-counts">{countsLine(all)}</span> },
-    ...rows.map((r) => ({
-      value: r.path,
-      className: 'wproj-row',
-      label: <span className="wproj-name">{r.name}</span>,
-      hint: (
-        <>
-          <span className="wproj-counts">{r.counts}</span>
-          {r.needsYou > 0 && <span className="wproj-needs">{r.needsYou} needs you</span>}
-        </>
-      ),
-    })),
-  ];
+  const search = (data?.workflows || []).length > SEARCH_AFTER;
   function close() {
     setQuery('');
     onOpenChange(false);
   }
-  function pick(v: string) {
-    prefs.pickProject(v === ALL ? '' : v);
-    close();
-  }
-  // A tap on the row already picked fires no change: it closes the sheet all the same. (The
-  // click bubbles here before the radio repaints, so only the old pick reads as checked.)
-  function tapped(e: MouseEvent) {
-    if ((e.target as Element).closest('.wproj-row')?.querySelector('[data-state="checked"]')) close();
-  }
   return (
     <Sheet open={open} onOpenChange={(o) => (o ? onOpenChange(true) : close())} title="Project" className="work-sheet work-project-sheet">
-      {search && (
-        <div className="wproj-search">
-          <TextInput search plain value={query} onChange={setQuery} label="Search projects" placeholder="Search projects" />
-        </div>
-      )}
-      <div className="wproj-list" onClick={tapped}>
-        <RadioGroup label="Project" value={value} onChange={pick} options={options} />
-        {search && rows.length === 0 && <p className="wproj-none">No project matches.</p>}
-      </div>
+      <ProjectList data={data} prefs={prefs} search={search} query={query} setQuery={setQuery} onClose={close} />
     </Sheet>
   );
 }
@@ -111,25 +73,6 @@ function OptionsSheet({ open, onOpenChange, data, prefs, h, onPauseAll }: { open
         </ItemButton>
       )}
     </Sheet>
-  );
-}
-
-function PauseAllConfirm({ open, onOpenChange, h }: { open: boolean; onOpenChange: (open: boolean) => void; h: Hold }) {
-  return (
-    <Dialog open={open} onOpenChange={onOpenChange} title="Pause all agents?" description={PAUSE_ALL_ASK} className="work-confirm">
-      <div className="work-confirm-actions">
-        <DialogClose asChild>
-          <Button>Cancel</Button>
-        </DialogClose>
-        <Button variant="danger" id="wopt-pause-all-confirm" disabled={h.busy}
-          onClick={() => {
-            onOpenChange(false);
-            h.pauseAll();
-          }}>
-          Pause all agents
-        </Button>
-      </div>
-    </Dialog>
   );
 }
 

@@ -26,7 +26,7 @@
 // three real state-pill families this file guards are: the wall's .gs-state
 // pill (idle/working/needs-you/done/unknown — "needs-you" is this codebase's
 // name for "waiting"), the sidebar's .ar-state line (idle/working/waiting), and
-// the Work board's .kanban-state-chip/.kanban-card-error (failed is the real
+// the Work board's .wcard-state/.wcard-note (failed is the real
 // analogue of "error" — a task-level failure, not an agent one). All three
 // already carried a non-hue cue before this ticket; what's new here is the
 // guard, not the cue.
@@ -596,8 +596,8 @@ test('non-hue cue — sidebar row: the rendered dot NAMES the state word, not ju
 // ticket demands survive greyscale. CMX-233: the board is React (features/work); its
 // STATUS_CHIPS constant and rendered card are pinned in features/work/tests (models.test.ts,
 // Board.test.tsx). This keeps the page-level read: the REAL page's Work island, fed a
-// failed run by the one poll, shows the chip's word and the error text, not colour only.
-test('WIRING: a REAL rendered Work board card shows its status chip word AND its error text — not colour-only', async () => {
+// failed run by the one poll, shows the state's word and the error text, not colour only.
+test('WIRING: a REAL rendered Work board card shows its state word AND its error text — not colour-only', async () => {
     const payload = { configured: true, workflows: [{ path: 'wf.yaml', recent_runs: [{ task_id: 'T1', status: 'failed', last_error: 'boom', ended_at: '2026-01-01' }] }] };
     await bootDashboardDom({
         body: '<div class="panel active" id="panel-work"></div>', terminalsEnabled: false,
@@ -607,16 +607,18 @@ test('WIRING: a REAL rendered Work board card shows its status chip word AND its
     await pollWork();
     await new Promise(r => setTimeout(r, 0));
 
-    const chip = document.querySelector('#kanban-board .kanban-state-chip');
-    assert.ok(chip, 'no .kanban-state-chip rendered for a failed card');
-    assert.match(chip.textContent, /failed/i,
-        'the REAL rendered .kanban-state-chip has no "failed" text — only its st-failed colour class would remain, ' +
+    // CMX-316: the board draws the compact card; its state is a WORD beside its icon, and the
+    // run's error is the card's note, not a colour.
+    const state = document.querySelector('#kanban-board .wcard-state');
+    assert.ok(state, 'no .wcard-state rendered for a failed card');
+    assert.match(state.textContent, /failed/i,
+        'the REAL rendered .wcard-state has no "failed" text — only its colour would remain, ' +
         'the exact hue-only regression this guard exists to prevent');
 
-    const err = document.querySelector('#kanban-board .kanban-card-error');
-    assert.ok(err, 'no .kanban-card-error rendered for a failed card with last_error set');
+    const err = document.querySelector('#kanban-board .wcard-note');
+    assert.ok(err, 'no .wcard-note rendered for a failed card with last_error set');
     assert.match(err.textContent, /boom/,
-        'the REAL rendered .kanban-card-error has no error text — only its red colour would remain');
+        'the REAL rendered .wcard-note has no error text — only its colour would remain');
 });
 
 // --- GUARD 4: a context-% threshold is never colour-only — the exact number
