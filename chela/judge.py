@@ -1879,7 +1879,57 @@ def _apply_experiments(
     the tests that can observe its file — see :func:`_measure`. ``pinned`` (parallel to
     ``items``) replays each experiment's FIRST-run selection instead of computing one — the
     consistency re-run's contract.
+
+    ⛔ CMX-162: a KILLED experiment leaves the worktree byte-identical too. The loop's
+    ``finally`` restores the file on a normal exit or an exception, but SIGTERM/SIGHUP/SIGINT
+    skip it by default and SIGKILL skips anything. So this reuses the sweep's machinery
+    (CMX-97/131) instead of a second copy: those three signals raise
+    :class:`~chela.sweep._Interrupted` so the ``finally`` runs, every mutation writes the
+    sweep's recovery marker before it lands, and a guardian process in its own session
+    restores the file from the marker if this process dies anyway. Once the file is back, the
+    signal is delivered again to whatever handler it had before, so a killed judge still
+    dies the way it would have.
     """
+    from chela import sweep
+
+    recovered, err = sweep.recover(worktree)
+    if err:
+        return [], err
+    if recovered:
+        log.warning("judge: %s", recovered)
+    old = sweep._install_signal_handlers()
+    guardian = None
+    try:
+        # Inside the `try`: a signal while the guardian spawns still restores the handlers.
+        guardian = sweep._start_guardian(worktree)
+        if guardian is None:
+            log.warning("judge: the kill guardian could not start — a SIGKILL mid-mutation "
+                        "is only recovered by the next judge or sweep run in %s", worktree)
+        return _apply_each(worktree, test_cmd, items, baseline, timeout, selector, pinned,
+                           progress=progress, heartbeat=heartbeat)
+    except sweep._Interrupted as e:
+        signum = e.args[0]
+        # A signal between a mutation's write and its `try`, or inside the restore itself,
+        # never reached the `finally` that restores — the marker still holds the original.
+        _, err = sweep.recover(worktree)
+    finally:
+        sweep._restore_signal_handlers(old)
+        sweep._stop_guardian(guardian)
+    signal.raise_signal(signum)
+    # Only reached when the earlier handler returns (e.g. a daemon's graceful-shutdown flag).
+    return [], (f"interrupted by signal {signum} — the experiments stopped"
+                + (f", and the mutated file could NOT be recovered: {err}" if err
+                   else "; the mutated file was restored"))
+
+
+def _apply_each(
+    worktree: Path, test_cmd: str, items: list, baseline: SuiteResult, timeout: float,
+    selector: "judge_select.Selector | None", pinned: "list[judge_select.Selection | None] | None",
+    *, progress, heartbeat,
+) -> tuple[list[Outcome], str]:
+    """:func:`_apply_experiments`' loop, run under its signal handlers and guardian."""
+    from chela import sweep
+
     outcomes: list[Outcome] = []
 
     def _record(outcome: Outcome) -> None:
@@ -1916,6 +1966,7 @@ def _apply_experiments(
             ))
             continue
 
+        _mark_mutation(worktree, path, exp)
         applied, reason, original = apply_mutation(path, exp.before, exp.after)
         try:
             started = time.monotonic()
@@ -1938,7 +1989,10 @@ def _apply_experiments(
             # ⛔ ALWAYS. The next experiment's baseline is this file, unmutated.
             restored = True
             restore_detail = ""
-            if applied and original is not None:
+            # CMX-162: also when `apply_mutation` refused AFTER its write (the read-back
+            # raised, or the replacement is missing) — the file may be changed all the same,
+            # and the marker dropped below was its only other copy.
+            if original is not None:
                 try:
                     path.write_text(original)
                 except OSError as e:
@@ -1960,6 +2014,9 @@ def _apply_experiments(
                             f"{len(readback)} chars where the original was {len(original)} — "
                             "something else may have written to this file concurrently"
                         )
+            if restored:
+                # The marker stays when the restore failed: it holds the only known-good copy.
+                sweep.marker_path(worktree).unlink(missing_ok=True)
         if not restored:
             # ⛔ THE ARTIFACT IS NOW CONTAMINATED. Every experiment after this one would run
             # against a file still carrying the last mutation, so its "the suite went green"
@@ -1981,6 +2038,26 @@ def _apply_experiments(
     if progress is not None:
         progress(len(items), len(items))
     return outcomes, ""
+
+
+def _mark_mutation(worktree: Path, path: Path, exp: Experiment) -> None:
+    """⛔ CMX-162: write the sweep's recovery marker for ``exp`` BEFORE it is applied, so a
+    kill at any point after the write is recoverable. A file that cannot be read is not
+    marked — :func:`apply_mutation` will refuse it too, so nothing lands. A marker that
+    cannot be written leaves the ``finally`` and SIGTERM paths intact; only a SIGKILL is
+    then unrecoverable, so it is logged, not fatal."""
+    from chela import sweep
+
+    try:
+        original = path.read_text()
+    except (OSError, UnicodeDecodeError):
+        return
+    try:
+        sweep._write_marker(worktree, str(path.relative_to(worktree.resolve())), original,
+                            original.replace(exp.before, exp.after, 1))
+    except OSError as e:
+        log.warning("judge: no recovery marker for %s (%s) — a SIGKILL during this "
+                    "experiment would leave its mutation on disk", exp.file, e)
 
 
 _SELECT = object()   # _measure's "no pinned selection — compute one" sentinel
