@@ -11,20 +11,20 @@ import { beforeAll, test } from 'vitest';
 import assert from 'node:assert/strict';
 import { bootPhone, pane, settle } from './js_helpers/term_pane_fixture.mjs';
 
-let release, chela, terminals;
+let release, sidebar, terminals;
 beforeAll(async () => {
     const layoutGate = new Promise(r => { release = r; });
-    ({ chela, terminals } = await bootPhone({ order: ['/srv/code/gamma', '/srv/code/beta', '/srv/code/alpha'], layoutGate }));
+    ({ sidebar, terminals } = await bootPhone({ order: ['/srv/code/gamma', '/srv/code/beta', '/srv/code/alpha'], layoutGate }));
     await settle();
 });
 
 test('a swipe before the sidebar draws survives the sidebar drawing', async () => {
-    assert.deepEqual(chela.sidebarOrder(), [], 'the sidebar has not drawn');
+    assert.deepEqual(sidebar.sidebarOrder(), [], 'the sidebar has not drawn');
     assert.deepEqual(pane(), { value: '@201', shown: '@201' }, 'the boot fell back to the first row');
     terminals.stepAgentMobile(1);   // options order with no sidebar yet: @201 → @202
     await settle();
     release();
     await settle();
-    assert.deepEqual(chela.sidebarOrder(), ['@203', '@202', '@201'], 'the sidebar has drawn');
+    assert.deepEqual(sidebar.sidebarOrder(), ['@203', '@202', '@201'], 'the sidebar has drawn');
     assert.deepEqual(pane(), { value: '@202', shown: '@202' });
 });

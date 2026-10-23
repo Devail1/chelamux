@@ -21,7 +21,7 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { activateDom, bootDashboardDom, copyDashboard, flush, SIDEBAR } from './js_helpers/dashboard_dom.mjs';
+import { activateDom, bootDashboardDom, copyDashboard, flush, SIDEBAR, AGENTS_STORE, VIEW_STORE, NAV } from './js_helpers/dashboard_dom.mjs';
 import { fakeArchiveServer } from './js_helpers/fake_archive.mjs';
 
 const BODY = `
@@ -72,10 +72,10 @@ async function boot({ hidden = [], sessions = [], hold = [], seedLocalStorage, o
     const { dom, modules } = await bootDashboardDom({
         body: BODY, canvasStub: true, terminalsEnabled: false, fetchImpl, seedLocalStorage,
         jsRoot,
-        extraModules: ['util.js', 'nav.js', SIDEBAR],
+        extraModules: [AGENTS_STORE, VIEW_STORE, NAV, SIDEBAR],
     });
     const page = {
-        dom, server, sent, nav: modules.nav, sidebar: modules.sidebar, util: modules.util,
+        dom, server, sent, nav: modules.nav, sidebar: modules.sidebar, agentsStore: modules.agents.agents, viewStore: modules.view.view,
         use() { activateDom(dom); globalThis.fetch = fetchImpl; return page; },
         async release(name) { gates.get(name).resolve(); gates.delete(name); await settle(); },
         posts: path => sent.filter(c => c.method === 'POST' && c.path === path),
@@ -113,7 +113,7 @@ test('nothing is pruned before the first archive answer — then the prune runs'
     // A hidden run whose row is not in the list: once the archive is KNOWN it is pruned.
     // Before that, the page has not seen the archive, and must not act on it.
     const page = (await boot({ hidden: ['run:CMX-9'], hold: ['GET /api/sidebar/archive'] })).use();
-    page.util.setAgentsCache(ROWS);
+    page.agentsStore.set(ROWS);
     page.sidebar.renderSidebarAgents(ROWS);                    // a render before the archive loads
     await settle();
     assert.ok(host().querySelector('.agent-row[data-agent="a"]'), 'the rows still render');

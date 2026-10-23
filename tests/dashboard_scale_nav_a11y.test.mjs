@@ -251,15 +251,14 @@ import { dirname, join } from 'node:path';
 import { JSDOM } from 'jsdom';   // needs `pnpm install` — tests/test_js_suites.py enforces it
 
 import { tileState } from '../chela/dashboard/static/js/wallmodel.ts';
-import { navViews } from '../chela/dashboard/static/js/viewreg.js';
-import { bootDashboardDom, SIDEBAR } from './js_helpers/dashboard_dom.mjs';
+import { navViews } from '../chela/dashboard/frontend/src/features/shell/views.ts';
+import { APP_BODY, bootDashboardDom, SIDEBAR, NAV } from './js_helpers/dashboard_dom.mjs';
 import { cssForViewport, resolveVars } from './js_helpers/css_viewport.mjs';
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..', 'chela', 'dashboard');
 const src = p => readFileSync(join(ROOT, p), 'utf8');
 
 const CSS = src('static/style.css');
-const VIEWS_SRC = src('static/js/views.js');
 
 // --- jsdom fixtures: mount the REAL style.css and a concrete, hand-written
 // fragment of REAL markup (mirroring features/panehead's PaneHead and terminals.js's
@@ -576,7 +575,7 @@ test('non-hue cue — the palette\'s status words: idle/working/waiting each map
 // moved the word off the row face into the dot's accessible name. Read the REAL rendered row.
 const SIDEBAR_BODY = '<aside class="sidebar"><div class="side-list" id="sidebar-agents"></div></aside>';
 async function sidebarRows(rows, ctx = []) {
-    const { modules: { nav, sidebar } } = await bootDashboardDom({ body: SIDEBAR_BODY, canvasStub: true, extraModules: ['nav.js', SIDEBAR] });
+    const { modules: { nav, sidebar } } = await bootDashboardDom({ body: SIDEBAR_BODY, canvasStub: true, extraModules: [NAV, SIDEBAR] });
     sidebar.updateCtxCache(ctx);
     sidebar.renderSidebarAgents(rows);
     return name => document.querySelector(`#sidebar-agents .agent-row[data-agent="${name}"]`);
@@ -645,37 +644,27 @@ test('context-% threshold non-hue cue — sidebar .ar-ctx renders the numeric pe
 // pin + the #side-nav-more WIRING tests) wholesale: there is no longer a
 // second nav group, a demotion, or a re-parenting claim to guard piece by
 // piece — the whole shape collapses to one fact, asserted directly against
-// the REAL views.js source and the REAL rendered sidebar.
-function shippedViewIds() {
-    const body = VIEWS_SRC.split('export const VIEWS')[1];
-    const ids = [...body.matchAll(/^\s+id:\s*'([^']+)'/gm)];
-    return ids.map((m, i) => {
-        const start = m.index;
-        const end = i + 1 < ids.length ? ids[i + 1].index : body.length;
-        const block = body.slice(start, end);
-        return { id: m[1], virtual: /virtual:\s*true/.test(block) };
-    });
-}
-
-test('nav inventory: the shipped nav is exactly Wall and Work — the other five views are DELETED, not demoted', () => {
-    const entries = shippedViewIds().filter(v => !v.virtual);
-    const shipped = navViews(entries, { terminalsOn: true }).map(v => v.id);
+// the REAL registry (features/shell, CMX-248; static/js/views.js before) and the REAL page.
+test('nav inventory: the shipped nav is exactly Wall and Work — the other five views are DELETED, not demoted', async () => {
+    const { VIEWS } = await import('../chela/dashboard/frontend/src/features/shell/index.ts');
+    const shipped = navViews(VIEWS.filter(v => !v.virtual), { terminalsOn: true }).map(v => v.id);
     assert.deepEqual(shipped, ['terminals', 'work'],
         'the shipped nav drifted from CMX-279\'s exact 2 views — if this includes feed/knowledge/agents/personas/cost, ' +
         'one of the five deleted views came back; if it is missing terminals or work, one of the two kept views broke');
+    assert.ok(VIEWS.every(v => !('tier' in v)),
+        'a view still carries a `tier` field — CMX-279 removed the primary/secondary split along with the ' +
+        'five demoted-then-deleted views (nothing left needs a second nav group)');
 });
 
-test('nav inventory: the five deleted views leave no trace — no panel, no tier field, no secondary nav group', () => {
-    const html = src('templates/index.html');
+test('nav inventory: the five deleted views leave no trace on the real page — no panel, no secondary nav group', async () => {
+    await bootDashboardDom({ body: APP_BODY });
+    assert.ok(document.querySelector('#root .sidebar #side-nav'), 'the real page did not mount');
     for (const id of ['feed', 'knowledge', 'agents', 'personas', 'cost']) {
-        assert.ok(!html.includes(`id="panel-${id}"`),
-            `index.html still has a panel-${id} div — CMX-279 deleted this view's panel along with its nav entry`);
+        assert.equal(document.getElementById(`panel-${id}`), null,
+            `the page still has a panel-${id} — CMX-279 deleted this view's panel along with its nav entry`);
     }
-    assert.ok(!VIEWS_SRC.includes('tier:'),
-        'views.js still carries a `tier` field — CMX-279 removed the primary/secondary split along with the ' +
-        'five demoted-then-deleted views (nothing left needs a second nav group)');
-    assert.ok(!html.includes('id="side-nav-more"'),
-        'index.html still has a #side-nav-more container — CMX-279 removed the secondary nav group entirely, ' +
+    assert.equal(document.getElementById('side-nav-more'), null,
+        'the page still has a #side-nav-more container — CMX-279 removed the secondary nav group entirely, ' +
         'it did not just empty it');
 });
 
@@ -690,9 +679,7 @@ test('nav inventory: the five deleted views leave no trace — no panel, no tier
 test('WIRING: the REAL renderNav() renders exactly Wall and Work into #side-nav, in order', async () => {
     const BODY = '<div class="app"><aside class="sidebar"><section class="side-section">' +
         '<div class="side-list" id="side-nav"></div></section><div id="sidebar-agents"></div></aside></div>';
-    // Browser-faithful import order: main.js is the entry (nav <-> main is a
-    // cycle — import anything else first and its `let`s are in their TDZ).
-    const { modules: { nav } } = await bootDashboardDom({ body: BODY, extraModules: ['nav.js'] });
+    const { modules: { nav } } = await bootDashboardDom({ body: BODY, extraModules: [NAV] });
 
     nav.renderNav();
     const ids = [...document.querySelectorAll('#side-nav .side-item')].map(el => el.dataset.view);

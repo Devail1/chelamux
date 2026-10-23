@@ -15,7 +15,7 @@
 // tests/test_js_suites.py)
 import { beforeAll, beforeEach, test } from 'vitest';
 import assert from 'node:assert/strict';
-import { bootDashboardDom, ORCHESTRATOR, SIDEBAR } from './js_helpers/dashboard_dom.mjs';
+import { bootDashboardDom, ORCHESTRATOR, SIDEBAR, AGENTS_STORE, VIEW_STORE, NAV } from './js_helpers/dashboard_dom.mjs';
 import { buildItems, DISPATCHED_KEY, runState } from '../chela/dashboard/frontend/src/features/sidebar/model.ts';
 
 const BODY = `
@@ -25,10 +25,10 @@ const BODY = `
 <div id="agent-detail"></div>
 <span id="hdr-agents"></span><span id="hdr-next"></span><span id="hdr-updated"></span>`;
 
-let nav, util, orchestrator, sidebar;
+let nav, agentsStore, viewStore, orchestrator, sidebar;
 
 beforeAll(async () => {
-    ({ modules: { util, nav, orchestrator, sidebar } } = await bootDashboardDom({
+    ({ modules: { agents: { agents: agentsStore }, view: { view: viewStore }, nav, orchestrator, sidebar } } = await bootDashboardDom({
         body: BODY,
         canvasStub: true,
         terminalsEnabled: false,
@@ -42,7 +42,7 @@ beforeAll(async () => {
             }
             return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve(body) });
         },
-        extraModules: ['util.js', 'nav.js', ORCHESTRATOR, SIDEBAR],
+        extraModules: [AGENTS_STORE, VIEW_STORE, NAV, ORCHESTRATOR, SIDEBAR],
     }));
 });
 
@@ -58,7 +58,7 @@ const WT = '/srv/u/.chela/worktrees/chelamux';
 const runCard = (tid, title, role, over = {}) => ({ task_id: tid, title, status: 'running', judge_state: '', role, ...over });
 
 function render(rows) {
-    util.setAgentsCache(rows);
+    agentsStore.set(rows);
     sidebar.renderSidebarAgents(rows);
 }
 const host = () => document.getElementById('sidebar-agents');
@@ -160,7 +160,7 @@ test('every count shown equals the rows it heads — staged with 2-3 rows per cl
         // the orchestrator — in its folder group, not pinned (CMX-72)
         { ...win('orch', { cwd: '/srv/code/alpha' }), window_id: '@900' },
     ];
-    util.setAgentsCache(rows);
+    agentsStore.set(rows);
     await orchestrator.orchestratorSubscribe('@900');
     render(rows);
     try {

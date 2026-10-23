@@ -108,12 +108,13 @@ beforeAll(async () => {
     // Same cyclic-import order as the browser (index.html -> main.js -> everything
     // else) — main.js's top-level initSSE() is what wires the real `orchestrator`
     // listener onto our FakeEventSource.
-    await import('../chela/dashboard/frontend/src/boot.ts');
-    const util = await import('../chela/dashboard/static/js/util.js');
+    (await import('../chela/dashboard/frontend/src/boot.ts')).start();
+    const { agents: agentsStore } = await import('../chela/dashboard/frontend/src/shared/store/agents.ts');
+    const { view: viewStore } = await import('../chela/dashboard/frontend/src/shared/store/view.ts');
     terminals = await import('../chela/dashboard/frontend/src/features/wall/index.ts');
     orchestrator = await import('../chela/dashboard/frontend/src/shared/orchestrator/index.ts');
-    util.setCurrentTab('terminals');
-    util.setAgentsCache(AGENTS);
+    viewStore.set('terminals');
+    agentsStore.set(AGENTS);
     await terminals.renderTerminals();   // ONE wall, built once — as in a live session
 });
 
@@ -191,8 +192,9 @@ test('an SSE reconnect ("hello") re-fetches the status and the ring moves to the
 test('a pane added after the owner is known renders with the ring already on', async () => {
     ORCH_STATUS = { wid: '@3', name: 'agent-c', state: 'ok', why: '', queued: 0 };
     await orchestrator.refreshOrchestratorStatus();   // owner is @3 BEFORE its pane exists
-    const util = await import('../chela/dashboard/static/js/util.js');
-    util.setAgentsCache([...AGENTS, { name: 'shell', window_id: '@3', online: true }]);
+    const { agents: agentsStore } = await import('../chela/dashboard/frontend/src/shared/store/agents.ts');
+    const { view: viewStore } = await import('../chela/dashboard/frontend/src/shared/store/view.ts');
+    agentsStore.set([...AGENTS, { name: 'shell', window_id: '@3', online: true }]);
     terminals.absorbFreshTerminals(['@1', '@2', '@3']);
     await new Promise(resolve => setTimeout(resolve, 0));
 

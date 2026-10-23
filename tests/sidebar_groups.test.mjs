@@ -12,7 +12,7 @@
 // Run: pnpm exec vitest run tests/sidebar_groups.test.mjs  (pytest runs it via tests/test_js_suites.py)
 import { beforeAll, beforeEach, test } from 'vitest';
 import assert from 'node:assert/strict';
-import { bootDashboardDom, flush, SIDEBAR } from './js_helpers/dashboard_dom.mjs';
+import { bootDashboardDom, flush, SIDEBAR, AGENTS_STORE, VIEW_STORE, NAV } from './js_helpers/dashboard_dom.mjs';
 import { fakeArchiveServer } from './js_helpers/fake_archive.mjs';
 import { clickMenu, closeMenu, menu, menuItems, openMenu, rightClick } from './js_helpers/side_menu.mjs';
 import {
@@ -28,12 +28,12 @@ const BODY = `
 
 // Every POST /api/agents/spawn the launcher makes, body parsed.
 const spawns = [];
-let nav, util, sidebar;
+let nav, agentsStore, viewStore, sidebar;
 // CMX-75: the archive is SERVER state — this stands in for /api/sidebar/archive.
-const server = fakeArchiveServer(() => util && util._agentsCache);
+const server = fakeArchiveServer(() => agentsStore && agentsStore.get());
 
 beforeAll(async () => {
-    ({ modules: { util, nav, sidebar } } = await bootDashboardDom({
+    ({ modules: { agents: { agents: agentsStore }, view: { view: viewStore }, nav, sidebar } } = await bootDashboardDom({
         body: BODY,
         canvasStub: true,
         // Off, so "Open … pane" lands on the agent-detail view (a real DOM node to read
@@ -48,7 +48,7 @@ beforeAll(async () => {
             const body = u.includes('/api/agents/spawn') ? { ok: true } : /\/api\/(agents|summary)/.test(u) ? [] : {};
             return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve(body) });
         },
-        extraModules: ['util.js', 'nav.js', SIDEBAR],
+        extraModules: [AGENTS_STORE, VIEW_STORE, NAV, SIDEBAR],
     }));
 });
 
@@ -69,7 +69,7 @@ const win = (name, over = {}) => ({
 });
 
 function render(rows) {
-    util.setAgentsCache(rows);
+    agentsStore.set(rows);
     sidebar.renderSidebarAgents(rows);
 }
 

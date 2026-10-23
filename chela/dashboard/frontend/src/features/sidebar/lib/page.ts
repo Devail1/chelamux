@@ -17,13 +17,6 @@ export function postJson(path: string, body: unknown): Promise<unknown> {
   return api(path, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
 }
 
-type Handlers = Record<string, ((...a: never[]) => unknown) | undefined>;
-/** window.chela: the handlers inline HTML and the islands call (created on first use). */
-export function chelaNs(): Handlers {
-  const w = window as unknown as { chela?: Handlers };
-  return (w.chela ??= {});
-}
-
 export const isObj = (v: unknown): v is Record<string, unknown> => !!v && typeof v === 'object' && !Array.isArray(v);
 
 /** `mem` stands in ONLY while storage throws; when storage works it is the whole truth. */

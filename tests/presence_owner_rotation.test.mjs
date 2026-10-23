@@ -74,7 +74,7 @@ function fakeGridStack() {
     return { init: () => grid };
 }
 
-let terminals, util, owner, shareSession;
+let terminals, agentsStore, viewStore, owner, shareSession;
 const settle = async () => { for (let i = 0; i < 20; i++) await new Promise(r => setTimeout(r, 0)); };
 
 beforeAll(async () => {
@@ -97,13 +97,14 @@ beforeAll(async () => {
         addEventListener() {}, removeEventListener() {}, addListener() {}, removeListener() {} });
     globalThis.window.chela = globalThis.window.chela || {};
     globalThis.setInterval = () => 0;   // no heartbeat / prune timers: the test drives it
-    await import('../chela/dashboard/frontend/src/boot.ts');
-    util = await import('../chela/dashboard/static/js/util.js');
+    (await import('../chela/dashboard/frontend/src/boot.ts')).start();
+    ({ agents: agentsStore } = await import('../chela/dashboard/frontend/src/shared/store/agents.ts'));
+    ({ view: viewStore } = await import('../chela/dashboard/frontend/src/shared/store/view.ts'));
     terminals = await import('../chela/dashboard/frontend/src/features/wall/index.ts');
     owner = await import(dashDir + '/static/collab/presence-owner.js');
     ({ shareSession } = await import('../chela/dashboard/frontend/src/features/share/index.ts'));
-    util.setCurrentTab('terminals');
-    util.setAgentsCache([{ ...AGENT }]);
+    viewStore.set('terminals');
+    agentsStore.set([{ ...AGENT }]);
     await terminals.renderTerminals();
     await settle();
 });

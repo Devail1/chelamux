@@ -17,11 +17,10 @@
 import { beforeAll, test } from 'vitest';
 import assert from 'node:assert/strict';
 import { JSDOM } from 'jsdom';   // needs `pnpm install` — tests/test_js_suites.py enforces it
-import { activateDom, flush, mountIslands, sliceTemplate } from './js_helpers/dashboard_dom.mjs';
+import { activateDom, flush, mountIslands } from './js_helpers/dashboard_dom.mjs';
 
-// The island's slot, sliced out of the REAL templates/index.html: a renamed slot leaves the
-// chip wired to a modal that never mounts.
-const MODAL_DIFF_HTML = sliceTemplate('<div id="diff-modal-island">', '</div>');
+// The modal's shell slot: mountIslands draws it from the shell's own table (features/shell).
+const MODAL_DIFF_HTML = '<div id="diff-modal-island"></div>';
 
 const PANEL = `
 <div class="panel" id="panel-terminals">
@@ -72,7 +71,7 @@ function fakeGridStack() {
     return { init: () => grid };
 }
 
-let terminals, util, closeDiffModal;
+let terminals, agentsStore, viewStore, closeDiffModal;
 
 beforeAll(async () => {
     const dom = new JSDOM(`<!doctype html><html><body>${PANEL}</body></html>`,
@@ -90,11 +89,12 @@ beforeAll(async () => {
     // Browser-faithful order: the islands, then the legacy graph (nav <-> main is a cycle).
     await mountIslands(dom.window);
     ({ closeDiffModal } = await import('../chela/dashboard/frontend/src/features/diffmodal/index.ts'));
-    await import('../chela/dashboard/frontend/src/boot.ts');
-    util = await import('../chela/dashboard/static/js/util.js');
+    (await import('../chela/dashboard/frontend/src/boot.ts')).start();
+    ({ agents: agentsStore } = await import('../chela/dashboard/frontend/src/shared/store/agents.ts'));
+    ({ view: viewStore } = await import('../chela/dashboard/frontend/src/shared/store/view.ts'));
     terminals = await import('../chela/dashboard/frontend/src/features/wall/index.ts');
-    util.setCurrentTab('terminals');
-    util.setAgentsCache(AGENTS);
+    viewStore.set('terminals');
+    agentsStore.set(AGENTS);
     await terminals.renderTerminals();
 });
 
@@ -142,7 +142,7 @@ test('a real click on the wall tile\'s "Files" chip opens the diff modal island 
 for (const evilWid of ["@2'x", '@3&amp;']) {
     test(`a real click on the Files chip opens the modal on the exact wid ${JSON.stringify(evilWid)}`, async () => {
         try {
-            util.setAgentsCache([{ name: 'w', window_id: evilWid, online: true }]);
+            agentsStore.set([{ name: 'w', window_id: evilWid, online: true }]);
             await terminals.renderTerminals();
             const btn = document.querySelector('.gs-files');
             assert.ok(btn, `no .gs-files chip rendered for ${evilWid}`);
@@ -155,7 +155,7 @@ for (const evilWid of ["@2'x", '@3&amp;']) {
             await flush();
         } finally {
             // restore the single-agent fixture every other test in this file depends on
-            util.setAgentsCache(AGENTS);
+            agentsStore.set(AGENTS);
             await terminals.renderTerminals();
         }
     });
@@ -301,7 +301,7 @@ test('the Files chip is also emitted (and wired end to end) in single-pane / mob
         // selection this test switches to below) is neither `wids[1]` nor
         // any OTHER fixed index that could have coincidentally matched '@2'
         // above, since it is a different agent at a different render.
-        util.setAgentsCache([...AGENTS,
+        agentsStore.set([...AGENTS,
             { name: 'w2', window_id: '@2', online: true },
             { name: 'w3', window_id: '@3', online: true }]);
 
@@ -579,7 +579,7 @@ test('the Files chip is also emitted (and wired end to end) in single-pane / mob
         globalThis.fetch = originalFetch;
         window.matchMedia = originalMatchMedia;
         // restore the single-agent, wall-mode fixture every other test in this file depends on
-        util.setAgentsCache(AGENTS);
+        agentsStore.set(AGENTS);
         terminals.setTermMode('wall');
         await flush();
     }

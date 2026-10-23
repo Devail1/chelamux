@@ -58,7 +58,7 @@ let barH = 47;
 let vv;            // the fake VisualViewport
 let roCallbacks = [];
 let terminals;
-let util;
+let agentsStore, viewStore;
 let keybar;
 let model;
 
@@ -120,11 +120,12 @@ beforeAll(async () => {
     await mountIslands(dom.window);
     keybar = await import('../chela/dashboard/frontend/src/features/keybar/index.ts');
     model = await import('../chela/dashboard/frontend/src/features/keybar/model.ts');
-    await import('../chela/dashboard/frontend/src/boot.ts');
-    util = await import('../chela/dashboard/static/js/util.js');
+    (await import('../chela/dashboard/frontend/src/boot.ts')).start();
+    ({ agents: agentsStore } = await import('../chela/dashboard/frontend/src/shared/store/agents.ts'));
+    ({ view: viewStore } = await import('../chela/dashboard/frontend/src/shared/store/view.ts'));
     terminals = await import('../chela/dashboard/frontend/src/features/wall/index.ts');
-    util.setCurrentTab('terminals');
-    util.setAgentsCache(AGENTS);
+    viewStore.set('terminals');
+    agentsStore.set(AGENTS);
     await terminals.renderTerminals();
 });
 
@@ -273,13 +274,13 @@ test('⭐ a freshly rebuilt pane re-fits if the keyboard is already up (renderTe
     keyboard(true);                       // keyboard up, but NO event: only the render may notice
     const before = document.querySelector('#term-stage .term-pane');
     // A second agent appears → the stage signature changes → the single pane is rebuilt.
-    util.setAgentsCache([...AGENTS, { name: 'two', window_id: '@2', online: true }]);
+    agentsStore.set([...AGENTS, { name: 'two', window_id: '@2', online: true }]);
     await terminals.renderTerminals();
     const after = document.querySelector('#term-stage.term-single .term-pane');
     assert.ok(after && after !== before, 'the single pane must have been rebuilt');
     assert.ok(root().classList.contains('kb-fit'), 'the rebuilt pane must be fitted by renderTerminals itself');
     assert.equal(fitVar(), openFit());
-    util.setAgentsCache(AGENTS);
+    agentsStore.set(AGENTS);
     await terminals.renderTerminals();
 });
 

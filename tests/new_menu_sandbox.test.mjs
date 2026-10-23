@@ -13,19 +13,18 @@
 // tests/test_js_suites.py; needs `pnpm install` for jsdom).
 import { test, beforeAll, beforeEach } from 'vitest';
 import assert from 'node:assert/strict';
-import { bootDashboardDom, clickIsland, sliceTemplate, flush } from './js_helpers/dashboard_dom.mjs';
+import { APP_BODY, bootDashboardDom, clickIsland, flush } from './js_helpers/dashboard_dom.mjs';
 
 let win, doc;
 let calls = [];
 
 beforeAll(async () => {
-    const body = sliceTemplate('<div class="app">', '<div id="overlays-island"></div>');
     const fetchImpl = (url, opts) => {
         calls.push({ url: String(url), opts: opts || {} });
         const b = String(url).endsWith('/api/launcher') ? { recent: [{ path: '/work/proj' }], favorites: [] } : { ok: true };
         return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve(b) });
     };
-    const { dom } = await bootDashboardDom({ body, fetchImpl });
+    const { dom } = await bootDashboardDom({ body: APP_BODY, fetchImpl });
     win = dom.window;
     doc = win.document;
     win.prompt = () => '/work/proj';

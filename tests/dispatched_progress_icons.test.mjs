@@ -5,7 +5,7 @@
 import { beforeAll, test } from 'vitest';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
-import { bootDashboardDom, sliceTemplate, flush, SIDEBAR, WALL } from './js_helpers/dashboard_dom.mjs';
+import { APP_BODY, bootDashboardDom, flush, SIDEBAR, WALL, AGENTS_STORE, VIEW_STORE, NAV } from './js_helpers/dashboard_dom.mjs';
 import { cssForViewport, resolveVars, shapeSignature, DESKTOP, DESKTOP_DARK } from './js_helpers/css_viewport.mjs';
 
 const CSS = readFileSync(new URL('../chela/dashboard/static/style.css', import.meta.url), 'utf8');
@@ -50,17 +50,16 @@ const fakeGridStack = () => ({ init: () => ({
     cellHeight: noop, column: noop, getGridItems: () => [], removeAll: noop, float: noop, engine: { nodes: [] },
 }) });
 
-let win, doc, util, terminals, nav, sheet, sidebar;
+let win, doc, agentsStore, viewStore, terminals, nav, sheet, sidebar;
 beforeAll(async () => {
     globalThis.GridStack = fakeGridStack();
-    const body = sliceTemplate('<div class="app">', '\n  </main>') + '</div>';
-    const { dom, modules } = await bootDashboardDom({ body, fetchImpl: fakeFetch, canvasStub: true,
-        extraModules: ['util.js', WALL, 'nav.js', SIDEBAR] });
+    const { dom, modules } = await bootDashboardDom({ body: APP_BODY, fetchImpl: fakeFetch, canvasStub: true,
+        extraModules: [AGENTS_STORE, VIEW_STORE, WALL, NAV, SIDEBAR] });
     win = dom.window; doc = win.document;
     doc.elementFromPoint = () => null;
-    ({ util, terminals, nav, sidebar } = modules);
-    util.setCurrentTab('terminals');
-    util.setAgentsCache(AGENTS);
+    ({ agents: { agents: agentsStore }, view: { view: viewStore }, terminals, nav, sidebar } = modules);
+    viewStore.set('terminals');
+    agentsStore.set(AGENTS);
     await terminals.renderTerminals();
     sidebar.renderSidebarAgents(AGENTS);
     await flush();
@@ -203,14 +202,14 @@ test('minimized bar: a run window wears its run\'s icon and label; a human chip 
 test('minimized bar: a state change drops the old state: the pulse ring stops when the run leaves working', async () => {
     const swap = (wid, over) => AGENTS.map(a => (a.window_id === wid ? { ...a, ...over } : a));
     fleet = swap('@11', { session_status: 'idle', run: card('R-WORK', 'agent', { status: 'awaiting_review', judge_state: 'running' }) });
-    util.setAgentsCache(fleet);
+    agentsStore.set(fleet);
     await terminals.termTick();
     assert.deepEqual(classes(chipDot('@11')), ['dispatched', 'judging', 'term-status-dot']);
     sheet.textContent = cssForViewport(CSS, DESKTOP);
     assert.notEqual(animName(chipDot('@11')), 'term-status-pulse');
     // the window loses its run card (still docked): back to the plain dot, label gone
     fleet = swap('@11', { session_status: 'busy', run: null });
-    util.setAgentsCache(fleet);
+    agentsStore.set(fleet);
     await terminals.termTick();
     const dot = chipDot('@11');
     assert.deepEqual(classes(dot), ['term-status-dot', 'working']);

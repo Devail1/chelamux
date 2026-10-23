@@ -4,7 +4,7 @@ import { act, cleanup, fireEvent, render, screen } from '@testing-library/react'
 import { afterEach, beforeEach, expect, test, vi } from 'vitest';
 import { termMode } from '../../../shared/store/wall.ts';
 import { configurePaneFrames } from '../../paneframe/index.ts';
-import { Keybar, mountKeybar, paneKeybarActions } from '../index.ts';
+import { Keybar, paneKeybarActions } from '../index.ts';
 import { afterCtrlLetter, keyboardOccluded, nextCtrl, paneFitHeight, pinTop } from '../model.ts';
 
 function draw() {
@@ -152,21 +152,6 @@ test('the default actions send the single pane\'s key through features/paneframe
   await act(async () => {});
   expect(sent).toEqual([{ url: '/api/term/key', body: { agent: '@7', key: 'Tab' } }]);
   vi.unstubAllGlobals();
-});
-
-test('mountKeybar draws into #keybar-island, and is a no-op without one', async () => {
-  expect(mountKeybar(window)).toBeNull();
-  const slot = document.createElement('div');
-  slot.id = 'keybar-island';
-  document.body.append(slot);
-  const termKey = vi.fn();
-  const root = mountKeybar(window, { termKey, termPaste: vi.fn() });
-  await act(async () => {});
-  expect(root).not.toBeNull();
-  fireEvent.click(slot.querySelector('#term-keybar button') as Element);
-  expect(termKey.mock.calls).toEqual([['Escape']]);
-  act(() => root?.unmount());
-  slot.remove();
 });
 
 test('the phone row stops listening once it unmounts', () => {

@@ -50,22 +50,22 @@ def test_the_committed_build_matches_a_fresh_build_of_src():
 
 
 def _copy_dashboard(tmp_path: Path) -> Path:
-    """The frontend beside a copy of the static/ it bundles (CMX-215: main.tsx boots
-    ../../static/js through boot.ts, which reaches collab/ too), so a test can change either
-    without touching the repo."""
+    """The frontend beside a copy of the static/ it bundles (CMX-215: main.tsx imports
+    ../../static/js, which reaches collab/ too, and since CMX-248 style.css and its fonts), so
+    a test can change either without touching the repo."""
     tree = tmp_path / "dashboard" / "frontend"
     shutil.copytree(FRONTEND, tree, ignore=shutil.ignore_patterns("node_modules"))
     (tree / "node_modules").symlink_to(FRONTEND / "node_modules")
     shutil.copytree(BUILT.parent, tmp_path / "dashboard" / "static",
-                    ignore=shutil.ignore_patterns("app", "vendor", "img", "fonts"))
+                    ignore=shutil.ignore_patterns("app", "vendor", "img"))
     return tree
 
 
 @pytest.mark.parametrize("changed,old,new", [
     ("src/features/version/lib/VersionBadge.tsx", "build {version}", "v{version}"),
-    # util.js's live kebab-menu handler: lucideIcon's message is tree-shaken once no legacy
-    # module calls it (CMX-242).
-    ("../static/js/util.js", "closest('.kebab-wrap')", "closest('.kebab-wrapper')"),   # CMX-215
+    # a static/js module the bundle imports (the Wall tile's state word; CMX-248 deleted the
+    # last plain-JS ones, util.js among them)
+    ("../static/js/wallmodel.ts", "word: 'PR open'", "word: 'PR opened'"),   # CMX-215
 ], ids=["island", "legacy"])
 def test_a_source_change_without_a_rebuild_is_stale(tmp_path, changed, old, new):
     """Negative control: the same check over a copy of the frontend is green as copied, and

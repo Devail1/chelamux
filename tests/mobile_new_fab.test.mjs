@@ -24,7 +24,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { bootDashboardDom, clickIsland, flush, sliceTemplate } from './js_helpers/dashboard_dom.mjs';
+import { APP_BODY, bootDashboardDom, clickIsland, flush } from './js_helpers/dashboard_dom.mjs';
 import { cssForViewport, PHONE, DESKTOP } from './js_helpers/css_viewport.mjs';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -33,10 +33,9 @@ const CSS = fs.readFileSync(path.join(here, '..', 'chela', 'dashboard', 'static'
 let win, doc, sheet;
 let phone = true;
 beforeAll(async () => {
-    // The REAL markup from the app shell through the overlays island: the sidebar (with its
-    // New session button), both fabs, the scrim and the launch menu's island.
-    const body = sliceTemplate('<div class="app">', '<div id="overlays-island"></div>');
-    const { dom } = await bootDashboardDom({ body, phone: () => phone });
+    // The REAL page (the shell): the sidebar (with its New session button), both fabs, the
+    // scrim and the launch menu.
+    const { dom } = await bootDashboardDom({ body: APP_BODY, phone: () => phone });
     win = dom.window;
     doc = win.document;
     sheet = doc.createElement('style');
@@ -59,7 +58,7 @@ const menu = () => doc.querySelector('.popover.launch-menu');
 async function reset() {
     const { closeLaunchMenu } = await import('../chela/dashboard/frontend/src/features/launcher/index.ts');
     closeLaunchMenu();
-    win.chela.closeSidebar();
+    if (doc.querySelector('.sidebar').classList.contains('open')) clickIsland(doc.getElementById('sidebar-scrim'));
     await flush();
 }
 
@@ -92,7 +91,7 @@ test('@390: the "+" is displayed while the drawer is closed, and hides with the 
     const plus = doc.getElementById('btn-new-mobile');
     assert.notEqual(win.getComputedStyle(plus).display, 'none',
         'the "+" is not displayed on a phone — New session is back to two taps deep');
-    win.chela.toggleSidebar(true);
+    clickIsland(doc.getElementById('btn-menu-mobile'));   // the ☰ opens the closed drawer
     assert.equal(win.getComputedStyle(plus).display, 'none',
         'the "+" still shows over the open drawer');
     await reset();
@@ -119,7 +118,7 @@ test('@390: tapping the "+" opens the launch menu with the drawer left CLOSED, p
 test('@390: the drawer path still opens the SAME launch menu (accepted case)', async () => {
     sheet.textContent = '';
     await reset();
-    win.chela.toggleSidebar(true);
+    clickIsland(doc.getElementById('btn-menu-mobile'));   // the ☰ opens the closed drawer
     clickIsland(doc.querySelector('.sidebar .sidebar-new-btn'));
     await flush();
     assert.ok(menu()?.querySelector('#new-sandbox-item'), 'the drawer\'s New session no longer opens the launch menu');

@@ -1,11 +1,12 @@
 <!doctype html>
-<!-- CMX-178: `pnpm dev` only. Each island's slot, as the dashboard's index.html has it; the
-     build never reads this file (vite.config.ts names src/main.tsx as its input). It loads
-     the islands alone: the legacy modules main.tsx adds need the dashboard's whole page. -->
+<!-- CMX-178: `pnpm dev` only (the build never reads this file: vite.config.ts names
+     src/main.tsx as its input). The dashboard's page without Flask, so without the Gridstack
+     bundle and ttyd: it runs with terminals off. -->
 <html lang="en">
-<head><meta charset="UTF-8"><title>chela islands (dev)</title></head>
+<head><meta charset="UTF-8"><title>chela (dev)</title></head>
 <body>
-<span id="version-island"></span>
-<script type="module" src="/src/islands.tsx"></script>
+<script type="application/json" id="chela-boot">{"terminalsEnabled": false}</script>
+<div id="root"></div>
+<script type="module" src="/src/main.tsx"></script>
 </body>
 </html>

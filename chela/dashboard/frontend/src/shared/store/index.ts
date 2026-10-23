@@ -2,4 +2,4 @@
 // parallel port slices add a file instead of editing a shared one. A slice is a Store
 // (shared/bridge: get / set / subscribe); React reads one with useStore. Legacy imports the
 // same objects, through util.js's facade (currentTab, _agentsCache).
-export { createStore, useStore, type Store } from '../bridge/index.ts';
+export { createStore, useStore, useStoreNow, type Store } from '../bridge/index.ts';

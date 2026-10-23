@@ -102,7 +102,7 @@ for (const [width, height] of [[1440, 900], [725, 900], [390, 844]]) {
                 let page;
                 ({ context, page } = await open({ width, height, shared: live }));
                 m = await measure(page);
-                await page.evaluate(() => window.chela.selectView('work'));
+                await page.evaluate(() => document.querySelector('.side-item[data-view="work"]').click());
                 await stable(page);
                 offWall = await measure(page);
             });
