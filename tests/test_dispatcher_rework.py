@@ -841,21 +841,24 @@ def test_reconcile_done_from_a_review_state_row_that_left_the_tracker(tmp_path):
     """Guard 3 (confirm) — the genuine happy path stays intact. A REVIEW-status row (the
     agent opened a PR; a human struck the tracker line by hand, or the legacy self-strike
     flow removed it) whose task left `open_ids` still reconciles to `done` — the completion-
-    evidence gate added for claimed/running rows must not touch this path.
+    evidence gate added for claimed/running rows must not touch this path. 🗂️⏸️ CMX-308:
+    once its PR has MERGED — the PR here is the transcript's, so phase 0 never saw it and
+    the merge is read by this branch itself (an open one holds the row: see
+    tests/test_reconcile_left_tracker_pr_open.py).
     """
     wf = _wf(tmp_path)
     source = _Source()      # "abc123" has left the tracker
     with dispatcher._db() as conn:
         _row(conn, workflow_path=str(wf.path), status="awaiting_review",
-             window_name="test-1", pr_url="https://github.com/o/r/pull/80", pr_state="open")
+             window_name="test-1", pr_url=None, pr_state=None)
 
     fake = _FakeTmux()
     fake.windows = [("@1", "test-1")]
     with patch.object(dispatcher, "load_workflow_cached", return_value=_status(wf)), \
          patch.object(dispatcher, "get_source", return_value=source), \
          patch.object(dispatcher, "_claim_order", return_value=[]), \
-         patch.object(dispatcher, "_read_pr_url", return_value=None), \
-         patch.object(dispatcher, "_read_pr_status", return_value=("open", "MERGEABLE")), \
+         patch.object(dispatcher, "_read_pr_url", return_value="https://github.com/o/r/pull/80"), \
+         patch.object(dispatcher, "_read_pr_status", return_value=("merged", "MERGEABLE")), \
          patch.object(dispatcher.subprocess, "run", side_effect=fake.run):
         summary = dispatcher.tick(wf.path)
 

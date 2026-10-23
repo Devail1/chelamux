@@ -192,6 +192,8 @@ def _status_of(task_id):
 
 
 LIVE_STATUSES = (*dispatcher.REVIEW_STATUSES, "running")
+# 🗂️⏸️ CMX-308: what a review row whose task left the tracker carries while its PR is open.
+HELD_OPEN = "issue left the tracker's ready states; PR still open"
 
 
 class _PartialRead:
@@ -286,6 +288,13 @@ def test_an_id_positively_reported_closed_is_reconciled_as_today(tmp_path, statu
     )
 
     assert summary["tracker_refresh_failed"] is False
+    if status in dispatcher.REVIEW_STATUSES:
+        # 🗂️⏸️ CMX-308: the review row's PR is still open — held with a note, not done.
+        assert summary["reconciled_done"] == 0
+        assert _status_of(tid) == status
+        assert dispatcher.resolve_run(tid)["tracker_note"] == HELD_OPEN
+        assert killed == []
+        return
     assert summary["reconciled_done"] == 1
     assert _status_of(tid) == "done"
     assert killed == ["test-1"]
@@ -310,14 +319,15 @@ def test_an_open_but_unlabelled_issue_is_not_done(tmp_path):
 
 
 def test_a_struck_markdown_line_is_reconciled_as_today(tmp_path):
-    """⭐ MUST BE ACCEPTED (markdown): a human strikes the line ⇒ the review row goes done."""
+    """⭐ MUST BE ACCEPTED (markdown): a human strikes the line ⇒ the review row goes done —
+    once its PR has merged (CMX-308: an open one holds the row instead)."""
     wf = _wf(tmp_path)
     src = MarkdownSource(wf)
     tid = src.list_open_tasks()[0].id
     _seed(wf, tid, "awaiting_review", tmp_path)
     (tmp_path / "TODO.md").write_text("- [x] do a thing\n")
 
-    summary, _ = _tick(wf, src)
+    summary, _ = _tick(wf, src, pr_status=lambda url: ("merged", "MERGEABLE"))
 
     assert summary["reconciled_done"] == 1
     assert _status_of(tid) == "done"
@@ -759,7 +769,7 @@ def test_a_source_without_fetch_whose_listing_succeeded_reconciles_as_today(tmp_
     wf = _wf(tmp_path)
     _seed(wf, "abc123", "awaiting_review", tmp_path)
 
-    summary, _ = _tick(wf, _NoFetchGoodListing())
+    summary, _ = _tick(wf, _NoFetchGoodListing(), pr_status=lambda url: ("merged", "MERGEABLE"))
 
     assert summary["tracker_refresh_failed"] is False
     assert summary["reconciled_done"] == 1
@@ -1433,6 +1443,14 @@ def test_a_tracker_close_is_the_only_thing_a_failed_refresh_withholds(
 
     for key in failed:
         assert failed[key] == still_open[key], f"{key}: a failed refresh acted"
+    if status in dispatcher.REVIEW_STATUSES:
+        # 🗂️⏸️ CMX-308: a review row's PR is still OPEN, so the close is acted on as a
+        # HOLD — the note is written, the row, window and worktree are kept.
+        assert HELD_OPEN in closed["db"] and HELD_OPEN not in still_open["db"]
+        assert "'done'" not in closed["db"]
+        assert closed["killed"] == still_open["killed"] == "[]"
+        assert closed["cleaned"] == still_open["cleaned"] == "[]"
+        return
     # ⭐ MUST BE ACCEPTED: the close itself is acted on, in full — row done, window killed,
     # worktree freed — and that is the whole of what B withheld.
     assert "'done'" in closed["db"] and "'done'" not in still_open["db"]
@@ -1502,8 +1520,9 @@ def test_a_listing_failure_is_not_promoted_into_a_refresh_failure(tmp_path, monk
                           _RefreshOk("closed"))
     _, listing_failed = _one_arm(tmp_path / "B", monkeypatch, None, "awaiting_review",
                                  _ListingFailedRefreshOk())
-    assert "'done'" in healthy["db"]
-    assert "'done'" in listing_failed["db"], "a listing failure withheld a refresh-confirmed close"
+    # 🗂️⏸️ CMX-308: the row's PR is open, so "acted on" is the hold note, not `done`.
+    assert HELD_OPEN in healthy["db"]
+    assert HELD_OPEN in listing_failed["db"], "a listing failure withheld a refresh-confirmed close"
     assert listing_failed["killed"] == healthy["killed"]
     assert listing_failed["cleaned"] == healthy["cleaned"]
 

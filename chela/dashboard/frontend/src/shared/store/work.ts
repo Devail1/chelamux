@@ -28,6 +28,7 @@ export type Run = {
   pr_state?: string | null;
   last_error?: string | null;
   close_reason?: string | null;
+  tracker_note?: string | null;
   handoff?: string | null;
   closed_run_stall?: string | null;
   tasks?: TaskProgress | null;

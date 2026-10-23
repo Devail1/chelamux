@@ -62,6 +62,15 @@ test('runCardNote: a reconcile-closed run (no reason) falls back; nothing → nu
   expect(runCardNote({ status: 'done' })).toBe(null);
 });
 
+// --- 🗂️⏸️ CMX-308 — a run held after its task left the tracker shows why ---
+
+test('runCardNote: a held run shows its tracker_note as a note; last_error still wins', () => {
+  const note = "issue left the tracker's ready states; PR still open";
+  expect(runCardNote({ status: 'awaiting_review', tracker_note: note })).toEqual({ text: note, closed: true });
+  expect(runCardNote({ status: 'needs_human', tracker_note: note, last_error: 'boom' })).toEqual({ text: 'boom', closed: false });
+  expect(runCardNote({ status: 'awaiting_review', tracker_note: '  ' })).toBe(null);
+});
+
 // --- 🗂️🔁 CMX-68 — a closed run silently holding a READY task is flagged, with a way out ---
 
 test('runStallNote: a stalled card says the closed run blocks it; an unstalled one says nothing', () => {

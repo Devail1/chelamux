@@ -398,10 +398,10 @@ def test_a_DISPATCHED_row_that_leaves_the_tracker_is_still_struck_done(
         conn.execute(
             "INSERT INTO runs (task_id, workflow_path, title, status, branch_name, "
             "worktree_path, started_at, attempt, pr_url, pr_state) "
-            "VALUES (?, ?, ?, 'awaiting_review', ?, ?, ?, 1, ?, 'open')",
+            "VALUES (?, ?, ?, 'awaiting_review', ?, ?, ?, 1, ?, NULL)",
+            # 🗂️⏸️ CMX-308: no PR on the row — one whose PR is still open is held, not done.
             ("cmx-777", str(wf.path), "a real dispatched task", "cmx-777",
-             str(tmp_path / "wt" / "cmx-777"), "2026-08-21T10:00:00+00:00",
-             "https://github.com/o/r/pull/777"),
+             str(tmp_path / "wt" / "cmx-777"), "2026-08-21T10:00:00+00:00", None),
         )
         conn.commit()
 
