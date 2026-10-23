@@ -64,6 +64,8 @@ export function flatten(data: WorkPayload | null | undefined): Record<Bucket, Ca
         body: t.body,
         tracker_url: t.tracker_url || null, // CMX-5: the Linear issue URL
         tracker_state: t.tracker_state || null, // CMX-168: the column linear.ts places it by
+        risk: t.risk ?? undefined, // CMX-405: the issue's risk label (the card's risk chip)
+        risk_reason: t.risk_reason ?? undefined,
         closed_run_stall: t.closed_run_stall || null, // CMX-68: a closed run holds this task
         ...from,
       });

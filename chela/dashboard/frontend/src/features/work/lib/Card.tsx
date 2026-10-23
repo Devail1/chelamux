@@ -2,80 +2,33 @@
 // static/js/kanban.js's _kCard by CMX-233. A click on the card opens the task modal with the
 // SAME object the board holds (from the one /api/dispatcher poll), never a refetch; every
 // control inside it stops the click so it never ALSO opens the modal.
-import { useEffect, useState, type DragEvent, type MouseEvent, type ReactNode } from 'react';
+import { useState, type DragEvent, type MouseEvent, type ReactNode } from 'react';
 import { icons } from '../../../shared/icons/index.ts';
 import { Markdown } from '../../../shared/markdown/index.ts';
-import { Button, IconButton, TextButton } from '../../../shared/ui/index.ts';
-import { postWorkDelete, type DeletePayload } from '../../runs/index.ts';
+import { IconButton, TextButton } from '../../../shared/ui/index.ts';
+import type { DeletePayload } from '../../runs/index.ts';
 import { prLabel, riskChip, runCardNote, runCloseAction, runDisplayId, runHandoffNote, runStallNote, taskProgress, trackerHref } from '../../runs/model.ts';
 import { openTaskModal } from '../../taskmodal/index.ts';
 import { CI_CHIP, ciKind, displayTitle, wfShort } from '../../taskmodal/model.ts';
 import { STATUS_CHIPS, branchOrLine, mergeControl, type Card as CardData } from '../board.ts';
 import { runStateBadges } from '../linear.ts';
 import { mergeRun, promoteBacklog, requeueRun } from './actions.ts';
+import { askMerge, askPromote, askRequeue, deletePayload, stop, useCardError, useDelete } from './cardActions.tsx';
 
-const stop = (e: MouseEvent) => e.stopPropagation();
-const prName = (url: string | null | undefined) => {
-  const label = prLabel(url || '');
-  return label === 'PR' ? 'this PR' : `PR ${label}`;
-};
 const CI_ICON = { passing: icons.ciPassing, failing: icons.ciFailing, pending: icons.ciPending, none: icons.ciNone, unknown: icons.ciUnknown };
-
-/** What a source line or a run deletes as; null when there is no target (a parked bullet's
- * title is comment-stripped, so it would never match its line, or match the wrong one). */
-function deletePayload(card: CardData): DeletePayload | null {
-  if (card.status === 'backlog' || card.status === 'open') return card.file && card.title ? { kind: 'source-line', file: card.file, text: card.title } : null;
-  if (card.status === 'parked') return null;
-  return card.task_id ? { kind: 'run', task_id: card.task_id } : null;
-}
-
-type Confirm = 'ask' | 'busy' | { error: string };
 
 /** The × and its inline confirm strip (not window.confirm). On success the refetch drops the card. */
 function DeleteControl({ payload }: { payload: DeletePayload }) {
-  const [confirm, setConfirm] = useState<Confirm | null>(null);
-  async function remove() {
-    setConfirm('busy');
-    const err = await postWorkDelete(payload);
-    setConfirm(err ? { error: err } : null);
-  }
+  const { confirm, ask, strip } = useDelete(payload);
   return (
     <>
       <IconButton className="kanban-delete-btn" label="Delete this card" style={confirm ? { visibility: 'hidden' } : undefined}
-        onClick={(e) => { e.stopPropagation(); setConfirm('ask'); }}>
+        onClick={(e) => { e.stopPropagation(); ask(); }}>
         <icons.close aria-hidden size={14} />
       </IconButton>
-      {confirm && (
-        <div className="kanban-confirm" onClick={stop}>
-          {confirm === 'ask' ? (
-            <>
-              <span className="kanban-confirm-msg">Delete this?</span>
-              <Button variant="danger" size="sm" className="btn-confirm" onClick={() => void remove()}>Delete</Button>
-              <Button size="sm" onClick={() => setConfirm(null)}>Cancel</Button>
-            </>
-          ) : confirm === 'busy' ? (
-            <span className="kanban-confirm-msg">Deleting…</span>
-          ) : (
-            <>
-              <span className="kanban-confirm-msg" style={{ color: 'var(--red)' }}>{confirm.error}</span>
-              <Button size="sm" onClick={() => setConfirm(null)}>Close</Button>
-            </>
-          )}
-        </div>
-      )}
+      {strip}
     </>
   );
-}
-
-/** A failure surfaced ON the card with the server's own words, for 15 s: never swallowed. */
-function useCardError(): [{ cls: string; text: string } | null, (cls: string, text: string) => void] {
-  const [err, setErr] = useState<{ cls: string; text: string } | null>(null);
-  useEffect(() => {
-    if (!err) return;
-    const t = setTimeout(() => setErr(null), 15000);
-    return () => clearTimeout(t);
-  }, [err]);
-  return [err, (cls, text) => setErr({ cls, text })];
 }
 
 /** A card action: asks first (`ask` returns false to abort, or the reason text), shows `busy`
@@ -128,7 +81,7 @@ export function Card({ card, onDragStart, onDragEnd }: Props) {
           {card.section && <span className="kanban-section-chip">{card.section}</span>}
           {wfPath && text && (
             <Action className="kanban-promote-btn" label="Promote" busy="Promoting…" fail={(t) => fail('kanban-promote-toast', t)}
-              ask={() => window.confirm(`Promote backlog item to TODO?\n\n"${text.length > 80 ? text.slice(0, 77) + '...' : text}"\n\nThis commits to the base branch and pushes.`) && ''}
+              ask={() => askPromote(text)}
               act={() => promoteBacklog(wfPath, text)} />
           )}
         </div>
@@ -188,11 +141,11 @@ export function Card({ card, onDragStart, onDragEnd }: Props) {
         {merge === 'merged' && <Chip className="kanban-merged-badge" title="PR already merged" icon={icons.merged}>Merged</Chip>}
         {merge === 'button' && (
           <Action className="kanban-merge-btn" label="Merge" busy="Merging…" fail={(t) => fail('kanban-merge-toast', t)}
-            ask={() => window.confirm(`Squash-merge ${prName(card.pr_url)} and delete branch?`) && ''} act={() => mergeRun(taskId)} />
+            ask={() => askMerge(card)} act={() => mergeRun(taskId)} />
         )}
         {close && (
           <Action className="kanban-requeue-btn" label={close.label} busy="Working…" fail={(t) => fail('kanban-merge-toast', t)}
-            ask={() => (window.prompt(`Requeue ${taskId}: why? (recorded in its review history; the old PR is closed and the next tick claims a fresh attempt on a new branch)`) || '').trim() || false}
+            ask={() => askRequeue(taskId)}
             act={(reason) => requeueRun(taskId, reason)} />
         )}
       </div>
