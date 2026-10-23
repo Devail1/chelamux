@@ -1,5 +1,5 @@
-"""⚖️🧹🌙 CMX-303 — the nightly sweep's scheduler: when it runs, which merges it covers, the
-key store, and the daemon wiring.
+"""⚖️🧹🌙 CMX-303/CMX-304 — the nightly sweep: when it runs, which merges it covers, the
+battery, the survivor groups and their same-shape sites, the key store, and the daemon wiring.
 
 Every test runs against a throwaway repo whose ``origin`` is a local bare repo, a temp
 ``CHELA_DIR`` and a fake :class:`~chela.sweep_nightly.Filer` — nothing talks to a tracker.
@@ -26,15 +26,17 @@ OLD = "2020-01-01T00:00:00+00:00"
 CALC = "def clamp(x, lo):\n    if x < lo:\n        return lo\n    return x\n"
 CALC_TEST = ("from calc import clamp\n\n\ndef test_clamp():\n    assert clamp(-1, 0) == 0\n"
              "    assert clamp(5, 0) == 5\n")
-# PR 1 — the ONE weak guard: no test reads is_big().
-WEAK = 'def is_big(x):\n    if x > 100:\n        return "big"\n    return "small"\n'
+# PR 1 — the ONE weak guard, of ONE category (if-false): no test reads is_big().
+WEAK = 'def is_big(x):\n    if x:\n        return "big"\n    return "small"\n'
+# A weak guard of TWO categories (if-false, compare-flip) whose line PR 2 also carries.
+WEAK_TWO = 'def is_big(x):\n    if x > 100:\n        return "big"\n    return "small"\n'
 # PR 2 — the same shape, covered: killed.
 COVERED = "def big_enough(x):\n    if x > 100:\n        return 1\n    return 2\n"
 COVERED_TEST = ("from other import big_enough\n\n\ndef test_big_enough():\n"
                 "    assert big_enough(101) == 1\n    assert big_enough(100) == 2\n")
 # A weak guard a NON-standard PR carries — judged (or human-gated) per PR, never swept here.
 CORE_WEAK = "def tick(y):\n    if y > 7:\n        return 3\n    return 4\n"
-WEAK_TITLE_KINDS = ["if-false", "compare-flip"]
+WEAK_TITLE_KINDS = ["if-false"]
 
 
 def _git(repo: Path, *args: str, date: str | None = None) -> str:
@@ -85,7 +87,7 @@ class Filer:
     """A tracker stand-in: files each group, returning ``CMX-901``, ``CMX-902`` …"""
 
     def __init__(self, fail: BaseException | None = None):
-        self.calls: list[tuple[list[sweep.Mutation], sweep_nightly.FileContext]] = []
+        self.calls: list[tuple[sweep_nightly.SurvivorGroup, sweep_nightly.FileContext]] = []
         self.fail = fail
 
     def __call__(self, group, ctx) -> str:
@@ -96,7 +98,11 @@ class Filer:
 
     @property
     def sites(self) -> list[str]:
-        return [g[0].key for g, _ in self.calls]
+        return [g.mutation.key for g, _ in self.calls]
+
+    @property
+    def kinds(self) -> list[str]:
+        return [g.mutation.kind for g, _ in self.calls]
 
 
 def _run(repo: Path, chela_dir: Path, filer, **kw) -> dict:
@@ -118,9 +124,16 @@ def test_two_standard_prs_one_weak_guard_files_exactly_one_group(tmp_path):
     assert (res["status"], res["filed"], filer.sites) == ("survivors", ["CMX-901"],
                                                           ["size.py:2"])
     group, ctx = filer.calls[0]
-    assert [m.kind for m in group] == WEAK_TITLE_KINDS
-    assert [(m.before.strip(), m.after.strip()) for m in group][0] == (
-        "if x > 100:", "if False and (x > 100):")
+    assert (group.file, group.mutation.kind, group.mutation.before.strip(),
+            group.mutation.after.strip()) == ("size.py", "if-false", "if x:",
+                                              "if False and (x):")
+    assert [m.key for m in group.survivors] == ["size.py:2"] and group.sites == ("size.py:2",)
+    assert group.key == sweep_nightly.category_key(str((repo / "WORKFLOW.md").resolve()),
+                                                   group.mutation)
+    assert res["groups"] == [{
+        "file": "size.py", "key": group.key, "kind": "if-false", "target": "if x:",
+        "mutation": "if-false: `if x:` → `if False and (x):`", "survived": ["size.py:2"],
+        "sites": ["size.py:2"]}]
     head = _git(repo, "rev-parse", "HEAD")
     pr1 = _git(repo, "rev-parse", "HEAD~1")
     assert (ctx.head, ctx.ref, ctx.workflow, ctx.chela_dir) == (
@@ -128,10 +141,10 @@ def test_two_standard_prs_one_weak_guard_files_exactly_one_group(tmp_path):
     assert ctx.merged_in == f"`{pr1[:12]}` PR 1: is_big (#1)"
     # the filer runs while the checkout of `head` is still there (slice 2 greps it)
     assert ctx.worktree == (tmp_path / "wt" / "nightly-sweep").resolve()
-    assert len(res["prs"]) == 2 and res["survivors"] == 2
-    assert res["mutations"] == 5 and res["unrun"] == 0 and res["unsupported"] == []
+    assert len(res["prs"]) == 2 and res["survivors"] == 1
+    assert res["mutations"] == 4 and res["unrun"] == 0 and res["unsupported"] == []
     # the key store holds one key per surviving MUTATION, each naming its issue and site
-    assert sorted(v["issue"] for v in _store(chela)["keys"].values()) == ["CMX-901"] * 2
+    assert [v["issue"] for v in _store(chela)["keys"].values()] == ["CMX-901"]
     assert {v["site"] for v in _store(chela)["keys"].values()} == {"size.py:2"}
     # the checkout is thrown away, and the repo's own tree is untouched
     assert not (tmp_path / "wt" / "nightly-sweep").exists()
@@ -156,23 +169,26 @@ def test_a_second_run_with_no_change_files_nothing(tmp_path):
     again = Filer()
     res = _run(repo, chela, again)
     assert again.calls == [] and res["filed"] == [] and res["already_filed"] == 1
-    assert (res["status"], res["survivors"]) == ("clean", 2)
+    assert (res["status"], res["survivors"]) == ("clean", 1)
 
 
-def test_a_new_survivor_category_on_an_already_filed_guard_is_filed(tmp_path):
-    """Dedupe is per surviving MUTATION: a guard line filed for one category whose other
-    category is new is filed again — only a group whose EVERY key is filed is skipped
-    (a PARTIAL store, so `all` and `any` disagree — defeat shape 303b)."""
-    repo, chela = _repo(tmp_path), tmp_path / "chela"
+def test_a_new_survivor_in_an_already_filed_category_is_filed(tmp_path):
+    """Dedupe is per surviving MUTATION: a category filed for one site whose other site is
+    new is filed again — only a group whose EVERY key is filed is skipped (a PARTIAL store,
+    so `all` and `any` disagree — defeat shape 303b)."""
+    twin = WEAK.replace("is_big", "is_huge")
+    repo = _repo(tmp_path, prs=[({"size.py": WEAK, "huge.py": twin}, "PR 1 (#1)", None)])
+    chela = tmp_path / "chela"
     _run(repo, chela, Filer())
     path = sweep_nightly.state_dir(chela) / "filed.json"
     store = _store(chela)
-    assert len(store["keys"]) == 2              # if-false + compare-flip on size.py:2
+    assert sorted(v["site"] for v in store["keys"].values()) == ["huge.py:2", "huge.py:2"]
     store["keys"].pop(sorted(store["keys"])[0])
     path.write_text(json.dumps(store))
     again = Filer()
     res = _run(repo, chela, again)
     assert (res["filed"], res["already_filed"], len(again.calls)) == (["CMX-901"], 0, 1)
+    assert [m.key for m in again.calls[0][0].survivors] == ["huge.py:2", "size.py:2"]
     assert len(_store(chela)["keys"]) == 2
 
 
@@ -193,7 +209,7 @@ def test_the_key_store_keeps_other_entries_it_did_not_write(tmp_path):
     _run(repo, chela, Filer())
     store = _store(chela)
     assert store["v"] == 1 and store["keys"]["older"] == {"issue": "CMX-1"}
-    assert len(store["keys"]) == 3
+    assert len(store["keys"]) == 2
 
 
 def test_a_daemon_restart_between_runs_still_files_nothing(tmp_path):
@@ -228,8 +244,10 @@ def test_the_default_filer_records_what_it_would_file_and_stores_no_key(tmp_path
     assert (rec["site"], rec["head"], rec["workflow"], rec["merged_in"]) == (
         "size.py:2", res["head"], str((repo / "WORKFLOW.md").resolve()),
         f"`{pr1[:12]}` PR 1: is_big (#1)")
-    assert rec["mutations"][0] == {"kind": "if-false", "before": "if x > 100:",
-                                   "after": "if False and (x > 100):"}
+    assert rec["mutations"] == [{"site": "size.py:2", "kind": "if-false", "before": "if x:",
+                                 "after": "if False and (x):"}]
+    assert (rec["file"], rec["sites"], rec["key"]) == ("size.py", ["size.py:2"],
+                                                       res["groups"][0]["key"])
     assert [m["kind"] for m in rec["mutations"]] == WEAK_TITLE_KINDS
     # Nothing was filed, so nothing is remembered as filed: the real filer (slice 3) files it.
     assert not (sweep_nightly.state_dir(chela) / "filed.json").exists() or \
@@ -342,7 +360,7 @@ def test_negative_control_a_core_pr_read_as_standard_would_be_swept(tmp_path, mo
     monkeypatch.setattr(risktier, "classify", lambda *a, **k: (risktier.STANDARD, None))
     filer = Filer()
     assert _run(repo, chela, filer)["status"] == "survivors"
-    assert filer.sites == ["chela/dispatcher.py:2"]
+    assert filer.sites == ["chela/dispatcher.py:2", "chela/dispatcher.py:2"]
 
 
 def test_the_tier_reads_the_workflows_own_core_and_always_human_paths(tmp_path):
@@ -499,8 +517,12 @@ def test_an_unsupported_file_a_standard_pr_merged_is_reported_unknown(tmp_path):
     """Not mutatable is not clean: the run says the file is UNKNOWN."""
     prs = [({"other.py": COVERED, "tests/test_other.py": COVERED_TEST, "tool.go":
              "package tool\n\nfunc F(x int) bool { return x > 1 }\n"}, "PR 2 (#2)", None)]
-    res = _run(_repo(tmp_path, prs=prs), tmp_path / "chela", Filer())
-    assert (res["status"], res["unsupported"]) == ("clean", ["tool.go"])
+    repo, chela = _repo(tmp_path, prs=prs), tmp_path / "chela"
+    res = _run(repo, chela, Filer())
+    assert (res["status"], res["unsupported"], res["survivors"]) == ("unknown", ["tool.go"], 0)
+    assert res["why"] == "tool.go UNKNOWN — no mutator handles them, not clean"
+    # it will never become mutatable by waiting, so it does not hold the window back
+    assert _covered_record(chela) == {str((repo / "WORKFLOW.md").resolve()): res["at"]}
 
 
 def test_unsupported_is_only_what_the_standard_prs_merged(tmp_path):
@@ -515,7 +537,7 @@ def test_unsupported_is_only_what_the_standard_prs_merged(tmp_path):
 def test_a_line_a_later_core_pr_rewrote_is_not_swept(tmp_path):
     """The guard now blames to the core PR (judged per PR), so it is not swept again."""
     prs = [({"size.py": WEAK}, "PR 1 (#1)", None),
-           ({"size.py": WEAK.replace("x > 100", "x >= 100"), "chela/dispatcher.py": "X = 1\n"},
+           ({"size.py": WEAK.replace("if x:", "if x != 0:"), "chela/dispatcher.py": "X = 1\n"},
             "core rewrite (#9)", None)]
     filer = Filer()
     res = _run(_repo(tmp_path, prs=prs), tmp_path / "chela", filer)
@@ -569,7 +591,8 @@ def test_a_non_default_base_branch_is_the_one_swept(tmp_path):
     wf_path.write_text(wf_path.read_text().replace("base_branch: dev", "base_branch: main"))
     filer = Filer()
     res = _run(repo, chela, filer)
-    assert res["head"] == sha and filer.sites == ["mainonly.py:2", "mainonly.py:3"]
+    assert res["head"] == sha and filer.sites == ["mainonly.py:2", "mainonly.py:3",
+                                              "mainonly.py:2"]
     assert res["prs"] == [f"{sha[:12]} PR M: main only (#9)"]
     assert filer.calls[0][1].ref == "origin/main"
 
@@ -628,6 +651,12 @@ def test_every_git_call_runs_with_full_argv_cwd_and_timeout(tmp_path, monkeypatc
     blame = [a for a, _ in seen if a[3:4] == ["blame"]]
     assert blame and all(a[2] == str((tmp_path / "wt" / "nightly-sweep").resolve())
                          and a[3:7] == ["blame", "--porcelain", "HEAD", "--"] for a in blame)
+    grep = [(a, k) for a, k in seen if a[3:4] == ["grep"]]
+    assert grep == [(["git", "-C", str((tmp_path / "wt" / "nightly-sweep").resolve()), "grep",
+                      "-n", "-z", "-I", "--full-name", "--no-color", "--no-column", "-F", "-e",
+                      "if x:", "--"],
+                     {"capture_output": True, "text": True, "errors": "replace",
+                      "timeout": 120})]
 
 
 def test_an_unreachable_origin_is_cannot_verify(tmp_path):
@@ -688,13 +717,13 @@ def test_one_refused_filing_never_loses_the_others(tmp_path):
     calls = []
 
     def filer(group, ctx):
-        calls.append(group[0].key)
+        calls.append(group.mutation.key)
         if len(calls) == 1:
             raise RuntimeError("no")
         return "CMX-7"
     res = _run(repo, chela, filer)
-    assert calls == ["size.py:2", "tiny.py:2", "tiny.py:3"]
-    assert (res["filed"], res["failed"]) == (["CMX-7", "CMX-7"], ["size.py:2: no"])
+    assert calls == ["size.py:2", "tiny.py:2", "tiny.py:3", "tiny.py:2"]
+    assert (res["filed"], res["failed"]) == (["CMX-7"] * 3, ["size.py:2: no"])
 
 
 def test_a_crash_between_two_filings_keeps_the_first_key(tmp_path):
@@ -838,15 +867,15 @@ def test_a_budget_overflow_is_counted_unrun(tmp_path):
     many (round-4 survivor of #819: `unrun=0` must go red)."""
     repo, chela = _repo(tmp_path, extra="sweep:\n  max_mutations: 1\n"), tmp_path / "chela"
     res = _run(repo, chela, Filer())
-    assert (res["mutations"], res["unrun"]) == (5, 4)
+    assert (res["mutations"], res["unrun"]) == (4, 3)
     # ...and lines never measured are not covered: the window stays where it was.
     assert _covered_record(chela) == {}
 
 
 def test_a_battery_with_nothing_unrun_moves_the_window(tmp_path):
-    repo, chela = _repo(tmp_path, extra="sweep:\n  max_mutations: 5\n"), tmp_path / "chela"
+    repo, chela = _repo(tmp_path, extra="sweep:\n  max_mutations: 4\n"), tmp_path / "chela"
     res = _run(repo, chela, Filer())
-    assert (res["mutations"], res["unrun"]) == (5, 0)
+    assert (res["mutations"], res["unrun"]) == (4, 0)
     assert _covered_record(chela) == {str((repo / "WORKFLOW.md").resolve()): res["at"]}
 
 
@@ -858,7 +887,7 @@ def test_sweep_lines_mutates_exactly_those_lines_and_names_unsupported(tmp_path)
                       lines={"size.py": {2}, "x.go": {1}, "tests/test_calc.py": {2}})
     assert {(r.mutation.file, r.mutation.line) for r in rep.results} == {("size.py", 2)}
     assert rep.unsupported == ["x.go"] and rep.base == "label"
-    assert {r.mutation.kind for r in rep.survivors} == {"if-false", "compare-flip"}
+    assert {r.mutation.kind for r in rep.survivors} == {"if-false"}
     assert not any("generated" in n for n in rep.notes)
 
 
@@ -1156,6 +1185,8 @@ def test_a_raising_daemon_tick_is_logged_and_the_loop_goes_on(monkeypatch, caplo
 
 @pytest.mark.parametrize("status, why, code, line", [
     ("survivors", "", 1, "nightly sweep: survivors"),
+    ("unrun", "2 UNRUN", 2, "nightly sweep: unrun — 2 UNRUN"),
+    ("unknown", "x.go", 2, "nightly sweep: unknown — x.go"),
     ("cannot_verify", "fetch broke", 2, "nightly sweep: cannot_verify — fetch broke"),
     ("clean", "", 0, "nightly sweep: clean"),
     ("skipped", "paused", 0, "nightly sweep: skipped — paused")])
@@ -1208,9 +1239,199 @@ def test_survivor_key_ignores_the_line_number_but_not_what_the_guard_is():
     assert len(k("w", _mut())) == 24 and int(k("w", _mut()), 16) >= 0
 
 
-def test_one_group_per_guard_line():
-    a, b, c = _mut(), _mut(kind="compare-flip", after="    if not x:"), _mut(line=9)
-    assert sweep_nightly.group_survivors([a, b, c]) == [[a, b], [c]]
+def test_one_group_per_category_not_per_line():
+    """Shape + target: two kinds on ONE line are two groups; one kind on the same stripped
+    line at two sites (two files, two indents) is ONE group; another target is another."""
+    a, b = _mut(), _mut(kind="compare-flip", after="    if not x:")
+    c, d = _mut(file="b.py", line=9, before="if x:", after="if False and (x):"), _mut(line=9)
+    e = _mut(line=12, before="    if y:", after="    if False and (y):")
+    assert sweep_nightly.group_survivors([a, b, c, d, e]) == [[a, c, d], [b], [e]]
+
+
+def test_category_key_is_shape_and_target_only():
+    k = sweep_nightly.category_key
+    assert k("w", _mut()) == k("w", _mut(file="b.py", line=40, before="if x:",
+                                         after="if True or (x):"))
+    for other in (_mut(kind="if-true"), _mut(before="    if y:")):
+        assert k("w", other) != k("w", _mut())
+    assert k("w2", _mut()) != k("w", _mut())
+    assert len(k("w", _mut())) == 24 and k("w", _mut()) != sweep_nightly.survivor_key(
+        "w", _mut())
+
+
+# --- same-shape sites ----------------------------------------------------------------------
+
+
+def test_parse_grep_pins_every_field_where_they_differ():
+    """path, line and body are three DIFFERENT values per record — a parser that took the
+    wrong column (or split a path holding ':') names the wrong site."""
+    out = ("pkg/a:b.py\0" "17\0" "    if x:\n"
+           "c.py\0" "4\0" "if x:   \n"
+           "d.py\0" "9\0" "    if x: y()\n"            # contains the text, is not the shape
+           "tests/test_e.py\0" "2\0" "if x:\n"           # a test measures, is not a site
+           "README.md\0" "3\0" "if x:\n"                 # prose, not mutatable
+           "f.py\0" "x1\0" "if x:\n"                     # not a line number
+           "g.py\0" "5\n"                                # torn record
+           "")
+    assert sweep_nightly.parse_grep(out, "if x:") == ["pkg/a:b.py:17", "c.py:4"]
+    assert sweep_nightly.parse_grep("", "if x:") == []
+
+
+def test_parse_grep_keeps_a_body_holding_the_separator():
+    out = "a.py\0" "3\0" "s = 'a\0b'\n"
+    assert sweep_nightly.parse_grep(out, "s = 'a\0b'") == ["a.py:3"]
+
+
+REGEXY = 'm = re.match(".*[(", s)'
+INDEXY = "return v[0] + 1"
+
+
+def _grep_repo(tmp_path: Path) -> Path:
+    repo = tmp_path / "g"
+    repo.mkdir()
+    _git(repo, "init", "-q")
+    (repo / "a.py").write_text(f"def f(s):\n    {REGEXY}\n    return m\n")
+    (repo / "b.py").write_text(f"import re\n{REGEXY}\n")
+    (repo / "c.py").write_text(f"def g(v):\n    {INDEXY}\n")
+    (repo / "d.py").write_text("def h(v0):\n    return v0 + 1\n")   # what a regex would hit
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-qm", "x")
+    return repo
+
+
+def test_same_shape_sites_is_a_fixed_string_search(tmp_path):
+    """`.*[(` is TEXT: as a regex it does not even compile (every site dropped), and
+    `v[0]` as a regex is `v0` (the real site missed, a wrong one found)."""
+    repo = _grep_repo(tmp_path)
+    assert sweep_nightly.same_shape_sites(repo, REGEXY) == ["a.py:2", "b.py:2"]
+    assert sweep_nightly.same_shape_sites(repo, INDEXY) == ["c.py:2"]
+
+
+def test_same_shape_sites_none_is_not_found_and_failure_is_unknown(tmp_path, monkeypatch):
+    repo = _grep_repo(tmp_path)
+    assert sweep_nightly.same_shape_sites(repo, "nowhere_at_all()") == []    # exit 1
+    assert sweep_nightly.same_shape_sites(repo, "") is None
+    assert sweep_nightly.same_shape_sites(tmp_path / "not-a-repo", REGEXY) is None
+
+
+def _grouped(tmp_path, *muts):
+    return sweep_nightly.survivor_groups("w", _grep_repo(tmp_path), list(muts))
+
+
+def test_survivor_groups_carry_file_mutation_sites_and_key(tmp_path):
+    a = _mut(file="b.py", line=2, kind="return-none", before=REGEXY, after="None")
+    b = _mut(file="a.py", line=2, kind="return-none", before="    " + REGEXY, after="None")
+    c = _mut(file="c.py", line=2, kind="return-code", before="    " + INDEXY, after="x")
+    groups, failed = _grouped(tmp_path, a, b, c)
+    assert failed == []
+    assert [(g.file, g.mutation, g.survivors, g.sites, g.key) for g in groups] == [
+        ("b.py", a, (a, b), ("a.py:2", "b.py:2"), sweep_nightly.category_key("w", a)),
+        ("c.py", c, (c,), ("c.py:2",), sweep_nightly.category_key("w", c))]
+
+
+def test_a_category_whose_sites_cannot_be_listed_is_not_grouped(tmp_path, monkeypatch):
+    monkeypatch.setattr(sweep_nightly, "same_shape_sites", lambda wt, text: None)
+    groups, failed = _grouped(tmp_path, _mut(file="c.py", line=2, before=INDEXY))
+    assert (groups, failed) == ([], ["c.py:2: its same-shape sites could not be listed"])
+
+
+def test_a_listing_that_misses_its_own_survivor_is_not_grouped(tmp_path):
+    """A survivor whose line the grep did not find means the listing is wrong — never
+    "these are all the sites"."""
+    ok = _mut(file="c.py", line=2, before=INDEXY)
+    off = _mut(file="c.py", line=7, before=INDEXY)
+    repo = _grep_repo(tmp_path)
+    groups, failed = sweep_nightly.survivor_groups("w", repo, [ok, off])
+    assert (groups, failed) == ([], ["c.py:2: the same-shape listing misses c.py:7"])
+    groups, failed = sweep_nightly.survivor_groups("w", repo, [ok])
+    assert ([g.sites for g in groups], failed) == ([("c.py:2",)], [])
+
+
+def test_the_weak_guard_of_two_shapes_is_two_groups_listing_every_site(tmp_path):
+    """Real battery: if-false and compare-flip both survive on `if x > 100:`; PR 2's same
+    line (killed there) is a same-shape site of both."""
+    prs = [({"size.py": WEAK_TWO}, "PR 1 (#1)", None),
+           ({"other.py": COVERED, "tests/test_other.py": COVERED_TEST}, "PR 2 (#2)", None)]
+    filer = Filer()
+    res = _run(_repo(tmp_path, prs=prs), tmp_path / "chela", filer)
+    assert (res["status"], res["filed"], filer.kinds) == (
+        "survivors", ["CMX-901", "CMX-902"], ["if-false", "compare-flip"])
+    assert [(g.file, g.mutation.after.strip(), g.sites) for g, _ in filer.calls] == [
+        ("size.py", "if False and (x > 100):", ("other.py:2", "size.py:2")),
+        ("size.py", "if x <= 100:", ("other.py:2", "size.py:2"))]
+    assert len({g.key for g, _ in filer.calls}) == 2
+
+
+def test_an_unlisted_category_is_not_filed_and_holds_the_window(tmp_path, monkeypatch):
+    repo, chela = _repo(tmp_path), tmp_path / "chela"
+    monkeypatch.setattr(sweep_nightly, "same_shape_sites", lambda wt, text: None)
+    filer = Filer()
+    res = _run(repo, chela, filer)
+    assert (res["status"], filer.calls, res["groups"], res["failed"]) == (
+        "survivors", [], [], ["size.py:2: its same-shape sites could not be listed"])
+    assert _covered_record(chela) == {}
+    assert not (sweep_nightly.state_dir(chela) / "filed.json").exists()
+
+
+# --- UNRUN and UNKNOWN are never clean --------------------------------------------------------
+
+
+WEAK_MUT = sweep.Mutation("size.py", 2, "if-false", "    if x:", "    if False and (x):")
+
+
+def _fake_battery(monkeypatch, *results, unsupported=()):
+    def fake(worktree, base, test_cmd, **kw):
+        return sweep.SweepReport(results=[sweep.SweepResult(m, st) for m, st in results],
+                                 unsupported=list(unsupported))
+    monkeypatch.setattr(sweep_nightly.sweep, "sweep", fake)
+
+
+def test_a_budget_overflow_with_no_survivor_is_unrun_not_clean(tmp_path, monkeypatch):
+    repo, chela = _repo(tmp_path), tmp_path / "chela"
+    late = sweep.Mutation("other.py", 3, "return-code", "        return 1", "        return 0")
+    _fake_battery(monkeypatch, (WEAK_MUT, judge.KILLED), (late, sweep.UNRUN),
+                  (late, sweep.UNRUN), unsupported=["x.go"])
+    res = _run(repo, chela, Filer())
+    assert (res["status"], res["survivors"], res["mutations"], res["unrun"]) == (
+        "unrun", 0, 3, 2)
+    assert res["unrun_sites"] == ["other.py:3"]
+    assert res["why"] == ("2 mutation(s) the budget never reached are UNRUN — CANNOT VERIFY "
+                          "for their lines, not clean")
+    assert _covered_record(chela) == {}
+
+
+def test_the_real_battery_overflow_is_unrun(tmp_path):
+    prs = [({"other.py": COVERED, "tests/test_other.py": COVERED_TEST}, "PR 2 (#2)", None)]
+    repo = _repo(tmp_path, prs=prs, extra="sweep:\n  max_mutations: 1\n")
+    res = _run(repo, tmp_path / "chela", Filer())
+    assert (res["status"], res["survivors"], res["mutations"], res["unrun"]) == (
+        "unrun", 0, 3, 2)
+
+
+@pytest.mark.parametrize("unrun, unsupported, want", [
+    (0, [], "clean"), (2, [], "unrun"), (0, ["x.go"], "unknown"), (2, ["x.go"], "unrun")])
+def test_the_quiet_status(unrun, unsupported, want):
+    assert sweep_nightly._quiet_status({"unrun": unrun, "unsupported": unsupported}) == want
+
+
+def test_survivors_with_unrun_mutations_still_say_survivors(tmp_path, monkeypatch):
+    repo, chela = _repo(tmp_path), tmp_path / "chela"
+    late = sweep.Mutation("other.py", 3, "return-code", "        return 1", "        return 0")
+    _fake_battery(monkeypatch, (WEAK_MUT, judge.SURVIVED), (late, sweep.UNRUN))
+    res = _run(repo, chela, Filer())
+    assert (res["status"], res["filed"], res["unrun"]) == ("survivors", ["CMX-901"], 1)
+    # filed, but never measured everything: the window still does not move
+    assert _covered_record(chela) == {}
+    again = _run(repo, chela, Filer())
+    assert (again["status"], again["already_filed"], again["filed"]) == ("unrun", 1, [])
+
+
+def test_already_filed_with_an_unknown_file_is_unknown_not_clean(tmp_path, monkeypatch):
+    repo, chela = _repo(tmp_path), tmp_path / "chela"
+    _fake_battery(monkeypatch, (WEAK_MUT, judge.SURVIVED), unsupported=["x.go"])
+    assert _run(repo, chela, Filer())["status"] == "survivors"
+    again = _run(repo, chela, Filer())
+    assert (again["status"], again["already_filed"]) == ("unknown", 1)
 
 
 # --- the covered window ---------------------------------------------------------------------

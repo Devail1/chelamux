@@ -3,7 +3,8 @@
 CMX-296 (gate redesign 1b-i) lets a standard-tier PR — no core path, see
 :mod:`chela.risktier` — merge on green CI with no judge round. This is the other half (1b-ii,
 CMX-299, landing in three slices): once a day nothing merged that way goes un-mutated for long.
-This module is slice 1/3, the scheduler; slices 2 and 3 plug into the :class:`Filer` seam.
+Slice 1/3 is the scheduler (CMX-303); slice 2/3 (CMX-304) groups the survivors and finds
+every same-shape site; slice 3 plugs the tracker into the :class:`Filer` seam.
 
 * **When.** ``sweep.nightly_at`` in WORKFLOW.md (``"HH:MM"`` local; default ``02:00``;
   ``off``, ``never``, ``false`` or ``sweep.enabled: false`` turns it off). The daemon
@@ -17,16 +18,23 @@ This module is slice 1/3, the scheduler; slices 2 and 3 plug into the :class:`Fi
   or a human already, a prose one has nothing to mutate). A root commit is diffed against the
   empty tree. The lines swept are the ones that STILL blame to one of those commits at the tip,
   so a line a later core PR rewrote is not swept twice. ONE battery, through
-  :func:`chela.sweep.sweep` — the judge's own mechanics and budget.
+  :func:`chela.sweep.sweep` — the judge's own mechanics, ``judge.select_tests``, suite timeout
+  and budget. A mutation the budget never reached is UNRUN and a file no mutator handles is
+  UNKNOWN: a night with either and no survivor says so, never ``clean``.
 * **The covered window.** The last 24 h — or, after a night that could not look, back to the
   last run that did (at most :data:`MAX_CATCHUP_SECONDS`). Only a run that looked and
   finished (not CANNOT VERIFY, no refused filing, no mutation left UNRUN) moves it, in ``$CHELA_DIR/sweep-nightly/
   covered.json``.
-* **Filed.** Each surviving guard (one source line) goes to the :class:`Filer` once. A survivor
-  already filed is never filed again: its key — workflow, file, category, line text before and
-  after, no line number — is kept in ``$CHELA_DIR/sweep-nightly/filed.json``, which outlives
-  restarts and is written after EACH filing. Until slice 3 the default filer is
-  :class:`WouldFile`, which files nothing and records what it would have filed.
+* **Grouped.** One :class:`SurvivorGroup` per CATEGORY — mutation shape (its kind) plus target
+  (the guard line's stripped text) — however many sites survived it. Each group lists EVERY
+  same-shape site in the checkout: a FIXED-STRING ``git grep -F`` of the stripped line, so a
+  regex metacharacter in it never drops a site. A group whose sites cannot be listed, or whose
+  listing misses one of its own survivors, is not filed (fail closed; the next night retries).
+* **Filed.** Each group goes to the :class:`Filer` once. A survivor already filed is never
+  filed again: its key — workflow, file, kind, line text before and after, no line number — is
+  kept in ``$CHELA_DIR/sweep-nightly/filed.json``, which outlives restarts and is written after
+  EACH filing. Until slice 3 the default filer is :class:`WouldFile`, which files nothing and
+  records what it would have filed.
 * **Skipped** while a fleet pause (``chela dispatch --pause --all``) is active.
 """
 from __future__ import annotations
@@ -61,6 +69,9 @@ GIT_TIMEOUT = 120
 EMPTY_TREE = "4b825dc642cb6eb9a060e54bf8d69288fbee4904"
 
 SURVIVORS, CLEAN, SKIPPED, CANNOT_VERIFY = "survivors", "clean", "skipped", "cannot_verify"
+# No survivor, but not clean either: the budget left mutations UNRUN, or a merged file is not
+# mutatable (UNKNOWN). Neither is ever reported as clean.
+UNRUN, UNKNOWN = "unrun", "unknown"
 
 _RE_AT = re.compile(r"^([01]?\d|2[0-3]):([0-5]\d)$")
 _RE_BLAME = re.compile(r"^([0-9a-f]{40}) \d+ (\d+)(?: \d+)?\Z")
@@ -286,25 +297,42 @@ class FileContext:
     chela_dir: Path
 
 
-class Filer(Protocol):
-    """Files ONE surviving guard — every mutation of one source line that survived. Returns
-    the tracker identifier, or ``None`` when nothing was filed (the keys are then NOT
-    recorded, so a later run files it). Raising refuses this filing only."""
+@dataclass(frozen=True)
+class SurvivorGroup:
+    """One CATEGORY of surviving guard: mutation shape (``mutation.kind``) plus target (the
+    stripped line, :func:`category`), with every same-shape site of it in the checkout."""
+    file: str                           # where the first survivor of the category is
+    mutation: sweep.Mutation            # that survivor — the sweep's priority order
+    survivors: tuple[sweep.Mutation, ...]   # every surviving mutation in the category
+    sites: tuple[str, ...]              # EVERY "file:line" whose stripped text is the target
+    key: str                            # :func:`category_key` — no file, no line number
 
-    def __call__(self, group: list[sweep.Mutation], ctx: FileContext) -> str | None: ...
+    def as_dict(self) -> dict:
+        return {"file": self.file, "key": self.key, "mutation": self.mutation.describe(),
+                "kind": self.mutation.kind, "target": self.mutation.before.strip(),
+                "survived": [m.key for m in self.survivors], "sites": list(self.sites)}
+
+
+class Filer(Protocol):
+    """Files ONE :class:`SurvivorGroup`. Returns the tracker identifier, or ``None`` when
+    nothing was filed (the keys are then NOT recorded, so a later run files it). Raising
+    refuses this filing only."""
+
+    def __call__(self, group: SurvivorGroup, ctx: FileContext) -> str | None: ...
 
 
 class WouldFile:
     """The default :class:`Filer` until slice 3 brings the tracker one: files NOTHING, and
     appends what it would have filed to ``$CHELA_DIR/sweep-nightly/would-file.jsonl``."""
 
-    def __call__(self, group: list[sweep.Mutation], ctx: FileContext) -> None:
+    def __call__(self, group: SurvivorGroup, ctx: FileContext) -> None:
         path = state_dir(ctx.chela_dir) / "would-file.jsonl"
         path.parent.mkdir(parents=True, exist_ok=True)
-        rec = {"at": time.time(), "workflow": str(ctx.workflow), "site": group[0].key,
+        rec = {"at": time.time(), "workflow": str(ctx.workflow), "site": group.mutation.key,
+               "file": group.file, "key": group.key, "sites": list(group.sites),
                "head": ctx.head, "merged_in": ctx.merged_in,
-               "mutations": [{"kind": m.kind, "before": m.before.strip(),
-                              "after": m.after.strip()} for m in group]}
+               "mutations": [{"site": m.key, "kind": m.kind, "before": m.before.strip(),
+                              "after": m.after.strip()} for m in group.survivors]}
         with open(path, "a", encoding="utf-8") as fh:
             fh.write(json.dumps(rec, sort_keys=True) + "\n")
         return None
@@ -316,13 +344,75 @@ def survivor_key(wf_path: str, mut: sweep.Mutation) -> str:
     return hashlib.sha256(raw.encode()).hexdigest()[:24]
 
 
+def category(mut: sweep.Mutation) -> tuple[str, str]:
+    """``(shape, target)``: the mutation's kind and the stripped text of the line it hit."""
+    return mut.kind, mut.before.strip()
+
+
+def category_key(wf_path: str, mut: sweep.Mutation) -> str:
+    """The group's identity: workflow + :func:`category` — no file, no line number."""
+    raw = "\0".join((str(wf_path), *category(mut)))
+    return hashlib.sha256(raw.encode()).hexdigest()[:24]
+
+
 def group_survivors(survivors: list[sweep.Mutation]) -> list[list[sweep.Mutation]]:
-    """One group per surviving GUARD — a source line — with every mutation of it that
-    survived, in the sweep's priority order."""
-    groups: dict[str, list[sweep.Mutation]] = {}
+    """One group per CATEGORY (:func:`category`) — every survivor of it, wherever it is — in
+    the sweep's priority order."""
+    groups: dict[tuple[str, str], list[sweep.Mutation]] = {}
     for m in survivors:
-        groups.setdefault(m.key, []).append(m)
+        groups.setdefault(category(m), []).append(m)
     return list(groups.values())
+
+
+def parse_grep(out: str, text: str) -> list[str]:
+    """``git grep -n -z`` output (``path NUL line NUL body``) → each ``"path:line"`` whose
+    stripped body is EXACTLY ``text``, in mutatable source. A longer line merely containing
+    ``text`` is not the same shape."""
+    sites = []
+    for raw in out.split("\n"):
+        parts = raw.split("\0", 2)
+        if len(parts) != 3 or not parts[1].isdigit():
+            continue
+        rel, ln, body = parts
+        if body.strip() == text and sweep._sweepable(rel):
+            sites.append(f"{rel}:{ln}")
+    return sites
+
+
+def same_shape_sites(worktree: Path, text: str) -> list[str] | None:
+    """Every ``file:line`` of mutatable source in ``worktree`` whose stripped text is exactly
+    ``text`` — a FIXED-STRING grep (``-F``): ``.*[(`` is text, not a pattern. ``None`` when
+    ``git grep`` could not say, never "no other site"."""
+    if not text:
+        return None
+    try:
+        out = _git(worktree, "grep", "-n", "-z", "-I", "--full-name", "--no-color",
+                   "--no-column", "-F", "-e", text, "--", ok=(0, 1))
+    except _Git as e:
+        log.warning("nightly sweep: same-shape sites of %r: %s", text, e)
+        return None
+    return parse_grep(out, text)
+
+
+def survivor_groups(wf_path: str, worktree: Path, survivors: list[sweep.Mutation],
+                    ) -> tuple[list[SurvivorGroup], list[str]]:
+    """``(groups, failed)``: one :class:`SurvivorGroup` per category, with its sites. A
+    category whose sites cannot be listed — or whose listing misses one of its own survivors
+    — is in ``failed`` instead (``"<site>: <why>"``): unknown sites are never "only these"."""
+    groups, failed = [], []
+    for members in group_survivors(survivors):
+        first = members[0]
+        sites = same_shape_sites(worktree, first.before.strip())
+        if sites is None:
+            failed.append(f"{first.key}: its same-shape sites could not be listed")
+            continue
+        missing = [m.key for m in members if m.key not in sites]
+        if missing:
+            failed.append(f"{first.key}: the same-shape listing misses {', '.join(missing)}")
+            continue
+        groups.append(SurvivorGroup(file=first.file, mutation=first, survivors=tuple(members),
+                                    sites=tuple(sites), key=category_key(wf_path, first)))
+    return groups, failed
 
 
 # --- the run --------------------------------------------------------------------------------
@@ -344,7 +434,7 @@ def run(wf, *, now: float | None = None, chela_dir: Path | None = None,
     chela_dir = Path(chela_dir or config.CHELA_DIR)
     now = time.time() if now is None else now
     result = {"workflow": str(wf.path), "at": now, "filed": [], "would_file": [],
-              "already_filed": 0, "failed": [], "survivors": 0, "prs": []}
+              "already_filed": 0, "failed": [], "survivors": 0, "prs": [], "groups": []}
     if paused(chela_dir):
         result.update(status=SKIPPED, why="a fleet pause (`chela dispatch --pause --all`) "
                                           "is active")
@@ -431,17 +521,38 @@ def _sweep_and_file(wf, worktree: Path, head: str, ref: str, standard: list[dict
     report = sweep.sweep(worktree, f"{ref}@{head[:12]} (standard-tier lines)",
                          cfg.test_cmd, timeout=cfg.suite_timeout_seconds,
                          select_tests=cfg.select_tests, budget=budget, lines=lines)
-    result.update(mutations=len(report.results), unrun=len(report._with(sweep.UNRUN)),
-                  unsupported=list(report.unsupported))
+    unrun = [r.mutation.key for r in report._with(sweep.UNRUN)]
+    result.update(mutations=len(report.results), unrun=len(unrun),
+                  unrun_sites=sorted(set(unrun)), unsupported=list(report.unsupported))
     if report.cannot_verify:
         result.update(status=CANNOT_VERIFY, why=report.cannot_verify)
         return
     survivors = [r.mutation for r in report.survivors]
     result["survivors"] = len(survivors)
-    if not survivors:
-        result.update(status=CLEAN, why="")
-        return
-    _file(wf, worktree, head, ref, survivors, origin, standard, chela_dir, filer, result)
+    if survivors:
+        _file(wf, worktree, head, ref, survivors, origin, standard, chela_dir, filer, result)
+    if result.get("status") is None:
+        result.update(status=_quiet_status(result), why=_quiet_why(result))
+
+
+def _quiet_status(result: dict) -> str:
+    """A night with nothing (left) to file: CLEAN only when every mutation ran and every
+    merged file was mutatable."""
+    if result.get("unrun"):
+        return UNRUN
+    if result.get("unsupported"):
+        return UNKNOWN
+    return CLEAN
+
+
+def _quiet_why(result: dict) -> str:
+    if result.get("unrun"):
+        return (f"{result['unrun']} mutation(s) the budget never reached are UNRUN — CANNOT "
+                "VERIFY for their lines, not clean")
+    if result.get("unsupported"):
+        return (f"{', '.join(result['unsupported'])} UNKNOWN — no mutator handles them, not "
+                "clean")
+    return ""
 
 
 def _file(wf, worktree: Path, head: str, ref: str, survivors: list[sweep.Mutation],
@@ -458,9 +569,12 @@ def _file(wf, worktree: Path, head: str, ref: str, survivors: list[sweep.Mutatio
     subjects = {c["sha"]: f"`{c['sha'][:12]}` {c['subject']}" for c in standard}
     merged = {f"{f}:{ln}": subjects.get(sha, "") for (f, ln), sha in origin.items()}
     filer = filer if filer is not None else WouldFile()
-    for group in group_survivors(survivors):
-        site = group[0].key
-        keys = [survivor_key(str(wf.path), m) for m in group]
+    groups, unlisted = survivor_groups(str(wf.path), worktree, survivors)
+    result["failed"].extend(unlisted)
+    result["groups"] = [g.as_dict() for g in groups]
+    for group in groups:
+        site = group.mutation.key
+        keys = [survivor_key(str(wf.path), m) for m in group.survivors]
         # Per MUTATION: a new survivor category on a guard line filed before is filed again.
         if all(k in filed for k in keys):
             result["already_filed"] += 1
@@ -479,5 +593,5 @@ def _file(wf, worktree: Path, head: str, ref: str, survivors: list[sweep.Mutatio
             filed[k] = {"issue": ident, "at": result["at"], "site": site}
         _write_json(keys_path, store)       # per issue: a crash never files one twice
         result["filed"].append(ident)
-    busy = result["filed"] or result["failed"] or result["would_file"]
-    result.update(status=SURVIVORS if busy else CLEAN, why="")
+    if result["filed"] or result["failed"] or result["would_file"]:
+        result.update(status=SURVIVORS, why="")
