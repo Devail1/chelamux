@@ -220,11 +220,84 @@ def test_lint_boundaries_fails_on_exactly_the_imports_each_rule_forbids(tmp_path
     }
 
 
+# Vitest's default `include`: what a spec file is named, wherever the config sends it.
+SPEC_FILE = re.compile(r"\.(test|spec)\.[cm]?[jt]sx?$")
+RED_SPEC = "src/features/gate/tests/red.spec.ts"    # the `test` gate fixture's one red spec
+
+
+def _run_with_report(tree, *args):
+    """`pnpm test` over `tree` with Vitest's JSON report beside its usual output."""
+    report = tree.parent / "vitest-report.json"
+    code, out, _ = _pnpm(tree, "test", *args, "--reporter=default", "--reporter=json",
+                         f"--outputFile.json={report}")
+    if not report.is_file():
+        pytest.fail(f"vitest wrote no JSON report:\n{_shown(out, 4000)}")
+    return code, out, json.loads(report.read_text())
+
+
+def _not_run_specs(tree, report):
+    """Problems with a run's coverage of `tree`: a spec file under src/ the run never
+    collected, a file it ran that is not one, a file with no test in it, a skipped or todo
+    test. CMX-324: this replaces a pinned total that every spec-adding PR had to edit; it
+    still catches Vitest silently running fewer specs (a glob or config change that drops
+    files), by comparing against the files on disk instead of a number."""
+    tree = tree.resolve()     # Vitest reports real paths
+    on_disk = {p.relative_to(tree).as_posix() for p in (tree / "src").rglob("*")
+               if p.is_file() and SPEC_FILE.search(p.name)}
+    ran = {Path(f["name"]).resolve().relative_to(tree).as_posix(): f for f in report["testResults"]}
+    problems = [f"never collected: {f}" for f in sorted(on_disk - set(ran))]
+    problems += [f"not a spec file: {f}" for f in sorted(set(ran) - on_disk)]
+    problems += [f"no tests in: {f}" for f, r in sorted(ran.items()) if not r["assertionResults"]]
+    if report["numPendingTests"] or report["numTodoTests"]:
+        problems.append(f"{report['numPendingTests']} skipped, {report['numTodoTests']} todo")
+    return problems
+
+
+@pytest.mark.parametrize("pending,todo,ok", [(0, 0, True), (1, 0, False), (0, 1, False)])
+def test_coverage_check_flags_strays_empty_files_and_skips(tmp_path, pending, todo, ok):
+    for f in ("src/a.test.ts", "src/b.spec.tsx", "src/c/d.test.mjs", "src/setup.ts", "x.test.ts"):
+        (tmp_path / f).parent.mkdir(parents=True, exist_ok=True)
+        (tmp_path / f).write_text("")
+    one = [{"status": "passed"}]
+    report = {"numPendingTests": pending, "numTodoTests": todo, "testResults": [
+        {"name": str(tmp_path / "src/a.test.ts"), "assertionResults": one},
+        {"name": str(tmp_path / "src/b.spec.tsx"), "assertionResults": []},
+        {"name": str(tmp_path / "src/setup.ts"), "assertionResults": one},
+    ]}
+    assert _not_run_specs(tmp_path, report) == [
+        "never collected: src/c/d.test.mjs",    # x.test.ts sits outside src/: not expected
+        "not a spec file: src/setup.ts",
+        "no tests in: src/b.spec.tsx",
+    ] + ([] if ok else [f"{pending} skipped, {todo} todo"])
+
+
 def test_test_fails_on_a_failing_spec_and_still_runs_the_real_ones(tmp_path):
-    code, out, _ = _pnpm(_violating_copy(tmp_path, "test"), "test")
+    tree = _violating_copy(tmp_path, "test").resolve()     # Vitest reports real paths
+    code, out, report = _run_with_report(tree)
     assert code != 0, _shown(out, 4000)
-    plain = re.sub(r"\x1b\[[0-9;]*m", "", out.decode())   # CI colours vitest's summary
-    assert re.search(r"Tests\s+1 failed \| 1533 passed \(1534\)", plain), _shown(out, 4000)
+    assert _not_run_specs(tree, report) == [], _shown(out, 4000)
+    failed = [(Path(f["name"]).resolve().relative_to(tree).as_posix(), a["title"])
+              for f in report["testResults"] for a in f["assertionResults"]
+              if a["status"] != "passed"]
+    assert failed == [(RED_SPEC, "gate fixture: this test must fail")], _shown(out, 4000)
+
+
+def test_a_config_that_drops_spec_files_fails_the_coverage_check(tmp_path):
+    # Negative control (CMX-324): narrow Vitest's `include` to the gate fixture alone, as a
+    # careless glob would, and the run must be reported as missing every other spec file.
+    tree = _violating_copy(tmp_path, "test").resolve()
+    config = tree / "vite.config.ts"
+    narrowed = config.read_text().replace(
+        "test: { environment: 'jsdom',", f"test: {{ include: ['{RED_SPEC}'], environment: 'jsdom',")
+    assert narrowed != config.read_text()
+    config.write_text(narrowed)
+    _, out, report = _run_with_report(tree)
+    ran = [Path(r["name"]).resolve() for r in report["testResults"]]
+    assert ran == [tree / RED_SPEC], _shown(out, 4000)
+    on_disk = sorted(p.relative_to(tree).as_posix() for p in (tree / "src").rglob("*")
+                     if SPEC_FILE.search(p.name) and p != tree / RED_SPEC)
+    assert on_disk, "no spec files to drop: the control proves nothing"
+    assert _not_run_specs(tree, report) == [f"never collected: {f}" for f in on_disk]
 
 
 def test_the_frontend_is_a_pnpm_workspace_member_with_exact_pins():
