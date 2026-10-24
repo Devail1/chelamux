@@ -280,7 +280,10 @@ def test_the_tick_respawns_into_the_existing_worktree_and_branch(tmp_path):
     with dispatcher._db() as conn:
         _row(conn, workflow_path=str(wf.path), status="changes_requested",
              worktree_path=str(original_wt), branch_name="test-1",
-             review_history=json.dumps([{"round": 1, "at": "t", "body": "the wire is loose"}]))
+             review_history=json.dumps([{"round": 1, "at": "t", "body": "the wire is loose"}]),
+             # ⏸️ CMX-318: a park left from the last round must not hold the new one
+             parked_at="2026-10-22T10:00:00+00:00", parked_reason="old", parked_until="2h",
+             parked_by="orchestrator")
 
     with patch.object(dispatcher, "load_workflow_cached", return_value=_status(wf)), \
          patch.object(dispatcher, "get_source", return_value=source), \
@@ -306,6 +309,8 @@ def test_the_tick_respawns_into_the_existing_worktree_and_branch(tmp_path):
     assert run["worktree_path"] == str(original_wt)
     assert run["branch_name"] == "test-1"
     assert run["rework_count"] == 1
+    assert [run[c] for c in ("parked_at", "parked_reason", "parked_until", "parked_by")] == [
+        None] * 4
 
     # The prompt carries the verdict AND tells the agent to read the PR thread itself.
     assert prompts and "the wire is loose" in prompts[0]

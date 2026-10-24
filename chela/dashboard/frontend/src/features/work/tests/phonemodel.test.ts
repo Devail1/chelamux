@@ -131,3 +131,23 @@ test('a card\'s one note: a failure (warns) or close reason first, then a stall 
   expect(cardNote(card({ status: 'running', reason: 'blocked' }))).toBeNull();
   expect(cardNote(card({ status: 'parked' }))).toBeNull();
 });
+
+test('CMX-318: a held run\'s flag (first, never a warning) carries its reason and since-when; its state stays its own; no stall note', () => {
+  const now = 10_000;
+  const manual = { kind: 'manual' as const, reason: 'waiting for the flaky fix', since: now - 7200, until: 'run:CMX-9', by: 'orchestrator' };
+  const slot = { kind: 'slot' as const, reason: 'waiting for a suite slot (holder: CMX-7)', since: now - 300 };
+  expect(cardFlags(card({ park: manual, rework_count: 1 }), now)).toEqual([
+    { label: 'parked · waiting for the flaky fix · 2h ago', warn: false, icon: 'pause', title: 'waiting for the flaky fix · 2h ago · until run:CMX-9 · by orchestrator' },
+    { label: 'rework 1', warn: true, icon: 'rework' },
+  ]);
+  expect(cardFlags(card({ park: slot }), now)).toEqual([
+    { label: 'waiting · waiting for a suite slot (holder: CMX-7) · 5m ago', warn: false, icon: 'slotWait', title: 'waiting for a suite slot (holder: CMX-7) · 5m ago' },
+  ]);
+  expect(cardFlags(card({ park: { kind: 'manual', reason: 'x'.repeat(60), since: null } }), now)[0]?.label).toBe(`parked · ${'x'.repeat(39)}… · since ?`);
+  expect(cardFlags(card({ park: null }), now)).toEqual([]);
+  expect(cardState(card({ park: manual }))).toEqual(cardState(card({})));
+  expect(cardNote(card({ park: manual, closed_run_stall: 'stalled' }))).toBeNull();
+  expect(cardNote(card({ closed_run_stall: 'stalled' }))).toEqual({ text: 'stalled', warn: true });
+  expect(cardNote(card({ park: manual, last_error: 'boom' }))).toEqual({ text: 'boom', warn: true });
+  expect(rowFlag(card({ park: manual }))).toEqual({ label: expect.stringContaining('parked · waiting for the flaky fix'), warn: false });
+});

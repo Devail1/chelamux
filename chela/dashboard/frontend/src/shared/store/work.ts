@@ -36,7 +36,12 @@ export type Run = {
   judge_state?: string | null;
   rework_count?: number | null;
   tracker_state?: string | null;
+  park?: RunPark | null;
 };
+
+/** CMX-318: why a claimed/running run is held on purpose — `manual` (`chela park`) or `slot`
+ * (waiting for a suite slot). `since` is epoch seconds (null when unreadable). */
+export type RunPark = { kind: 'manual' | 'slot'; reason: string; since: number | null; until?: string | null; by?: string | null };
 
 /** An open task: a TODO.md line, or a Linear issue (with `group`, `tracker_state`, `risk`). */
 export type OpenTask = {

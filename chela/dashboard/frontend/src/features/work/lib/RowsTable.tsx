@@ -32,7 +32,7 @@ function TableRow({ card, now }: { card: CardData; now: number }) {
         <div className="wtable-title-text" title={c.title}><Markdown inline source={displayTitle(c.title).slice(0, 200)} /></div>
         {strip}
       </td>
-      <td className="wtable-state">{c.state}</td>
+      <td className="wtable-state" title={c.stateTitle}>{c.state}</td>
       <td className="wtable-pr">{c.pr}</td>
       <td className={`wtable-ci${c.ciWarn ? ' warn' : ''}`}>{c.ci}</td>
       <td className={`wtable-risk${c.riskWarn ? ' warn' : ''}`}>{c.risk}</td>
