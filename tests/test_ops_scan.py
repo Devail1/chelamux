@@ -431,6 +431,22 @@ def test_events_default_to_the_core_log(env):
     assert ops.Sources(env.dir, env.proc).events_path == env.dir / "events-core.jsonl"
 
 
+def test_events_are_topped_up_from_the_rolled_core_log(env, monkeypatch):
+    monkeypatch.setattr(ops, "TAIL_BYTES", 300)
+    (env.dir / "events-core.jsonl.1").write_text(
+        "".join(json.dumps({"seq": i, "type": "x", "pad": "p" * 40}) + "\n" for i in range(1, 6)))
+    write_events(env, [{"seq": 6, "type": "x", "pad": "p" * 40}])
+    # ~75-byte lines: 225 bytes of budget left from .1 holds its last 2 whole lines
+    assert [e["seq"] for e in src(env).events] == [4, 5, 6]
+
+
+def test_a_full_current_tail_reads_no_rolled_lines(env, monkeypatch):
+    monkeypatch.setattr(ops, "TAIL_BYTES", 300)
+    (env.dir / "events-core.jsonl.1").write_text(json.dumps({"seq": 1, "type": "x"}) + "\n")
+    write_events(env, [{"seq": i, "type": "x", "pad": "p" * 40} for i in range(2, 9)])
+    assert [e["seq"] for e in src(env).events] == [6, 7, 8]
+
+
 def _hook_flooded(env):
     """A ``run_ci_red`` the core log holds, and a main log of nothing but hooks."""
     write_events(env, [{"seq": 7, "ts": NOW, "type": "run_ci_red",

@@ -94,7 +94,17 @@ class Sources:
 
     @cached_property
     def events(self) -> list[dict]:
-        return _tail_jsonl(self.events_path)
+        # Right after the core log rolls, the current file holds almost nothing: top the
+        # tail up from the rolled ``.1`` (CMX-328).
+        try:
+            size = self.events_path.stat().st_size
+        except OSError:
+            size = 0
+        older: list[dict] = []
+        if size < TAIL_BYTES:
+            rolled = self.events_path.with_name(self.events_path.name + ".1")
+            older = _tail_jsonl(rolled, TAIL_BYTES - size)
+        return older + _tail_jsonl(self.events_path)
 
     @cached_property
     def heldout(self) -> list[dict]:

@@ -280,3 +280,30 @@ def test_an_unfiltered_read_does_not_seed(log_file, tmp_path):
     _write_main(log_file, [_rec(1, "run_review")])
     event_log.read()
     assert not _core(tmp_path).with_name("events-core.jsonl.seeded").exists()
+
+
+def test_a_core_read_never_hands_back_a_cursor_behind_the_callers():
+    event_log.append("run_review", "a", {})
+    event_log.append("hook.stop", "b", {})
+    event_log.append("hook.stop", "c", {})
+    assert event_log.read(3, types=["run_review"])["next_seq"] == 3
+    assert event_log.read(None, types=["run_review"])["next_seq"] == 1
+    assert event_log.read(None)["next_seq"] == 3          # the ring: its own position
+
+
+def test_a_failed_seed_is_not_retried_on_every_read(log_file, tmp_path, monkeypatch):
+    _write_main(log_file, [_rec(1, "run_review")])
+    blocker = tmp_path / "not-a-dir"
+    blocker.write_text("")
+    monkeypatch.setattr(event_log, "core_path", lambda: blocker / "events-core.jsonl")
+    monkeypatch.setattr(event_log, "_seed_failed", set())
+    event_log.read(types=["run_review"])
+    calls = []
+    monkeypatch.setattr(event_log, "_append_lock", lambda: calls.append(1) or (_ for _ in ()))
+    assert event_log.seed_core() == 0
+    assert calls == []
+
+
+def test_the_hook_prefix_is_the_hooks_own():
+    from chela import hooks
+    assert event_log.HOOK_PREFIX == hooks.TYPE_PREFIX == "hook."

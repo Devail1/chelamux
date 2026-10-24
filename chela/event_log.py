@@ -245,6 +245,9 @@ def new_boot() -> str:
     return state["boot_id"]
 
 
+_seed_failed: set[str] = set()   # core paths whose seed already failed in this process
+
+
 def seed_core() -> int:
     """Copy the non-hook records still in the main log (and its rolled files) into the
     core log, once. Returns how many it added.
@@ -257,7 +260,7 @@ def seed_core() -> int:
     """
     core = core_path()
     marker = core.with_name(core.name + ".seeded")
-    if marker.exists():
+    if marker.exists() or str(core) in _seed_failed:
         return 0
     path = log_path()
     try:
@@ -278,6 +281,9 @@ def seed_core() -> int:
                 core.with_name(f"{core.name}.1").unlink(missing_ok=True)
             marker.write_text("")
     except OSError as exc:
+        # Once per process: read() calls this on every core read, and an unwritable
+        # CHELA_DIR must not re-parse every rolled file under the append lock each poll.
+        _seed_failed.add(str(core))
         log.warning("events: seeding the core log failed (%s)", exc)
         return 0
     return len(add)
@@ -578,6 +584,10 @@ def read(after_seq: int | None = None, *, after_boot: str | None = None,
         out = [e for e in out if e.get("wid") == wid]
 
     next_seq = last_seq
+    if ceiling:
+        # The core log's last record can sit behind a cursor taken at the tip (hooks came
+        # after it). Never hand a cursor back BEHIND the one the caller passed in.
+        next_seq = max(next_seq, after_seq or 0)
     if limit is not None and limit >= 0 and len(out) > limit:
         out = out[:limit]
         next_seq = out[-1]["seq"] if out else (after_seq or 0)
