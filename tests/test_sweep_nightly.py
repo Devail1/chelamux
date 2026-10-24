@@ -1987,3 +1987,33 @@ def test_label_nodes_without_an_id_or_of_another_name_are_ignored(tmp_path):
     out = _source(tmp_path, t).create_issue("T", "B", labels=("sweep",))
     assert out["warnings"] == []
     assert t.sent() == {**ISSUE, "labelIds": ["new-sweep"]}
+
+
+def test_a_source_line_holding_backticks_stays_one_code_span(tmp_path):
+    m = _mut(before="    x = `a``b`", after="    x = None")
+    _, body = sweep_nightly.render_issue(_group(m), _ctx(tmp_path))
+    assert "- `a.py:3`: ``` x = `a``b` ``` → `x = None`" in body
+    assert "**Category:** `if-false` on ``` x = `a``b` ```" in body
+    assert sweep_nightly._code("plain") == "`plain`"
+
+
+def test_an_issue_filed_before_a_failing_key_write_is_still_reported(tmp_path, monkeypatch):
+    repo, chela = _repo(tmp_path), tmp_path / "chela"
+
+    def full(path, data):
+        raise OSError("disk full")
+    monkeypatch.setattr(sweep_nightly, "_write_json", full)
+    res = _run(repo, chela, Filer())
+    assert (res["status"], res["filed"]) == ("cannot_verify", ["CMX-901"])
+    assert "filed CMX-901" in res["summary"]
+
+
+def test_a_notice_that_cannot_render_is_a_plain_line_never_a_raise(tmp_path, notices,
+                                                                   monkeypatch):
+    def broken(result):
+        raise KeyError("survivors")
+    monkeypatch.setattr(sweep_nightly, "summary", broken)
+    res = _run(_repo(tmp_path), tmp_path / "chela", Filer())
+    assert res["summary"] == (f"🧹🌙 nightly sweep ({res['workflow']}): survivors — the "
+                              "notice failed: KeyError('survivors')")
+    assert [t for _, t, _ in notices] == [res["summary"]]

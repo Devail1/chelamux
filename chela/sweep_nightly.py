@@ -346,6 +346,13 @@ class WouldFile:
         return None
 
 
+def _code(text: str) -> str:
+    """``text`` as one inline code span, fenced past any backtick run inside it."""
+    ticks = "`" * (max((len(r) for r in re.findall(r"`+", text)), default=0) + 1)
+    pad = " " if text.startswith("`") or text.endswith("`") else ""
+    return f"{ticks}{pad}{text}{pad}{ticks}"
+
+
 def render_issue(group: SurvivorGroup, ctx: FileContext) -> tuple[str, str]:
     """``(title, description)`` of the ONE issue for ``group``."""
     first = group.mutation
@@ -357,15 +364,16 @@ def render_issue(group: SurvivorGroup, ctx: FileContext) -> tuple[str, str]:
         "⚖️🧹 The nightly mutation sweep found a guard on the base branch that no test can "
         "tell apart from its corruption. It merged from a STANDARD-tier PR, which gets no "
         "judge round.", "",
-        f"**Category:** `{first.kind}` on `{text}`",
+        f"**Category:** `{first.kind}` on {_code(text)}",
         f"**Swept:** `{ctx.ref}` at `{ctx.head[:12]}`",
     ]
     if ctx.merged_in:
         lines.append(f"**Merged in:** {ctx.merged_in}")
     lines += ["", "**Mutations that survived:**", ""]
-    lines += [f"- `{m.key}`: `{m.before.strip()}` → `{m.after.strip()}`"
+    lines += [f"- `{m.key}`: {_code(m.before.strip())} → {_code(m.after.strip())}"
               for m in group.survivors]
-    lines += ["", f"**Same-shape sites** (every source line that reads exactly `{text}`):", ""]
+    lines += ["", f"**Same-shape sites** (every source line that reads exactly {_code(text)}):",
+              ""]
     survived = {m.key for m in group.survivors}
     lines += [f"- `{s}`" + (" ← survived" if s in survived else "")
               for s in group.sites[:MAX_SITES]]
@@ -656,10 +664,10 @@ def _file(wf, worktree: Path, head: str, ref: str, survivors: list[sweep.Mutatio
         if ident is None:
             result["would_file"].append(site)
             continue
+        result["filed"].append(ident)      # before the write: an issue made is reported
         for k in keys:
             filed[k] = {"issue": ident, "at": result["at"], "site": site}
         _write_json(keys_path, store)       # per issue: a crash never files one twice
-        result["filed"].append(ident)
     result["warnings"].extend(getattr(filer, "warnings", ()))
     if result["filed"] or result["failed"] or result["would_file"]:
         # A night with survivors AND unmeasured lines says both: the count alone hides it.
@@ -704,7 +712,12 @@ def notify(result: dict) -> None:
     never the work."""
     from chela import inbox
 
-    result["summary"] = summary(result)
+    try:
+        result["summary"] = summary(result)
+    except Exception as e:  # noqa: BLE001 — run() never raises: a plain line instead
+        log.exception("nightly sweep: the notice could not be rendered")
+        result["summary"] = (f"🧹🌙 nightly sweep ({result.get('workflow')}): "
+                             f"{result.get('status')} — the notice failed: {e!r}")
     log.info("%s", result["summary"])
     try:
         inbox.enqueue(INBOX_KIND, result["summary"],
