@@ -180,6 +180,41 @@ def test_a_PR_the_reconcile_read_finds_merged_goes_done_on_this_tick(tmp_path):
     assert cleaned == [TID]
 
 
+def test_a_held_run_that_reconciles_own_read_finds_merged_drops_its_note(tmp_path):
+    """🔴 GUARD: a HELD row (its note already written) whose PR phase 0 could not read, and
+    reconcile's own read finds MERGED ⇒ `done`, and that done-write clears the note. Seeded
+    with the note on purpose: from a row with no note, dropping the clear reads the same
+    (DEFEAT_SHAPES 88 — a reset tested only from a row already holding the reset value)."""
+    wf = _wf(tmp_path)
+    _seed(wf, "awaiting_review", tracker_note=HELD_OPEN)
+
+    summary, killed, cleaned, asked = _tick(wf, [(None, None), ("merged", "MERGEABLE")])
+
+    run = _run()
+    assert asked == [PR_URL, PR_URL]            # phase 0 failed; reconcile read it merged
+    assert run["status"] == "done"
+    assert run["pr_state"] == "merged"
+    assert run["tracker_note"] is None          # the finished card does not say "held"
+    assert summary["reconciled_done"] == 1
+    assert [c[-1].rsplit(":", 1)[-1] for c in killed] == ["test-1"]
+    assert cleaned == [TID]
+
+
+def test_the_hold_records_a_PR_found_only_in_the_transcript(tmp_path):
+    """🔴 GUARD: a PR known only from the transcript is written onto the held row, so
+    phase 0 tracks it — and finishes the row — on later ticks."""
+    wf = _wf(tmp_path)
+    _seed(wf, "awaiting_review", pr_url=None, pr_state=None)
+
+    _tick(wf, [("open", "MERGEABLE")], read_pr_url=PR_URL)
+
+    run = _run()
+    assert run["status"] == "awaiting_review"
+    assert run["tracker_note"] == HELD_OPEN
+    assert run["pr_url"] == PR_URL
+    assert run["pr_state"] == "open"
+
+
 def test_a_review_row_with_no_PR_at_all_still_goes_done(tmp_path):
     """⭐ NEGATIVE CONTROL: no PR anywhere ⇒ nothing to hold for — the tracker close stays
     done-evidence, as before CMX-308, and no PR read is attempted."""
