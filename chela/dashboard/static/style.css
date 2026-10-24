@@ -3468,8 +3468,10 @@ body.sidebar-resizing iframe { pointer-events: none; }
     border: 0; background: none; color: var(--text); line-height: 1.3;
 }
 .launch-menu button.popover-item:hover, .popover.ui-floating > button.popover-item:hover { background: var(--accent); color: var(--on-accent); }
-.launch-row .lr-main { display: flex; align-items: center; gap: 9px; flex: 1; min-width: 0; padding: 0; }
-.launch-row .lr-main:hover { background: none; color: inherit; }
+/* CMX-327: `.launch-menu .launch-row button.lr-main` outranks `.launch-menu button.popover-item` above
+   (display: block put the icon and the name on two lines) and its hover fill. */
+.launch-menu .launch-row button.lr-main { display: flex; align-items: center; gap: 9px; flex: 1; min-width: 0; padding: 0; }
+.launch-menu .launch-row button.lr-main:hover { background: none; color: inherit; }
 .launch-row .lr-icon svg, .launch-row .lr-actions svg { display: block; }
 
 /* --- Agent detail --- */
