@@ -52,8 +52,9 @@ function Unarchive({ itemKey, resume, actions }: { itemKey: string; resume: bool
   );
 }
 
-// CMX-278: a hover (style.css) or a long press shows the whole row: the title wraps instead
-// of truncating. The long press's own click does not also open the session.
+// CMX-278: a long press shows the whole row: the title wraps instead of truncating (a phone
+// has no hover or tooltip; on a pointer the row's tooltip does it, CMX-331). The long
+// press's own click does not also open the session.
 export const LONG_PRESS_MS = 500;
 function useLongPress() {
   const [full, setFull] = useState(false);
@@ -106,8 +107,9 @@ function Row({ it, s, actions, archived = false, altNum, children }: RowProps) {
     <div className={cls} data-agent={name} data-run={v.runId ?? undefined} data-item={it.key} title={v.title}
       onClick={() => { if (!press.consumed()) actions.selectAgent(name); }} onContextMenu={menu.onContext} {...press.handlers}>
       <span className={`term-status-dot ${v.dotCls}`} role="img" aria-label={v.dotLabel} title={v.dotLabel} />
-      <span className="agent-row-name" data-key={v.windowKey || undefined}
-        title={v.windowKey ? `window: ${v.windowKey}` : undefined}>{v.label}</span>
+      {/* no title of its own (CMX-331): hovering the name shows the row's tooltip, which opens
+          with the full title, then the window key */}
+      <span className="agent-row-name" data-key={v.windowKey || undefined}>{v.label}</span>
       <span className="ar-meta">
         {v.meta.map(m => <MetaChip key={m.kind} m={m} />)}
         {/* CMX-417: the `@N` that chela peek and the inbox use, shown on hover */}

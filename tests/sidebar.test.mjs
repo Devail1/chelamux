@@ -184,11 +184,13 @@ test('CMX-62: a manual name beats Claude\'s title, the title beats the window na
     assert.equal(nameFor('shell-3'), 'porting the wall');
     assert.equal(nameFor('shell-5'), 'Fix the reconcile loop', 'ai_title must outrank the live session name');
     assert.equal(nameFor('shell-1'), 'shell-1', 'no title ⇒ the window name (never rewritten to the repo)');
-    // The short window name stays reachable as the secondary label (hover) when the
-    // title leads — and is absent when the name already IS the label.
+    // The short window name stays reachable as the secondary label when the title
+    // leads — and is absent when the name already IS the label. CMX-331: the name has
+    // no title of its own; the row's tooltip carries the full title, then the key.
     const span = rowFor('billing-fix').querySelector('.agent-row-name');
     assert.equal(span.dataset.key, 'billing-fix');
-    assert.equal(span.title, 'window: billing-fix');
+    assert.equal(span.hasAttribute('title'), false);
+    assert.match(rowFor('billing-fix').title, /^Open-MMO game on Windows PC \(billing-fix\) · @2\n/);
     assert.equal(rowFor('shell-1').querySelector('.agent-row-name').dataset.key, undefined);
     assert.equal(rowFor('reviewer').querySelector('.agent-row-name').dataset.key, undefined);
 });

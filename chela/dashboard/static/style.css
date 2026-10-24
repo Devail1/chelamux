@@ -2749,8 +2749,8 @@ body.sidebar-resizing iframe { pointer-events: none; }
 .agent-row.rich.active::before { height: 16px; }
 /* longhands, so the shrink weights read the same in every engine (and in jsdom's cascade) */
 .agent-row.rich .agent-row-name { flex-grow: 1; flex-shrink: 1; flex-basis: auto; min-width: 0; font-size: 12.5px; }
-/* CMX-278: a hover or a long press (.show-full) shows the whole title, wrapped. */
-.agent-row.rich:hover .agent-row-name,
+/* CMX-278 + CMX-331: a long press (.show-full) shows the whole title, wrapped. A hover does
+   not: it would grow the row and shift every row below, so the row's tooltip carries it. */
 .agent-row.rich.show-full .agent-row-name { white-space: normal; overflow-wrap: anywhere; }
 .agent-row.rich .ar-meta {
     flex-grow: 0; flex-shrink: 1000; flex-basis: auto; min-width: 0; overflow: hidden; display: inline-flex; align-items: center; gap: 6px;

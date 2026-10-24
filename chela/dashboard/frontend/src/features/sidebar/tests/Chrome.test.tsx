@@ -1,7 +1,7 @@
 // CMX-278: the sidebar's nav rows, the width handle, the long press that shows a whole row,
 // (their slots in the page are the shell's: features/shell's tests).
 import { act, cleanup, fireEvent, render } from '@testing-library/react';
-import { afterEach, expect, test, vi } from 'vitest';
+import { afterAll, afterEach, beforeAll, describe, expect, test, vi } from 'vitest';
 import { LONG_PRESS_MS, Nav, ResizeHandle, Sidebar } from '../index.ts';
 import { SIDEBAR_WIDTH, clampWidth, type NavState } from '../model.ts';
 import { actions, state, win } from './fixtures.ts';
@@ -136,8 +136,58 @@ test('a long press shows the whole row and does not also open the session; a tap
   }
 });
 
-test('the hover and long-press rule wraps the title instead of truncating it (style.css)', async () => {
+test('the sidebar grid takes its width from --sidebar-w (style.css)', async () => {
   const sheet = (await import('../../../../../static/style.css?raw')).default;
-  expect(sheet).toMatch(/\.agent-row\.rich:hover \.agent-row-name,\s*\.agent-row\.rich\.show-full \.agent-row-name \{ white-space: normal;/);
   expect(sheet).toMatch(/grid-template-columns: var\(--sidebar-w, 288px\) 1fr;/);
+});
+
+// CMX-331 (Liav, 10-24): a hover wrapped the whole title onto extra lines, so the row grew and
+// every row below it jumped. jsdom never matches `:hover`, so the sheet is loaded with each
+// `:hover` rewritten to a `.sim-hover` class: the computed style of a row carrying that class
+// is the hovered row's. A long press (.show-full) still wraps, since a phone has no hover.
+describe('a long title under style.css', () => {
+  let style: HTMLStyleElement;
+  beforeAll(async () => {
+    const sheet = (await import('../../../../../static/style.css?raw')).default;
+    style = document.createElement('style');
+    style.textContent = sheet.replaceAll(':hover', '.sim-hover');
+    document.head.append(style);
+  });
+  afterAll(() => style.remove());
+
+  const LONG = 'a-very-long-session-title-that-never-fits-the-sidebar-on-one-line';
+  const rowAndName = () => {
+    const a = win(LONG);
+    const { container } = render(<Sidebar state={state([a])} actions={actions()} />);
+    const row = container.querySelector('.agent-row') as HTMLElement;
+    return { a, row, name: row.querySelector('.agent-row-name') as HTMLElement };
+  };
+
+  test('a hovered row stays one line, with an ellipsis', () => {
+    const { row, name } = rowAndName();
+    expect(getComputedStyle(name).whiteSpace).toBe('nowrap');
+    row.classList.add('sim-hover');
+    const cs = getComputedStyle(name);
+    expect([cs.whiteSpace, cs.textOverflow, cs.overflow]).toEqual(['nowrap', 'ellipsis', 'hidden']);
+  });
+
+  test('the full title is the tooltip over the row and its name', () => {
+    const { a, row, name } = rowAndName();
+    expect(row.title.split('\n')[0]).toBe(`${LONG} · ${a.window_id}`);
+    // the name has no title of its own, so hovering it shows the row's
+    expect(name.hasAttribute('title')).toBe(false);
+  });
+
+  test('a long press (.show-full) still wraps the title', () => {
+    vi.useFakeTimers();
+    try {
+      const { row, name } = rowAndName();
+      fireEvent.touchStart(row);
+      act(() => { vi.advanceTimersByTime(LONG_PRESS_MS); });
+      expect(row.classList.contains('show-full')).toBe(true);
+      expect(getComputedStyle(name).whiteSpace).toBe('normal');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
 });
