@@ -321,7 +321,10 @@ body {
     flex: 1 1 auto; min-width: 0; user-select: none;
     display: flex; flex-direction: row; align-items: baseline; gap: 8px; overflow: hidden;
 }
-.gs-grip { cursor: move; }
+/* CMX-329: the move cursor only where Gridstack can move a tile (grid.ts toggles
+   `.wall-movable` with enableMove); in Auto and Focus the header keeps the
+   default cursor, or the Focus strip's pointer (below). */
+.wall-movable .gs-grip { cursor: move; }
 .pane-title { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .gs-label .pane-subtitle, .gs-grip .pane-subtitle { flex: 1 1 0; min-width: 0; }
 /* CMX-241: a shell's cwd beside its `Shell` title reads `Shell · ~`. */
@@ -602,7 +605,8 @@ body {
 /* Pane title: rename target. Subtle dotted underline on hover hints it's
    editable; the inline edit input matches the dark header. */
 .pane-title { cursor: text; }
-.gs-grip .pane-title { cursor: move; }
+.gs-grip .pane-title { cursor: default; }
+.wall-movable .gs-grip .pane-title { cursor: move; }
 .pane-title:hover { text-decoration: underline dotted; text-underline-offset: 2px; }
 .pane-title-edit {
     font: inherit; color: var(--text); background: var(--bg);
