@@ -2371,6 +2371,8 @@ def stuck_events(runs: list[dict], store: dict, probes: dict[str, dict], now: fl
         if not task or run.get("status") not in STUCK_RUN_STATES:
             continue
         entry = dict(prev.get(task) or {})
+        # Only the manual park is read here: a suite-slot wait (the other kind of park) is
+        # the probe's `slot_wait`, which the quiet check below already excuses.
         parked = park.manual(run)
         why = parked and park.overdue(parked, now, runs_by_id, config.park_max_s())
         if parked and why:

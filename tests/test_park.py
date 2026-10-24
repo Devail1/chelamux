@@ -13,6 +13,7 @@ from pathlib import Path
 import pytest
 
 from chela import config, dispatcher, inbox, main, park, suite_guard
+from chela.sources import Task
 
 NOW = 1_800_000_000.0
 NOW_DT = datetime.fromtimestamp(NOW, timezone.utc)
@@ -72,6 +73,9 @@ def test_a_park_that_outlives_the_max_is_exactly_one_notice():
     assert "chela unpark T1 or re-park it" in event["summary"]
     assert event["payload"]["parked_at"] == run["parked_at"]
     assert event["payload"]["task_id"] == "T1"
+    assert event["payload"]["parked_reason"] == "waiting for the flaky fix"
+    assert event["payload"]["parked_until"] is None
+    assert event["payload"]["overdue"] == "it is past the 6h park max"
 
 
 def test_after_its_one_notice_an_outlived_park_shields_nothing():
@@ -126,6 +130,15 @@ def test_a_park_until_a_run_ends_is_reported_once_that_run_is_done():
     events = inbox.stuck_events([parked, {**other, "status": "done"}], store, _idle(), NOW)
     assert _kinds(events) == ["run_park_overdue"]
     assert "its --until run T2 is done" in events[0]["summary"]
+
+
+def test_a_park_restored_after_an_unpark_is_reported_again():
+    """The once-per-park memory is dropped the tick a run is seen unparked, so the same
+    park coming back (same `parked_at`) is not silently trusted forever."""
+    store, run = inbox._empty(), _parked(at=NOW - 30000)
+    assert _kinds(inbox.stuck_events([run], store, _idle(), NOW)) == ["run_park_overdue"]
+    assert inbox.stuck_events([_run()], store, _idle(), NOW + 60) == []
+    assert _kinds(inbox.stuck_events([run], store, _idle(), NOW + 120)) == ["run_park_overdue"]
 
 
 def test_unparking_restarts_the_stuck_clock():
@@ -545,6 +558,11 @@ def test_park_and_unpark_an_unknown_run(db):
     assert "no run matches 'nope'" in dispatcher.unpark_run("nope")["error"]
 
 
+def _logged() -> list[dict]:
+    return [json.loads(line) for line in
+            Path(os.environ["CHELA_EVENTS_FILE"]).read_text().splitlines()]
+
+
 def test_unpark_clears_the_park(db):
     db()
     dispatcher.park_run("CMX-5", "r", until="run:X", by="me")
@@ -552,7 +570,53 @@ def test_unpark_clears_the_park(db):
     row = _row()
     assert [row[c] for c in ("parked_at", "parked_reason", "parked_until", "parked_by")] == [
         None] * 4
+    assert park.manual(row) is None
+    assert [(e["type"], e["payload"]) for e in _logged()][-1] == (
+        "run_unparked", {"task_id": "CMX-5", "by": "me"})
     assert dispatcher.unpark_run("CMX-5")["error"] == "CMX-5 is not parked"
+    assert [e["type"] for e in _logged()] == ["run_parked", "run_unparked"]
+
+
+def test_re_parking_a_parked_run_replaces_the_park_and_restarts_its_clock(db):
+    db(parked_at="2026-10-22T10:00:00+00:00", parked_reason="old", parked_until="run:X",
+       parked_by="someone")
+    got = dispatcher.park_run("CMX-5", "new reason", by="orchestrator")
+    assert got["ok"]
+    row = _row()
+    assert (row["parked_reason"], row["parked_until"], row["parked_by"]) == (
+        "new reason", None, "orchestrator")
+    assert row["parked_at"] == got["at"] != "2026-10-22T10:00:00+00:00"
+
+
+def test_a_park_with_no_parker_stores_null_not_an_empty_name(db):
+    db()
+    assert dispatcher.park_run("CMX-5", "r")["ok"]
+    assert _row()["parked_by"] is None
+
+
+def test_a_claim_clears_a_park_left_on_the_row(tmp_path):
+    """A failed run re-dispatched under the SAME task_id goes through `_spawn`'s ON CONFLICT
+    upsert. A park left on that row must not ride into the new attempt: it would hide the
+    fresh agent from the stuck detector from its first tick. Asserted on the invariant —
+    the new claim is not parked — and on each column, so dropping any one goes red."""
+    from tests.test_taskmodal_data import _conn, _repo, _spawn, _wf
+    repo, root, conn = _repo(tmp_path), tmp_path / "worktrees", _conn()
+    task = Task(id="park-task", title="Park me", file="TODO.md", line_number=1, raw="- [ ] x")
+    assert _spawn(_wf(repo, root), task, conn, attempt=1) is True
+    conn.execute("UPDATE runs SET status='running', parked_at=?, parked_reason='held', "
+                 "parked_until='run:CMX-9', parked_by='orchestrator' WHERE task_id='park-task'",
+                 (_iso(NOW),))
+    assert park.manual(dict(conn.execute(
+        "SELECT * FROM runs WHERE task_id='park-task'").fetchone()))     # the park is real
+    conn.execute("UPDATE runs SET status='failed' WHERE task_id='park-task'")
+    conn.commit()
+
+    assert _spawn(_wf(repo, root), task, conn, attempt=2) is True
+    row = dict(conn.execute("SELECT * FROM runs WHERE task_id='park-task'").fetchone())
+    assert row["attempt"] == 2 and row["status"] in park.ACTIVE     # a live claim again
+    assert park.manual(row) is None
+    for col in ("parked_at", "parked_reason", "parked_until", "parked_by"):
+        assert row[col] is None, col
 
 
 # --- the CLI ------------------------------------------------------------------------
