@@ -53,6 +53,10 @@ export interface AgentRow {
     needs_human?: boolean;
     done?: boolean;
     claude_running?: boolean;
+    /** CMX-62: renamed by a human. */
+    manual_name?: boolean;
+    /** CMX-241: the pane's cwd, home as `~`; sent only while no Claude runs. */
+    shell_cwd?: string | null;
     window_type?: string;
     session_moved?: boolean;
     /** The Claude session this window runs now (CMX-278). */

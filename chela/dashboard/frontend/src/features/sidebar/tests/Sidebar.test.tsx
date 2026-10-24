@@ -147,7 +147,8 @@ test('the tooltip: label, window name and id, the state, the extras and how long
   const name = row.querySelector('.agent-row-name');
   expect(name?.textContent).toBe('Fix it');
   expect(name?.getAttribute('data-key')).toBe('key');
-  expect(name?.getAttribute('title')).toBe('window: key');
+  // CMX-331: no title of its own, so hovering the name shows the row's (full title first)
+  expect(name?.hasAttribute('title')).toBe(false);
   expect(rowOf(el, 'plain').title).toBe(`plain · ${b.window_id}\nidle (open on the wall)`);
   expect(rowOf(el, 'plain').querySelector('.agent-row-name')?.hasAttribute('data-key')).toBe(false);
   expect(rowOf(el, 'plain').classList.contains('on-wall')).toBe(true);
