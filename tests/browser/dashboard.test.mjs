@@ -757,9 +757,13 @@ describe('CMX-327 desktop 1440×900: a launcher row is one line, icon, name, the
     test('a hovered row keeps the row tint: its button never takes the menu item\'s accent fill', async () => {
         ready();
         if (!await page.locator('.popover.launch-menu').isVisible()) await page.locator('.sidebar-new-btn').first().click();
+        await page.waitForSelector('.popover.launch-menu .launch-row', { state: 'visible', timeout: 5000 });
         const main = page.locator('.popover.launch-menu .launch-row .lr-main').first();
         await main.hover();
-        const bg = await main.evaluate((el) => getComputedStyle(el).backgroundColor);
+        const { bg, color, rowColor } = await main.evaluate((el) => ({
+            bg: getComputedStyle(el).backgroundColor, color: getComputedStyle(el).color,
+            rowColor: getComputedStyle(el.parentElement).color }));
         assert.equal(bg, 'rgba(0, 0, 0, 0)', `the hovered launcher button paints ${bg}`);
+        assert.equal(color, rowColor, `the hovered launcher button's text turns ${color}, not the row's ${rowColor}`);
     });
 });

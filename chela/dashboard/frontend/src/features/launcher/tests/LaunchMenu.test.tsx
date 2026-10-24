@@ -302,6 +302,7 @@ describe('under style.css', () => {
 
   test('a launcher row is one line: icon, name, then actions', async () => {
     await openFrom('.sidebar-new-btn');
+    expect(menu()?.querySelectorAll('.launch-row')).toHaveLength(2);
     for (const row of menu()?.querySelectorAll('.launch-row') ?? []) {
       expect(getComputedStyle(row).display).toBe('flex');
       const main = row.querySelector('.lr-main') as HTMLElement;
@@ -311,6 +312,5 @@ describe('under style.css', () => {
       expect([...main.children].map((c) => c.className)).toEqual(['lr-icon', 'lr-label']);
       expect(getComputedStyle(main.querySelector('.lr-label') as HTMLElement).textOverflow).toBe('ellipsis');
     }
-    expect(menu()?.querySelectorAll('.launch-row')).toHaveLength(2);
   });
 });
