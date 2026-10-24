@@ -2825,6 +2825,9 @@ body.sidebar-resizing iframe { pointer-events: none; }
 /* CMX-76: the orchestrator's row badge, a crown since CMX-121 (its tooltip and accessible
    name say "Orchestrator"; no hue cue: the operator is red-weak). */
 .agent-row.rich .ar-orch { color: var(--text); }
+/* CMX-330: a plain shell's cwd (`~/projects/x`) gives way before the title, then ellipsizes. */
+.agent-row.rich .ar-meta > .ar-cwd { flex-shrink: 1; min-width: 0; overflow: hidden; }
+.agent-row.rich .ar-cwd .ar-meta-text { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 /* Show empty groups: a folder header with no matching session keeps its `+`. */
 .side-group.empty .group-rows { display: none; }
 .side-group.flat { margin-top: 4px; }
