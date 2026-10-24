@@ -385,6 +385,10 @@ export type MenuItem =
 
 type Entry = Exclude<MenuItem, 'separator'>;
 
+// An item's icon, sized once here for every menu: the legacy overflow menu's 14px, inside the
+// 16px `.ov-ic` slot. Lucide's own default is 24px, which overflows the slot (CMX-309).
+const MENU_ICON_SIZE = 14;
+
 // A page change swaps the items under the focused one: focus the new page's first item, so
 // the keyboard keeps its place in the menu.
 function refocus(content: Element | null) {
@@ -410,7 +414,7 @@ function MenuEntry({ it }: { it: Entry }) {
       {it.back && <span className="ov-chev back"><ChevronRight size={12} aria-hidden /></span>}
       {it.icon && (
         <span className="ov-ic">
-          <it.icon aria-hidden />
+          <it.icon aria-hidden size={MENU_ICON_SIZE} />
         </span>
       )}
       <span className="ov-label">{it.label}</span>

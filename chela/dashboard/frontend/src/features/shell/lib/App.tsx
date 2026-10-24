@@ -32,7 +32,7 @@ function SidebarHead() {
           floats over it, so open and close share one spot. The controller keeps aria-expanded. */}
       <IconButton label="Toggle sidebar" className="icon-btn sidebar-toggle" id="btn-menu"
         aria-expanded={!document.body.classList.contains('sidebar-collapsed')} onClick={() => toggleSidebar()}>
-        <icons.menu aria-hidden="true" />
+        <icons.menu aria-hidden="true" size={20} />
       </IconButton>
       <div className="brand"><img src={staticUrl('img/claw-mark.svg')} className="brand-mark" alt="" /><span>chela</span></div>
       <div className="sidebar-head-actions">
@@ -115,7 +115,7 @@ export function App() {
           fixed child off-screen (CMX-377). A view with a pane open hides it: the pane's title
           bar carries the opener (CMX-313). New session is the drawer's own button (no "+"). */}
       <IconButton label="Open menu" className="mobile-menu-fab" id="btn-menu-mobile" aria-expanded={false} onClick={() => toggleSidebar()}>
-        <icons.menu aria-hidden="true" />
+        <icons.menu aria-hidden="true" size={20} />
       </IconButton>
       {/* Always on top, on every breakpoint, OUTSIDE the off-canvas sidebar: a live share or a
           broken status feed must never hide behind a closed drawer (CMX-377). */}
