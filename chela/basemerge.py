@@ -8,6 +8,12 @@ made every other port PR conflict on it. Nobody resolves that by hand: the bundl
 from both sides, rebuilt from the merged ``src/``, checked by the same stale-asset check CI
 runs, and committed as the merge. Any other conflicted path, or a build that fails, is today's
 send-back, and nothing is pushed.
+
+🏗️ CMX-323: the scratch worktree is a bare checkout — no ``.venv``, no ``node_modules`` — so
+it is provisioned the way the judge's is (:func:`chela.judge.provision_suite_env`) before the
+targeted tests run, outside the suite slot. A run that still could not START (provisioning
+failed, the runner never spawned, nothing collected) is :data:`INFRA`: nothing about the code
+was measured, so it is never sent back as red.
 """
 from __future__ import annotations
 
@@ -33,6 +39,13 @@ RED = "red"             # clean, but the targeted tests failed: ``files`` are th
 CURRENT = "current"     # the branch already contains origin/<base>: nothing to merge
 REBUILT = "rebuilt"     # conflicted ONLY in the bundle: rebuilt, checked, tests green, pushed
 BUILD_FAILED = "build_failed"   # conflicted only in the bundle, but its rebuild failed
+INFRA = "infra"         # clean, but the targeted tests could not START: nothing was measured
+
+# pytest's exit codes for a run that never reached a test: 2 interrupted (also uv's own
+# "Failed to spawn: `pytest`"), 3 internal error, 4 usage error, 5 no tests collected. Only
+# with no test run and no error counted: a collection error the merge caused is exit 2 too,
+# and that one IS red.
+NO_START_CODES = frozenset({2, 3, 4, 5})
 
 BUNDLE_DIR = "chela/dashboard/static/app"
 # The rebuild, in the scratch worktree: install exactly the lockfile, build, then CI's own
@@ -108,11 +121,17 @@ def targeted_tests(wt: Path, touched: list[str]) -> list[str]:
     return sorted(tests)
 
 
+def never_started(res: judge.SuiteResult) -> bool:
+    """The suite process ran but no test did: a no-start exit code, no test run, no error."""
+    return res.exit_code in NO_START_CODES and res.ran == 0 and res.errors == 0
+
+
 def attempt(repo: str | Path, branch: str, base: str, test_cmd: str) -> dict:
     """Merge a fresh ``origin/<base>`` into the pushed ``origin/<branch>``; clean ⇒ run the
     targeted tests (none, or no ``test_cmd``: the PR's CI gates it) and push only when green.
     Conflicted ONLY under :data:`BUNDLE_DIR` ⇒ rebuilt (:func:`_rebuild`) and then the same.
-    ``{outcome, base_sha, head_sha, merge_sha, files, detail}``; RuntimeError = unmeasured."""
+    ``{outcome, base_sha, head_sha, merge_sha, files, detail}``; RuntimeError = unmeasured;
+    :data:`INFRA` = merged cleanly but the tests could not start (nothing pushed)."""
     _git(repo, "fetch", "--quiet", "origin", f"+refs/heads/{base}:refs/remotes/origin/{base}",
          f"+refs/heads/{branch}:refs/remotes/origin/{branch}", timeout=FETCH_TIMEOUT)
     base_sha = _git(repo, "rev-parse", f"refs/remotes/origin/{base}")
@@ -147,9 +166,18 @@ def attempt(repo: str | Path, branch: str, base: str, test_cmd: str) -> dict:
         if tests and test_cmd:
             cmd = (judge_select.extend(test_cmd, tests) if judge_select.extendable(test_cmd)
                    else test_cmd)
+            infra = {**out, "outcome": INFRA, "merge_sha": merge_sha, "files": tests}
+            problem = judge.provision_suite_env(wt)
+            if problem:
+                return {**infra, "detail": f"the scratch worktree could not be provisioned: "
+                                           f"{problem}"}
             res = judge.run_suite(cmd, wt, timeout=TEST_TIMEOUT)
             if not res.ok:      # never ran: nothing about the code, so not the agent's red
-                raise RuntimeError(f"the targeted tests could not run: {res.detail}")
+                return {**infra, "detail": f"the targeted tests could not run: {res.detail}"}
+            if never_started(res):
+                return {**infra, "detail": f"the targeted tests never started (exit "
+                                           f"{res.exit_code}, no test ran):\n"
+                                           f"{res.tail[-1500:]}"}
             if res.exit_code != 0 or res.timed_out:
                 return {**out, "outcome": RED, "merge_sha": merge_sha, "files": tests,
                         "detail": (res.tail or res.detail)[-1500:]}
