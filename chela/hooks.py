@@ -263,6 +263,21 @@ MAX_DEPTH = 8
 MAX_PAYLOAD = 32 * 1024     # the encoded payload; past this it degrades to a stub
 MAX_SUMMARY = 160
 
+# CMX-328: everything else is kept as a PREVIEW. At up to 2000 chars per string, a
+# hook event averaged 2-3 KB and the 8 MB log rolled every ~7 h, taking every decision
+# in it along. Nothing reads a tool's body back out of the log, so a field is cut to
+# PREVIEW_CHARS and its original size goes in ``clipped_bytes``. A dict field (the
+# ``tool_input`` of a Write: ``file_path`` + ``content``) keeps its keys, each value a
+# preview, until BULK_BUDGET encoded bytes; a nested container becomes a JSON preview.
+# A top-level string (a ``prompt``, a ``last_assistant_message``, a denial ``reason``
+# that the inbox cuts to 200 itself after collapsing whitespace) keeps TEXT_CHARS.
+PREVIEW_CHARS = 200
+TEXT_CHARS = 500
+BULK_BUDGET = 1024
+# The tools that BLOCK on a human (chela.telegram.hookgate re-exports this): their
+# ``tool_input`` IS the question, and the gate reads every option back out of the log.
+INTERACTIVE_TOOLS: tuple[str, ...] = ("AskUserQuestion", "ExitPlanMode")
+
 
 def event_type(hook_event_name: str) -> str:
     """``PreToolUse`` → ``hook.pre_tool_use`` — the log's ``type`` for a hook event."""
@@ -952,9 +967,72 @@ def _clip(value, depth: int = 0):
     return str(value)[:MAX_STR]
 
 
+def _cut(text: str, limit: int = PREVIEW_CHARS) -> str:
+    if len(text) <= limit:
+        return text
+    return text[:limit] + f"… [+{len(text) - limit} chars]"
+
+
+def _encoded_size(value) -> int:
+    try:
+        return len(json.dumps(value, ensure_ascii=False, default=str).encode())
+    except (TypeError, ValueError):
+        return len(str(value).encode())
+
+
+def _preview_leaf(value):
+    """One value, at most ~PREVIEW_CHARS: a container is flattened to its JSON preview."""
+    if isinstance(value, str):
+        return _cut(value)
+    if isinstance(value, (int, float, bool)) or value is None:
+        return value
+    try:
+        text = json.dumps(value, ensure_ascii=False, default=str)
+    except (TypeError, ValueError):
+        text = str(value)
+    return _cut(text)
+
+
+def _preview(value):
+    """A top-level field, bounded: a dict keeps its keys (each a leaf preview) up to
+    :data:`BULK_BUDGET`, a string keeps :data:`TEXT_CHARS`, anything else is one leaf."""
+    if isinstance(value, str):
+        return _cut(value, TEXT_CHARS)
+    if not isinstance(value, dict):
+        return _preview_leaf(value)
+    out: dict = {}
+    used = 0
+    items = list(value.items())
+    for i, (k, v) in enumerate(items):
+        leaf = _preview_leaf(v)
+        used += _encoded_size({str(k): leaf})
+        if used > BULK_BUDGET and out:
+            out["…"] = f"+{len(items) - i} keys"
+            break
+        out[str(k)] = leaf
+    return out
+
+
 def clip_payload(body: dict) -> dict:
-    """The hook body, bounded. Degrades to a stub rather than writing a megabyte line."""
-    clipped = _clip(body)
+    """The hook body, bounded. Degrades to a stub rather than writing a megabyte line.
+
+    Every field but an interactive tool's ``tool_input`` is a preview (CMX-328): the tool
+    name, the path, ~200 chars of each body value, and in ``clipped_bytes`` the size of
+    each field that was cut.
+    """
+    clipped: dict = {}
+    sizes: dict = {}
+    interactive = body.get("tool_name") in INTERACTIVE_TOOLS
+    for k, v in list(body.items())[:MAX_ITEMS]:
+        k = str(k)
+        if k == "tool_input" and interactive:
+            clipped[k] = _clip(v)              # the gate reads every option back
+            continue
+        clipped[k] = _preview(v)
+        if clipped[k] != v:
+            sizes[k] = _encoded_size(v)
+    if sizes:
+        clipped["clipped_bytes"] = sizes
     try:
         size = len(json.dumps(clipped, ensure_ascii=False, default=str))
     except (TypeError, ValueError):

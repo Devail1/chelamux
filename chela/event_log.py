@@ -42,6 +42,15 @@ tmux, no other file — a writer never blocks on anything but the three small wr
 serves the current file (through a bounded in-memory ring); the rolled files are the
 audit trail. A cursor pointing behind what is still served is reported as a gap.
 
+**The core log (CMX-328).** ``hook.*`` events are an agent's telemetry — hundreds an
+hour — and chela's own events (a merge, a send-back, a judge verdict, a stuck notice) are
+a few dozen a day. In one file the firehose rolled the decisions out of the served file
+within hours, and the Decisions dialog read "No decisions logged yet" after a day of
+them. So every non-``hook.*`` record is ALSO appended, byte-identical (same ``seq``, same
+``boot_id``), to a small sibling (``events-core.jsonl``, plus one rolled ``.1``) under the
+same lock, and a :func:`read` whose ``types`` are all non-hook is served from it: its
+retention no longer depends on how busy the agents are.
+
 **A corrupt line is skipped, never fatal.** A crash mid-append leaves a torn final line.
 Reads drop unparseable lines and count them (``corrupt_lines``) rather than raising: a
 log that refuses to be read is worse than a log with a hole in it.
@@ -70,6 +79,14 @@ RING_SIZE = int(os.environ.get("CHELA_EVENTS_RING", "2000"))
 MAX_BYTES = int(os.environ.get("CHELA_EVENTS_MAX_BYTES", str(8 * 1024 * 1024)))
 KEEP_ROTATIONS = int(os.environ.get("CHELA_EVENTS_KEEP", "3"))
 
+# The core log (non-hook records only): its own size bound and ONE rolled generation, so
+# it always holds at least CORE_MAX_BYTES of chela's own events — weeks, at ~1 KB each.
+CORE_MAX_BYTES = 2 * 1024 * 1024
+CORE_KEEP = 1
+
+# Agent telemetry: kept out of the core log. Matches chela.hooks.TYPE_PREFIX.
+HOOK_PREFIX = "hook."
+
 # How often --follow re-stats the file.
 FOLLOW_INTERVAL = 0.5
 
@@ -81,6 +98,17 @@ def log_path() -> Path:
     # developer's real ~/.chela/events.jsonl — the redirect could not reach a name that
     # was already copied. Resolve it late and the sandbox always wins.
     return Path(os.environ.get("CHELA_EVENTS_FILE") or (config.CHELA_DIR / "events.jsonl"))
+
+
+def core_path() -> Path:
+    """The core log: a sibling of :func:`log_path` (``events.jsonl`` → ``events-core.jsonl``)."""
+    p = log_path()
+    return p.with_name(f"{p.stem}-core{p.suffix}")
+
+
+def is_core(type: str | None) -> bool:
+    """Does a record of this type go to the core log? Everything that is not a hook's."""
+    return not str(type or "").startswith(HOOK_PREFIX)
 
 
 def _state_path() -> Path:
@@ -185,6 +213,11 @@ def rotate() -> dict:
                 # Never clobber an earlier retirement — a second wipe gets its own file.
                 backup = path.with_name(f"{path.name}.bak.{int(time.time())}")
             path.rename(backup)
+        core = core_path()
+        for src in (core.with_name(f"{core.name}.1"), core):
+            # The core log holds the same known-wrong rows, so it is retired with it.
+            if src.exists():
+                src.rename(src.with_name(f"{src.name}.bak.{int(time.time() * 1000)}"))
         state = _read_state()
         state["boot_id"] = _new_boot_id()
         _write_state(state)
@@ -208,21 +241,82 @@ def new_boot() -> str:
         state = _read_state()
         state["boot_id"] = _new_boot_id()
         _write_state(state)
+    seed_core()
     return state["boot_id"]
+
+
+def seed_core() -> int:
+    """Copy the non-hook records still in the main log (and its rolled files) into the
+    core log, once. Returns how many it added.
+
+    The core log starts empty on the first run with it, while the decisions of the last
+    day are still sitting in ``events.jsonl.{1..N}``; without this the dialog would read
+    empty until new ones arrived. A ``.seeded`` marker makes it a one-time step (after
+    it, a call is one ``stat``); records the core log already holds (same ``seq``) are
+    not copied twice.
+    """
+    core = core_path()
+    marker = core.with_name(core.name + ".seeded")
+    if marker.exists():
+        return 0
+    path = log_path()
+    try:
+        with _append_lock():
+            have = _parse(core.with_name(f"{core.name}.1"))[0] + _parse(core)[0]
+            seqs = {e["seq"] for e in have}
+            old: list[dict] = []
+            for i in range(KEEP_ROTATIONS, 0, -1):
+                old += _parse(path.with_name(f"{path.name}.{i}"))[0]
+            old += _parse(path)[0]
+            add = [e for e in old if is_core(e.get("type")) and e["seq"] not in seqs]
+            if add:
+                merged = sorted(have + add, key=lambda e: e["seq"])
+                core.parent.mkdir(parents=True, exist_ok=True)
+                tmp = core.with_name(core.name + ".tmp")
+                tmp.write_text("".join(_encode(e) for e in merged), encoding="utf-8")
+                tmp.replace(core)
+                core.with_name(f"{core.name}.1").unlink(missing_ok=True)
+            marker.write_text("")
+    except OSError as exc:
+        log.warning("events: seeding the core log failed (%s)", exc)
+        return 0
+    return len(add)
 
 
 # --- append ---------------------------------------------------------------------
 
-def _rotate_locked(path: Path) -> None:
+def _rotate_locked(path: Path, keep: int | None = None) -> None:
     """Roll events.jsonl → .1 → .2 … Called under the append lock, so no writer races it."""
-    oldest = path.with_name(f"{path.name}.{KEEP_ROTATIONS}")
+    keep = KEEP_ROTATIONS if keep is None else keep
+    oldest = path.with_name(f"{path.name}.{keep}")
     oldest.unlink(missing_ok=True)
-    for i in range(KEEP_ROTATIONS - 1, 0, -1):
+    for i in range(keep - 1, 0, -1):
         src = path.with_name(f"{path.name}.{i}")
         if src.exists():
             src.rename(path.with_name(f"{path.name}.{i + 1}"))
     path.rename(path.with_name(f"{path.name}.1"))
-    log.info("events: rotated %s (>= %d bytes)", path.name, MAX_BYTES)
+    log.info("events: rotated %s", path.name)
+
+
+def _write_line_locked(path: Path, line: str, max_bytes: int, keep: int | None = None) -> None:
+    """Append one encoded line, rolling first if it would cross ``max_bytes``. Under the lock."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        size = path.stat().st_size
+    except FileNotFoundError:
+        size = 0
+    if size and size + len(line.encode()) > max_bytes:
+        _rotate_locked(path, keep)
+        size = 0
+    if size and not _ends_with_newline(path):
+        # The previous writer died mid-line. Without this, our O_APPEND lands
+        # flush against that torn tail and CORRUPTS OUR OWN EVENT TOO — one
+        # crash would eat two events instead of one, and keep eating them until
+        # someone noticed. Close their line; ours then stands on its own.
+        line = "\n" + line
+        log.warning("events: closing a torn final line (a writer died mid-append)")
+    with open(path, "a", encoding="utf-8") as fh:
+        fh.write(line)                     # O_APPEND, one short line: atomic on POSIX
 
 
 def _ends_with_newline(path: Path) -> bool:
@@ -292,27 +386,17 @@ def append(type: str, summary: str = "", payload: dict | None = None, *,
             record["boot_id"] = state["boot_id"]
             line = _encode(record)
             path.parent.mkdir(parents=True, exist_ok=True)
-            try:
-                size = path.stat().st_size
-            except FileNotFoundError:
-                size = 0
-            if size and size + len(line.encode()) > MAX_BYTES:
-                _rotate_locked(path)
-                size = 0
-            if size and not _ends_with_newline(path):
-                # The previous writer died mid-line. Without this, our O_APPEND lands
-                # flush against that torn tail and CORRUPTS OUR OWN EVENT TOO — one
-                # crash would eat two events instead of one, and keep eating them until
-                # someone noticed. Close their line; ours then stands on its own.
-                line = "\n" + line
-                log.warning("events: closing a torn final line (a writer died mid-append)")
             # The sidecar is bumped BEFORE the line lands: a crash in between loses an
             # event (the reader sees the seq hole and says so), where the other order
             # would REUSE a seq — two different events with one identity, which nothing
             # downstream could ever untangle.
             _write_state({"boot_id": record["boot_id"], "seq": record["seq"]})
-            with open(path, "a", encoding="utf-8") as fh:
-                fh.write(line)             # O_APPEND, one short line: atomic on POSIX
+            _write_line_locked(path, line, MAX_BYTES)
+            if is_core(record["type"]):
+                try:
+                    _write_line_locked(core_path(), line, CORE_MAX_BYTES, CORE_KEEP)
+                except OSError as exc:     # the main log has it: report the record, not None
+                    log.warning("events: core append failed (%s): %s", exc, record["type"])
     except OSError as exc:                 # a full disk, a read-only FS, a vanished dir
         log.warning("events: append failed (%s) — event dropped: %s", exc, record["type"])
         return None
@@ -337,6 +421,7 @@ _ring: deque[dict] = deque(maxlen=RING_SIZE)
 _ring_key: tuple | None = None    # (path, size, mtime_ns) — a path change invalidates too
 _ring_dropped = False             # the file held more than the ring can carry
 _ring_corrupt = 0
+_core_cache: tuple[tuple, list[dict], int] | None = None   # (key, records, corrupt)
 
 
 def _parse(path: Path) -> tuple[list[dict], int]:
@@ -385,6 +470,30 @@ def _refresh_ring() -> None:
     _ring_key = key
 
 
+def _core_records() -> tuple[list[dict], int]:
+    """The core log (``.1`` then current), re-parsed only when either file changed."""
+    global _core_cache
+    core = core_path()
+    files = (core.with_name(f"{core.name}.1"), core)
+    key = []
+    for p in files:
+        try:
+            st = p.stat()
+            key.append((str(p), st.st_size, st.st_mtime_ns))
+        except OSError:
+            key.append((str(p), -1, -1))
+    if _core_cache is not None and _core_cache[0] == tuple(key):
+        return _core_cache[1], _core_cache[2]
+    records: list[dict] = []
+    corrupt = 0
+    for p in files:
+        recs, bad = _parse(p)
+        records += recs
+        corrupt += bad
+    _core_cache = (tuple(key), records, corrupt)
+    return records, corrupt
+
+
 def ring() -> list[dict]:
     """The bounded in-memory tail of the log (live reads never touch the rolled files)."""
     _refresh_ring()
@@ -392,7 +501,7 @@ def ring() -> list[dict]:
 
 
 def _gap(after_seq: int | None, after_boot: str | None, boot: str,
-         records: list[dict]) -> dict | None:
+         records: list[dict], ceiling: int = 0) -> dict | None:
     """Why the caller's cursor cannot be trusted — or None if it can.
 
     Reported, never papered over. Silently resuming across a hole is how a reader ends
@@ -405,7 +514,9 @@ def _gap(after_seq: int | None, after_boot: str | None, boot: str,
                 "after_seq": after_seq, "resume_from_seq": 0}
     if after_seq is None:
         return None
-    last = records[-1]["seq"] if records else 0
+    # ``ceiling`` is the log's own tip, for a source that holds only SOME of its records
+    # (the core log): a cursor past its last record is not ahead of the log.
+    last = max(records[-1]["seq"] if records else 0, ceiling)
     if after_seq > last:
         return {"reason": "cursor is ahead of the log — the seq space was reset",
                 "boot_id": boot, "after_seq": after_seq, "last_seq": last,
@@ -435,11 +546,24 @@ def read(after_seq: int | None = None, *, after_boot: str | None = None,
     truncation; when nothing was truncated it is the log's own position, so a reader
     filtering on one ``type`` still advances past the events it deliberately dropped
     instead of re-scanning them forever.
+
+    When every one of ``types`` is a non-hook type, the source is the core log (see the
+    module docstring), which reaches back past the main log's rolls; ``first_seq`` /
+    ``last_seq`` are then the core log's. Otherwise it is the ring over the current file.
     """
-    _refresh_ring()
-    records = list(_ring)
-    boot = current_boot()
-    gap = _gap(after_seq, after_boot, boot, records)
+    state = _read_state()
+    boot = state["boot_id"]
+    ceiling = 0
+    if types and all(is_core(t) for t in types):
+        # Also seeded here, not only at daemon start: a dashboard or CLI on the new code
+        # must not read an empty core log until the daemon next restarts.
+        seed_core()
+        records, corrupt = _core_records()
+        ceiling = state["seq"]
+    else:
+        _refresh_ring()
+        records, corrupt = list(_ring), _ring_corrupt
+    gap = _gap(after_seq, after_boot, boot, records, ceiling)
     if gap is not None:
         after_seq = gap["resume_from_seq"] or None
 
@@ -464,7 +588,7 @@ def read(after_seq: int | None = None, *, after_boot: str | None = None,
         "first_seq": records[0]["seq"] if records else 0,
         "last_seq": last_seq,
         "next_seq": next_seq,
-        "corrupt_lines": _ring_corrupt,
+        "corrupt_lines": corrupt,
     }
 
 

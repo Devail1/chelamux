@@ -37,14 +37,15 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass
 
-from chela import event_log
+from chela import event_log, hooks
 
 log = logging.getLogger(__name__)
 
 # The tools that BLOCK on a human. `AskUserQuestion` / `ExitPlanMode` are not hook
 # events — they are tools, and they arrive as PreToolUse / PermissionRequest carrying
-# `tool_name` + the full `tool_input` (measured on Claude Code 2.1.207).
-INTERACTIVE_TOOLS: tuple[str, ...] = ("AskUserQuestion", "ExitPlanMode")
+# `tool_name` + the full `tool_input` (measured on Claude Code 2.1.207). Defined in
+# chela.hooks, whose payload clipping keeps exactly these tools' input whole (CMX-328).
+INTERACTIVE_TOOLS: tuple[str, ...] = hooks.INTERACTIVE_TOOLS
 
 _PRE = "hook.pre_tool_use"
 _POST = "hook.post_tool_use"

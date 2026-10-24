@@ -622,7 +622,12 @@ chela events --wid @3 --type hook.pre_tool_use          # what @3 is doing
 ```
 
 A big payload is **clipped, never dropped**: a `Write` of a 200 KB file carries that file
-in `tool_input.content`, and the log is a line-per-event JSONL a human tails. Strings are
-bounded, and a payload past the ceiling degrades to a stub. What the bound is written to
-protect is the per-option `label`/`description` of an `AskUserQuestion` and a Bash
-`command`: the things a decision is actually made from.
+in `tool_input.content`, and the log is a line-per-event JSONL a human tails. Since
+CMX-328 a hook event stores a **preview**, not the tool's body: each value of
+`tool_input` / `tool_response` keeps 200 characters (a nested object becomes a 200-char
+JSON preview, and a wide one stops at about 1 KB), any other top-level string keeps 500,
+and `clipped_bytes` records the original size of every field that was cut. A Write of a
+1 MB file is now a line of about 1 KB. Nothing reads a tool's body back out of the log.
+The one exception is the `tool_input` of `AskUserQuestion` / `ExitPlanMode`, which is
+kept whole (up to the old per-string bound, and a stub past the ceiling): the Telegram
+gate reads every question and option back from the log.

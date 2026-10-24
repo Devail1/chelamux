@@ -49,7 +49,7 @@ def src(env, **kw):
 
 
 def write_events(env, events):
-    (env.dir / "events.jsonl").write_text("".join(json.dumps(e) + "\n" for e in events))
+    (env.dir / "events-core.jsonl").write_text("".join(json.dumps(e) + "\n" for e in events))
 
 
 def set_runs(env, rows):
@@ -423,6 +423,41 @@ def test_events_are_read_from_the_tail_only(env, monkeypatch):
     old = {"seq": 1, "type": "run_ci_red", "payload": {"task_id": "OLD", "failing": []}}
     write_events(env, [old] + [{"seq": i, "type": "x", "pad": "p" * 40} for i in range(2, 9)])
     assert [e["seq"] for e in src(env).events] == [6, 7, 8]       # ~75-byte lines; 1st is cut
+
+
+def test_events_default_to_the_core_log(env):
+    """CMX-328: every rule reads chela's own events, which the hook traffic in
+    ``events.jsonl`` pushed out of a 2 MB tail within the hour."""
+    assert ops.Sources(env.dir, env.proc).events_path == env.dir / "events-core.jsonl"
+
+
+def _hook_flooded(env):
+    """A ``run_ci_red`` the core log holds, and a main log of nothing but hooks."""
+    write_events(env, [{"seq": 7, "ts": NOW, "type": "run_ci_red",
+                        "payload": {"task_id": "CMX-1", "failing": [], "ci_sha": "abcdef123"}}])
+    (env.dir / "events.jsonl").write_text(
+        "".join(json.dumps({"seq": i, "type": "hook.stop"}) + "\n" for i in range(8, 20)))
+
+
+def test_scheduled_reads_the_core_log(env, monkeypatch):
+    _hook_flooded(env)
+    monkeypatch.setattr("chela.event_log.log_path", lambda: env.dir / "events.jsonl")
+    monkeypatch.setattr("chela.inbox.enqueue", lambda *a: True)
+    monkeypatch.setattr(ops.time, "time", lambda: NOW)
+    got = ops.scheduled(env.dir, env.proc)
+    assert [f["subject"] for f in got["findings"] if f["rule"] == "ci_red_unsettled"] == [
+        "CMX-1@abcdef1"]
+
+
+def test_the_cli_scan_reads_the_core_log(env, monkeypatch, capsys):
+    _hook_flooded(env)
+    monkeypatch.setattr("chela.event_log.log_path", lambda: env.dir / "events.jsonl")
+    monkeypatch.setattr(main.config, "CHELA_DIR", env.dir)
+    seen = []
+    monkeypatch.setattr(ops, "scan", lambda src, state: seen.append(src.events_path) or {
+        "findings": []})
+    main.cmd_ops_scan(SimpleNamespace(notify=False, json=True))
+    assert seen == [env.dir / "events-core.jsonl"]
 
 
 # --- budget, crash isolation ---------------------------------------------------------------
