@@ -111,12 +111,13 @@ export function Settings() {
       }}>
       <div className="settings-search">
         <TextInput search plain id="settings-search" label="Search settings" placeholder="Search settings" value={s.query} onChange={setSettingsQuery} autoFocus={!coarse()} />
-        <p className="settings-search-empty" id="settings-search-empty" hidden={shown !== 0}>{shown === 0 ? status : ''}</p>
         <span className="sr-only" id="settings-search-status" role="status" aria-live="polite">{status}</span>
       </div>
       <div className="settings-modal-body">
         <Rail tab={s.tab} searching={searching} />
         <div className="settings-tabpanels" id="drawer-body" ref={body}>
+          {/* CMX-310: in the panel, where the hits would be; above the body it pushed the rail down */}
+          <p className="settings-search-empty" id="settings-search-empty" hidden={shown !== 0}>{shown === 0 ? status : ''}</p>
           {SETTINGS_TABS.map((t) => {
             const Panel = PANELS[t.id];
             return (
