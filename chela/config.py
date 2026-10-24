@@ -1326,6 +1326,12 @@ def stuck_agent_alert_s() -> int:
     return int(os.environ.get("CHELA_STUCK_AGENT_ALERT_S", "1200"))
 
 
+def park_max_s() -> int:
+    """A run parked by ``chela park`` (CMX-318) is never called STUCK — until it has been
+    parked this long (or past its ``--until``); then ONE notice says the park outlived itself."""
+    return int(os.environ.get("CHELA_PARK_MAX_S", "21600"))
+
+
 def selfcheck_alert_s() -> int:
     """A live ``chela task-finished`` / ``chela judge sweep`` / pytest in a running run's
     worktree is ACTIVITY, not a stuck agent (CMX-110) — until it has run this long; then

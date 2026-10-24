@@ -8,7 +8,7 @@
 import type { WorkPayload } from '../../shared/store/work.ts';
 import { ciKind } from '../taskmodal/model.ts';
 import type { Card, Column } from './board.ts';
-import { cardIds, cardState, totalCounts } from './phone.ts';
+import { cardIds, cardState, parkFlag, totalCounts } from './phone.ts';
 
 export type KeyStorage = Pick<Storage, 'getItem' | 'setItem'>;
 
@@ -143,17 +143,20 @@ export function shortAge(seconds: number | null): string {
 const CI_WORD = { passing: 'passing', failing: 'failing', pending: 'pending', none: 'no CI', unknown: 'unknown' } as const;
 const RISKS = ['high', 'normal', 'low'];
 
-export type Cells = { id: string; title: string; state: string; pr: string; ci: string; ciWarn: boolean; risk: string; riskWarn: boolean; age: string };
+export type Cells = { id: string; title: string; state: string; stateTitle?: string; pr: string; ci: string; ciWarn: boolean; risk: string; riskWarn: boolean; age: string };
 
 /** A table row's words. CI only with a PR; risk only when the issue carries a known one. */
 export function rowCells(card: Card, now: number): Cells {
   const { id, pr } = cardIds(card);
   const ci = card.pr_url ? ciKind(card.pr_checks ?? undefined) : null;
+  const park = card.park ? parkFlag(card.park, now / 1000) : null;   // `now` is ms; a park's `since` is s
   const risk = typeof card.risk === 'string' && RISKS.includes(card.risk.toLowerCase()) ? card.risk.toLowerCase() : '';
   return {
     id,
     title: card.title || '',
-    state: cardState(card).label,
+    // CMX-318: a held run's state cell is its park flag (dim, the reason in full as its title)
+    state: park ? park.label : cardState(card).label,
+    stateTitle: park?.title,
     pr,
     ci: ci ? CI_WORD[ci] : '',
     ciWarn: ci === 'failing',

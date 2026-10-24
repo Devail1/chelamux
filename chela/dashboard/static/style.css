@@ -2749,8 +2749,8 @@ body.sidebar-resizing iframe { pointer-events: none; }
 .agent-row.rich.active::before { height: 16px; }
 /* longhands, so the shrink weights read the same in every engine (and in jsdom's cascade) */
 .agent-row.rich .agent-row-name { flex-grow: 1; flex-shrink: 1; flex-basis: auto; min-width: 0; font-size: 12.5px; }
-/* CMX-278: a hover or a long press (.show-full) shows the whole title, wrapped. */
-.agent-row.rich:hover .agent-row-name,
+/* CMX-278 + CMX-331: a long press (.show-full) shows the whole title, wrapped. A hover does
+   not: it would grow the row and shift every row below, so the row's tooltip carries it. */
 .agent-row.rich.show-full .agent-row-name { white-space: normal; overflow-wrap: anywhere; }
 .agent-row.rich .ar-meta {
     flex-grow: 0; flex-shrink: 1000; flex-basis: auto; min-width: 0; overflow: hidden; display: inline-flex; align-items: center; gap: 6px;
@@ -2825,6 +2825,9 @@ body.sidebar-resizing iframe { pointer-events: none; }
 /* CMX-76: the orchestrator's row badge, a crown since CMX-121 (its tooltip and accessible
    name say "Orchestrator"; no hue cue: the operator is red-weak). */
 .agent-row.rich .ar-orch { color: var(--text); }
+/* CMX-330: a plain shell's cwd (`~/projects/x`) gives way before the title, then ellipsizes. */
+.agent-row.rich .ar-meta > .ar-cwd { flex-shrink: 1; min-width: 0; overflow: hidden; }
+.agent-row.rich .ar-cwd .ar-meta-text { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 /* Show empty groups: a folder header with no matching session keeps its `+`. */
 .side-group.empty .group-rows { display: none; }
 .side-group.flat { margin-top: 4px; }
@@ -3468,8 +3471,10 @@ body.sidebar-resizing iframe { pointer-events: none; }
     border: 0; background: none; color: var(--text); line-height: 1.3;
 }
 .launch-menu button.popover-item:hover, .popover.ui-floating > button.popover-item:hover { background: var(--accent); color: var(--on-accent); }
-.launch-row .lr-main { display: flex; align-items: center; gap: 9px; flex: 1; min-width: 0; padding: 0; }
-.launch-row .lr-main:hover { background: none; color: inherit; }
+/* CMX-327: `.launch-menu .launch-row button.lr-main` outranks `.launch-menu button.popover-item` above
+   (display: block put the icon and the name on two lines) and its hover fill. */
+.launch-menu .launch-row button.lr-main { display: flex; align-items: center; gap: 9px; flex: 1; min-width: 0; padding: 0; }
+.launch-menu .launch-row button.lr-main:hover { background: none; color: inherit; }
 .launch-row .lr-icon svg, .launch-row .lr-actions svg { display: block; }
 
 /* --- Agent detail --- */

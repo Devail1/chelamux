@@ -1591,6 +1591,13 @@ def ensure_schema(conn: sqlite3.Connection) -> sqlite3.Connection:
         ("base_sync", "ALTER TABLE runs ADD COLUMN base_sync TEXT"),
         # 🔎 CMX-209. JSON {no_review_reason}: a code hand-in let through with no `## Review`.
         ("review_gate", "ALTER TABLE runs ADD COLUMN review_gate TEXT"),
+        # ⏸️ CMX-318. `chela park`: when (`parked_at`, NULL ⇒ not parked), why, until what
+        # (an ISO time or `run:<ID>`) and by whom. The stuck detector skips a parked run;
+        # a claim or a rework re-spawn clears all four (`chela/park.py`).
+        ("parked_at", "ALTER TABLE runs ADD COLUMN parked_at TEXT"),
+        ("parked_reason", "ALTER TABLE runs ADD COLUMN parked_reason TEXT"),
+        ("parked_until", "ALTER TABLE runs ADD COLUMN parked_until TEXT"),
+        ("parked_by", "ALTER TABLE runs ADD COLUMN parked_by TEXT"),
     ):
         if _column in existing_columns:
             continue  # already migrated — no DDL attempted, nothing to fail
@@ -5355,6 +5362,56 @@ def acknowledge_blocked_race(ident: str, by: str = "", note: str = "") -> dict:
     }
 
 
+def park_run(ident: str, reason: str, until: str | None = None, by: str = "") -> dict:
+    """⏸️ CMX-318: park a claimed/running run — the stuck detector skips it until
+    ``unpark_run`` or until the park outlives ``until`` / ``config.park_max_s()`` (then ONE
+    notice). The run keeps its slot and its window: nothing here touches tmux or the
+    worktree. Who may call it is the CLI's check (``park.refusal``); ``until`` is already
+    parsed (``park.parse_until``). Re-parking a parked run restarts its clock."""
+    run = resolve_run(ident)
+    if run is None:
+        return {"ok": False, "error": f"no run matches {ident!r} (task id, branch, or window name)"}
+    task_id = run["task_id"]
+    reason = (reason or "").strip()
+    if not reason:
+        return {"ok": False, "task_id": task_id, "error": "a park needs a --reason"}
+    when = _now()
+    with _db() as conn:
+        cur = conn.execute(
+            "UPDATE runs SET parked_at=?, parked_reason=?, parked_until=?, parked_by=? "
+            "WHERE task_id=? AND status IN ('claimed', 'running')",
+            (when, reason, until, by or None, task_id))
+        conn.commit()
+    if cur.rowcount == 0:
+        return {"ok": False, "task_id": task_id,
+                "error": f"{task_id} is {run.get('status')!r} — only a claimed or running "
+                         "run's agent can be parked"}
+    event_log.append("run_parked", f"{task_id}: parked by {by or 'unknown'} — {reason}",
+                     payload={"task_id": task_id, "by": by, "at": when, "reason": reason,
+                              "until": until})
+    return {"ok": True, "task_id": task_id, "at": when, "reason": reason, "until": until,
+            "by": by}
+
+
+def unpark_run(ident: str, by: str = "") -> dict:
+    """⏸️ CMX-318: clear a park. The stuck clock restarts from now (the inbox kept the run
+    active while parked), so an unparked agent gets the full quiet budget again."""
+    run = resolve_run(ident)
+    if run is None:
+        return {"ok": False, "error": f"no run matches {ident!r} (task id, branch, or window name)"}
+    task_id = run["task_id"]
+    with _db() as conn:
+        cur = conn.execute(
+            "UPDATE runs SET parked_at=NULL, parked_reason=NULL, parked_until=NULL, "
+            "parked_by=NULL WHERE task_id=? AND parked_at IS NOT NULL", (task_id,))
+        conn.commit()
+    if cur.rowcount == 0:
+        return {"ok": False, "task_id": task_id, "error": f"{task_id} is not parked"}
+    event_log.append("run_unparked", f"{task_id}: unparked by {by or 'unknown'}",
+                     payload={"task_id": task_id, "by": by})
+    return {"ok": True, "task_id": task_id}
+
+
 def _cleanup_worktree_on_done(wf: WorkflowDef, row: sqlite3.Row) -> None:
     """Free a finished run's worktree the moment its row goes `done` — not later.
 
@@ -7474,7 +7531,8 @@ def _spawn(wf: WorkflowDef, task: Task, attempt: int, conn: sqlite3.Connection, 
              task_number=excluded.task_number, idle_nudged_at=NULL, window_id=NULL,
              window_epoch=NULL, brief=excluded.brief, risk=excluded.risk,
              risk_reason=excluded.risk_reason, tracker_url=excluded.tracker_url,
-             tracker_edge=NULL""",
+             tracker_edge=NULL, parked_at=NULL, parked_reason=NULL, parked_until=NULL,
+             parked_by=NULL""",
         (task.id, str(wf.path), task.title, window_name, str(worktree), branch, _now(), attempt,
          task_number, _task_brief(task), run_risk(task.risk), task.risk_reason, task.url),
     )
@@ -8163,6 +8221,7 @@ def _respawn_rework(
     conn.execute(
         "UPDATE runs SET status='running', rework_count=?, started_at=?, ended_at=NULL, "
         "last_error=NULL, idle_nudged_at=NULL, window_id=NULL, window_epoch=NULL, "
+        "parked_at=NULL, parked_reason=NULL, parked_until=NULL, parked_by=NULL, "
         "worktree_path=?, review_reworks=? "
         "WHERE task_id=?",
         (rework_round, _now(), str(worktree), review_round, task_id),

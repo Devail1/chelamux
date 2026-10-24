@@ -5,6 +5,7 @@
 // ⚠️ Colour is never the signal (Liav is red-weak): every flag is a WORD, and `warn` (orange)
 // only marks the real warnings: risk high, a rework round, CI failing.
 // ---------------------------------------------------------------------------
+import { ageStr } from '../../shared/format/index.ts';
 import type { IconName } from '../../shared/icons/index.ts';
 import type { Run, Workflow, WorkPayload } from '../../shared/store/work.ts';
 import { prLabel, runCardNote, runDisplayId, runHandoffNote, runStallNote } from '../runs/model.ts';
@@ -130,7 +131,7 @@ export function rowGroups(columns: readonly Column[]): Column[] {
 
 // --- the compact card --------------------------------------------------------------------------
 
-export type Flag = { label: string; warn: boolean; icon?: IconName };
+export type Flag = { label: string; warn: boolean; icon?: IconName; title?: string };
 
 const CI_FLAG: Record<ReturnType<typeof ciKind>, Flag> = {
   passing: { label: 'CI passing', warn: false, icon: 'ciPassing' },
@@ -141,9 +142,22 @@ const CI_FLAG: Record<ReturnType<typeof ciKind>, Flag> = {
 };
 const RISKS = ['high', 'normal', 'low'];
 
-/** The compact card's flags line, in order: rework, risk, CI (only with a PR). */
-export function cardFlags(card: Card): Flag[] {
+const PARK_REASON_MAX = 40;
+
+/** CMX-318: a held run's flag — `parked` (the orchestrator's) or `waiting` (a suite slot), its
+ * reason and since when. Never a warning: the hold is on purpose. The title has it all. */
+export function parkFlag(park: NonNullable<Card['park']>, now: number): Flag {
+  const age = park.since == null ? 'since ?' : ageStr(now - park.since);
+  const reason = park.reason.length > PARK_REASON_MAX ? `${park.reason.slice(0, PARK_REASON_MAX - 1)}…` : park.reason;
+  const title = [park.reason, age, park.until ? `until ${park.until}` : '', park.by ? `by ${park.by}` : ''].filter(Boolean).join(' · ');
+  const slot = park.kind === 'slot';
+  return { label: `${slot ? 'waiting' : 'parked'} · ${reason} · ${age}`, warn: false, icon: slot ? 'slotWait' : 'pause', title };
+}
+
+/** The compact card's flags line, in order: a park, rework, risk, CI (only with a PR). */
+export function cardFlags(card: Card, now: number = Date.now() / 1000): Flag[] {
   const out: Flag[] = [];
+  if (card.park) out.push(parkFlag(card.park, now));
   const rework = Number(card.rework_count) || 0;
   if (rework > 0) out.push({ label: `rework ${rework}`, warn: true, icon: 'rework' });
   const risk = typeof card.risk === 'string' ? card.risk.toLowerCase() : '';
@@ -176,11 +190,12 @@ export function cardIds(card: Card): { id: string; pr: string } {
 }
 
 /** The one note a compact card shows (two lines at most): a failure or close reason first,
- * then a stall, then the agent's handoff, then a parked bullet's reason. */
+ * then a stall (never on a held run, CMX-318: its flag says why), then the agent's handoff,
+ * then a parked bullet's reason. */
 export function cardNote(card: Card): { text: string; warn: boolean } | null {
   const note = runCardNote(card);
   if (note) return { text: note.text, warn: !note.closed };
-  const stall = runStallNote(card);
+  const stall = card.park ? null : runStallNote(card);
   if (stall) return { text: stall, warn: true };
   const handoff = runHandoffNote(card);
   if (handoff) return { text: handoff, warn: false };

@@ -375,6 +375,263 @@ def test_repeat_flake_survives_a_runs_table_without_ci_flakes(env):
     assert ops.rule_repeat_flake(src(env), {}) == []
 
 
+# --- CMX-298: a flake from before the test's latest fix does not count ----------------------
+
+def _g(repo, *args):
+    env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
+    env.update(GIT_AUTHOR_NAME="t", GIT_AUTHOR_EMAIL="t@t", GIT_COMMITTER_NAME="t",
+               GIT_COMMITTER_EMAIL="t@t", GIT_CONFIG_GLOBAL=os.devnull,
+               GIT_CONFIG_NOSYSTEM="1")
+    return subprocess.run(["git", "-C", str(repo), *args], check=True, capture_output=True,
+                          text=True, env=env).stdout.strip()
+
+
+TEST_SRC = ("import os\nfrom pkg import mod\nimport pkg.deep.leaf\nfrom .helper import h\n"
+            "from . import sib\ndef test_t():\n    pass\n")
+FILES = {"WORKFLOW.md": "---\nproject_key: CMX\nworkspace:\n  base_branch: dev\n---\n",
+         "tests/test_a.py": TEST_SRC, "tests/helper.py": "h = 1\n", "tests/sib.py": "",
+         "tests/unrelated.py": "", "pkg/__init__.py": "", "pkg/mod.py": "", "pkg/other.py": "",
+         "pkg/deep/__init__.py": "", "pkg/deep/leaf.py": ""}
+T = "tests/test_a.py::test_t"
+
+
+@pytest.fixture
+def repo(tmp_path):
+    """c0 → (fix) on origin/dev; ``head(base)`` makes a PR head forked from ``base``."""
+    r = tmp_path / "repo"
+    r.mkdir()
+    _g(r, "init", "-q", "-b", "dev")
+    for rel, text in FILES.items():
+        (r / rel).parent.mkdir(parents=True, exist_ok=True)
+        (r / rel).write_text(text)
+    _g(r, "add", "-A")
+    _g(r, "commit", "-qm", "c0")
+    n = [0]
+
+    def commit(touch=None, base=None):
+        if base:
+            _g(r, "checkout", "-q", "--detach", base)
+        n[0] += 1
+        rel = touch or f"pr{n[0]}.txt"
+        with open(r / rel, "a") as fh:
+            fh.write(f"# {n[0]}\n")
+        _g(r, "add", rel)
+        _g(r, "commit", "-qm", f"c{n[0]}")
+        return _g(r, "rev-parse", "HEAD")
+
+    def publish(sha):
+        _g(r, "update-ref", "refs/remotes/origin/dev", sha)
+
+    c0 = _g(r, "rev-parse", "HEAD")
+    publish(c0)
+    return SimpleNamespace(path=r, c0=c0, commit=commit, publish=publish,
+                           workflow=str(r / "WORKFLOW.md"))
+
+
+def ci_flakes(env, rows):
+    """rows: (task, sha, workflow_path)."""
+    import sqlite3
+    from datetime import datetime, timezone
+
+    at = datetime.fromtimestamp(NOW - 3600, timezone.utc).isoformat()
+    conn = sqlite3.connect(env.dir / "scheduler.db")
+    conn.execute("CREATE TABLE runs (task_id TEXT, status TEXT, started_at TEXT, "
+                 "ci_flakes TEXT, workflow_path TEXT)")
+    conn.executemany("INSERT INTO runs VALUES (?, 'done', '', ?, ?)",
+                     [(t, json.dumps([{"test": T, "sha": sha, "at": at}]), wf)
+                      for t, sha, wf in rows])
+    conn.commit()
+    conn.close()
+
+
+def quarantine(env):
+    return [f["evidence"]["tasks"] for f in ops.rule_repeat_flake(src(env), {})
+            if f["subject"] == f"ci:{T}"]
+
+
+@pytest.mark.parametrize("touch, counted", [
+    ("tests/test_a.py", False),          # the test itself
+    ("pkg/mod.py", False),               # `from pkg import mod`
+    ("pkg/__init__.py", False),          # `from pkg import …`'s package
+    ("pkg/deep/leaf.py", False),         # `import pkg.deep.leaf`
+    ("pkg/deep/__init__.py", False),     # …which runs pkg/deep/__init__.py first
+    ("tests/helper.py", False),          # `from .helper import h`
+    ("tests/sib.py", False),             # `from . import sib`
+    ("pkg/other.py", True),              # NEGATIVE: not imported — the old flakes stand
+    ("tests/unrelated.py", True),        # NEGATIVE: a neighbour of the test, not imported
+])
+def test_flakes_from_before_a_fix_of_the_test_or_its_imports_do_not_count(
+        env, repo, touch, counted):
+    heads = [repo.commit(base=repo.c0) for _ in range(3)]
+    repo.publish(repo.commit(touch=touch, base=repo.c0))
+    ci_flakes(env, [(f"CMX-{i}", h, repo.workflow) for i, h in enumerate(heads)])
+    assert quarantine(env) == ([{"CMX-0": NOW - 3600, "CMX-1": NOW - 3600,
+                                 "CMX-2": NOW - 3600}] if counted else [])
+
+
+def test_flakes_on_heads_that_contain_the_fix_count(env, repo):
+    fix = repo.commit(touch="tests/test_a.py", base=repo.c0)
+    repo.publish(fix)
+    old = repo.commit(base=repo.c0)
+    heads = [repo.commit(base=fix) for _ in range(2)]
+    ci_flakes(env, [("CMX-1", heads[0], repo.workflow), ("CMX-2", heads[1], repo.workflow),
+                    ("CMX-3", old, repo.workflow)])
+    assert [sorted(t) for t in quarantine(env)] == [["CMX-1", "CMX-2"]]
+
+
+def test_the_fix_is_read_from_origin_base_not_the_checkout(env, repo):
+    heads = [repo.commit(base=repo.c0) for _ in range(2)]
+    repo.commit(touch="tests/test_a.py", base=repo.c0)   # a local fix, never on origin/dev
+    ci_flakes(env, [("CMX-1", heads[0], repo.workflow), ("CMX-2", heads[1], repo.workflow)])
+    assert len(quarantine(env)) == 1
+
+
+@pytest.mark.parametrize("break_it", ["unknown_sha", "no_sha", "no_workflow", "bad_workflow",
+                                      "no_origin_ref", "test_not_on_base", "unparseable"])
+def test_a_fix_git_cannot_prove_leaves_the_flakes_counted(env, repo, break_it):
+    heads = [repo.commit(base=repo.c0) for _ in range(2)]
+    repo.publish(repo.commit(touch="tests/test_a.py", base=repo.c0))
+    wf = repo.workflow
+    if break_it == "unknown_sha":
+        heads[0] = "0" * 40
+    elif break_it == "no_sha":
+        heads[0] = ""
+    elif break_it == "no_workflow":
+        wf = None
+    elif break_it == "bad_workflow":
+        (repo.path / "WORKFLOW.md").write_text("no front matter\n")
+    elif break_it == "no_origin_ref":
+        _g(repo.path, "update-ref", "-d", "refs/remotes/origin/dev")
+    elif break_it == "test_not_on_base":
+        _g(repo.path, "rm", "-q", "tests/test_a.py")
+        _g(repo.path, "commit", "-qm", "rm")
+        repo.publish(_g(repo.path, "rev-parse", "HEAD"))
+    ci_flakes(env, [("CMX-1", heads[0], wf), ("CMX-2", heads[1], wf)])
+    if break_it == "unparseable":                # imports unreadable: the test file alone
+        (repo.path / "tests/test_a.py").write_text("def (:\n")
+        _g(repo.path, "commit", "-qam", "broken")
+        repo.publish(_g(repo.path, "rev-parse", "HEAD"))
+        assert quarantine(env) == []             # that commit touched the test itself
+        return
+    want = {"CMX-1", "CMX-2"} - ({"CMX-2"} if break_it in ("unknown_sha", "no_sha") else set())
+    got = quarantine(env)
+    assert [set(t) for t in got] == ([want] if len(want) >= 2 else [])
+    if len(want) < 2:                            # only CMX-1 proves nothing on its own: pin
+        assert src(env).predates_fix({"test": T, "sha": heads[0], "workflow": wf}) is False
+
+
+def test_runs_without_a_workflow_path_column_still_count(env):
+    import sqlite3
+    from datetime import datetime, timezone
+
+    at = datetime.fromtimestamp(NOW - 60, timezone.utc).isoformat()
+    conn = sqlite3.connect(env.dir / "scheduler.db")
+    conn.execute("CREATE TABLE runs (task_id TEXT, status TEXT, started_at TEXT, ci_flakes TEXT)")
+    conn.executemany("INSERT INTO runs VALUES (?, 'done', '', ?)",
+                     [(t, json.dumps([{"test": T, "sha": "a" * 40, "at": at}]))
+                      for t in ("CMX-1", "CMX-2")])
+    conn.commit()
+    conn.close()
+    assert [sorted(t) for t in quarantine(env)] == [["CMX-1", "CMX-2"]]
+
+
+def test_git_is_called_with_its_repo_and_a_timeout(env, monkeypatch, tmp_path):
+    calls = []
+    monkeypatch.setattr(subprocess, "run", lambda argv, **kw: calls.append((argv, kw)) or "ok")
+    assert src(env)._git(tmp_path, "log", "-1") == "ok"
+    assert calls == [(["git", "-C", str(tmp_path), "log", "-1"],
+                      {"capture_output": True, "text": True, "errors": "replace",
+                       "timeout": 5})]
+
+
+@pytest.mark.parametrize("exc", [FileNotFoundError("git"),
+                                 subprocess.TimeoutExpired(["git"], 5)])
+def test_git_that_cannot_run_is_none_and_the_flake_counts(env, monkeypatch, tmp_path, exc):
+    def boom(*a, **k):
+        raise exc
+    monkeypatch.setattr(subprocess, "run", boom)
+    assert src(env)._git(tmp_path, "log") is None
+    s = src(env)
+    monkeypatch.setattr(s, "last_fix", lambda wf, f: (tmp_path, "f" * 40))
+    assert s.predates_fix({"test": T, "sha": "a" * 40, "workflow": "w"}) is False
+
+
+def test_imported_paths_are_the_direct_imports_as_files():
+    assert ops._imported_paths(TEST_SRC, "tests/test_a.py") == {
+        "os.py", "os/__init__.py", "pkg.py", "pkg/__init__.py", "pkg/mod.py",
+        "pkg/mod/__init__.py", "pkg/deep/__init__.py", "pkg/deep/leaf.py",
+        "pkg/deep/leaf/__init__.py", "tests/__init__.py", "tests/helper.py",
+        "tests/helper/__init__.py", "tests/helper/h.py", "tests/helper/h/__init__.py",
+        "tests.py", "tests/sib.py", "tests/sib/__init__.py"}
+    assert ops._imported_paths("from .. import up\nfrom ... import gone\n", "tests/t.py") == {
+        "up.py", "up/__init__.py"}
+
+
+def test_the_tree_is_listed_once_per_repo_and_ref(env, repo):
+    s, calls = src(env), []
+    real = s._git
+    s._git = lambda r, *a: calls.append(a[0]) or real(r, *a)
+    assert s.last_fix(repo.workflow, "tests/test_a.py") is not None
+    assert s.last_fix(repo.workflow, "tests/sib.py") is not None
+    assert calls.count("ls-tree") == 1
+
+
+def test_a_known_quarantine_finding_is_not_renotified_across_restarts(env, monkeypatch):
+    import sqlite3
+    from datetime import datetime, timezone
+
+    sent = []
+    monkeypatch.setattr("chela.inbox.enqueue", lambda *a: sent.append(a) or True)
+    monkeypatch.setattr("chela.event_log.log_path", lambda: env.dir / "events.jsonl")
+    clock = [NOW]
+    monkeypatch.setattr(ops.time, "time", lambda: clock[0])
+
+    def flaked(*tasks):
+        at = datetime.fromtimestamp(clock[0] - 60, timezone.utc).isoformat()
+        conn = sqlite3.connect(env.dir / "scheduler.db")
+        conn.execute("CREATE TABLE IF NOT EXISTS runs (task_id TEXT, status TEXT, "
+                     "started_at TEXT, ci_flakes TEXT)")
+        conn.executemany("INSERT INTO runs VALUES (?, 'done', '', ?)",
+                         [(t, json.dumps([{"test": T, "at": at}])) for t in tasks])
+        conn.commit()
+        conn.close()
+
+    flaked("CMX-1", "CMX-2")
+    ops.scheduled(env.dir, env.proc)
+    for _ in range(3):                           # each a fresh process over the saved state
+        clock[0] += ops.RENOTIFY_S + 1
+        ops.scheduled(env.dir, env.proc)
+    assert len(sent) == 1
+    flaked("CMX-3")                              # a NEW PR flaked: that is news
+    clock[0] += 60
+    ops.scheduled(env.dir, env.proc)
+    assert len(sent) == 2 and "CMX-1, CMX-2, CMX-3" in sent[1][1]
+    clock[0] += 60
+    ops.scheduled(env.dir, env.proc)
+    assert len(sent) == 2
+    state = json.loads((env.dir / "ops" / "state.json").read_text())
+    assert state["sigs"] == {f"repeat_flake:ci:{T}": "CMX-1,CMX-2,CMX-3"}
+
+
+def test_a_finding_without_a_sig_still_renotifies_and_leaves_no_sig(env):
+    f = ops._finding("leaked_proc", "pid:1", "x")
+    assert "sig" not in f
+    state = {"notified": {"leaked_proc:pid:1": NOW - ops.RENOTIFY_S}, "sigs": {
+        "leaked_proc:pid:1": "stale"}}
+    result = {"ts": NOW, "findings": [f], "rules_done": ["leaked_proc"], "errors": {}}
+    assert ops.record(env.dir, result, state, src(env)) == [f]
+    assert json.loads((env.dir / "ops" / "state.json").read_text())["sigs"] == {}
+
+
+def test_a_sigd_finding_that_resolves_forgets_its_sig(env):
+    key = f"repeat_flake:ci:{T}"
+    state = {"notified": {key: NOW - 60}, "sigs": {key: "CMX-1,CMX-2"}}
+    result = {"ts": NOW, "findings": [], "rules_done": ["repeat_flake"], "errors": {}}
+    ops.record(env.dir, result, state, src(env))
+    saved = json.loads((env.dir / "ops" / "state.json").read_text())
+    assert saved["notified"] == {} and saved["sigs"] == {}
+
+
 # --- rule 5: judge whack-a-mole (CMX-176/259) ----------------------------------------------
 
 def judge_body(*locs):

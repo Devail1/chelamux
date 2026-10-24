@@ -15,6 +15,7 @@ hand. Each rule below is one of those oddities, made automatic; each names its i
 """
 from __future__ import annotations
 
+import ast
 import calendar
 import json
 import os
@@ -39,6 +40,7 @@ HUNG_AFTER_S = 20 * 60
 HUNG_CPU = 0.01
 FLAKE_WINDOW_S = 24 * 3600
 QUARANTINE_WINDOW_S = 48 * 3600
+GIT_TIMEOUT_S = 5
 STORM_WINDOW_S = 3600
 STORM_COUNT = 3
 WHACK_ROUNDS = 3
@@ -91,6 +93,8 @@ class Sources:
         self.now = time.time() if now is None else now
         self.worktrees = self.chela_dir / "worktrees"
         self._environ: dict[int, dict[str, str] | None] = {}
+        self._fixes: dict[tuple, tuple[Path, str] | None] = {}
+        self._trees: dict[tuple, set[str] | None] = {}
 
     @cached_property
     def events(self) -> list[dict]:
@@ -140,20 +144,81 @@ class Sources:
             return []
         conn = sqlite3.connect(f"file:{db}?mode=ro", uri=True, timeout=2)
         try:
-            rows = conn.execute("SELECT task_id, ci_flakes FROM runs "
-                                "WHERE ci_flakes IS NOT NULL").fetchall()
+            try:
+                rows = conn.execute("SELECT task_id, ci_flakes, workflow_path FROM runs "
+                                    "WHERE ci_flakes IS NOT NULL").fetchall()
+            except sqlite3.OperationalError:      # no workflow_path: no repo to ask git
+                rows = conn.execute("SELECT task_id, ci_flakes, NULL FROM runs "
+                                    "WHERE ci_flakes IS NOT NULL").fetchall()
         except sqlite3.OperationalError:          # a runs table older than CMX-255
             return []
         finally:
             conn.close()
         out = []
-        for task, raw in rows:
+        for task, raw, wf in rows:
             try:
                 flakes = json.loads(raw)
             except ValueError:
                 continue
-            out += [(task, f) for f in flakes if isinstance(f, dict) and "::" in str(f.get("test"))]
+            out += [(task, dict(f, workflow=wf)) for f in flakes
+                    if isinstance(f, dict) and "::" in str(f.get("test"))]
         return out
+
+    def _git(self, repo: Path, *args: str) -> subprocess.CompletedProcess | None:
+        try:
+            return subprocess.run(["git", "-C", str(repo), *args], capture_output=True,
+                                  text=True, errors="replace", timeout=GIT_TIMEOUT_S)
+        except (OSError, subprocess.SubprocessError):
+            return None
+
+    def last_fix(self, workflow_path: str | None, test_file: str) -> tuple[Path, str] | None:
+        """CMX-298: ``(repo, sha)`` of the latest commit on ``origin/<base_branch>`` that
+        touched ``test_file`` or a repo module it imports; None when any of it is unreadable."""
+        if (workflow_path, test_file) not in self._fixes:
+            self._fixes[(workflow_path, test_file)] = self._last_fix(workflow_path, test_file)
+        return self._fixes[(workflow_path, test_file)]
+
+    def _last_fix(self, workflow_path: str | None, test_file: str) -> tuple[Path, str] | None:
+        from chela import workflow
+
+        if not workflow_path:
+            return None
+        try:
+            wf = workflow.load_workflow(workflow_path)
+        except Exception:  # noqa: BLE001 — unreadable or unparseable: no base to read
+            return None
+        repo, ref = wf.path.parent, f"origin/{wf.get('workspace', 'base_branch', default='master')}"
+        show = self._git(repo, "show", f"{ref}:{test_file}")
+        tree = self._tree(repo, ref)
+        if not show or show.returncode or tree is None:
+            return None
+        try:
+            mods = _imported_paths(show.stdout, test_file)
+        except (SyntaxError, ValueError):
+            mods = set()
+        paths = [test_file, *sorted(mods & tree)]
+        log = self._git(repo, "log", "-1", "--format=%H", ref, "--", *paths)
+        sha = log.stdout.strip() if log and not log.returncode else ""
+        return (repo, sha) if sha else None
+
+    def _tree(self, repo: Path, ref: str) -> set[str] | None:
+        """Every file path at ``ref``, listed once per scan; None when unreadable."""
+        if (repo, ref) not in self._trees:
+            got = self._git(repo, "ls-tree", "-r", "--name-only", ref)
+            self._trees[(repo, ref)] = (set(got.stdout.splitlines())
+                                        if got and not got.returncode else None)
+        return self._trees[(repo, ref)]
+
+    def predates_fix(self, flake: dict) -> bool:
+        """CMX-298: True only when git PROVES the flake's head lacks :meth:`last_fix` — a
+        flake from before the test (or what it imports) was last changed. Unknown ⇒ False:
+        the flake still counts."""
+        fix = self.last_fix(flake.get("workflow"), str(flake["test"]).split("::", 1)[0])
+        sha = str(flake.get("sha") or "")
+        if fix is None or not sha:
+            return False
+        got = self._git(fix[0], "merge-base", "--is-ancestor", fix[1], sha)
+        return got is not None and got.returncode == 1
 
     @cached_property
     def procs(self) -> list[dict]:
@@ -223,8 +288,40 @@ class Sources:
             return float(judge.SUITE_TIMEOUT_SECONDS)
 
 
-def _finding(rule: str, subject: str, summary: str, **evidence) -> dict:
-    return {"rule": rule, "subject": subject, "summary": summary, "evidence": evidence}
+def _imported_paths(source: str, test_file: str) -> set[str]:
+    """Repo-relative files ``source`` may import directly: ``import a.b`` ⇒ ``a/b.py`` or
+    ``a/b/__init__.py``; ``from a import b`` adds ``a/b.py``; a relative import resolves from
+    ``test_file``'s directory. The caller keeps those the tree actually has."""
+    out: set[str] = set()
+    here = Path(test_file).parent.parts
+
+    def add(*parts: str) -> None:
+        parts = tuple(p for p in parts if p)
+        for i in range(1, len(parts) + 1):        # `import a.b` runs a/__init__.py too
+            stem = "/".join(parts[:i])
+            out.update({f"{stem}/__init__.py"} | ({f"{stem}.py"} if i == len(parts) else set()))
+
+    for node in ast.walk(ast.parse(source)):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                add(*alias.name.split("."))
+        elif isinstance(node, ast.ImportFrom):
+            if node.level > len(here) + 1:
+                continue                          # above the repo root
+            base = here[:len(here) - node.level + 1] if node.level else ()
+            mod = [*base, *(node.module or "").split(".")]
+            add(*mod)
+            for alias in node.names:
+                add(*mod, alias.name)
+    return out
+
+
+def _finding(rule: str, subject: str, summary: str, *, sig: str | None = None,
+             **evidence) -> dict:
+    """``sig`` (CMX-298): a finding about past facts — flakes that happened — carries one;
+    while it is unchanged the finding is never re-notified, however old the notice."""
+    out = {"rule": rule, "subject": subject, "summary": summary, "evidence": evidence}
+    return dict(out, sig=sig) if sig is not None else out
 
 
 def _is_test_runner(argv: list[str]) -> bool:
@@ -372,18 +469,19 @@ def rule_repeat_flake(src: Sources, state: dict) -> list[dict]:
                     f"tasks in 24h: {', '.join(sorted(tasks))}", test=tid, tasks=tasks)
            for tid, tasks in sorted(seen.items()) if len(tasks) >= 2]
     # CMX-282: the same test red-then-green-on-re-run on ≥2 PRs' heads within 48 h ⇒ file
-    # it and register it in tests/flaky.toml the same day.
+    # it and register it in tests/flaky.toml the same day. CMX-298: a flake on a head from
+    # before the test's latest fix is history, not evidence.
     ci: dict[str, dict[str, float]] = {}
     for task, flake in src.ci_flakes:
         try:                                      # the dispatcher's `_now()` isoformat
             at = datetime.fromisoformat(str(flake.get("at"))).timestamp()
         except ValueError:
             continue
-        if at >= src.now - QUARANTINE_WINDOW_S:
+        if at >= src.now - QUARANTINE_WINDOW_S and not src.predates_fix(flake):
             ci.setdefault(str(flake["test"]), {})[str(task)] = at
     return out + [_finding("repeat_flake", f"ci:{tid}", f"quarantine candidate: {tid} — CI "
                            f"flake on {len(tasks)} PRs in 48h: {', '.join(sorted(tasks))}",
-                           test=tid, tasks=tasks)
+                           sig=",".join(sorted(tasks)), test=tid, tasks=tasks)
                   for tid, tasks in sorted(ci.items()) if len(tasks) >= 2]
 
 
@@ -462,20 +560,33 @@ def fleet_paused(chela_dir: Path) -> bool:
 
 def record(chela_dir: Path, result: dict, state: dict, src: Sources) -> list[dict]:
     """Append the findings to ``ops/findings.jsonl``, update the dedupe state, and return the
-    ones to notify: never notified, or last notified ≥ :data:`RENOTIFY_S` ago. A finding that
-    is gone from a rule that completed WITHOUT raising is forgotten, so its recurrence is new
-    again; a rule that raised proves nothing about what it used to find."""
+    ones to notify: never notified, or last notified ≥ :data:`RENOTIFY_S` ago — unless it
+    carries a ``sig`` equal to the one last notified (CMX-298: the same past flakes, re-read
+    by every later scan, are not news). A finding that is gone from a rule that completed
+    WITHOUT raising is forgotten, so its recurrence is new again; a rule that raised proves
+    nothing about what it used to find."""
     notified, now = dict(state.get("notified") or {}), result["ts"]
+    sigs = dict(state.get("sigs") or {})
     keys = {f"{f['rule']}:{f['subject']}" for f in result["findings"]}
     clean = set(result["rules_done"]) - set(result["errors"])
     for key in list(notified):
         if key not in keys and key.split(":", 1)[0] in clean:
             del notified[key]
+            sigs.pop(key, None)
     fresh = []
     for f in result["findings"]:
         key = f"{f['rule']}:{f['subject']}"
-        if now - notified.get(key, float("-inf")) >= RENOTIFY_S:
+        sig = f.get("sig")
+        if sig is not None and key in notified:
+            due = sigs.get(key) != sig
+        else:
+            due = now - notified.get(key, float("-inf")) >= RENOTIFY_S
+        if due:
             notified[key] = now
+            if sig is None:
+                sigs.pop(key, None)
+            else:
+                sigs[key] = sig
             fresh.append(f)
     out = ops_dir(chela_dir)
     out.mkdir(parents=True, exist_ok=True)
@@ -486,7 +597,7 @@ def record(chela_dir: Path, result: dict, state: dict, src: Sources) -> list[dic
             if _is_test_runner(p["argv"]) and src.worktree_of(p)}
            if "hung_test" in clean else state.get("cpu") or {})
     tmp = out / "state.json.tmp"
-    tmp.write_text(json.dumps({"notified": notified, "cpu": cpu}))
+    tmp.write_text(json.dumps({"notified": notified, "sigs": sigs, "cpu": cpu}))
     os.replace(tmp, out / "state.json")
     return fresh
 

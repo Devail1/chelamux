@@ -114,7 +114,7 @@ export const DECISION_TYPES = [
     // started, a run someone else reopened/closed, a red CI with its failing line, a PR gone
     // CONFLICTING, an agent gone quiet (or its completion marker unread), a hold that lapsed.
     'run_judge_not_started', 'run_reopened', 'run_was_closed', 'run_ci_red', 'run_ci_flake', 'run_pr_conflicting',
-    'run_stuck', 'run_marker_unread', 'run_selfcheck_long', 'dispatch_hold_expired', 'dispatch_hold_released',
+    'run_stuck', 'run_marker_unread', 'run_selfcheck_long', 'run_park_overdue', 'dispatch_hold_expired', 'dispatch_hold_released',
     'finished', 'blocked', 'died', 'gone_unknown', 'completed_gone',
     'watch_epoch_lost', 'inbox_undeliverable', 'inbox_self_healed',
 ];

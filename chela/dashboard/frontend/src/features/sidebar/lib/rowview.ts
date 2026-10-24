@@ -1,11 +1,12 @@
 // CMX-276 (+ CMX-121's row redesign): what one sidebar row SHOWS, as data. The title gets
 // the width; state is the dot's SHAPE (Liav is red-weak), its word only in the dot's
 // aria-label and the row's tooltip; metadata is a short list of icon + text + tooltip.
+import { headLabel, type HeadAgent } from '../../panehead/model.ts';
 import {
   type AgentRow, type Battery, type Item, type SidebarState, itemLabel, primaryWindow, runDot, runState,
 } from '../model.ts';
 
-export type MetaKind = 'orchestrator' | 'pr' | 'judging' | 'context';
+export type MetaKind = 'orchestrator' | 'pr' | 'judging' | 'context' | 'cwd';
 
 export interface Meta {
   kind: MetaKind;
@@ -73,6 +74,9 @@ function metaOf(it: Item, a: AgentRow, s: SidebarState): Meta[] {
   if (a.window_id && a.window_id === s.orchWid) {
     out.push({ kind: 'orchestrator', text: '', cls: 'ar-orch', title: 'Orchestrator: holds the decisions inbox' });
   }
+  // CMX-330: a plain shell's cwd, the subtitle its pane header shows beside `Shell`.
+  const head = it.kind === 'run' ? null : headLabel(a as HeadAgent, a.window_id ?? '');
+  if (head?.cwd && head.subtitle) out.push({ kind: 'cwd', text: head.subtitle, cls: 'ar-cwd', title: `Shell in ${head.subtitle}` });
   const pr = it.kind === 'run' && s.view.showPR ? prMeta(it) : null;
   if (pr) out.push(pr);
   const b = testingBattery(it);
