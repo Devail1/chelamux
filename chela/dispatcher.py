@@ -2523,7 +2523,7 @@ def _resolve_base_conflict(conn: sqlite3.Connection, wf: WorkflowDef, row, head:
                     res["base_sha"][:12], res["merge_sha"][:12])
         return "merged"
     if res["outcome"] == basemerge.INFRA:
-        return _base_merge_infra(conn, row, res, base)
+        return _base_merge_infra(conn, row, res, base, head)
     # Burn the sha and grant the free round BEFORE the verdict, so 1d (below) never sees this
     # round as charged; both are undone if the verdict is not written.
     conn.execute("UPDATE runs SET conflict_sha=?, conflict_reworks=MIN(COALESCE("
@@ -2545,27 +2545,31 @@ def _resolve_base_conflict(conn: sqlite3.Connection, wf: WorkflowDef, row, head:
     return "rework"
 
 
-def _base_merge_infra(conn: sqlite3.Connection, row, res: dict, base: str) -> str:
+def _base_merge_infra(conn: sqlite3.Connection, row, res: dict, base: str, head: str) -> str:
     """🏗️ CMX-323. The base merged cleanly but its targeted tests could not START (the scratch
     worktree could not be provisioned, the runner never spawned, nothing was collected), so
     nothing about the code was measured. Never sent back: counted as an infra restart (CMX-192,
-    not the review cap), the orchestrator told, and the head left un-burned so the next tick
-    tries again. At the infra cap the run escalates, so a broken box still stops. Returns
-    ``infra`` or ``escalated``."""
+    not the review cap), the orchestrator told, and the head burned — ONE infra round per head,
+    so a box that stays broken does not spend the whole infra budget (shared with CI) and flood
+    the inbox in as many ticks. A new push, or a human, takes it from there. At the infra cap
+    the run escalates. A run that left ``awaiting_review`` during the attempt is not charged.
+    Returns ``infra``, ``escalated`` or ``none``."""
     from chela import inbox
     task_id = row["task_id"]
-    conn.execute("UPDATE runs SET infra_restarts=COALESCE(infra_restarts, 0) + 1 "
-                 "WHERE task_id=?", (task_id,))
+    cur = conn.execute("UPDATE runs SET conflict_sha=?, infra_restarts=COALESCE(infra_restarts, "
+                       "0) + 1 WHERE task_id=? AND status='awaiting_review'", (head, task_id))
     conn.commit()
+    if cur.rowcount != 1:
+        return "none"
     restarts, cap = infra_restarts(row) + 1, infra_restart_cap(row)
     why = tui_sanitize(judge._last_meaningful_line(res["detail"])) or "no detail"
     log.warning("Task %s: origin/%s merges cleanly but the targeted tests could not start "
-                "(infra restart %s/%s, not sent back): %s", task_id, base, restarts, cap, why)
+                "(infra restart %s/%s, not sent back, not retried on this head): %s", task_id, base, restarts, cap, why)
     try:
         inbox.enqueue("run_base_merge_infra",
                       f"🏗️ {row['branch_name'] or task_id}: origin/{base} merges cleanly but "
                       f"its targeted tests could not start (infra {restarts}/{cap}) — NOT sent "
-                      f"back for rework — {why}",
+                      f"back for rework, not retried on this head — {why}",
                       {"task_id": task_id, "branch_name": row["branch_name"],
                        "pr_url": row["pr_url"], "base_sha": res["base_sha"],
                        "head_sha": res["head_sha"], "detail": res["detail"],

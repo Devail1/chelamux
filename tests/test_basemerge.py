@@ -506,21 +506,37 @@ def test_an_infra_base_merge_is_counted_reported_and_never_sent_back(tmp_path, t
     run = dispatcher.resolve_run("abc123")
     assert (run["status"], run["rework_count"], run["conflict_reworks"], run["infra_restarts"]) \
         == ("awaiting_review", 0, 0, 3)
-    assert run["conflict_sha"] is None                 # un-burned: the next tick tries again
+    assert run["conflict_sha"] == "deadbee1"           # one infra round per head
     assert dispatcher.latest_verdict(run) in (None, "")
     assert not fake.comments
     cap = dispatcher.infra_restart_cap(run)
     [(kind, summary_line, payload)] = notices
     assert kind == "run_base_merge_infra"
     assert summary_line == (f"🏗️ test-1: origin/dev merges cleanly but its targeted tests could "
-                            f"not start (infra 3/{cap}) — NOT sent back for rework — Caused by: "
+                            f"not start (infra 3/{cap}) — NOT sent back for rework, not retried on this head — "
+                            f"Caused by: "
                             f"No such file (os error 2)")
     assert payload == {"task_id": "abc123", "branch_name": "test-1",
                        "pr_url": "https://github.com/o/r/pull/80", "base_sha": "b" * 40,
                        "head_sha": "deadbee1", "detail": _infra()["detail"],
                        "infra_restarts": 3, "infra_restart_cap": cap}
-    _tick(wf, fake)
-    assert len(calls) == 2 and dispatcher.resolve_run("abc123")["infra_restarts"] == 4
+    _tick(wf, fake)                                     # the same head: not tried again
+    assert len(calls) == 1 and dispatcher.resolve_run("abc123")["infra_restarts"] == 3
+
+
+def test_a_run_that_left_awaiting_review_during_the_attempt_is_not_charged(tmp_path, notices,
+                                                                          monkeypatch):
+    def merged_meanwhile(*a):
+        with dispatcher._db() as c:
+            c.execute("UPDATE runs SET status='done' WHERE task_id='abc123'")
+            c.commit()
+        return _infra()
+    monkeypatch.setattr(basemerge, "attempt", merged_meanwhile)
+    wf, fake = _setup(tmp_path, pr_mergeable="CONFLICTING", infra_restarts=2)
+    summary = _tick(wf, fake)
+    run = dispatcher.resolve_run("abc123")
+    assert (summary["base_infra"], summary["escalated"], notices) == (0, 0, [])
+    assert (run["status"], run["infra_restarts"], run["conflict_sha"]) == ("done", 2, None)
 
 
 def test_an_infra_base_merge_at_the_infra_cap_escalates(tmp_path, tried, notices, monkeypatch):
