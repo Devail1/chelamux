@@ -3142,7 +3142,10 @@ body.sidebar-resizing iframe { pointer-events: none; }
 .settings-modal {
     position: fixed; top: 50%; left: 50%;
     transform: translate(-50%, -50%) scale(0.97);
-    width: min(760px, 94vw); max-height: 86vh;
+    /* CMX-310: a FIXED height, never sized by its content: centred on `top: 50%`, a
+       content-sized dialog grew and shrank on every tab switch or search keystroke and
+       its head and rail jumped with it. The panel (.settings-tabpanels) scrolls inside. */
+    width: min(760px, 94vw); height: min(640px, 86vh); max-height: 86vh;
     background: var(--surface); border: 1px solid var(--border); border-radius: 12px;
     box-shadow: 0 20px 60px rgba(0, 0, 0, 0.35);
     opacity: 0; pointer-events: none; transition: opacity 0.15s ease, transform 0.15s ease;
@@ -3174,7 +3177,7 @@ body.sidebar-resizing iframe { pointer-events: none; }
 }
 .settings-tab:hover { background: var(--bg); color: var(--text); }
 .settings-tab.active { background: color-mix(in srgb, var(--accent) 13%, transparent); color: var(--accent); font-weight: 600; }
-.settings-tabpanels { flex: 1 1 auto; min-width: 0; overflow-y: auto; padding: 14px; }
+.settings-tabpanels { flex: 1 1 auto; min-width: 0; min-height: 0; overflow-y: auto; padding: 14px; }
 .settings-tabpanel { display: none; flex-direction: column; gap: 12px; }
 .settings-tabpanel.active { display: flex; }
 /* margin-top:auto pins the footer to the bottom of the flex column without giving
@@ -3204,7 +3207,7 @@ body.sidebar-resizing iframe { pointer-events: none; }
    lib/search.ts) — never re-rendered. */
 .settings-search { flex: 0 0 auto; padding: 10px 16px; border-bottom: 1px solid var(--border); }
 .settings-search .s-input { width: 100%; box-sizing: border-box; }
-.settings-search-empty { margin: 8px 0 0; font-size: 12.5px; color: var(--text-dim); }
+.settings-search-empty { margin: 0; font-size: 12.5px; color: var(--text-dim); }
 .settings-search-empty[hidden] { display: none; }
 .settings-modal.searching .settings-tabpanel { display: none; }
 .settings-modal.searching .settings-tabpanel[data-s-hit] { display: flex; }
@@ -3223,7 +3226,8 @@ body.sidebar-resizing iframe { pointer-events: none; }
 @media (max-width: 640px) {
     .settings-modal {
         top: 4vh; left: 3vw; transform: translate(0, 0) scale(0.97);
-        width: 94vw; max-height: 92vh;
+        /* CMX-310: dvh where supported, so a phone's URL bar never clips the footer */
+        width: 94vw; height: 92vh; height: 92dvh; max-height: 92vh; max-height: 92dvh;
     }
     .settings-modal.open { transform: translate(0, 0) scale(1); }
 }

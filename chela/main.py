@@ -3002,7 +3002,8 @@ def cmd_judge_self_check(args) -> None:
 def cmd_judge_nightly_sweep(args) -> None:
     """⚖️🧹🌙 CMX-303: one nightly sweep of a workflow (see :mod:`chela.sweep_nightly`) — the
     daemon's detached child, or a hand run. Exit 0 clean/skipped, 1 survivors to file (filed,
-    would file, or refused), 2 CANNOT VERIFY or an unreadable workflow."""
+    would file, or refused), 2 CANNOT VERIFY, UNRUN (CMX-304: the budget left mutations
+    unmeasured), UNKNOWN (a merged file no mutator handles) or an unreadable workflow."""
     try:
         wf = workflow.load_workflow(args.workflow)
     except Exception as e:  # noqa: BLE001 — a WORKFLOW.md that does not parse
@@ -3012,7 +3013,8 @@ def cmd_judge_nightly_sweep(args) -> None:
     line = f"nightly sweep: {result['status']}" + (f" — {result['why']}" if result.get("why")
                                                     else "")
     print(json.dumps(result, indent=2) if args.json else line)
-    sys.exit({sweep_nightly.CANNOT_VERIFY: 2, sweep_nightly.SURVIVORS: 1}.get(result["status"], 0))
+    sys.exit({sweep_nightly.CANNOT_VERIFY: 2, sweep_nightly.UNRUN: 2, sweep_nightly.UNKNOWN: 2,
+              sweep_nightly.SURVIVORS: 1}.get(result["status"], 0))
 
 
 def cmd_judge_sweep(args) -> None:
