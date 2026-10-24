@@ -426,14 +426,16 @@ def test_tick_does_not_restrike_or_reclaim_a_closed_unmerged_PRs_task(ticking, m
     assert n == 1  # one row for this task_id, forever — no duplicate spawned alongside it
 
 
-def test_tick_removes_the_worktree_when_the_tracker_line_is_struck_by_hand(ticking):
+def test_tick_removes_the_worktree_when_the_tracker_line_is_struck_by_hand(ticking, monkeypatch):
     """`row["task_id"] not in open_ids and status in REVIEW_STATUSES` → done: the other
-    `tick()` path that reaches `done` without a fresh `pr_state` read this tick."""
+    `tick()` path that reaches `done` without a fresh `pr_state` read this tick. The row
+    has no PR (🗂️⏸️ CMX-308: one whose PR is still open is held, not done)."""
     repo = ticking
     wf_path = repo / "WORKFLOW.md"
     alpha = next(t.id for t in _source(repo).list_open_tasks() if t.title == "alpha")
     worktrees_root = repo.parent / ".chela" / "worktrees"
-    wt_path = _seed_run_with_worktree(repo, wf_path, alpha, worktrees_root)
+    monkeypatch.setattr(dispatcher, "_read_pr_url", lambda *a, **k: None)
+    wt_path = _seed_run_with_worktree(repo, wf_path, alpha, worktrees_root, pr_url=None)
     assert wt_path.is_dir()
 
     # A human struck the line by hand — task_id leaves the tracker's open set.

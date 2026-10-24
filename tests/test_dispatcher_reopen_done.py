@@ -361,3 +361,88 @@ def test_chela_reopen_on_a_done_run_end_to_end(tmp_path):
     ).fetchone()
     conn.close()
     assert (status, head) == ("awaiting_review", "freshfix0002")
+
+
+# --- (f) 🗂️🔓 CMX-308: a linear tracker has no struck line — the PR state decides ---------
+# Linear's GitHub integration closes an issue whenever ANY merged PR names it, so a done
+# linear run can sit on an OPEN PR of its own (CMX-119, 2026-10-22). There is no `- [x]`
+# to consult: an OPEN PR is the evidence the task is not finished. No Linear call is made
+# (and none could be: no API key in a test) — the tracker is never loaded for this kind.
+
+LINEAR_WORKFLOW = """---
+project_key: CMX
+tracker:
+  kind: linear
+  team: CMX
+workspace:
+  root: {root}
+  base_branch: dev
+---
+seed
+"""
+
+
+def _linear_repo(tmp_path: Path) -> Path:
+    repo = _repo(tmp_path)
+    (repo / "WORKFLOW.md").write_text(LINEAR_WORKFLOW.format(root=tmp_path / "wt"))
+    (repo / "TODO.md").unlink()           # a linear workflow has no tracker FILE at all
+    return repo
+
+
+def test_a_done_linear_run_with_an_open_pr_and_a_moved_head_is_reopened(tmp_path):
+    """🔴 GUARD: fold the linear branch back into the struck-line check ⇒ refused with "no
+    struck-line" (or "tracker could not be read") ⇒ RED."""
+    repo = _linear_repo(tmp_path)
+    with dispatcher._db() as conn:
+        _row(conn, repo)
+    with patch.object(dispatcher, "get_source", side_effect=AssertionError("tracker loaded")):
+        result = _reopen(_gh(state="OPEN", head="freshfix0002"))
+
+    assert result["ok"] is True, result
+    run = dispatcher.resolve_run(TASK_ID)
+    assert run["status"] == "awaiting_review"
+    assert run["pr_head_sha"] == "freshfix0002"
+
+
+@pytest.mark.parametrize("state", ["MERGED", "CLOSED"])
+def test_a_done_linear_run_whose_pr_is_not_open_is_refused(tmp_path, state):
+    """⭐ NEGATIVE CONTROL: the PR state is the ONLY evidence for linear, so a merged or
+    closed PR still refuses — the linear branch sits AFTER the PR-state check."""
+    repo = _linear_repo(tmp_path)
+    with dispatcher._db() as conn:
+        _row(conn, repo)
+    result = _reopen(_gh(state=state, head="freshfix0002"))
+
+    assert result["ok"] is False
+    assert state in result["error"]
+    assert dispatcher.resolve_run(TASK_ID)["status"] == "done"
+
+
+def test_a_done_linear_run_whose_pr_state_is_unreadable_is_refused(tmp_path):
+    """⭐ NEGATIVE CONTROL: an unreadable PR state is never "open"."""
+    repo = _linear_repo(tmp_path)
+    with dispatcher._db() as conn:
+        _row(conn, repo)
+
+    def _run(cmd, *a, **k):
+        if "state,mergeable" in cmd:
+            return _R(returncode=1, stdout=json.dumps({"state": "OPEN"}), stderr="HTTP 502")
+        return _gh()(cmd, *a, **k)
+
+    result = _reopen(_run)
+    assert result["ok"] is False
+    assert "could not be read" in result["error"]
+    assert dispatcher.resolve_run(TASK_ID)["status"] == "done"
+
+
+def test_a_done_linear_run_still_passes_the_new_commit_gate(tmp_path):
+    """⭐ NEGATIVE CONTROL: skipping the struck-line check skips nothing else — a head the
+    judge already ruled on is refused for linear exactly as for markdown."""
+    repo = _linear_repo(tmp_path)
+    with dispatcher._db() as conn:
+        _row(conn, repo)
+    result = _reopen(_gh(state="OPEN", head="judged000001"))
+
+    assert result["ok"] is False
+    assert "same" in result["error"].lower()
+    assert dispatcher.resolve_run(TASK_ID)["status"] == "done"
