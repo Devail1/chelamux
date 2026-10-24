@@ -56,7 +56,7 @@ function screenState(page) {
 const tipNow = page => page.evaluate(() => document.querySelector('.tap-tip:not(.ui-floating)')?.textContent ?? null);
 
 async function tapRow(page, name) {
-    // The row's name span carries title="window: …": the exact element the tap-tip took.
+    // The name's nearest titled element (the row, CMX-331) is what the tap-tip would take.
     await page.locator(`#sidebar-agents .agent-row[data-agent="${name}"] .agent-row-name`).tap();
     const tip = await tipNow(page);
     assert.equal(tip, null, `the tap popped the tap-tip "${tip}" instead of opening the session`);
@@ -79,11 +79,14 @@ describe(`CMX-301 phone ${W}×${H}, touch: tapping a session row opens it`, { sk
     });
     after(() => context && context.close());
 
-    test('the row name carries a title (else the tap below proves nothing)', async () => {
+    test('the row name sits under a title (else the tap below proves nothing)', async () => {
         ready();
-        assert.equal(await page.evaluate(() =>
-            document.querySelector('#sidebar-agents .agent-row[data-agent="c-idle"] .agent-row-name')?.getAttribute('title')),
-        'window: c-idle');
+        // CMX-331: the name has no title of its own; the row's, which opens with the full
+        // title, is what a tap on the name would pop
+        const t = await page.evaluate(() =>
+            document.querySelector('#sidebar-agents .agent-row[data-agent="c-idle"] .agent-row-name')
+                ?.closest('[title]')?.getAttribute('title'));
+        assert.match(t ?? '', /^Refactor the flux capacitor \(c-idle\) · @3\n/);
     });
 
     test('tap a row ⇒ that session is the one full-width pane, the drawer shut, no tooltip', async () => {
