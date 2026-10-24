@@ -4,7 +4,8 @@
 // icon); the star pins or unpins, x forgets a recent; + opens the favorites picker; a launch
 // into a dir with a live Claude focuses that pane instead of spawning a twin.
 import { act, cleanup, fireEvent, render, screen } from '@testing-library/react';
-import { afterEach, beforeEach, expect, test, vi } from 'vitest';
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, test, vi } from 'vitest';
+import css from '../../../../../static/style.css?raw';
 import { agents } from '../../../shared/store/agents.ts';
 import { LaunchMenu, NewSessionButton, closeLaunchMenu, launchProject, launcher, newSandboxedSession, newShellWindow, openLaunchMenu, refreshLauncher, samePath, setLauncherHost } from '../index.ts';
 
@@ -283,4 +284,33 @@ test('openLaunchMenu opens it at any element (the gear menu passes its gear)', a
   act(() => closeLaunchMenu());
   expect(menu()).toBeNull();
   gear.remove();
+});
+
+// CMX-327 (Liav, 10-24): every row drew its icon on one line and the name on the next. The
+// row's own button is an ItemButton, and `.launch-menu button.popover-item { display: block }`
+// outranked the `.lr-main` flex rule. jsdom lays nothing out, so the computed style is the
+// observable; it does apply the cascade's specificity (CMX-311 parses style.css once, here).
+// tests/browser/dashboard.test.mjs measures the same row's boxes and its hover in Chromium.
+describe('under style.css', () => {
+  let style: HTMLStyleElement;
+  beforeAll(() => {
+    style = document.createElement('style');
+    style.textContent = css;
+    document.head.append(style);
+  });
+  afterAll(() => style.remove());
+
+  test('a launcher row is one line: icon, name, then actions', async () => {
+    await openFrom('.sidebar-new-btn');
+    for (const row of menu()?.querySelectorAll('.launch-row') ?? []) {
+      expect(getComputedStyle(row).display).toBe('flex');
+      const main = row.querySelector('.lr-main') as HTMLElement;
+      const cs = getComputedStyle(main);
+      expect([cs.display, cs.alignItems, cs.minWidth, cs.textAlign]).toEqual(['flex', 'center', '0px', 'left']);
+      expect([...row.children].map((c) => c.className)).toEqual(['popover-item lr-main', 'lr-actions']);
+      expect([...main.children].map((c) => c.className)).toEqual(['lr-icon', 'lr-label']);
+      expect(getComputedStyle(main.querySelector('.lr-label') as HTMLElement).textOverflow).toBe('ellipsis');
+    }
+    expect(menu()?.querySelectorAll('.launch-row')).toHaveLength(2);
+  });
 });

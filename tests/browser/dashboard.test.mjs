@@ -716,3 +716,50 @@ describe('CMX-398 phone 390×844: the New-session menu is still wholly on screen
         await assertInViewport(page, '.popover.launch-menu', vp);
     });
 });
+
+describe('CMX-327 desktop 1440×900: a launcher row is one line, icon, name, then actions', { skip: why }, () => {
+    let page, context;
+    const ready = setup(async () => {
+        ({ page, context } = await openDashboard(browser, {
+            width: 1440, height: 900,
+            api: { '/api/launcher': {
+                favorites: [{ path: '/p/one', label: 'one', exists: true }],
+                recent: [{ path: '/p/a-project-with-a-rather-long-name', label: 'a-project-with-a-rather-long-name', exists: false }],
+            } },
+        }));
+        await settle(page);
+        await stable(page);
+    });
+    after(() => context && context.close());
+
+    test('every row: icon, name and actions share one line, a long name included', async () => {
+        ready();
+        await page.locator('.sidebar-new-btn').first().click();
+        await page.waitForSelector('.popover.launch-menu .launch-row', { state: 'visible', timeout: 5000 });
+        const rows = await page.$$eval('.popover.launch-menu .launch-row', (els) => els.map((row) => {
+            const r = (sel) => {
+                const b = (sel ? row.querySelector(sel) : row).getBoundingClientRect();
+                return { top: b.top, bottom: b.bottom, left: b.left, right: b.right, mid: (b.top + b.bottom) / 2 };
+            };
+            return { row: r(null), icon: r('.lr-icon svg'), label: r('.lr-label'), actions: r('.lr-actions') };
+        }));
+        assert.equal(rows.length, 2);
+        for (const { row, icon, label, actions } of rows) {
+            const where = JSON.stringify({ row, icon, label, actions });
+            assert.ok(Math.abs(icon.mid - label.mid) <= 2, `the icon and the name are on different lines: ${where}`);
+            assert.ok(icon.right <= label.left + px, `the icon is not left of the name: ${where}`);
+            assert.ok(label.right <= actions.left + px, `the actions are not right of the name: ${where}`);
+            assert.ok(row.bottom - row.top < (label.bottom - label.top) + 20, `the row is taller than one line: ${where}`);
+            assert.ok(actions.right <= row.right + px, `the actions overflow the row: ${where}`);
+        }
+    });
+
+    test('a hovered row keeps the row tint: its button never takes the menu item\'s accent fill', async () => {
+        ready();
+        if (!await page.locator('.popover.launch-menu').isVisible()) await page.locator('.sidebar-new-btn').first().click();
+        const main = page.locator('.popover.launch-menu .launch-row .lr-main').first();
+        await main.hover();
+        const bg = await main.evaluate((el) => getComputedStyle(el).backgroundColor);
+        assert.equal(bg, 'rgba(0, 0, 0, 0)', `the hovered launcher button paints ${bg}`);
+    });
+});
