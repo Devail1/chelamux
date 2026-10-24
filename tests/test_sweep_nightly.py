@@ -1997,6 +1997,22 @@ def test_a_source_line_holding_backticks_stays_one_code_span(tmp_path):
     assert sweep_nightly._code("plain") == "`plain`"
 
 
+@pytest.mark.parametrize("text, span", [
+    ("`a", "`` `a ``"),          # leading backtick only: pad, or the fence swallows it
+    ("a`", "`` a` ``"),          # trailing backtick only
+    ("`a`", "`` `a` ``"),        # both ends
+    ("a`b", "``a`b``"),          # inner backtick only: no pad
+])
+def test_a_backtick_at_either_end_of_a_code_span_is_padded(text, span):
+    assert sweep_nightly._code(text) == span
+
+
+def test_a_source_line_starting_with_a_backtick_stays_one_code_span(tmp_path):
+    m = _mut(before="    `cmd` and x", after="    x = None")
+    _, body = sweep_nightly.render_issue(_group(m), _ctx(tmp_path))
+    assert "- `a.py:3`: `` `cmd` and x `` → `x = None`" in body
+
+
 def test_an_issue_filed_before_a_failing_key_write_is_still_reported(tmp_path, monkeypatch):
     repo, chela = _repo(tmp_path), tmp_path / "chela"
 
