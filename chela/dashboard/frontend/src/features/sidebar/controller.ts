@@ -6,6 +6,8 @@
 // the page (the wall, the agent detail view, the launcher, the orchestrator slot) it reaches
 // through the host the shell configures.
 import { api, BOOT } from '../../shared/api/index.ts';
+// panehead's model, not its index: PaneHead imports this controller (no-circular)
+import { headLabel, isShell, type HeadAgent } from '../panehead/model.ts';
 import { registerLane } from '../../shared/scheduler/index.ts';
 import { type Agent, agents as agentsStore } from '../../shared/store/agents.ts';
 import { onOverlayOpen } from '../../shared/ui/index.ts';
@@ -192,7 +194,8 @@ export function renderSidebarAgents(agents: AgentRow[] | null | undefined): void
   if (!document.getElementById('sidebar-agents')) return;
   const c = custom();
   const labels: Record<string, string> = {};
-  for (const a of rows) if (a?.window_id) labels[a.window_id] = host.label(a);
+  // CMX-330: a plain shell reads `Shell` here too, by the pane header's own rule (headLabel).
+  for (const a of rows) if (a?.window_id) labels[a.window_id] = isShell(a as HeadAgent) ? headLabel(a as HeadAgent, a.window_id).title : host.label(a);
   const ctx: Record<string, number> = {};
   for (const [wid, x] of Object.entries(ctxByWid)) if (x.used_pct != null) ctx[wid] = x.used_pct;
   state = {
