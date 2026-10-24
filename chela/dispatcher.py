@@ -2489,8 +2489,10 @@ def _resolve_base_conflict(conn: sqlite3.Connection, wf: WorkflowDef, row, head:
     worktree (:func:`chela.basemerge.attempt`): clean and green ⇒ pushed, recorded on the PR
     ("base merged automatically"), and the judge grades the new head as usual. 🏭 CMX-300: a
     conflict ONLY in the generated bundle is rebuilt and pushed the same way. A conflict, a
-    failed rebuild or a red merge ⇒ a rework that is NOT charged against the cap. Returns ``merged``,
-    ``rework``, or ``none`` (nothing could be measured, or nothing to do)."""
+    failed rebuild or a red merge ⇒ a rework that is NOT charged against the cap. 🏗️ CMX-323:
+    tests that could not START ⇒ :func:`_base_merge_infra`, never a rework. Returns ``merged``,
+    ``rework``, ``infra``, ``escalated``, or ``none`` (nothing could be measured, or nothing
+    to do)."""
     from chela import basemerge
     task_id = row["task_id"]
     base = wf.get("workspace", "base_branch", default="master")
@@ -2520,6 +2522,8 @@ def _resolve_base_conflict(conn: sqlite3.Connection, wf: WorkflowDef, row, head:
         log.warning("Task %s: base merged automatically (origin/%s %s → %s)", task_id, base,
                     res["base_sha"][:12], res["merge_sha"][:12])
         return "merged"
+    if res["outcome"] == basemerge.INFRA:
+        return _base_merge_infra(conn, row, res, base)
     # Burn the sha and grant the free round BEFORE the verdict, so 1d (below) never sees this
     # round as charged; both are undone if the verdict is not written.
     conn.execute("UPDATE runs SET conflict_sha=?, conflict_reworks=MIN(COALESCE("
@@ -2539,6 +2543,47 @@ def _resolve_base_conflict(conn: sqlite3.Connection, wf: WorkflowDef, row, head:
     log.warning("Task %s: PR conflicts with origin/%s (%s) — sent back, not charged: %s",
                 task_id, base, res["outcome"], ", ".join(res["files"]))
     return "rework"
+
+
+def _base_merge_infra(conn: sqlite3.Connection, row, res: dict, base: str) -> str:
+    """🏗️ CMX-323. The base merged cleanly but its targeted tests could not START (the scratch
+    worktree could not be provisioned, the runner never spawned, nothing was collected), so
+    nothing about the code was measured. Never sent back: counted as an infra restart (CMX-192,
+    not the review cap), the orchestrator told, and the head left un-burned so the next tick
+    tries again. At the infra cap the run escalates, so a broken box still stops. Returns
+    ``infra`` or ``escalated``."""
+    from chela import inbox
+    task_id = row["task_id"]
+    conn.execute("UPDATE runs SET infra_restarts=COALESCE(infra_restarts, 0) + 1 "
+                 "WHERE task_id=?", (task_id,))
+    conn.commit()
+    restarts, cap = infra_restarts(row) + 1, infra_restart_cap(row)
+    why = tui_sanitize(judge._last_meaningful_line(res["detail"])) or "no detail"
+    log.warning("Task %s: origin/%s merges cleanly but the targeted tests could not start "
+                "(infra restart %s/%s, not sent back): %s", task_id, base, restarts, cap, why)
+    try:
+        inbox.enqueue("run_base_merge_infra",
+                      f"🏗️ {row['branch_name'] or task_id}: origin/{base} merges cleanly but "
+                      f"its targeted tests could not start (infra {restarts}/{cap}) — NOT sent "
+                      f"back for rework — {why}",
+                      {"task_id": task_id, "branch_name": row["branch_name"],
+                       "pr_url": row["pr_url"], "base_sha": res["base_sha"],
+                       "head_sha": res["head_sha"], "detail": res["detail"],
+                       "infra_restarts": restarts, "infra_restart_cap": cap})
+    except Exception:  # noqa: BLE001 — the inbox is advisory
+        log.warning("Task %s: could not queue the base-merge infra notice", task_id,
+                    exc_info=True)
+    if restarts < cap:
+        return "infra"
+    _escalate(conn, row,
+              f"infra restart cap reached ({restarts}/{cap}): origin/{base} merges cleanly "
+              f"into the PR but its targeted tests could not start in the scratch worktree: "
+              f"{why}",
+              recommendation="fix the host's test environment (`uv sync`, `pnpm install`), "
+                             "then `chela retry` the run",
+              options=["fix the environment and `chela retry`",
+                       "merge the base into the branch by hand"])
+    return "escalated"
 
 
 def _failing_log_tail(repo_dir: str | None, run_ids: tuple[str, ...]) -> str:
@@ -5496,7 +5541,7 @@ def _refused(error: str | None, refused: bool = False) -> dict:
         "pr_state_refreshed": 0, "watchdog_renudged": 0, "tracker_struck": 0,
         "reworked": 0, "escalated": 0, "ci_failed": 0, "ci_infra_failed": 0,
         "ci_rerun": 0, "ci_flake": 0, "ci_known_flake": 0, "base_merged": 0, "base_conflict": 0,
-        "judged": 0, "judge_cancelled": 0, "judge_lost": 0, "judge_stranded": 0,
+        "base_infra": 0, "judged": 0, "judge_cancelled": 0, "judge_lost": 0, "judge_stranded": 0,
         "trial_ledger": 0, "disk_budget_exceeded": False, "window_reaped": 0,
         "blocked": True, "error": error, "held": False, "hold_expired": False,
         "refused": refused,
@@ -5675,6 +5720,7 @@ def tick(workflow_path: str | Path) -> dict:
         "ci_known_flake": 0,
         "base_merged": 0,
         "base_conflict": 0,
+        "base_infra": 0,
         "judged": 0,
         "judge_cancelled": 0,
         "judge_lost": 0,
@@ -6584,6 +6630,9 @@ def tick(workflow_path: str | Path) -> dict:
             outcome = _resolve_base_conflict(conn, wf, row, head)
             if outcome in ("merged", "rework"):
                 summary["base_merged" if outcome == "merged" else "base_conflict"] += 1
+            elif outcome in ("infra", "escalated"):
+                summary["base_infra"] += 1
+                summary["escalated"] += outcome == "escalated"
 
         # 1c′. A CHECK THAT NEVER SETTLES IS NOT A CHECK WE ARE STILL WAITING FOR.
         #

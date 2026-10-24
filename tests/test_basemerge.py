@@ -5,6 +5,7 @@ tests/test_dispatcher_ci.py."""
 from __future__ import annotations
 
 import json
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -126,14 +127,108 @@ def test_no_test_cmd_pushes_an_unextendable_one_runs_as_is_a_hung_one_is_red(
     assert _origin_feat(repo) == (res["merge_sha"] if outcome == "merged" else head)
 
 
-def test_a_suite_that_never_ran_raises_and_pushes_nothing(fx, monkeypatch):
+def test_a_suite_that_never_ran_is_infra_and_pushes_nothing(fx, monkeypatch):
     repo, head = fx
     _dev(repo, {"other.py": "x = 2\n"})
     monkeypatch.setattr(judge, "run_suite", lambda *a, **k: judge.SuiteResult(
         False, -1, 0, 0, 0, "", "no shell"))
-    with pytest.raises(RuntimeError, match="could not run: no shell"):
-        basemerge.attempt(repo, "feat", "dev", PYTEST)
-    assert _origin_feat(repo) == head
+    res = basemerge.attempt(repo, "feat", "dev", PYTEST)
+    assert (res["outcome"], res["files"]) == ("infra", ["tests/test_mod.py"])
+    assert res["detail"] == "the targeted tests could not run: no shell"
+    assert res["merge_sha"] and _origin_feat(repo) == head
+    assert len(_g(repo, "worktree", "list").splitlines()) == 1
+
+
+# --- 🏗️ CMX-323: a scratch worktree with no environment is provisioned; a no-start is infra --
+
+@pytest.mark.skipif(shutil.which("uv") is None, reason="needs uv on PATH")
+def test_a_runner_that_fails_to_spawn_is_infra_not_red(fx):
+    """The live shape: uv's own "Failed to spawn" (exit 2, no test ran), unmocked."""
+    repo, head = fx
+    _dev(repo, {"other.py": "x = 2\n"})
+    res = basemerge.attempt(repo, "feat", "dev", "uv run --no-project no-such-runner-cmx323")
+    assert (res["outcome"], _origin_feat(repo)) == ("infra", head)
+    assert "never started (exit 2, no test ran)" in res["detail"]
+    assert "Failed to spawn" in res["detail"]
+
+
+def test_nothing_collected_is_infra_not_red(fx):
+    repo, head = fx
+    _dev(repo, {"other.py": "x = 2\n"})
+    res = basemerge.attempt(repo, "feat", "dev", f"{PYTEST} -k no_such_test_cmx323")
+    assert (res["outcome"], _origin_feat(repo)) == ("infra", head)
+    assert "never started (exit 5, no test ran)" in res["detail"]
+
+
+def test_a_collection_error_the_merge_caused_is_still_red(fx):
+    """Negative control for exit 2: an ImportError the base brought in IS the merge's red."""
+    repo, head = fx
+    _dev(repo, {"tests/test_mod.py": TEST.replace("import f", "import nope")})
+    res = basemerge.attempt(repo, "feat", "dev", PYTEST)
+    assert (res["outcome"], _origin_feat(repo)) == ("red", head)
+    assert "1 error" in res["detail"]
+
+
+def test_the_scratch_worktree_is_provisioned_before_the_tests_run(fx, monkeypatch):
+    repo, _ = fx
+    _dev(repo, {"other.py": "x = 2\n"})
+    calls = []
+    monkeypatch.setattr(judge, "provision_suite_env", lambda wt: calls.append(
+        ("provision", Path(wt).name, Path(wt).parent.name[:16])) or "")
+    monkeypatch.setattr(judge, "run_suite", lambda c, cwd, timeout: calls.append(
+        ("suite", Path(cwd).name)) or judge.SuiteResult(True, 0, 1, 0, 0, "1 passed"))
+    res = basemerge.attempt(repo, "feat", "dev", PYTEST)
+    assert res["outcome"] == "merged"
+    assert calls == [("provision", "wt", "chela-basemerge-"), ("suite", "wt")]
+
+
+def test_a_scratch_worktree_that_cannot_be_provisioned_is_infra_and_runs_nothing(fx,
+                                                                                 monkeypatch):
+    repo, head = fx
+    _dev(repo, {"other.py": "x = 2\n"})
+    ran = []
+    monkeypatch.setattr(judge, "provision_suite_env", lambda wt: "`uv sync` failed (exit 2)")
+    monkeypatch.setattr(judge, "run_suite", lambda *a, **k: ran.append(a))
+    res = basemerge.attempt(repo, "feat", "dev", PYTEST)
+    assert (res["outcome"], ran, _origin_feat(repo)) == ("infra", [], head)
+    assert res["detail"] == ("the scratch worktree could not be provisioned: "
+                             "`uv sync` failed (exit 2)")
+    assert len(_g(repo, "worktree", "list").splitlines()) == 1
+
+
+def test_a_real_uv_project_with_no_venv_gets_one_and_runs_its_tests(fx, monkeypatch):
+    """The scratch worktree has no .venv: provisioning makes one (a stubbed `uv sync` that
+    links this test's own venv; the real one needs the network) and the tests RUN, green."""
+    repo, _ = fx
+    _commit(repo, {"pyproject.toml": "[project]\nname = 'x'\nversion = '0'\n"}, "uv project")
+    _g(repo, "push", "-q", "origin", "dev")
+    _dev(repo, {"other.py": "x = 2\n"})
+    synced, run, which = [], subprocess.run, shutil.which
+
+    def fake_uv(argv, *a, cwd=None, **k):
+        if argv[:2] != ["uv", "sync"]:
+            return run(argv, *a, cwd=cwd, **k)
+        synced.append((argv, Path(cwd).name))
+        (Path(cwd) / ".venv").symlink_to(sys.prefix)     # a venv with pytest in it
+        return subprocess.CompletedProcess(argv, 0, "", "")
+    monkeypatch.setattr(shutil, "which", lambda n, *a, **k: "/usr/bin/uv" if n == "uv"
+                        else which(n, *a, **k))
+    monkeypatch.setattr(subprocess, "run", fake_uv)
+    res = basemerge.attempt(repo, "feat", "dev",
+                            "sh -c './.venv/bin/python -m pytest -q -p no:cacheprovider "
+                            "tests/test_mod.py'")
+    assert synced == [(["uv", "sync", "--all-extras", "--quiet"], "wt")]
+    assert (res["outcome"], res["files"]) == ("merged", ["tests/test_mod.py"]), res["detail"]
+
+
+@pytest.mark.parametrize("code, passed, failed, errors, expected", [
+    (2, 0, 0, 0, True), (3, 0, 0, 0, True), (4, 0, 0, 0, True), (5, 0, 0, 0, True),
+    (0, 0, 0, 0, False), (1, 0, 0, 0, False), (6, 0, 0, 0, False), (-1, 0, 0, 0, False),
+    (2, 0, 0, 1, False), (2, 1, 0, 0, False), (2, 0, 1, 0, False), (1, 0, 1, 0, False)])
+def test_never_started_is_a_no_start_code_with_no_test_run_and_no_error(
+        code, passed, failed, errors, expected):
+    assert basemerge.never_started(
+        judge.SuiteResult(True, code, passed, failed, errors, "")) is expected
 
 
 def test_an_unfetchable_branch_raises_and_leaves_no_worktree(fx):
@@ -381,6 +476,96 @@ def test_a_clean_merge_with_no_targeted_tests_says_so(tmp_path, tried):
     _tick(wf, fake)
     assert any("(no targeted tests ran; CI gates it)" in c for c in fake.comments)
     assert not any("0 targeted" in c for c in fake.comments)
+
+
+# --- 🏗️ CMX-323: tests that could not start are infra: counted, reported, never sent back ---
+
+@pytest.fixture
+def notices(monkeypatch):
+    from chela import inbox
+    got = []
+    monkeypatch.setattr(inbox, "enqueue", lambda kind, summary, payload: got.append(
+        (kind, summary, payload)) or True)
+    return got
+
+
+def _infra(detail="error: Failed to spawn: `pytest`\n  Caused by: No such file (os error 2)"):
+    return {**_result("infra", files=["tests/test_mod.py"]), "merge_sha": "m" * 40,
+            "detail": detail}
+
+
+def test_an_infra_base_merge_is_counted_reported_and_never_sent_back(tmp_path, tried, notices):
+    calls, answer = tried
+    answer["res"] = _infra()
+    wf, fake = _setup(tmp_path, pr_mergeable="CONFLICTING", infra_restarts=2)
+
+    summary = _tick(wf, fake)
+
+    assert (summary["base_infra"], summary["base_conflict"], summary["reworked"],
+            summary["escalated"]) == (1, 0, 0, 0)
+    run = dispatcher.resolve_run("abc123")
+    assert (run["status"], run["rework_count"], run["conflict_reworks"], run["infra_restarts"]) \
+        == ("awaiting_review", 0, 0, 3)
+    assert run["conflict_sha"] is None                 # un-burned: the next tick tries again
+    assert dispatcher.latest_verdict(run) in (None, "")
+    assert not fake.comments
+    cap = dispatcher.infra_restart_cap(run)
+    [(kind, summary_line, payload)] = notices
+    assert kind == "run_base_merge_infra"
+    assert summary_line == (f"🏗️ test-1: origin/dev merges cleanly but its targeted tests could "
+                            f"not start (infra 3/{cap}) — NOT sent back for rework — Caused by: "
+                            f"No such file (os error 2)")
+    assert payload == {"task_id": "abc123", "branch_name": "test-1",
+                       "pr_url": "https://github.com/o/r/pull/80", "base_sha": "b" * 40,
+                       "head_sha": "deadbee1", "detail": _infra()["detail"],
+                       "infra_restarts": 3, "infra_restart_cap": cap}
+    _tick(wf, fake)
+    assert len(calls) == 2 and dispatcher.resolve_run("abc123")["infra_restarts"] == 4
+
+
+def test_an_infra_base_merge_at_the_infra_cap_escalates(tmp_path, tried, notices, monkeypatch):
+    _, answer = tried
+    answer["res"] = _infra()
+    monkeypatch.setattr(dispatcher, "max_infra_restarts", lambda: 3)
+    wf, fake = _setup(tmp_path, pr_mergeable="CONFLICTING", infra_restarts=2)
+
+    summary = _tick(wf, fake)
+
+    run = dispatcher.resolve_run("abc123")
+    assert (summary["base_infra"], summary["escalated"], summary["base_conflict"]) == (1, 1, 0)
+    assert (run["status"], run["infra_restarts"], run["rework_count"]) == ("needs_human", 3, 0)
+    assert "infra restart cap reached (3/3): origin/dev merges cleanly" in run["last_error"]
+    assert "Caused by: No such file (os error 2)" in run["last_error"]
+
+
+def test_one_infra_round_below_the_cap_does_not_escalate(tmp_path, tried, notices, monkeypatch):
+    _, answer = tried
+    answer["res"] = _infra()
+    monkeypatch.setattr(dispatcher, "max_infra_restarts", lambda: 3)
+    wf, fake = _setup(tmp_path, pr_mergeable="CONFLICTING", infra_restarts=1)
+    assert _tick(wf, fake)["escalated"] == 0
+    assert dispatcher.resolve_run("abc123")["status"] == "awaiting_review"
+
+
+def test_an_inbox_that_raises_still_counts_the_infra_round(tmp_path, tried, monkeypatch):
+    from chela import inbox
+    _, answer = tried
+    answer["res"] = _infra(detail="")
+    monkeypatch.setattr(inbox, "enqueue", lambda *a: (_ for _ in ()).throw(RuntimeError("x")))
+    wf, fake = _setup(tmp_path, pr_mergeable="CONFLICTING")
+    assert _tick(wf, fake)["base_infra"] == 1
+    run = dispatcher.resolve_run("abc123")
+    assert (run["infra_restarts"], run["status"]) == (1, "awaiting_review")
+
+
+def test_a_red_merge_after_a_clean_merge_is_still_sent_back_not_infra(tmp_path, tried, notices):
+    _, answer = tried
+    answer["res"] = _result("red", files=["tests/test_mod.py"])
+    wf, fake = _setup(tmp_path, pr_mergeable="CONFLICTING")
+    summary = _tick(wf, fake)
+    run = dispatcher.resolve_run("abc123")
+    assert (summary["base_conflict"], summary["base_infra"], notices) == (1, 0, [])
+    assert (run["status"], run["infra_restarts"] or 0) == ("running", 0)
 
 
 # --- 🏭 CMX-300: a conflict only in the generated bundle is rebuilt, not sent back -------
