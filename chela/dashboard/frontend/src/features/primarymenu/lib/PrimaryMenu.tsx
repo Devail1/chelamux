@@ -73,7 +73,7 @@ export function PrimaryMenu() {
   ];
   return (
     <Menu items={items} footer={<Readouts />}
-      trigger={<IconButton ref={gear} className="icon-btn" id="btn-primary-menu" label="Settings & menu"><icons.settings aria-hidden /></IconButton>} />
+      trigger={<IconButton ref={gear} className="icon-btn" id="btn-primary-menu" label="Settings & menu"><icons.settings aria-hidden size={20} /></IconButton>} />
   );
 }
 
