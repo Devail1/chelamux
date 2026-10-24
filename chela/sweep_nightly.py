@@ -17,7 +17,8 @@ every same-shape site; slice 3 plugs the tracker into the :class:`Filer` seam.
   :func:`chela.risktier.classify` the merge gate uses — a core or always-human PR met the judge
   or a human already, a prose one has nothing to mutate). A root commit is diffed against the
   empty tree. The lines swept are the ones that STILL blame to one of those commits at the tip,
-  so a line a later core PR rewrote is not swept twice. ONE battery, through
+  so a line a later core PR rewrote is not swept twice. The checkout is provisioned first
+  (:func:`chela.judge.provision_suite_env`: venv and node_modules — CMX-325). ONE battery, through
   :func:`chela.sweep.sweep` — the judge's own mechanics, ``judge.select_tests``, suite timeout
   and budget. A mutation the budget never reached is UNRUN and a file no mutator handles is
   UNKNOWN: a night with either and no survivor says so, never ``clean``.
@@ -516,12 +517,22 @@ def _sweep_and_file(wf, worktree: Path, head: str, ref: str, standard: list[dict
     except _Git as e:
         result.update(status=CANNOT_VERIFY, why=f"could not blame the merged lines: {e}")
         return
+    # ⛔ CMX-325: this checkout is never launched through an agent, so no `hooks.before_run`
+    # built it — no venv, no node_modules. Provision it HERE, before the battery: the sweep's
+    # own provisioning runs only after it has collected the mutations, and collecting a
+    # .ts/.tsx file's already needs `typescript` (the first night was CANNOT VERIFY on that).
+    env_problem = judge.provision_suite_env(worktree)
+    if env_problem:
+        result.update(status=CANNOT_VERIFY,
+                      why=f"the nightly worktree could not be PROVISIONED: {env_problem}")
+        return
     cfg = judge.judge_suite_config(wf)
     budget = sweep.resolve_budget(wf, seconds=wf.get("sweep", "budget_seconds"),
                                   max_mutations=wf.get("sweep", "max_mutations"))
     report = sweep.sweep(worktree, f"{ref}@{head[:12]} (standard-tier lines)",
                          cfg.test_cmd, timeout=cfg.suite_timeout_seconds,
-                         select_tests=cfg.select_tests, budget=budget, lines=lines)
+                         select_tests=cfg.select_tests, provision=False, budget=budget,
+                         lines=lines)
     unrun = [r.mutation.key for r in report._with(sweep.UNRUN)]
     result.update(mutations=len(report.results), unrun=len(unrun),
                   unrun_sites=sorted(set(unrun)), unsupported=list(report.unsupported))
