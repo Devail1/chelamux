@@ -95,6 +95,8 @@ const TYPE_CLASS: Record<string, ClassId> = {
     run_stuck: 'run',
     run_marker_unread: 'run',
     run_selfcheck_long: 'run',
+    // CMX-318: a park (`chela park`) that outlived its --until or the max.
+    run_park_overdue: 'run',
     dispatch_hold_expired: 'lifecycle',
     dispatch_hold_released: 'lifecycle',
     // The inbox cannot reach the orchestrator (CMX-77): its queue is addressed to a window

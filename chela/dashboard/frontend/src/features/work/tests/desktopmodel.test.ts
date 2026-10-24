@@ -95,6 +95,12 @@ test('rowCells: the words of a row; CI only with a PR, risk only a known one, or
   }
 });
 
+test('CMX-318: a held run\'s state cell is its park (the epoch-second since read against the ms clock), its title the full reason', () => {
+  const park = { kind: 'slot' as const, reason: 'waiting for a suite slot (holder: CMX-7)', since: NOW / 1000 - 300 };
+  expect(rowCells(card({ status: 'running', park }), NOW)).toMatchObject({ state: 'waiting · waiting for a suite slot (holder: CMX-7) · 5m ago', stateTitle: 'waiting for a suite slot (holder: CMX-7) · 5m ago' });
+  expect(rowCells(card({ status: 'running', park: null }), NOW)).toMatchObject({ state: 'running', stateTitle: undefined });
+});
+
 const ids = (cs: Card[]) => cs.map((c) => c.task_id);
 
 test('sortCards: none keeps the order (a copy); numeric ids and PRs; the worst CI and the highest risk first; blanks last both ways; stable', () => {

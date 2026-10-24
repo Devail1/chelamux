@@ -46,7 +46,7 @@ export function CompactCard({ card }: { card: CardData }) {
           {flags.map((f) => {
             const Icon = f.icon ? icons[f.icon] : null;
             return (
-              <span key={f.label} className={`wcard-flag${f.warn ? ' warn' : ''}`}>
+              <span key={f.label} className={`wcard-flag${f.warn ? ' warn' : ''}`} title={f.title}>
                 {Icon && <Icon aria-hidden size={12} />} {f.label}
               </span>
             );

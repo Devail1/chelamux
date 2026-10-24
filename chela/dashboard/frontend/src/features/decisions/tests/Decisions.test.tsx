@@ -235,9 +235,9 @@ test('the first refresh() tick seeds the log, scoped to decision kinds, with no 
 
 test('the decision kinds: every outcome chela/inbox.py queues, never the hook firehose', () => {
   const types = new Set(m.d.DECISION_TYPES);
-  for (const t of ['run_review', 'run_needs_human', 'run_changes_requested', 'run_failed', 'run_judge_clean', 'run_judge_cannot_verify', 'run_judge_blocked_race', 'run_unjudged_merged', 'run_judge_not_started', 'run_reopened', 'run_was_closed', 'run_ci_red', 'run_ci_flake', 'run_pr_conflicting', 'run_stuck', 'run_marker_unread', 'run_selfcheck_long', 'dispatch_hold_expired', 'dispatch_hold_released', 'finished', 'blocked', 'died', 'gone_unknown', 'completed_gone', 'watch_epoch_lost', 'inbox_undeliverable', 'inbox_self_healed'])
+  for (const t of ['run_review', 'run_needs_human', 'run_changes_requested', 'run_failed', 'run_judge_clean', 'run_judge_cannot_verify', 'run_judge_blocked_race', 'run_unjudged_merged', 'run_judge_not_started', 'run_reopened', 'run_was_closed', 'run_ci_red', 'run_ci_flake', 'run_pr_conflicting', 'run_stuck', 'run_marker_unread', 'run_selfcheck_long', 'run_park_overdue', 'dispatch_hold_expired', 'dispatch_hold_released', 'finished', 'blocked', 'died', 'gone_unknown', 'completed_gone', 'watch_epoch_lost', 'inbox_undeliverable', 'inbox_self_healed'])
     expect(types.has(t)).toBe(true);
-  expect(m.d.DECISION_TYPES).toHaveLength(27);
+  expect(m.d.DECISION_TYPES).toHaveLength(28);
   for (const t of ['hook.pre_tool_use', 'hook.post_tool_use', 'hook.user_prompt_submit']) expect(types.has(t)).toBe(false);
 });
 
