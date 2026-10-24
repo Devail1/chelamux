@@ -35,7 +35,7 @@ export function DecisionsButton({ jump }: { jump: JumpToOrchestrator }) {
         openDecisions();
       }}
     >
-      <icons.inbox aria-hidden />
+      <icons.inbox aria-hidden size={20} />
       <span className={`decisions-dot dot-${meta.cls}`} title={meta.word} />
       {count > 0 && (
         <span className={`decisions-unread${urgency !== 'neutral' ? ` decisions-unread-${urgency}` : ''}`}>{formatUnreadCount(count)}</span>

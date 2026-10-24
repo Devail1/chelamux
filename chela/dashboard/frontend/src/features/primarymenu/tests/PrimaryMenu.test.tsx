@@ -46,7 +46,7 @@ test('ONE trigger, a real button named for what it does, opens ONE menu with eve
   expect(screen.getByRole('menu', { name: 'Settings & menu' })).toBe(menu()); // named by its trigger
   expect(items().map((i) => i.querySelector('.ov-label')?.textContent)).toEqual(['Jump to…', 'New…', 'Share current session', 'Notifications', 'Settings']);
   expect(item('Jump to…').querySelector('.ov-val')?.textContent).toBe('⌘K');
-  expect(items().every((i) => i.querySelector('.ov-ic svg'))).toBe(true);
+  expect(items().map((i) => i.querySelector('.ov-ic svg')?.getAttribute('width'))).toEqual(['14', '14', '14', '14', '14']); // CMX-309: not Lucide's 24
 });
 
 test('the safety kill switch is never inside the menu', () => {

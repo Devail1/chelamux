@@ -301,6 +301,19 @@ test('ItemButton is a real button drawn as a .popover-item row', () => {
   expect([b.className, b.getAttribute('type'), b.title]).toEqual(['popover-item lr-main', 'button', 't']);
 });
 
+// CMX-309: Lucide draws 24px when unsized, which overflowed the 16px .ov-ic slot next to 13px
+// labels. The kit sizes every item's icon once (the legacy overflow menu's 14px).
+test('Menu: every item icon renders at 14px, never Lucide\'s 24px default', () => {
+  render(<Menu trigger={<Button>Icons</Button>} items={[{ label: 'Share', icon: Share2, onSelect: () => {} }, 'separator', { label: 'Again', icon: Share2, onSelect: () => {} }]} />);
+  fireEvent.keyDown(screen.getByText('Icons'), { key: 'Enter' });
+  const svgs = [...screen.getByRole('menu').querySelectorAll('.ov-ic svg')];
+  expect(svgs).toHaveLength(2);
+  for (const svg of svgs) {
+    expect(svg.getAttribute('width')).toBe('14');
+    expect(svg.getAttribute('height')).toBe('14');
+  }
+});
+
 test('a Menu draws its footer after its items, and is named by its trigger, whatever the trigger\'s id', () => {
   render(<Menu items={[{ label: 'One', onSelect: () => {} }]} footer={<div className="ov-stat">5h usage</div>} trigger={<Button>Open menu</Button>} />);
   fireEvent.keyDown(screen.getByText('Open menu'), { key: 'Enter' });
