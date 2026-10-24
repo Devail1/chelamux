@@ -1,5 +1,6 @@
-"""⚖️🧹🌙 CMX-303/CMX-304 — the nightly sweep: when it runs, which merges it covers, the
-battery, the survivor groups and their same-shape sites, the key store, and the daemon wiring.
+"""⚖️🧹🌙 CMX-303/CMX-304/CMX-305 — the nightly sweep: when it runs, which merges it covers,
+the battery, the survivor groups and their same-shape sites, the key store, the tracker filing,
+the inbox notice, and the daemon wiring.
 
 Every test runs against a throwaway repo whose ``origin`` is a local bare repo, a temp
 ``CHELA_DIR`` and a fake :class:`~chela.sweep_nightly.Filer` — nothing talks to a tracker.
@@ -19,6 +20,8 @@ import pytest
 
 from chela import judge, risktier, sweep, sweep_nightly
 from chela import main as main_mod
+from chela.sources import linear
+from chela.sources.linear import LinearError, LinearSource
 from chela.workflow import load_workflow, parse_workflow
 
 OLD = "2020-01-01T00:00:00+00:00"
@@ -37,6 +40,15 @@ COVERED_TEST = ("from other import big_enough\n\n\ndef test_big_enough():\n"
 # A weak guard a NON-standard PR carries — judged (or human-gated) per PR, never swept here.
 CORE_WEAK = "def tick(y):\n    if y > 7:\n        return 3\n    return 4\n"
 WEAK_TITLE_KINDS = ["if-false"]
+
+
+@pytest.fixture(autouse=True)
+def notices(monkeypatch):
+    """Every inbox notice a run queues, ``(kind, summary, payload)`` — none reaches a store."""
+    got: list[tuple[str, str, dict]] = []
+    monkeypatch.setattr("chela.inbox.enqueue",
+                        lambda kind, summary, payload: got.append((kind, summary, payload)))
+    return got
 
 
 def _git(repo: Path, *args: str, date: str | None = None) -> str:
@@ -232,8 +244,13 @@ def test_a_daemon_restart_between_runs_still_files_nothing(tmp_path):
 # --- the default filer: records what WOULD be filed, files nothing --------------------------
 
 
-def test_the_default_filer_records_what_it_would_file_and_stores_no_key(tmp_path):
+class _NoCreate:
+    """A tracker source with no ``create_issue`` (markdown, gh_issues)."""
+
+
+def test_the_default_filer_records_what_it_would_file_and_stores_no_key(tmp_path, monkeypatch):
     repo, chela = _repo(tmp_path), tmp_path / "chela"
+    monkeypatch.setattr("chela.sources.get_source", lambda wf: _NoCreate())
     res = _run(repo, chela, None)
     assert (res["status"], res["filed"], res["would_file"]) == ("survivors", [], ["size.py:2"])
     recs = [json.loads(x) for x in
@@ -249,7 +266,7 @@ def test_the_default_filer_records_what_it_would_file_and_stores_no_key(tmp_path
     assert (rec["file"], rec["sites"], rec["key"]) == ("size.py", ["size.py:2"],
                                                        res["groups"][0]["key"])
     assert [m["kind"] for m in rec["mutations"]] == WEAK_TITLE_KINDS
-    # Nothing was filed, so nothing is remembered as filed: the real filer (slice 3) files it.
+    # Nothing was filed, so nothing is remembered as filed: a filer that can, files it.
     assert not (sweep_nightly.state_dir(chela) / "filed.json").exists() or \
         _store(chela).get("keys") == {}
     # ...and a night that only recorded is still a night that looked: the window moves.
@@ -1494,8 +1511,9 @@ def test_catch_up_never_reaches_past_a_week(tmp_path):
     # check keeps these nights from moving the window (a red baseline, a torn key store).
     ("red_baseline", False), ("torn_key_store", False),
 ])
-def test_only_a_run_that_looked_moves_the_window(tmp_path, case, recorded):
+def test_only_a_run_that_looked_moves_the_window(tmp_path, monkeypatch, case, recorded):
     """A night that CANNOT VERIFY must not advance the window (defeat shape 303b)."""
+    monkeypatch.setattr("chela.sources.get_source", lambda wf: _NoCreate())
     prs = {"no_standard": [], "clean": [({"other.py": COVERED,
                                           "tests/test_other.py": COVERED_TEST}, "PR 2", None)],
            "red_baseline": [({"size.py": WEAK,
@@ -1574,3 +1592,398 @@ def test_window_start_reads_only_its_own_workflow(tmp_path):
     (sweep_nightly.state_dir(chela) / "covered.json").write_text(json.dumps(
         {"/other/WORKFLOW.md": 1e9 - 3 * 86400}))
     assert sweep_nightly.window_start(wf, 1e9, chela) == 1e9 - 86400
+
+
+# --- CMX-305: the tracker filer ------------------------------------------------------------
+
+
+class Created:
+    """A ``create_issue`` stand-in: records each call, answers ``CMX-7``, ``CMX-8`` …"""
+
+    def __init__(self, warnings=(), fail_on: int | None = None):
+        self.calls: list[tuple[str, str, tuple]] = []
+        self.warnings, self.fail_on = list(warnings), fail_on
+
+    def __call__(self, title, description, labels=()):
+        self.calls.append((title, description, labels))
+        if self.fail_on == len(self.calls):
+            raise LinearError("network", "reset")
+        return {"identifier": f"CMX-{6 + len(self.calls)}", "url": "u", "title": title,
+                "warnings": self.warnings}
+
+
+def _group(*survivors, sites=None) -> sweep_nightly.SurvivorGroup:
+    first = survivors[0]
+    return sweep_nightly.SurvivorGroup(
+        file=first.file, mutation=first, survivors=tuple(survivors),
+        sites=tuple(sites if sites is not None else [m.key for m in survivors]), key="k")
+
+
+def _ctx(tmp_path, merged_in="`abc` PR 1 (#1)") -> sweep_nightly.FileContext:
+    return sweep_nightly.FileContext(workflow=tmp_path / "WORKFLOW.md", worktree=tmp_path,
+                                     head="f" * 40, ref="origin/dev", merged_in=merged_in,
+                                     chela_dir=tmp_path / "chela")
+
+
+def test_the_tracker_filer_files_one_issue_with_the_documented_labels(tmp_path):
+    a = _mut(file="a.py", line=3)
+    b = _mut(file="b.py", line=9)
+    create = Created()
+    filer = sweep_nightly.TrackerFiler(create)
+    assert filer(_group(a, b, sites=["a.py:3", "b.py:9", "c.py:1"]), _ctx(tmp_path)) == "CMX-7"
+    assert len(create.calls) == 1 and filer.warnings == []
+    title, body, labels = create.calls[0]
+    assert labels == ("risk:normal", "sweep")
+    assert title == "Nightly sweep: if-false survived at a.py:3 and 1 more site(s)"
+    assert body == "\n".join([
+        "⚖️🧹 The nightly mutation sweep found a guard on the base branch that no test can "
+        "tell apart from its corruption. It merged from a STANDARD-tier PR, which gets no "
+        "judge round.", "",
+        "**Category:** `if-false` on `if x:`",
+        f"**Swept:** `origin/dev` at `{'f' * 12}`",
+        "**Merged in:** `abc` PR 1 (#1)", "",
+        "**Mutations that survived:**", "",
+        "- `a.py:3`: `if x:` → `if False and (x):`",
+        "- `b.py:9`: `if x:` → `if False and (x):`", "",
+        "**Same-shape sites** (every source line that reads exactly `if x:`):", "",
+        "- `a.py:3` ← survived", "- `b.py:9` ← survived", "- `c.py:1`", "",
+        "Add a test that goes RED under each mutation above — not a weaker assertion — and "
+        "check every same-shape site for the same gap."])
+
+
+def test_one_survivor_titles_its_site_alone_and_no_merge_line_without_one(tmp_path):
+    title, body = sweep_nightly.render_issue(_group(_mut()), _ctx(tmp_path, merged_in=""))
+    assert title == "Nightly sweep: if-false survived at a.py:3"
+    assert "**Merged in:**" not in body
+
+
+def test_the_issue_lists_at_most_100_sites_and_counts_the_rest(tmp_path):
+    m = _mut(file="f0.py", line=1)
+    sites = [f"f{i}.py:1" for i in range(101)]
+    _, body = sweep_nightly.render_issue(_group(m, sites=sites), _ctx(tmp_path))
+    assert "- `f99.py:1`" in body and "- `f100.py:1`" not in body
+    assert "- … and 1 more (`git grep -nF` the line)" in body
+    _, body = sweep_nightly.render_issue(_group(m, sites=sites[:100]), _ctx(tmp_path))
+    assert "- `f99.py:1`" in body and "more (`git grep" not in body
+
+
+def test_the_tracker_filer_keeps_each_label_warning_by_issue(tmp_path):
+    filer = sweep_nightly.TrackerFiler(Created(warnings=["label 'sweep' could not be created"]))
+    filer(_group(_mut()), _ctx(tmp_path))
+    filer(_group(_mut(file="b.py")), _ctx(tmp_path))
+    assert filer.warnings == ["CMX-7: label 'sweep' could not be created",
+                              "CMX-8: label 'sweep' could not be created"]
+
+
+def test_default_filer_is_the_tracker_when_it_can_create_and_would_file_otherwise(tmp_path,
+                                                                                  monkeypatch):
+    class Src:
+        def create_issue(self, title, description="", labels=()):
+            return {"identifier": "CMX-3"}
+    src = Src()
+    monkeypatch.setattr("chela.sources.get_source", lambda wf: src)
+    filer = sweep_nightly.default_filer(_wf(tmp_path))
+    assert isinstance(filer, sweep_nightly.TrackerFiler)
+    assert filer.create.__self__ is src and filer.create.__func__ is Src.create_issue
+    monkeypatch.setattr("chela.sources.get_source", lambda wf: _NoCreate())
+    assert isinstance(sweep_nightly.default_filer(_wf(tmp_path)), sweep_nightly.WouldFile)
+
+
+def test_a_run_with_no_filer_files_through_the_workflows_tracker(tmp_path, monkeypatch):
+    """🔴 WIRING: the default reaches the tracker — the real source's `create_issue`."""
+    repo, chela = _repo(tmp_path), tmp_path / "chela"
+    create = Created(warnings=["label 'sweep' could not be created"])
+
+    class Src:
+        create_issue = staticmethod(create)
+    seen = []
+    monkeypatch.setattr("chela.sources.get_source", lambda wf: seen.append(wf.path) or Src())
+    res = _run(repo, chela, None)
+    assert seen == [(repo / "WORKFLOW.md").resolve()]
+    assert (res["status"], res["filed"], res["would_file"]) == ("survivors", ["CMX-7"], [])
+    assert [(t, lb) for t, _, lb in create.calls] == [
+        ("Nightly sweep: if-false survived at size.py:2", ("risk:normal", "sweep"))]
+    assert res["warnings"] == ["CMX-7: label 'sweep' could not be created"]
+    assert {v["issue"] for v in _store(chela)["keys"].values()} == {"CMX-7"}
+
+
+def test_a_filer_raising_on_its_second_call_keeps_the_first_key(tmp_path):
+    """A refused 2nd filing (an Exception, caught): the 1st is on disk, the 2nd is not, and
+    the next run files only the 2nd."""
+    second = "def is_tiny(x):\n    if x < 3:\n        return 1\n    return 2\n"
+    prs = [({"size.py": WEAK, "tiny.py": second}, "PR 1 (#1)", None)]
+    repo, chela = _repo(tmp_path, prs=prs), tmp_path / "chela"
+    create = Created(fail_on=2)
+    res = _run(repo, chela, sweep_nightly.TrackerFiler(create))
+    assert (res["filed"], res["failed"]) == (["CMX-7", "CMX-9", "CMX-10"],
+                                             ["tiny.py:2: network: reset"])
+    wf = str((repo / "WORKFLOW.md").resolve())
+    refused = sweep_nightly.survivor_key(wf, sweep.Mutation(
+        "tiny.py", 2, "if-false", "    if x < 3:", "    if False and (x < 3):"))
+    store = _store(chela)["keys"]
+    assert refused not in store
+    assert sorted((v["site"], v["issue"]) for v in store.values()) == [
+        ("size.py:2", "CMX-7"), ("tiny.py:2", "CMX-10"), ("tiny.py:3", "CMX-9")]
+    again = Filer()
+    res2 = _run(repo, chela, again)
+    assert [(g.mutation.key, g.mutation.kind) for g, _ in again.calls] == [
+        ("tiny.py:2", "if-false")]
+    assert (res2["filed"], res2["already_filed"]) == (["CMX-901"], 3)
+
+
+@pytest.mark.parametrize("filed_keys, files", [
+    ("all", False), ("none", True), ("first", True), ("last", True)])
+def test_a_group_is_skipped_only_when_every_key_is_filed(tmp_path, filed_keys, files):
+    """`all`, never `any`: a group with ONE key not yet filed is filed again."""
+    twin = WEAK.replace("is_big", "is_huge")
+    repo = _repo(tmp_path, prs=[({"size.py": WEAK, "huge.py": twin}, "PR 1 (#1)", None)])
+    chela = tmp_path / "chela"
+    wf = str((repo / "WORKFLOW.md").resolve())
+    a = sweep.Mutation("huge.py", 2, "if-false", "    if x:", "    if False and (x):")
+    b = sweep.Mutation("size.py", 2, "if-false", "    if x:", "    if False and (x):")
+    ka, kb = sweep_nightly.survivor_key(wf, a), sweep_nightly.survivor_key(wf, b)
+    assert ka != kb
+    keys = {"all": [ka, kb], "none": [], "first": [ka], "last": [kb]}[filed_keys]
+    sweep_nightly.state_dir(chela).mkdir(parents=True)
+    (sweep_nightly.state_dir(chela) / "filed.json").write_text(json.dumps(
+        {"keys": {k: {"issue": "CMX-1"} for k in keys}}))
+    filer = Filer()
+    res = _run(repo, chela, filer)
+    assert (len(filer.calls), res["already_filed"]) == ((1, 0) if files else (0, 1))
+    if files:
+        assert [m.key for m in filer.calls[0][0].survivors] == ["huge.py:2", "size.py:2"]
+        assert set(_store(chela)["keys"]) == {ka, kb}
+
+
+# --- CMX-305: the inbox notice -----------------------------------------------------------
+
+
+def _res(**kw) -> dict:
+    base = {"workflow": "/r/repo/WORKFLOW.md", "status": "clean", "why": "", "survivors": 0,
+            "groups": [], "prs": ["a", "b"], "filed": [], "already_filed": 0, "failed": [],
+            "would_file": [], "warnings": [], "mutations": 4, "unrun": 0, "unsupported": []}
+    return {**base, **kw}
+
+
+@pytest.mark.parametrize("kw, line", [
+    (dict(status="survivors", survivors=3, groups=[{}, {}], filed=["CMX-7", "CMX-8"]),
+     "🧹🌙 nightly sweep (repo): 3 survivor(s) in 2 group(s) — filed CMX-7, CMX-8 — 2 "
+     "standard-tier PR(s), 4 mutation(s), 0 UNRUN"),
+    (dict(),
+     "🧹🌙 nightly sweep (repo): clean — nothing filed — 2 standard-tier PR(s), 4 mutation(s), "
+     "0 UNRUN"),
+    (dict(survivors=1, already_filed=1),
+     "🧹🌙 nightly sweep (repo): clean — nothing filed; 1 group(s) already filed — 2 "
+     "standard-tier PR(s), 4 mutation(s), 0 UNRUN"),
+    (dict(status="unrun", unrun=2),
+     "🧹🌙 nightly sweep (repo): UNRUN, not clean — nothing filed — 2 standard-tier PR(s), 4 "
+     "mutation(s), 2 UNRUN"),
+    (dict(status="unknown", unsupported=["x.go", "y.rs"]),
+     "🧹🌙 nightly sweep (repo): UNKNOWN, not clean — nothing filed — 2 standard-tier PR(s), "
+     "4 mutation(s), 0 UNRUN, 2 file(s) UNKNOWN (no mutator)"),
+    (dict(status="survivors", survivors=2, groups=[{}, {}], filed=["CMX-7"],
+          failed=["b.py:2: no", "c.py:1: no"], unrun=1, warnings=["CMX-7: label"]),
+     "🧹🌙 nightly sweep (repo): 2 survivor(s) in 2 group(s) — filed CMX-7; 2 NOT filed "
+     "(b.py:2: no) — 2 standard-tier PR(s), 4 mutation(s), 1 UNRUN — ⚠️ 1 warning(s): "
+     "CMX-7: label"),
+    (dict(status="survivors", survivors=1, groups=[{}], would_file=["a.py:2"]),
+     "🧹🌙 nightly sweep (repo): 1 survivor(s) in 1 group(s) — nothing filed; 1 would be "
+     "filed (the tracker cannot file issues; see would-file.jsonl) — 2 standard-tier PR(s), 4 "
+     "mutation(s), 0 UNRUN"),
+])
+def test_the_notice_for_each_outcome_after_a_battery(kw, line):
+    assert sweep_nightly.summary(_res(**kw)) == line
+
+
+@pytest.mark.parametrize("status, why, line", [
+    ("skipped", "a fleet pause is active",
+     "🧹🌙 nightly sweep (repo): skipped — a fleet pause is active — nothing filed"),
+    ("cannot_verify", "fetch broke",
+     "🧹🌙 nightly sweep (repo): CANNOT VERIFY — fetch broke — nothing filed")])
+def test_the_notice_without_a_battery(status, why, line):
+    res = _res(status=status, why=why)
+    for k in ("mutations", "unrun", "unsupported"):
+        res.pop(k)
+    assert sweep_nightly.summary(res) == line
+
+
+def test_each_run_queues_exactly_one_notice(tmp_path, notices):
+    repo, chela = _repo(tmp_path), tmp_path / "chela"
+    res = _run(repo, chela, Filer())
+    assert len(notices) == 1
+    kind, text, payload = notices[0]
+    assert kind == "nightly_sweep" and text == res["summary"]
+    assert text.startswith("🧹🌙 nightly sweep (repo): 1 survivor(s) in 1 group(s) — filed "
+                           "CMX-901 — 2 standard-tier PR(s), 4 mutation(s), 0 UNRUN")
+    assert "summary" not in payload and payload["filed"] == ["CMX-901"]
+    assert payload == {k: v for k, v in res.items() if k != "summary"}
+    _run(repo, chela, Filer())
+    assert len(notices) == 2 and notices[1][1].startswith(
+        "🧹🌙 nightly sweep (repo): clean — nothing filed; 1 group(s) already filed")
+
+
+@pytest.mark.parametrize("make", ["paused", "crash"])
+def test_a_skipped_or_crashed_run_still_queues_its_one_notice(tmp_path, notices, monkeypatch,
+                                                              make):
+    repo, chela = _repo(tmp_path), tmp_path / "chela"
+    chela.mkdir()
+    if make == "paused":
+        (chela / "fleet-pause.json").write_text("{}")
+        want = "skipped — a fleet pause (`chela dispatch --pause --all`) is active — nothing filed"
+    else:
+        def boom(*a, **k):
+            raise KeyError("surprise")
+        monkeypatch.setattr(sweep_nightly, "merged_commits", boom)
+        want = "CANNOT VERIFY — the sweep crashed: KeyError: 'surprise' — nothing filed"
+    _run(repo, chela, Filer())
+    assert [t for _, t, _ in notices] == [f"🧹🌙 nightly sweep (repo): {want}"]
+
+
+def test_a_failing_inbox_never_fails_the_run(tmp_path, monkeypatch, caplog):
+    repo, chela = _repo(tmp_path), tmp_path / "chela"
+
+    def boom(*a):
+        raise RuntimeError("inbox down")
+    monkeypatch.setattr("chela.inbox.enqueue", boom)
+    with caplog.at_level("ERROR", logger="chela.sweep_nightly"):
+        res = _run(repo, chela, Filer())
+    assert res["filed"] == ["CMX-901"]
+    assert [r.getMessage() for r in caplog.records] == [
+        "nightly sweep: the inbox notice failed"]
+
+
+# --- CMX-305: Linear create_issue(labels=...) ------------------------------------------------
+
+
+class LabelTeam:
+    """A Linear team stub: states, the label lookup, label create, issue create."""
+
+    def __init__(self, labels, *, create_reply=None, fail_read=False, parent=None):
+        self.labels, self.fail_read, self.parent = labels, fail_read, parent
+        self.create_reply = create_reply
+        self.calls: list[tuple[str, dict]] = []
+
+    def __call__(self, query, variables):
+        name = {linear.TEAM_STATES_QUERY: "states", linear.CREATE_ISSUE_MUTATION: "create",
+                linear.LABELS_BY_NAME_QUERY: "labels", linear.ISSUES_BY_NUMBER_QUERY: "parent",
+                linear.CREATE_LABEL_MUTATION: "new_label"}[query]
+        self.calls.append((name, json.loads(json.dumps(variables))))
+        if name == "states":
+            return {"teams": {"nodes": [{"id": "team-uuid", "states": {"nodes": [
+                {"id": "st-todo", "name": "Todo", "type": "unstarted", "position": 0}]}}]}}
+        if name == "parent":
+            return {"issues": {"nodes": [self.parent],
+                               "pageInfo": {"hasNextPage": False, "endCursor": None}}}
+        if name == "labels":
+            if self.fail_read:
+                raise LinearError("network", "reset")
+            return {"issueLabels": {"nodes": self.labels}}
+        if name == "new_label":
+            if self.create_reply is not None:
+                return self.create_reply
+            return {"issueLabelCreate": {"success": True, "issueLabel": {
+                "id": f"new-{variables['input']['name']}", "name": variables["input"]["name"]}}}
+        return {"issueCreate": {"success": True, "issue": {
+            "id": "i1", "identifier": "CMX-50", "title": variables["input"]["title"],
+            "url": "u"}}}
+
+    def sent(self) -> dict:
+        return next(v for n, v in self.calls if n == "create")["input"]
+
+
+def _source(tmp_path, transport):
+    return LinearSource(_wf(tmp_path), transport=transport)
+
+
+ISSUE = {"teamId": "team-uuid", "title": "T", "description": "B", "priority": 0,
+         "stateId": "st-todo"}
+
+
+def test_create_issue_resolves_existing_labels_and_creates_a_missing_one(tmp_path):
+    t = LabelTeam([{"id": "L-risk", "name": "risk:normal", "team": None},
+                   {"id": "L-other-team", "name": "sweep", "team": {"key": "OPS"}}])
+    out = _source(tmp_path, t).create_issue("T", "B", labels=("risk:normal", "sweep"))
+    assert out == {"identifier": "CMX-50", "url": "u", "title": "T", "warnings": []}
+    assert t.calls[1:3] == [
+        ("labels", {"names": ["risk:normal", "sweep"]}),
+        ("new_label", {"input": {"name": "sweep", "teamId": "team-uuid"}})]
+    assert t.sent() == {**ISSUE, "labelIds": ["L-risk", "new-sweep"]}
+
+
+def test_create_issue_uses_a_team_label_by_name_and_creates_nothing(tmp_path):
+    t = LabelTeam([{"id": "L-sweep", "name": "sweep", "team": {"key": "CMX"}}])
+    _source(tmp_path, t).create_issue("T", "B", labels=("sweep",))
+    assert [n for n, _ in t.calls] == ["states", "labels", "create"]
+    assert t.sent() == {**ISSUE, "labelIds": ["L-sweep"]}
+
+
+@pytest.mark.parametrize("reply, used", [
+    ({"issueLabelCreate": {"success": True, "issueLabel": {"id": "L9", "name": "sweep"}}}, True),
+    ({"issueLabelCreate": {"success": False, "issueLabel": {"id": "L9", "name": "sweep"}}}, False),
+    ({"issueLabelCreate": {"success": "yes", "issueLabel": {"id": "L9", "name": "sweep"}}}, False),
+    ({"issueLabelCreate": {"success": True, "issueLabel": None}}, False),
+    ({"issueLabelCreate": {"success": True, "issueLabel": {"name": "sweep"}}}, False),
+    ({}, False)])
+def test_success_decides_whether_a_created_label_is_used(tmp_path, reply, used):
+    """`success: true` AND a node with an id — a node alone (Linear said no) is never used."""
+    t = LabelTeam([], create_reply=reply)
+    out = _source(tmp_path, t).create_issue("T", "B", labels=("sweep",))
+    assert out["identifier"] == "CMX-50"
+    assert t.sent() == {**ISSUE, "labelIds": ["L9"] if used else []}
+    assert out["warnings"] == ([] if used else ["label 'sweep' could not be created"])
+
+
+def test_an_unreadable_label_list_is_a_warning_not_a_lost_issue(tmp_path):
+    t = LabelTeam([], fail_read=True)
+    out = _source(tmp_path, t).create_issue("T", "B", labels=("risk:normal", "sweep"))
+    assert out["identifier"] == "CMX-50"
+    assert out["warnings"] == ["could not read labels risk:normal, sweep: network: reset"]
+    assert t.sent() == {**ISSUE, "labelIds": []}
+    assert "new_label" not in [n for n, _ in t.calls]
+
+
+def test_a_raising_label_create_is_a_warning_and_the_others_still_attach(tmp_path):
+    t = LabelTeam([{"id": "L-risk", "name": "risk:normal", "team": None}])
+
+    def call(query, variables):
+        if query == linear.CREATE_LABEL_MUTATION:
+            raise LinearError("graphql", "nope")
+        return t(query, variables)
+    out = _source(tmp_path, call).create_issue("T", "B", labels=("risk:normal", "sweep"))
+    assert out["warnings"] == ["label 'sweep' could not be created: graphql: nope"]
+    assert t.sent() == {**ISSUE, "labelIds": ["L-risk"]}
+
+
+def test_labels_add_to_the_parents_inherited_labels_and_keep_them(tmp_path):
+    """A sub-issue inherits its parent's labels (its risk): the named labels are ADDED, the
+    inherited ones kept, and one that is both is sent once."""
+    parent = {"id": "p1", "identifier": "CMX-7", "number": 7, "labels": {
+        "nodes": [{"id": "L-risk"}, {"id": "L-parent"}]}}
+    t = LabelTeam([{"id": "L-sweep", "name": "sweep", "team": None},
+                   {"id": "L-risk", "name": "risk:normal", "team": None}], parent=parent)
+    _source(tmp_path, t).create_issue("T", "B", parent="CMX-7", labels=("sweep", "risk:normal"))
+    assert t.sent() == {**ISSUE, "parentId": "p1",
+                        "labelIds": ["L-risk", "L-parent", "L-sweep"]}
+
+
+def test_a_parent_without_named_labels_keeps_only_its_inherited_ones(tmp_path):
+    parent = {"id": "p1", "identifier": "CMX-7", "number": 7, "labels": {
+        "nodes": [{"id": "L-risk"}, {"id": "L-parent"}]}}
+    t = LabelTeam([], parent=parent)
+    _source(tmp_path, t).create_issue("T", "B", parent="CMX-7")
+    assert t.sent() == {**ISSUE, "parentId": "p1", "labelIds": ["L-risk", "L-parent"]}
+    assert "labels" not in [n for n, _ in t.calls]
+
+
+def test_create_issue_without_labels_sends_no_label_ids(tmp_path):
+    t = LabelTeam([])
+    _source(tmp_path, t).create_issue("T", "B", labels=(" ", ""))
+    assert t.sent() == ISSUE
+    assert [n for n, _ in t.calls] == ["states", "create"]
+
+
+def test_label_nodes_without_an_id_or_of_another_name_are_ignored(tmp_path):
+    t = LabelTeam([{"name": "sweep"}, "junk", {"id": "L-x", "name": "other", "team": None}])
+    out = _source(tmp_path, t).create_issue("T", "B", labels=("sweep",))
+    assert out["warnings"] == []
+    assert t.sent() == {**ISSUE, "labelIds": ["new-sweep"]}

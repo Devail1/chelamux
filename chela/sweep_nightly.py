@@ -4,7 +4,7 @@ CMX-296 (gate redesign 1b-i) lets a standard-tier PR — no core path, see
 :mod:`chela.risktier` — merge on green CI with no judge round. This is the other half (1b-ii,
 CMX-299, landing in three slices): once a day nothing merged that way goes un-mutated for long.
 Slice 1/3 is the scheduler (CMX-303); slice 2/3 (CMX-304) groups the survivors and finds
-every same-shape site; slice 3 plugs the tracker into the :class:`Filer` seam.
+every same-shape site; slice 3/3 (CMX-305) files them in the tracker and tells the inbox.
 
 * **When.** ``sweep.nightly_at`` in WORKFLOW.md (``"HH:MM"`` local; default ``02:00``;
   ``off``, ``never``, ``false`` or ``sweep.enabled: false`` turns it off). The daemon
@@ -34,8 +34,12 @@ every same-shape site; slice 3 plugs the tracker into the :class:`Filer` seam.
   before; a new site of a filed category files the group again. A survivor already filed is never
   filed again on its own: its key — workflow, file, kind, line text before and after, no line number — is
   kept in ``$CHELA_DIR/sweep-nightly/filed.json``, which outlives restarts and is written after
-  EACH filing. Until slice 3 the default filer is :class:`WouldFile`, which files nothing and
-  records what it would have filed.
+  EACH filing. The default filer is :class:`TrackerFiler`: ONE tracker issue per group, labelled
+  :data:`LABELS` (``risk:normal``, ``sweep``), listing its survivors and its sites. A tracker that
+  cannot create issues gets :class:`WouldFile`, which files nothing and records what it would
+  have filed.
+* **Told.** ONE inbox notice per run (:func:`summary`): what was filed, clean, or skipped and
+  why, and the UNRUN / UNKNOWN counts. A run that filed nothing says so in that line.
 * **Skipped** while a fleet pause (``chela dispatch --pause --all``) is active.
 """
 from __future__ import annotations
@@ -64,6 +68,9 @@ WINDOW_SECONDS = 24 * 3600
 # A night that could not look (a pause, a failed fetch, a red baseline) is caught up by the next
 # one — from the last run that DID look, at most this far back.
 MAX_CATCHUP_SECONDS = 7 * 24 * 3600
+LABELS = ("risk:normal", "sweep")
+MAX_SITES = 100           # same-shape sites listed in one issue; the rest are counted
+INBOX_KIND = "nightly_sweep"
 STATE_DIR_NAME = "sweep-nightly"
 FLEET_PAUSE_FILE = "fleet-pause.json"      # chela.fleet.STATE_FILE_NAME (CMX-214)
 GIT_TIMEOUT = 120
@@ -323,8 +330,8 @@ class Filer(Protocol):
 
 
 class WouldFile:
-    """The default :class:`Filer` until slice 3 brings the tracker one: files NOTHING, and
-    appends what it would have filed to ``$CHELA_DIR/sweep-nightly/would-file.jsonl``."""
+    """The :class:`Filer` for a tracker that cannot create issues: files NOTHING, and appends
+    what it would have filed to ``$CHELA_DIR/sweep-nightly/would-file.jsonl``."""
 
     def __call__(self, group: SurvivorGroup, ctx: FileContext) -> None:
         path = state_dir(ctx.chela_dir) / "would-file.jsonl"
@@ -337,6 +344,62 @@ class WouldFile:
         with open(path, "a", encoding="utf-8") as fh:
             fh.write(json.dumps(rec, sort_keys=True) + "\n")
         return None
+
+
+def render_issue(group: SurvivorGroup, ctx: FileContext) -> tuple[str, str]:
+    """``(title, description)`` of the ONE issue for ``group``."""
+    first = group.mutation
+    text = first.before.strip()
+    more = len(group.survivors) - 1
+    title = f"Nightly sweep: {first.kind} survived at {first.key}" + (
+        f" and {more} more site(s)" if more else "")
+    lines = [
+        "⚖️🧹 The nightly mutation sweep found a guard on the base branch that no test can "
+        "tell apart from its corruption. It merged from a STANDARD-tier PR, which gets no "
+        "judge round.", "",
+        f"**Category:** `{first.kind}` on `{text}`",
+        f"**Swept:** `{ctx.ref}` at `{ctx.head[:12]}`",
+    ]
+    if ctx.merged_in:
+        lines.append(f"**Merged in:** {ctx.merged_in}")
+    lines += ["", "**Mutations that survived:**", ""]
+    lines += [f"- `{m.key}`: `{m.before.strip()}` → `{m.after.strip()}`"
+              for m in group.survivors]
+    lines += ["", f"**Same-shape sites** (every source line that reads exactly `{text}`):", ""]
+    survived = {m.key for m in group.survivors}
+    lines += [f"- `{s}`" + (" ← survived" if s in survived else "")
+              for s in group.sites[:MAX_SITES]]
+    if len(group.sites) > MAX_SITES:
+        lines.append(f"- … and {len(group.sites) - MAX_SITES} more (`git grep -nF` the line)")
+    lines += ["", "Add a test that goes RED under each mutation above — not a weaker "
+                  "assertion — and check every same-shape site for the same gap."]
+    return title, "\n".join(lines)
+
+
+class TrackerFiler:
+    """The tracker's :class:`Filer`: ONE issue per group through ``create_issue``, labelled
+    :data:`LABELS`. A label the tracker could not attach is kept in :attr:`warnings` — the
+    issue itself is filed."""
+
+    def __init__(self, create):
+        self.create = create
+        self.warnings: list[str] = []
+
+    def __call__(self, group: SurvivorGroup, ctx: FileContext) -> str:
+        title, body = render_issue(group, ctx)
+        out = self.create(title, body, labels=LABELS)
+        ident = out["identifier"]
+        self.warnings += [f"{ident}: {w}" for w in out.get("warnings") or ()]
+        return ident
+
+
+def default_filer(wf) -> Filer:
+    """:class:`TrackerFiler` over the workflow's tracker, or :class:`WouldFile` when its kind
+    cannot create issues."""
+    from chela.sources import get_source
+
+    create = getattr(get_source(wf), "create_issue", None)
+    return TrackerFiler(create) if create is not None else WouldFile()
 
 
 def survivor_key(wf_path: str, mut: sweep.Mutation) -> str:
@@ -430,12 +493,14 @@ def base_ref(wf) -> str:
 
 def run(wf, *, now: float | None = None, chela_dir: Path | None = None,
         filer: Filer | None = None) -> dict:
-    """One nightly sweep of ``wf``. ``filer`` is the filing seam (:class:`WouldFile` when
-    None). Never raises an ``Exception``: a crash is a CANNOT VERIFY result."""
+    """One nightly sweep of ``wf``, then ONE inbox notice. ``filer`` is the filing seam
+    (:func:`default_filer` when None). Never raises an ``Exception``: a crash is a CANNOT
+    VERIFY result."""
     chela_dir = Path(chela_dir or config.CHELA_DIR)
     now = time.time() if now is None else now
     result = {"workflow": str(wf.path), "at": now, "filed": [], "would_file": [],
-              "already_filed": 0, "failed": [], "survivors": 0, "prs": [], "groups": []}
+              "already_filed": 0, "failed": [], "survivors": 0, "prs": [], "groups": [],
+              "warnings": []}
     if paused(chela_dir):
         result.update(status=SKIPPED, why="a fleet pause (`chela dispatch --pause --all`) "
                                           "is active")
@@ -465,6 +530,7 @@ def run(wf, *, now: float | None = None, chela_dir: Path | None = None,
                     _record_covered(wf, now, chela_dir)
     log.info("nightly sweep (%s): %s%s", wf.path, result["status"],
              f" — {result['why']}" if result.get("why") else "")
+    notify(result)
     return result
 
 
@@ -569,7 +635,7 @@ def _file(wf, worktree: Path, head: str, ref: str, survivors: list[sweep.Mutatio
     filed = store.setdefault("keys", {})
     subjects = {c["sha"]: f"`{c['sha'][:12]}` {c['subject']}" for c in standard}
     merged = {f"{f}:{ln}": subjects.get(sha, "") for (f, ln), sha in origin.items()}
-    filer = filer if filer is not None else WouldFile()
+    filer = filer if filer is not None else default_filer(wf)
     groups, unlisted = survivor_groups(str(wf.path), worktree, survivors)
     result["failed"].extend(unlisted)
     result["groups"] = [g.as_dict() for g in groups]
@@ -594,6 +660,54 @@ def _file(wf, worktree: Path, head: str, ref: str, survivors: list[sweep.Mutatio
             filed[k] = {"issue": ident, "at": result["at"], "site": site}
         _write_json(keys_path, store)       # per issue: a crash never files one twice
         result["filed"].append(ident)
+    result["warnings"].extend(getattr(filer, "warnings", ()))
     if result["filed"] or result["failed"] or result["would_file"]:
         # A night with survivors AND unmeasured lines says both: the count alone hides it.
         result.update(status=SURVIVORS, why=_quiet_why(result))
+
+
+# --- the notice -----------------------------------------------------------------------------
+
+
+def summary(result: dict) -> str:
+    """The ONE inbox line for a run: its outcome (and why), what was filed — or that nothing
+    was — and the battery's counts, UNRUN and UNKNOWN included."""
+    name = Path(result["workflow"]).parent.name or result["workflow"]
+    status = result["status"]
+    outcome = {SKIPPED: f"skipped — {result.get('why')}",
+               CANNOT_VERIFY: f"CANNOT VERIFY — {result.get('why')}",
+               SURVIVORS: f"{result['survivors']} survivor(s) in "
+                          f"{len(result['groups'])} group(s)",
+               CLEAN: "clean", UNRUN: "UNRUN, not clean", UNKNOWN: "UNKNOWN, not clean",
+               }.get(status, status)
+    filing = [f"filed {', '.join(result['filed'])}" if result["filed"] else "nothing filed"]
+    if result["already_filed"]:
+        filing.append(f"{result['already_filed']} group(s) already filed")
+    if result["failed"]:
+        filing.append(f"{len(result['failed'])} NOT filed ({result['failed'][0]})")
+    if result["would_file"]:
+        filing.append(f"{len(result['would_file'])} would be filed (the tracker cannot file "
+                      "issues; see would-file.jsonl)")
+    line = f"🧹🌙 nightly sweep ({name}): {outcome} — {'; '.join(filing)}"
+    if "mutations" in result:
+        line += (f" — {len(result['prs'])} standard-tier PR(s), {result['mutations']} "
+                 f"mutation(s), {result.get('unrun', 0)} UNRUN")
+        if result.get("unsupported"):
+            line += f", {len(result['unsupported'])} file(s) UNKNOWN (no mutator)"
+    if result["warnings"]:
+        line += f" — ⚠️ {len(result['warnings'])} warning(s): {result['warnings'][0]}"
+    return line
+
+
+def notify(result: dict) -> None:
+    """Queue the run's ONE inbox notice. A failing inbox is logged: the notice is the report,
+    never the work."""
+    from chela import inbox
+
+    result["summary"] = summary(result)
+    log.info("%s", result["summary"])
+    try:
+        inbox.enqueue(INBOX_KIND, result["summary"],
+                      {k: v for k, v in result.items() if k != "summary"})
+    except Exception:  # noqa: BLE001 — the notice is the report, not the work
+        log.exception("nightly sweep: the inbox notice failed")
