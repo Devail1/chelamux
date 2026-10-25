@@ -13,6 +13,7 @@ so what is new is only what the base commits touched:
 from __future__ import annotations
 
 import json
+import os
 import tempfile
 from pathlib import Path
 
@@ -24,7 +25,8 @@ CODE_SUFFIXES = (judge_select.PY_SUFFIXES + judge_select.JS_SUFFIXES
 
 def related_tests(worktree: Path, files: list[str]) -> list[str] | None:
     """The test files that observe any of ``files``; ``None`` = run the full suite, because a
-    code file is one no test observes (or git cannot list the tests). Non-code files add none."""
+    code file is one no test observes, a non-code file is not prose (a lockfile, a config a
+    test reads) or git cannot list the tests. Prose (docs, changelog) adds none."""
     listed = basesync._git(worktree, "ls-files", "--", "*.py")
     if listed.returncode != 0:
         return None
@@ -33,7 +35,9 @@ def related_tests(worktree: Path, files: list[str]) -> list[str] | None:
     nodes: list[str] = []
     for rel in files:
         if not rel.endswith(CODE_SUFFIXES):
-            continue
+            if judge._is_docs_path(rel):
+                continue
+            return None
         sel = selector.select(rel)
         if sel.full:
             return None
@@ -48,7 +52,7 @@ def _rerun_overlap(worktree: Path, workflow_path: str, experiments: str,
     if err:
         return 0, err
     keep = [e for e in raw.get("experiments") or []
-            if isinstance(e, dict) and e.get("file") in overlap]
+            if isinstance(e, dict) and os.path.normpath(str(e.get("file"))) in overlap]
     if not keep:
         return 0, ""
     with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as fh:

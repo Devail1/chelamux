@@ -81,7 +81,7 @@ def test_an_overlap_re_runs_only_the_overlapping_experiments(repo, tmp_path):
     _advance(repo[0], {"p.py": PR.replace("def g(x):\n    return x", "def g(x):\n    return -x"),
                        "q.py": "Q = 1\n"})
     exps = tmp_path / "e.json"
-    mine = {"guard": "f", "file": "p.py", "before": "x + 1", "after": "x - 1"}
+    mine = {"guard": "f", "file": "./p.py", "before": "x + 1", "after": "x - 1"}
     other = {"guard": "q", "file": "q.py", "before": "1", "after": "2"}
     exps.write_text(json.dumps({"experiments": [other, mine]}))
     seen = []
@@ -238,3 +238,13 @@ def test_only_a_tier_that_runs_experiments_re_runs_them(repo, tier, passed):
             patch.object(dispatcher, "reconcile_base_move", return_value={"ok": True}) as rec:
         main.main()
     rec.assert_called_once_with("cmx-88", repo[2], passed)
+
+
+@pytest.mark.parametrize("files, want", [
+    (["README.md", "docs/a.md", "changelog.d/x.md"], []),
+    (["uv.lock"], None), (["pyproject.toml"], None), (["WORKFLOW.md"], None)])
+def test_prose_selects_no_tests_and_any_other_non_code_file_runs_the_full_suite(
+        tmp_path, files, want):
+    listed = subprocess.CompletedProcess([], 0, "", "")
+    with patch.object(basesync, "_git", return_value=listed):
+        assert handinmove.related_tests(tmp_path, files) == want
