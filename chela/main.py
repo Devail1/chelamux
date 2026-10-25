@@ -4222,7 +4222,7 @@ def main() -> None:
     p_jnightly = judge_sub.add_parser(
         "nightly-sweep",
         help="⚖️🧹🌙 Mutation-sweep the lines STANDARD-tier PRs merged to the base branch in the "
-             "last 24h and hand each surviving guard to the filer once (the daemon runs it at "
+             "last 24h and file one tracker issue per surviving guard category (the daemon runs it at "
              "sweep.nightly_at)",
     )
     p_jnightly.add_argument("--workflow", metavar="PATH", required=True,
