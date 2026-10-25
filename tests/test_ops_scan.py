@@ -333,6 +333,7 @@ def test_tmux_server_whose_test_is_gone_is_a_leak(env):
     (["tmux", "-S", "-L", "chelatest-50-x"], dict(), True),   # -S takes "-L" as its value
     (["tmux", "-f", "x.conf", "-L", "chelatest-50-x"], dict(), False),
     (["/v/bin/tmux", "new", "-L", "chelatest-50-x"], dict(), True),  # the subcommand's, not tmux's
+    (["tmux", "new", "chelatest-50-x"], dict(), True),         # no -L at all
 ])
 def test_tmux_socket_names_its_owner_test(env, argv, owner, hit):
     helper(env, argv)
