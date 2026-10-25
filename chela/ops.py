@@ -49,6 +49,7 @@ TEST_RUNNERS = ("pytest", "py.test", "vitest")
 DETACHED_FLAG = "--detached-child"         # chela judge run --detach's own child
 DAEMON_MARKERS = ("God Daemon (",)         # argv[0] of a self-daemonizing proc: ppid 1 by design
 DAEMON_OWNER_FILE = "chela-tests-owner.pid"  # tests/conftest.py: the pytest that owns a PM2_HOME
+TMUX_ARG_FLAGS = ("-c", "-f", "-S", "-T")    # tmux's other global flags that take a value
 TEST_TMUX_SOCKET_RE = re.compile(r"chelatest-(\d+)-")  # a test's `tmux -L chelatest-<its pid>-…`
 FLEET_PAUSE_FILE = fleet.STATE_FILE_NAME  # CMX-214's `--pause --all` state
 
@@ -246,6 +247,11 @@ class Sources:
                         "age_s": uptime - int(rest[19]) / hz})
         return sorted(out, key=lambda p: p["pid"])
 
+    @cached_property
+    def ppids(self) -> dict[int, int]:
+        """pid → ppid of every readable process, built once per scan."""
+        return {q["pid"]: q["ppid"] for q in self.procs}
+
     def worktree_dir(self, proc: dict) -> Path | None:
         """The worktree the process's cwd or argv is under."""
         for path in (proc["cwd"], *proc["argv"]):
@@ -363,7 +369,7 @@ def _is_daemon(argv: list[str]) -> bool:
 
 def _descends(src: Sources, pid: int, root: int) -> bool:
     """True iff ``pid`` is a (grand…)child of ``root``."""
-    ppid = {q["pid"]: q["ppid"] for q in src.procs}
+    ppid = src.ppids
     seen = set()
     while pid not in seen and pid in ppid:
         seen.add(pid)
@@ -402,14 +408,20 @@ def _daemon_leak(src: Sources, p: dict, wt: tuple[str, str]) -> str | None:
 
 
 def _tmux_socket(argv: list[str]) -> str | None:
-    """The ``-L`` socket name of a tmux process (``-L name`` or ``-Lname``), else None."""
+    """The ``-L`` socket name of a tmux process (``-L name`` or ``-Lname``), else None. Only
+    a global flag counts: the scan stops at the subcommand, whose own args are not tmux's."""
     if not argv or Path(argv[0]).name != "tmux":
         return None
-    for a, b in zip(argv[1:], [*argv[2:], ""]):
+    args = iter(argv[1:])
+    for a in args:
+        if not a.startswith("-"):
+            return None                           # the subcommand
         if a == "-L":
-            return b or None
+            return next(args, "") or None
         if a.startswith("-L"):
             return a[2:]
+        if a in TMUX_ARG_FLAGS:
+            next(args, None)                      # its value is not a flag
     return None
 
 
@@ -433,8 +445,9 @@ def _helper_leak(src: Sources, p: dict, wt: tuple[str, str]) -> str | None:
             continue                              # a reused pid starts later; its own child
         if named and q["pid"] == int(named.group(1)):
             return None
-        if not named and _is_test_runner(q["argv"]) and src.worktree_of(q) == wt:
-            return None
+        if (not named and _is_test_runner(q["argv"]) and q["ppid"] != 1
+                and src.worktree_of(q) == wt):
+            return None                           # an orphaned test run owns nothing
     if named:
         return f"it is orphaned (ppid 1) and the test that owns tmux socket {sock} is gone"
     return "it is orphaned (ppid 1) and no live test run shares its worktree"

@@ -330,7 +330,9 @@ def test_tmux_server_whose_test_is_gone_is_a_leak(env):
     (["tmux", "-L", "chelatest-50"], dict(), True),            # <pid>- needs its dash
     (["tmux", "-L"], dict(), True),                            # no socket name
     (["tmuxx", "-L", "chelatest-50-x"], dict(), True),         # not tmux
-    (["/v/bin/tmux", "new", "-L", "chelatest-50-x"], dict(), False),
+    (["tmux", "-S", "-L", "chelatest-50-x"], dict(), True),   # -S takes "-L" as its value
+    (["tmux", "-f", "x.conf", "-L", "chelatest-50-x"], dict(), False),
+    (["/v/bin/tmux", "new", "-L", "chelatest-50-x"], dict(), True),  # the subcommand's, not tmux's
 ])
 def test_tmux_socket_names_its_owner_test(env, argv, owner, hit):
     helper(env, argv)
@@ -373,13 +375,14 @@ def test_script_in_a_worktree_without_a_live_pytest_is_a_leak(env):
     (dict(age=120), False),                                    # started together
     (dict(ppid=42), True),                                     # the helper's own child
     (dict(ppid=52), True),                                     # ...and grandchild
+    (dict(ppid=1), True),                                      # an orphaned pytest owns nothing
 ])
 def test_script_owner_must_be_a_live_test_of_its_worktree(env, pytest_, hit):
     helper(env, SCRIPT, where="judge-CMX-1")
     add_proc(env, 52, ["bash"], env.dir / "elsewhere", ppid=42)
     add_proc(env, 51, ["/v/bin/pytest"], env.wt / pytest_.get("where", "judge-CMX-1"),
              age=pytest_.get("age", 1800), ppid=pytest_.get("ppid", 500))
-    assert [s for s, _ in leaks(env)] == (["pid:42"] if hit else [])
+    assert [s for s, _ in leaks(env) if s != "pid:51"] == (["pid:42"] if hit else [])
 
 
 def test_script_whose_cwd_is_not_the_worktree_is_a_leak(env):
