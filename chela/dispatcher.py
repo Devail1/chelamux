@@ -13,7 +13,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path, PurePosixPath
 from typing import NamedTuple
 
-from chela import basesync, concurrency, critic, envutil, epoch, event_log, fleet, flaky, generated, hold, judge, memcap, mergegate, reviewgate, risktier, sizegate, sweep, verdictcarry
+from chela import basesync, concurrency, critic, envutil, epoch, event_log, fleet, flaky, generated, handinmove, hold, judge, memcap, mergegate, reviewgate, risktier, sizegate, sweep, verdictcarry
 from chela.config import (
     CHELA_DIR,
     TMUX_SESSION,
@@ -3266,7 +3266,36 @@ def check_base_sync(task_id: str, allow_behind: bool = False) -> dict:
     if state["behind"]:
         return {"ok": True, "record": {"base": base, "behind": state["behind"],
                                        "allow_behind": True}}
-    return {"ok": True, "record": None}
+    try:
+        since = basesync.base_sha(row["worktree_path"], base)
+    except RuntimeError as e:
+        return {"ok": False, "error": f"could not check this branch against its base — {e}"}
+    return {"ok": True, "record": None, "since": since}
+
+
+def reconcile_base_move(task_id: str, since: str, experiments: str | None) -> dict:
+    """⚖️🔀 CMX-334: after task-finished's checks — :func:`chela.handinmove.reconcile` on the
+    run's own worktree. A base it merged in is pushed: a push request is filed unless one is
+    still pending (the daemon pushes the branch as it stands when it applies that one)."""
+    with _db() as conn:
+        row = conn.execute("SELECT * FROM runs WHERE task_id=?", (task_id,)).fetchone()
+    if row is None or not row["worktree_path"] or not row["workflow_path"]:
+        return {"ok": False, "error": f"no run with a worktree on record for {task_id}"}
+    try:
+        wf = load_workflow(row["workflow_path"])
+    except Exception as e:
+        return {"ok": False, "error": f"{row['workflow_path']} could not be read: {e}"}
+    base = wf.get("workspace", "base_branch", default="master")
+    out = handinmove.reconcile(Path(row["worktree_path"]), wf, row["workflow_path"], base,
+                               since, experiments)
+    if out.get("moved"):
+        out["record"] = {"base": base, "moved": out["moved"]}
+        if not _push_request_path(row["worktree_path"]).exists():
+            pushed = request_push(task_id)
+            if not pushed.get("ok"):
+                return {"ok": False, "error": f"merged origin/{base}, but could not request "
+                                              f"its push: {pushed.get('error')}"}
+    return out
 
 
 def check_hand_in_size(task_id: str, oversize_reason: str | None = None,

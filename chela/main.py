@@ -2571,6 +2571,17 @@ def cmd_task_finished(args) -> None:
     if "sweep" in checks:
         accepted = _task_finished_sweep(args.task_id,
                                         getattr(args, "sweep_equivalent", None) or [])
+    if sync.get("since"):
+        # ⚖️🔀 CMX-334: the base moved while the checks ran — no second battery for it.
+        move = dispatcher.reconcile_base_move(args.task_id, sync["since"], experiments)
+        if not move.get("ok"):
+            print(f"task-finished: 🔀 {move['error']}")
+            sys.exit(1)
+        if move.get("record"):
+            from chela import basesync
+
+            sync["record"] = move["record"]
+            print(basesync.render(move["record"]))
     kwargs = {"handoff": getattr(args, "handoff", None)}
     if accepted:
         kwargs["sweep_equivalents"] = accepted
