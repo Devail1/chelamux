@@ -2542,7 +2542,10 @@ def _resolve_base_conflict(conn: sqlite3.Connection, wf: WorkflowDef, row, head:
                  (head, MAX_FREE_CONFLICT_REWORKS, task_id))
     conn.commit()
     try:
-        result = request_changes(task_id, basemerge.rework_body(res, base))
+        # 🔀 CMX-294: tagged free only when this round actually got a grant (the cap is MIN).
+        free = (row["conflict_reworks"] or 0) < MAX_FREE_CONFLICT_REWORKS
+        result = request_changes(task_id, basemerge.rework_body(res, base),
+                                 cause=REWORK_CAUSE_CONFLICT if free else REWORK_CAUSE_REVIEW)
     except sqlite3.Error as e:
         result = {"ok": False, "error": str(e)}
     if not result.get("ok"):
@@ -4461,6 +4464,8 @@ def request_changes(
     🏗️🔁 CMX-192: ``cause`` is written to ``rework_cause`` in the same write — ``review``
     (the default: a judge, a reviewer, a conflict) spends a rework-cap round when it is
     re-spawned; ``infra`` (the CI send-back) does not, and is counted in ``infra_restarts``.
+    ``conflict`` (CMX-294) is a free conflict round: a review round to the budgets, kept
+    distinct only so the inbox notice does not word it as a charged rework.
     """
     body = (body or "").strip()
     if not body:
@@ -4495,7 +4500,7 @@ def request_changes(
             "judge_state=COALESCE(?, judge_state), rework_cause=? "
             "WHERE task_id=? AND status='awaiting_review'",
             (json.dumps(reviews), judge_state,
-             REWORK_CAUSE_INFRA if cause == REWORK_CAUSE_INFRA else REWORK_CAUSE_REVIEW,
+             cause if cause in (REWORK_CAUSE_INFRA, REWORK_CAUSE_CONFLICT) else REWORK_CAUSE_REVIEW,
              task_id),
         )
         conn.commit()
@@ -4902,8 +4907,11 @@ def retry(ident: str, reason: str = "") -> dict:
     with _db() as conn:
         cur = conn.execute(
             "UPDATE runs SET status='changes_requested', review_history=?, last_error=NULL, "
-            "retry_count=? WHERE task_id=? AND status='needs_human'",
-            (json.dumps(reviews), new_retry_count, task_id),
+            "retry_count=?, rework_cause=CASE WHEN rework_cause=? THEN ? ELSE rework_cause "
+            "END WHERE task_id=? AND status='needs_human'",
+            # 🔀 CMX-294: a human-granted round is never a free conflict round.
+            (json.dumps(reviews), new_retry_count, REWORK_CAUSE_CONFLICT, REWORK_CAUSE_REVIEW,
+             task_id),
         )
         conn.commit()
         if cur.rowcount == 0:
@@ -7418,13 +7426,24 @@ def _col(row, name: str):
 
 REWORK_CAUSE_REVIEW = "review"
 REWORK_CAUSE_INFRA = "infra"
+# 🔀 CMX-294: a conflict send-back that took one of the MAX_FREE_CONFLICT_REWORKS free rounds.
+# Stored on the row only so the notice can say so; for the budgets it IS a review round.
+REWORK_CAUSE_CONFLICT = "conflict"
 
 
 def rework_cause(row) -> str:
     """🏗️🔁 CMX-192. Why the run was last sent back — ``infra`` only when it says so; a
-    NULL (a pre-CMX-192 row) is a review verdict, which is what every send-back was then."""
+    NULL (a pre-CMX-192 row) is a review verdict, which is what every send-back was then.
+    A free conflict round (CMX-294) reads as ``review`` here: it spends a review round, and
+    its grant in ``conflict_reworks`` is what keeps it off the cap."""
     return REWORK_CAUSE_INFRA if _col(row, "rework_cause") == REWORK_CAUSE_INFRA \
         else REWORK_CAUSE_REVIEW
+
+
+def free_conflict_round(row) -> bool:
+    """🔀 CMX-294. Is the round this run was last sent back for a FREE conflict round — one
+    that granted itself a ``conflict_reworks`` slot, so it is not charged against the cap?"""
+    return _col(row, "rework_cause") == REWORK_CAUSE_CONFLICT
 
 
 def review_reworks(row) -> int:

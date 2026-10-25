@@ -49,6 +49,8 @@ TEST_RUNNERS = ("pytest", "py.test", "vitest")
 DETACHED_FLAG = "--detached-child"         # chela judge run --detach's own child
 DAEMON_MARKERS = ("God Daemon (",)         # argv[0] of a self-daemonizing proc: ppid 1 by design
 DAEMON_OWNER_FILE = "chela-tests-owner.pid"  # tests/conftest.py: the pytest that owns a PM2_HOME
+TMUX_ARG_FLAGS = ("-c", "-f", "-S", "-T")    # tmux's other global flags that take a value
+TEST_TMUX_SOCKET_RE = re.compile(r"chelatest-(\d+)-")  # a test's `tmux -L chelatest-<its pid>-…`
 FLEET_PAUSE_FILE = fleet.STATE_FILE_NAME  # CMX-214's `--pause --all` state
 
 _TEST_ID_RE = re.compile(r"[\w./-]+::[^\s,;]+")
@@ -245,6 +247,11 @@ class Sources:
                         "age_s": uptime - int(rest[19]) / hz})
         return sorted(out, key=lambda p: p["pid"])
 
+    @cached_property
+    def ppids(self) -> dict[int, int]:
+        """pid → ppid of every readable process, built once per scan."""
+        return {q["pid"]: q["ppid"] for q in self.procs}
+
     def worktree_dir(self, proc: dict) -> Path | None:
         """The worktree the process's cwd or argv is under."""
         for path in (proc["cwd"], *proc["argv"]):
@@ -360,6 +367,18 @@ def _is_daemon(argv: list[str]) -> bool:
     return bool(argv) and any(m in argv[0] for m in DAEMON_MARKERS)
 
 
+def _descends(src: Sources, pid: int, root: int) -> bool:
+    """True iff ``pid`` is a (grand…)child of ``root``."""
+    ppid = src.ppids
+    seen = set()
+    while pid not in seen and pid in ppid:
+        seen.add(pid)
+        pid = ppid[pid]
+        if pid == root:
+            return True
+    return False
+
+
 def _daemon_leak(src: Sources, p: dict, wt: tuple[str, str]) -> str | None:
     """CMX-273: why a self-daemonizing process (re-parented to 1 by design) is leaked anyway,
     or None while a live process of its run still owns its ``PM2_HOME``: one that has it in
@@ -379,19 +398,8 @@ def _daemon_leak(src: Sources, p: dict, wt: tuple[str, str]) -> str | None:
         owner = int((Path(home) / DAEMON_OWNER_FILE).read_text().strip())
     except (OSError, ValueError):
         owner = None
-    ppid = {q["pid"]: q["ppid"] for q in src.procs}
-
-    def descends(pid: int) -> bool:
-        seen = set()
-        while pid not in seen and pid in ppid:
-            seen.add(pid)
-            pid = ppid[pid]
-            if pid == p["pid"]:
-                return True
-        return False
-
     for q in src.procs:
-        if _is_daemon(q["argv"]) or src.worktree_of(q) != wt or descends(q["pid"]):
+        if _is_daemon(q["argv"]) or src.worktree_of(q) != wt or _descends(src, q["pid"], p["pid"]):
             continue                              # a daemon, another run, or its own child
         if ((q["pid"] == owner and q["start"] <= p["start"])    # a reused pid starts later
                 or (src.environ(q["pid"]) or {}).get("PM2_HOME") == home):
@@ -399,10 +407,57 @@ def _daemon_leak(src: Sources, p: dict, wt: tuple[str, str]) -> str | None:
     return f"no live process of its run shares its PM2_HOME {home}"
 
 
+def _tmux_socket(argv: list[str]) -> str | None:
+    """The ``-L`` socket name of a tmux process (``-L name`` or ``-Lname``), else None. Only
+    a global flag counts: the scan stops at the subcommand, whose own args are not tmux's."""
+    if not argv or Path(argv[0]).name != "tmux":
+        return None
+    args = iter(argv[1:])
+    for a in args:
+        if not a.startswith("-"):
+            return None                           # the subcommand
+        if a == "-L":
+            return next(args, "") or None
+        if a.startswith("-L"):
+            return a[2:]
+        if a in TMUX_ARG_FLAGS:
+            next(args, None)                      # its value is not a flag
+    return None
+
+
+def _helper_leak(src: Sources, p: dict, wt: tuple[str, str]) -> str | None:
+    """CMX-279: why an orphaned (ppid 1) helper of a live test is leaked anyway, or None
+    while its test still owns it — a tmux server always re-parents to 1, and so does a
+    test's detached script. The owner is the test pid a ``tmux -L chelatest-<pid>-…`` socket
+    names; for any other helper whose CWD is in the worktree, a live test run of that same
+    run. Past the suite timeout no owner excuses it. A test run itself is never a helper:
+    its orphaned copy is CMX-274's runaway."""
+    sock = _tmux_socket(p["argv"])
+    named = TEST_TMUX_SOCKET_RE.match(sock or "")
+    cwd_wt = src.worktree_dir(dict(p, argv=[]))
+    if _is_test_runner(p["argv"]) or (not named and cwd_wt != src.worktree_dir(p)):
+        return "it is orphaned (ppid 1)"
+    limit = src.suite_timeout(p)
+    if p["age_s"] > limit:
+        return f"it is orphaned (ppid 1) and older than the suite timeout ({limit:.0f}s)"
+    for q in src.procs:
+        if q["start"] > p["start"] or _descends(src, q["pid"], p["pid"]):
+            continue                              # a reused pid starts later; its own child
+        if named and q["pid"] == int(named.group(1)):
+            return None
+        if (not named and _is_test_runner(q["argv"]) and q["ppid"] != 1
+                and src.worktree_of(q) == wt):
+            return None                           # an orphaned test run owns nothing
+    if named:
+        return f"it is orphaned (ppid 1) and the test that owns tmux socket {sock} is gone"
+    return "it is orphaned (ppid 1) and no live test run shares its worktree"
+
+
 def rule_leaked_proc(src: Sources, state: dict) -> list[dict]:
     """CMX-253: a process under a run/judge worktree whose run is over, or that was orphaned.
     A ``--detached-child`` judge is setsid'd ON PURPOSE, so ppid 1 alone is not a leak there;
-    nor for a self-daemonizing process (:func:`_daemon_leak`).
+    nor for a self-daemonizing process (:func:`_daemon_leak`), nor for a live test's own
+    detached helper — its tmux server or a script it started (:func:`_helper_leak`).
     CMX-274: also a test run under a RUNNING agent older than its suite timeout — a runaway
     the hand-in reaper has not reached yet (2 xdist workers pinned for 1h38m)."""
     out = []
@@ -413,8 +468,8 @@ def rule_leaked_proc(src: Sources, state: dict) -> list[dict]:
         status = src.runs.get(wt[0])
         orphan = p["ppid"] == 1 and DETACHED_FLAG not in p["argv"]
         why = "it is orphaned (ppid 1)"
-        if orphan and _is_daemon(p["argv"]):
-            why = _daemon_leak(src, p, wt)
+        if orphan:
+            why = (_daemon_leak if _is_daemon(p["argv"]) else _helper_leak)(src, p, wt)
             orphan = why is not None
         runaway = (wt[1] == "run" and status == "running" and _is_test_runner(p["argv"])
                    and p["age_s"] > src.suite_timeout(p))

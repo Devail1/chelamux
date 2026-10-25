@@ -809,3 +809,109 @@ def test_a_failed_rebuild_reworks_free_with_the_build_error(tmp_path, tried):
     verdict = dispatcher.latest_verdict(run)
     assert run["conflict_reworks"] == 1 and "rebuilding it on the merge failed" in verdict
     assert "vite: boom" in verdict and not any("Base merged" in c for c in fake.comments)
+
+
+# 🔀 CMX-294: a FREE conflict round is announced as one, never as a charged rework.
+
+def _workflow_file(tmp_path) -> str:
+    path = tmp_path / "WORKFLOW.md"
+    path.write_text("---\nproject_key: TEST\ntracker:\n  kind: markdown\n  path: TODO.md\n"
+                    "workspace:\n  base_branch: trunk\n---\nprompt\n")
+    return str(path)
+
+
+def _sent_back(run: dict) -> str:
+    from chela import inbox
+    events, _ = inbox.run_events([{"task_id": "abc123", "title": "t", "risk": None,
+                                   "retry_count": 0, "status": "changes_requested", **run}], {})
+    [event] = [e for e in events if e["kind"] == "run_changes_requested"]
+    return event["summary"]
+
+
+def test_a_free_conflict_round_is_tagged_and_a_charged_one_is_not(tmp_path, tried):
+    wf, fake = _setup(tmp_path, pr_mergeable="CONFLICTING", conflict_reworks=2)
+    _tick(wf, fake)
+    assert dispatcher.resolve_run("abc123")["rework_cause"] == "conflict"
+
+
+def test_a_conflict_past_the_free_rounds_is_tagged_as_a_charged_review(tmp_path, tried):
+    wf, fake = _setup(tmp_path, pr_mergeable="CONFLICTING", rework_count=7, conflict_reworks=3)
+    _tick(wf, fake)
+    run = dispatcher.resolve_run("abc123")
+    assert (run["rework_cause"], dispatcher.free_conflict_round(run)) == ("review", False)
+
+
+def test_request_changes_stores_the_conflict_cause(tmp_path):
+    with dispatcher._db() as conn:
+        _row(conn)
+    assert dispatcher.request_changes("abc123", "x", post_comment=False,
+                                      cause="conflict")["ok"]
+    assert dispatcher.resolve_run("abc123")["rework_cause"] == "conflict"
+
+
+def test_the_cmx_276_notice_names_the_free_round_not_a_charged_rework(tmp_path, monkeypatch):
+    """Live on CMX-276 (rework_count 3, conflict_reworks 2) the notice said "rework 4 of 4"
+    while the PR comment said the round was not charged."""
+    monkeypatch.setenv("CHELA_MAX_REWORKS", "4")
+    text = _sent_back({"workflow_path": _workflow_file(tmp_path), "rework_count": 3, "review_reworks": 3,
+                       "conflict_reworks": 2, "rework_cause": "conflict"})
+    assert ("🔀 sent back to merge trunk — conflict round 2 of 3, not charged, reworks used 2 of "
+            "4 — the next dispatcher tick") in text
+    assert "sent back for rework" not in text and "rework 4 of" not in text
+
+
+def test_a_review_send_back_keeps_the_charged_wording(tmp_path, monkeypatch):
+    monkeypatch.setenv("CHELA_MAX_REWORKS", "4")
+    text = _sent_back({"workflow_path": _workflow_file(tmp_path), "rework_count": 3, "review_reworks": 3,
+                       "conflict_reworks": 2, "rework_cause": "review"})
+    assert "sent back for rework — rework 4 of 6 — the next dispatcher tick" in text
+    assert "conflict round" not in text
+
+
+def test_a_first_conflict_round_counts_no_free_round_as_used(tmp_path, monkeypatch):
+    monkeypatch.setenv("CHELA_MAX_REWORKS", "3")
+    text = _sent_back({"workflow_path": _workflow_file(tmp_path), "rework_count": 0, "review_reworks": 0,
+                       "conflict_reworks": 1, "rework_cause": "conflict"})
+    assert "— conflict round 1 of 3, not charged, reworks used 0 of 3 —" in text
+
+
+def test_a_conflict_retry_keeps_the_free_wording_and_names_the_error(tmp_path, monkeypatch):
+    monkeypatch.setenv("CHELA_MAX_REWORKS", "4")
+    text = _sent_back({"workflow_path": _workflow_file(tmp_path), "rework_count": 1, "review_reworks": 1,
+                       "conflict_reworks": 1, "rework_cause": "conflict",
+                       "last_error": "tmux died"})
+    assert "conflict round 1 of 3, not charged, reworks used 1 of 4 — RETRY after: tmux died" \
+        in text
+    assert "sent back for rework" not in text
+
+
+@pytest.mark.parametrize("path", [None, "/nonexistent/WORKFLOW.md", "never-parsed"])
+def test_an_unreadable_workflow_names_no_guessed_base(path, monkeypatch, tmp_path):
+    monkeypatch.setenv("CHELA_MAX_REWORKS", "4")
+    if path == "never-parsed":
+        path = str(tmp_path / "WORKFLOW.md")
+        Path(path).write_text("---\n: [unclosed\n---\n")
+    text = _sent_back({"workflow_path": path, "rework_count": 0, "review_reworks": 0,
+                       "conflict_reworks": 1, "rework_cause": "conflict"})
+    assert "🔀 sent back to merge its base branch — conflict round 1 of 3" in text
+
+
+@pytest.mark.parametrize("cause, after", [("conflict", "review"), ("infra", "infra"),
+                                          ("review", "review")])
+def test_a_human_retry_is_never_a_free_conflict_round(tmp_path, monkeypatch, cause, after):
+    monkeypatch.setattr(dispatcher, "_post_pr_comment", lambda *a, **k: (True, ""))
+    with dispatcher._db() as conn:
+        _row(conn, status="needs_human", rework_count=4, conflict_reworks=1,
+             rework_cause=cause)
+    assert dispatcher.retry("abc123")["ok"]
+    assert dispatcher.resolve_run("abc123")["rework_cause"] == after
+
+
+def test_next_round_names_a_free_conflict_round_as_one(tmp_path, monkeypatch):
+    from chela import inbox
+    monkeypatch.setenv("CHELA_MAX_REWORKS", "4")
+    run = {"workflow_path": _workflow_file(tmp_path), "rework_count": 3, "review_reworks": 3,
+           "conflict_reworks": 2, "retry_count": 0, "risk": None}
+    assert inbox._next_round({**run, "rework_cause": "conflict"}) == (
+        "🔀 sent back to merge trunk — conflict round 2 of 3, not charged, reworks used 2 of 4")
+    assert inbox._next_round({**run, "rework_cause": "review"}) == "rework 4 of 6"
