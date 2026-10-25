@@ -418,7 +418,8 @@ def test_only_a_prose_pr_skips_the_judge(tmp_path, repo, monkeypatch, files, unr
         assert not (tmp_path / "wts" / "judge-abc123").exists()
         events = _notices()
         assert [e["kind"] for e in events] == ["run_judge_clean"], events
-        assert "prose-only, merged on green CI" in events[0]["summary"]
+        assert "prose-only, no judge round needed — merge-ready on green CI" \
+            in events[0]["summary"]
         assert dispatcher.merged_outside_gate(dict(run, pr_head_sha=sha)) is False
         assert dispatcher.merged_outside_gate(dict(run, judge_state="cannot_verify")) is True
 
