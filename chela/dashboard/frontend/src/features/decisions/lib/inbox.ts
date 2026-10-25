@@ -89,7 +89,11 @@ function persistLastSeen(n: number) {
 // Every kind chela/inbox.py ever queues or logs about a dispatch/watch outcome
 // (see agent_events/run_events/_gone_event/_epoch_lost_event/_undeliverable).
 // Deliberately NOT the Feed's tool-call/prompt firehose — this panel is
-// decisions, not the whole log.
+// decisions, not the whole log. CMX-328: keep every kind here a non-`hook.*` one.
+// A read whose types are ALL non-hook is served from the core log
+// (chela/event_log.py), which outlives the main log's rolls. One `hook.*` kind would
+// send the whole query back to the current file, which the hook traffic rolls every
+// few hours.
 export const DECISION_TYPES = [
     'run_review', 'run_needs_human', 'run_changes_requested', 'run_failed',
     // CMX-197: the judge's own verdict on a run still sitting in `awaiting_review` —

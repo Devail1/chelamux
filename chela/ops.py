@@ -5,8 +5,9 @@ hand. Each rule below is one of those oddities, made automatic; each names its i
 
 * **Never on the critical path.** The daemon only ever *spawns* ``chela ops scan --notify``
   (:func:`spawn`) — niced to 19, ionice idle, its own session — and never waits for it.
-* **Read-only.** It reads ``events.jsonl`` (its tail), ``judge-heldout/*.jsonl``, the runs
-  table (a ``mode=ro`` sqlite open) and ``/proc``. It never signals, merges or edits anything;
+* **Read-only.** It reads ``events-core.jsonl`` (its tail: chela's own events and never a
+  ``hook.*`` one, so it reaches back days, not minutes — CMX-328), ``judge-heldout/*.jsonl``,
+  the runs table (a ``mode=ro`` sqlite open) and ``/proc``. It never signals, merges or edits anything;
   the only writes are under ``$CHELA_DIR/ops/`` plus ONE inbox notice for NEW findings.
 * **Cheap.** The rules run in one worker thread under a hard :data:`BUDGET_S`; a scan that
   overruns reports ``partial`` with what it finished.
@@ -88,7 +89,7 @@ class Sources:
     def __init__(self, chela_dir: Path, proc_root: Path = Path("/proc"),
                  events_path: Path | None = None, now: float | None = None):
         self.chela_dir, self.proc_root = Path(chela_dir), Path(proc_root)
-        self.events_path = events_path or self.chela_dir / "events.jsonl"
+        self.events_path = events_path or self.chela_dir / "events-core.jsonl"
         self.now = time.time() if now is None else now
         self.worktrees = self.chela_dir / "worktrees"
         self._environ: dict[int, dict[str, str] | None] = {}
@@ -97,7 +98,17 @@ class Sources:
 
     @cached_property
     def events(self) -> list[dict]:
-        return _tail_jsonl(self.events_path)
+        # Right after the core log rolls, the current file holds almost nothing: top the
+        # tail up from the rolled ``.1`` (CMX-328).
+        try:
+            size = self.events_path.stat().st_size
+        except OSError:
+            size = 0
+        older: list[dict] = []
+        if size < TAIL_BYTES:
+            rolled = self.events_path.with_name(self.events_path.name + ".1")
+            older = _tail_jsonl(rolled, TAIL_BYTES - size)
+        return older + _tail_jsonl(self.events_path)
 
     @cached_property
     def heldout(self) -> list[dict]:
@@ -608,7 +619,7 @@ def scheduled(chela_dir: Path | None = None, proc_root: Path = Path("/proc")) ->
     if fleet_paused(chela_dir):
         return {"skipped": "a fleet pause (--pause --all) is active", "findings": []}
     state = load_state(chela_dir)
-    src = Sources(chela_dir, proc_root, events_path=event_log.log_path())
+    src = Sources(chela_dir, proc_root, events_path=event_log.core_path())
     result = scan(src, state)
     fresh = record(chela_dir, result, state, src)
     if fresh:

@@ -168,11 +168,11 @@ def test_a_key_is_recorded_even_when_the_cooldown_swallowed_its_notice():
 
 
 def test_the_payload_stub_keeps_the_key():
-    """A tool input too big for the log degrades to a stub; the dedupe key survives it."""
+    """A tool input too big for the log is cut to a preview; the dedupe key survives it."""
     huge = {**CASES["event"], "hook_event_name": "PermissionDenied",
             "tool_input": {f"k{i}": "x" * 900 for i in range(60)}}
     stub = hooks.clip_payload(huge)
-    assert stub.get("clipped") is True
+    assert "tool_input" in stub["clipped_bytes"]
     assert stub["tool_use_id"] == "toolu_01denied"
 
 

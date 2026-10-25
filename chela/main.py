@@ -3206,7 +3206,7 @@ def cmd_ops_scan(args) -> None:
     if args.notify:
         result = ops.scheduled()
     else:
-        result = ops.scan(ops.Sources(config.CHELA_DIR, events_path=event_log.log_path()),
+        result = ops.scan(ops.Sources(config.CHELA_DIR, events_path=event_log.core_path()),
                           ops.load_state(config.CHELA_DIR))
     print(json.dumps(result, indent=2) if args.json else ops.render(result))
 
