@@ -185,10 +185,12 @@ def test_a_huge_tool_input_is_clipped_not_dropped():
 
 
 def test_a_payload_past_the_bound_degrades_to_a_stub():
-    body = _body(tool_input={f"k{i}": "z" * 1500 for i in range(60)})
+    # Only an interactive tool's input is kept whole enough to reach the bound (CMX-328).
+    body = _body(tool_name="AskUserQuestion",
+                 tool_input={f"k{i}": "z" * 1500 for i in range(60)})
     record = hooks.ingest("PreToolUse", body)
     assert record["payload"]["clipped"] is True
-    assert record["payload"]["tool_name"] == "Bash"
+    assert record["payload"]["tool_name"] == "AskUserQuestion"
     assert "tool_input" not in record["payload"]
 
 
@@ -1062,3 +1064,116 @@ def test_a_header_naming_a_dead_window_falls_back_to_ordinary_correlation(
             transcript_path=f"/h/.claude/projects/{transcripts.encode_cwd('/a')}/s.jsonl",
         ), headers={"X-Chela-Wid": "@404"})
     assert resp.get_json() == with_header.get_json()
+
+
+# --- CMX-328: a hook event stores a preview, not the tool's body ----------------
+
+MB = 1024 * 1024
+
+
+def test_a_megabyte_tool_input_is_stored_under_two_kilobytes(tmp_path):
+    """The 8 MB log rolled every ~7 h because a Write stored its file. Now: ~1 KB a line."""
+    body = _body(tool_name="Write",
+                 tool_input={"file_path": "/repo/big.py", "content": "y" * MB})
+    hooks.ingest("PreToolUse", body)
+    line = (tmp_path / "events.jsonl").read_bytes()
+    assert len(line) < 2048
+    payload = json.loads(line)["payload"]
+    assert payload["tool_name"] == "Write"
+    assert payload["tool_input"]["file_path"] == "/repo/big.py"
+    assert payload["tool_input"]["content"] == "y" * 200 + f"… [+{MB - 200} chars]"
+    assert payload["clipped_bytes"] == {"tool_input": MB + 44}
+
+
+def test_a_megabyte_tool_response_is_stored_under_two_kilobytes(tmp_path):
+    body = _body(hook_event_name="PostToolUse", tool_name="Read",
+                 tool_input={"file_path": "/repo/big.py"},
+                 tool_response={"type": "text",
+                                "file": {"filePath": "/repo/big.py", "content": "z" * MB}})
+    hooks.ingest("PostToolUse", body)
+    line = (tmp_path / "events.jsonl").read_bytes()
+    assert len(line) < 2048
+    payload = json.loads(line)["payload"]
+    assert payload["tool_input"] == {"file_path": "/repo/big.py"}      # short: kept as is
+    assert payload["tool_response"]["type"] == "text"
+    nested = payload["tool_response"]["file"]          # a nested container: a JSON preview
+    assert nested.startswith('{"filePath": "/repo/big.py", "content": "zzz')
+    assert nested.endswith(" chars]")
+    assert set(payload["clipped_bytes"]) == {"tool_response"}
+
+
+def test_clipped_bytes_names_each_cut_field_with_its_original_size():
+    payload = hooks.clip_payload(_body(tool_name="Write",
+                                       tool_input={"file_path": "/a", "content": "y" * 1000},
+                                       prompt="p" * 600))
+    assert payload["clipped_bytes"] == {"tool_input": 1034, "prompt": 602}
+
+
+def test_nothing_cut_means_no_clipped_bytes():
+    assert "clipped_bytes" not in hooks.clip_payload(_body())
+
+
+def test_a_top_level_string_keeps_500_chars():
+    payload = hooks.clip_payload(_body(hook_event_name="UserPromptSubmit", prompt="p" * 600))
+    assert payload["prompt"] == "p" * 500 + "… [+100 chars]"
+    assert hooks.clip_payload(_body(prompt="q" * 500))["prompt"] == "q" * 500
+
+
+def test_a_body_value_keeps_200_chars():
+    payload = hooks.clip_payload(_body(tool_input={"command": "c" * 201}))
+    assert payload["tool_input"]["command"] == "c" * 200 + "… [+1 chars]"
+    assert hooks.clip_payload(_body(tool_input={"command": "c" * 200}))["tool_input"] == {
+        "command": "c" * 200}
+
+
+def test_a_list_field_is_one_json_preview():
+    payload = hooks.clip_payload(_body(background_tasks=[{"id": i} for i in range(3)]))
+    assert payload["background_tasks"] == '[{"id": 0}, {"id": 1}, {"id": 2}]'
+
+
+def test_a_wide_dict_stops_at_the_budget_and_counts_what_it_dropped():
+    payload = hooks.clip_payload(_body(tool_input={f"k{i}": "v" * 300 for i in range(10)}))
+    kept = payload["tool_input"]
+    # each key is ~220 encoded bytes, so 4 fit in 1024 and the other 6 are counted
+    assert [k for k in kept if k != "…"] == ["k0", "k1", "k2", "k3"]
+    assert kept["…"] == "+6 keys"
+
+
+def test_the_first_key_is_kept_even_when_alone_it_is_over_budget(monkeypatch):
+    monkeypatch.setattr(hooks, "BULK_BUDGET", 10)
+    kept = hooks.clip_payload(_body(tool_input={"file_path": "/a/b.py", "content": "x"}))
+    assert kept["tool_input"] == {"file_path": "/a/b.py", "…": "+1 keys"}
+
+
+def test_an_unencodable_value_is_previewed_from_its_str():
+    loop: list = []
+    loop.append(loop)                       # json.dumps raises ValueError on a cycle
+    payload = hooks.clip_payload(_body(tool_response=loop))
+    assert payload["tool_response"] == "[[...]]"
+    assert payload["clipped_bytes"] == {"tool_response": len("[[...]]")}
+
+
+LONG = "an option description longer than any preview " * 10      # 470 chars
+
+
+@pytest.mark.parametrize("tool", ["AskUserQuestion", "ExitPlanMode"])
+def test_an_interactive_tools_input_is_kept_whole(tool):
+    """The Telegram gate reads every option back out of the log (chela.telegram.hookgate)."""
+    tool_input = {"questions": [{"question": "Which?", "header": "H", "multiSelect": False,
+                                 "options": [{"label": "A", "description": LONG}]}],
+                  "plan": LONG}
+    payload = hooks.clip_payload(_body(tool_name=tool, tool_input=tool_input))
+    assert payload["tool_input"] == tool_input
+    assert "clipped_bytes" not in payload
+
+
+def test_the_same_input_on_any_other_tool_is_cut():
+    tool_input = {"plan": LONG}
+    payload = hooks.clip_payload(_body(tool_name="Task", tool_input=tool_input))
+    assert payload["tool_input"]["plan"] == LONG[:200] + f"… [+{len(LONG) - 200} chars]"
+
+
+def test_hookgate_reads_the_same_interactive_tools():
+    from chela.telegram import hookgate
+    assert hookgate.INTERACTIVE_TOOLS == ("AskUserQuestion", "ExitPlanMode")
+    assert hooks.INTERACTIVE_TOOLS == ("AskUserQuestion", "ExitPlanMode")

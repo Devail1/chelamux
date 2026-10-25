@@ -132,6 +132,16 @@ duplicates and no gaps.
   `CHELA_EVENTS_KEEP` generations (`events.jsonl.1`, `.2`, …): an unbounded append is a
   disk-filler on a busy fleet. Live reads come from a bounded in-memory ring
   (`CHELA_EVENTS_RING`, default 2000); the rolled files are the audit trail.
+* **The core log** (CMX-328). Every event that is not a `hook.*` one (chela's own:
+  merges, send-backs, judge verdicts, stuck notices) is also appended, byte-identical and
+  with the same `seq`, to `events-core.jsonl` beside the log. It rolls at 2 MB and keeps
+  one rolled file, which is about three weeks of chela's own events. A read whose `--type`s are **all** non-hook
+  (`chela events --type run_review`, the Decisions dialog's `/api/log` query, the ops scan)
+  is served from it, so how busy the agents are no longer decides how far back it reaches.
+  A read with no type, or with any `hook.*` type, still serves the current file.
+  Hooks used to share one 8 MB file with the decisions, and it rolled every ~7 h, so the
+  dialog read "No decisions logged yet" after a day full of them. On the first daemon
+  start with it, the core log is seeded from the decisions still in the rolled files.
 
 ## Configuration
 

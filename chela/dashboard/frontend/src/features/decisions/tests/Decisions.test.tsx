@@ -239,6 +239,8 @@ test('the decision kinds: every outcome chela/inbox.py queues, never the hook fi
     expect(types.has(t)).toBe(true);
   expect(m.d.DECISION_TYPES).toHaveLength(28);
   for (const t of ['hook.pre_tool_use', 'hook.post_tool_use', 'hook.user_prompt_submit']) expect(types.has(t)).toBe(false);
+  // CMX-328: one hook kind would move the whole query off the core log (chela/event_log.py)
+  expect(m.d.DECISION_TYPES.filter((t) => t.startsWith('hook.'))).toEqual([]);
 });
 
 test('an SSE `log` frame reads on from the cursor, whatever view is on screen', async () => {
