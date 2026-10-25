@@ -274,15 +274,17 @@ def test_god_daemon_older_than_its_runs_suite_timeout_is_a_leak(env, pm2, workfl
 
 
 @pytest.mark.parametrize("argv, hit", [
-    ([GOD], False),
-    (["node", GOD], True),                                     # the marker must be argv[0]
-    (["PM2 v7.0.4: God Daemon"], True),                        # no " (" — not the title
+    ([GOD], True),                                             # the PM2 rule: home not shared
+    (["node", GOD], False),                                    # the marker must be argv[0]
+    (["PM2 v7.0.4: God Daemon"], False),                       # no " (" — not the title
 ])
-def test_only_a_god_daemon_title_is_exempt_from_ppid_1(env, pm2, argv, hit):
+def test_only_a_god_daemon_title_takes_the_pm2_rule(env, pm2, argv, hit):
+    """A live pytest of the run that does NOT share the home: only the PM2 rule flags that;
+    any other orphan is that live test's helper (CMX-279)."""
     god(env, pm2, argv=argv)
-    add_proc(env, 50, ["/v/bin/pytest"], env.wt / "CMX-1", environ=[f"PM2_HOME={pm2}"])
-    assert leaks(env) == ([("pid:42", "pid 42 under run CMX-1 is alive but it is orphaned "
-                                      "(ppid 1)")] if hit else [])
+    add_proc(env, 50, ["/v/bin/pytest"], env.wt / "CMX-1", environ=["PM2_HOME=/tmp/other"])
+    assert leaks(env) == ([("pid:42", "pid 42 under run CMX-1 is alive but no live process "
+                                      f"of its run shares its PM2_HOME {pm2}")] if hit else [])
 
 
 def test_god_daemon_of_a_finished_run_is_a_leak_even_while_owned(env, pm2):
@@ -291,6 +293,134 @@ def test_god_daemon_of_a_finished_run_is_a_leak_even_while_owned(env, pm2):
     add_proc(env, 50, ["/v/bin/pytest"], env.wt / "CMX-1", environ=[f"PM2_HOME={pm2}"])
     assert leaks(env) == [("pid:42", "pid 42 under run CMX-1 is alive but its run is done"),
                           ("pid:50", "pid 50 under run CMX-1 is alive but its run is done")]
+
+
+# --- rule 2c: a live test's own detached helper is ppid 1 by design (CMX-279) --------------
+
+TMUX = ["/usr/bin/tmux", "-L", "chelatest-50-ab12cd", "new-session", "-d", "-s", "t"]
+SCRIPT = ["bash", "scripts/agent-terminals.sh"]
+
+
+def helper(env, argv, *, pid=42, where="CMX-1", age=120, cwd=None):
+    add_proc(env, pid, argv, cwd or env.wt / where, ppid=1, age=age)
+
+
+def test_tmux_server_of_a_live_test_is_not_a_leak(env):
+    helper(env, TMUX)
+    add_proc(env, 50, ["python", "-c", "worker"], env.dir / "elsewhere")   # any live pid 50
+    assert leaks(env) == []
+
+
+def test_tmux_server_whose_test_is_gone_is_a_leak(env):
+    helper(env, TMUX)
+    add_proc(env, 51, ["/v/bin/pytest"], env.wt / "CMX-1")    # a live test, but not ITS test
+    assert leaks(env) == [("pid:42", "pid 42 under run CMX-1 is alive but it is orphaned "
+                                     "(ppid 1) and the test that owns tmux socket "
+                                     "chelatest-50-ab12cd is gone")]
+
+
+@pytest.mark.parametrize("argv, owner, hit", [
+    (["tmux", "-Lchelatest-50-x", "new-session", "-d"], dict(), False),   # -L<name>
+    (["tmux", "-u", "-L", "chelatest-50-x"], dict(), False),
+    (TMUX, dict(age=120), False),                              # started together: still its own
+    (TMUX, dict(age=119), True),                               # pid 50 reused AFTER the server
+    (TMUX, dict(ppid=42), True),                               # the server's own child
+    (["tmux", "-L", "chelatest-500-x"], dict(), True),         # names another pid
+    (["tmux", "-L", "xchelatest-50-x"], dict(), True),         # anchored at the start
+    (["tmux", "-L", "chelatest-50"], dict(), True),            # <pid>- needs its dash
+    (["tmux", "-L"], dict(), True),                            # no socket name
+    (["tmuxx", "-L", "chelatest-50-x"], dict(), True),         # not tmux
+    (["/v/bin/tmux", "new", "-L", "chelatest-50-x"], dict(), False),
+])
+def test_tmux_socket_names_its_owner_test(env, argv, owner, hit):
+    helper(env, argv)
+    add_proc(env, 50, ["python", "-c", "worker"], env.dir / "elsewhere",
+             age=owner.get("age", 1800), ppid=owner.get("ppid", 500))
+    assert [s for s, _ in leaks(env)] == (["pid:42"] if hit else [])
+
+
+def test_tmux_server_with_a_dead_owner_is_a_leak_even_beside_a_live_pytest(env):
+    """The socket names its owner: a different live test in its worktree does not adopt it."""
+    helper(env, TMUX)
+    add_proc(env, 51, ["/v/bin/pytest"], env.wt / "CMX-1")
+    assert [s for s, _ in leaks(env)] == ["pid:42"]
+
+
+def test_unnamed_tmux_socket_falls_back_to_the_worktree_rule(env):
+    helper(env, ["tmux", "-L", "chelatest-fence-proof", "new-session", "-d"])
+    assert [s for s, _ in leaks(env)] == ["pid:42"]
+    add_proc(env, 51, ["/v/bin/pytest"], env.wt / "CMX-1")
+    assert leaks(env) == []
+
+
+def test_script_in_a_worktree_with_a_live_pytest_is_not_a_leak(env):
+    helper(env, SCRIPT, where="judge-CMX-1")
+    add_proc(env, 51, ["python3", "-m", "pytest", "-q"], env.wt / "judge-CMX-1")
+    assert leaks(env) == []
+
+
+def test_script_in_a_worktree_without_a_live_pytest_is_a_leak(env):
+    helper(env, SCRIPT, where="judge-CMX-1")
+    add_proc(env, 51, ["python3", "x"], env.wt / "judge-CMX-1")       # not a test run
+    assert leaks(env) == [("pid:42", "pid 42 under judge CMX-1 is alive but it is orphaned "
+                                     "(ppid 1) and no live test run shares its worktree")]
+
+
+@pytest.mark.parametrize("pytest_, hit", [
+    (dict(where="CMX-2"), True),                               # another run's pytest
+    (dict(where="CMX-1"), True),                               # the run's, not its judge's
+    (dict(age=119), True),                                     # started after the helper
+    (dict(age=120), False),                                    # started together
+    (dict(ppid=42), True),                                     # the helper's own child
+    (dict(ppid=52), True),                                     # ...and grandchild
+])
+def test_script_owner_must_be_a_live_test_of_its_worktree(env, pytest_, hit):
+    helper(env, SCRIPT, where="judge-CMX-1")
+    add_proc(env, 52, ["bash"], env.dir / "elsewhere", ppid=42)
+    add_proc(env, 51, ["/v/bin/pytest"], env.wt / pytest_.get("where", "judge-CMX-1"),
+             age=pytest_.get("age", 1800), ppid=pytest_.get("ppid", 500))
+    assert [s for s, _ in leaks(env)] == (["pid:42"] if hit else [])
+
+
+def test_script_whose_cwd_is_not_the_worktree_is_a_leak(env):
+    """Only the CWD places a helper in a worktree — an argv path alone does not."""
+    helper(env, ["bash", str(env.wt / "judge-CMX-1" / "scripts" / "agent-terminals.sh")],
+           cwd=env.dir / "elsewhere")
+    add_proc(env, 51, ["/v/bin/pytest"], env.wt / "judge-CMX-1")
+    assert leaks(env) == [("pid:42", "pid 42 under judge CMX-1 is alive but it is orphaned "
+                                     "(ppid 1)")]
+
+
+def test_an_orphaned_test_run_is_never_a_helper(env):
+    """CMX-274's runaway stays a leak even beside a live sibling pytest of its run."""
+    helper(env, ["/v/bin/pytest", "-q"])
+    add_proc(env, 51, ["/v/bin/pytest"], env.wt / "CMX-1")
+    assert leaks(env) == [("pid:42", "pid 42 under run CMX-1 is alive but it is orphaned "
+                                     "(ppid 1)")]
+
+
+@pytest.mark.parametrize("argv", [TMUX, SCRIPT])
+@pytest.mark.parametrize("workflow, age, hit", [
+    (None, 900, False), (None, 901, True),                               # the 900 s default
+    ("judge:\n  suite_timeout_seconds: 2400\n", 2400, False),
+    ("judge:\n  suite_timeout_seconds: 2400\n", 2401, True),
+])
+def test_helper_older_than_its_runs_suite_timeout_is_a_leak(env, argv, workflow, age, hit):
+    (env.wt / "CMX-1").mkdir(parents=True)
+    if workflow:
+        (env.wt / "CMX-1" / "WORKFLOW.md").write_text(f"---\nproject_key: CMX\n{workflow}---\n")
+    helper(env, argv, age=age)
+    add_proc(env, 50, ["/v/bin/pytest"], env.wt / "CMX-1", age=9000)
+    assert leaks(env) == ([("pid:42", "pid 42 under run CMX-1 is alive but it is orphaned "
+                            "(ppid 1) and older than the suite timeout "
+                            f"({2400 if workflow else 900}s)")] if hit else [])
+
+
+def test_helper_of_a_finished_run_is_a_leak_even_while_owned(env):
+    set_runs(env, [("CMX-1", "done", "2026-01-01")])
+    helper(env, TMUX)
+    add_proc(env, 50, ["/v/bin/pytest"], env.dir / "elsewhere")
+    assert leaks(env) == [("pid:42", "pid 42 under run CMX-1 is alive but its run is done")]
 
 
 # --- rule 3: unsettled CI red (CMX-256) ----------------------------------------------------
