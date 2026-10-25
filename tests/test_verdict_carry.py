@@ -419,14 +419,14 @@ def test_a_round_that_measured_nothing_keeps_the_last_real_one():
 
 def test_the_judge_prompt_names_the_prior_round_only_for_a_new_head():
     prior = {"sha": JUDGED, "experiments": [_exp(), HUE]}
-    note = verdictcarry.prompt_note(prior, HEAD)
+    note = verdictcarry.prompt_note(prior, HEAD, 5)
     assert "judged before, on `judged000001`" in note
     assert "re-runs that round's 2 experiment(s)" in note
     assert f"`git diff {JUDGED} HEAD`" in note
-    assert verdictcarry.prompt_note(prior, JUDGED) == ""
-    assert verdictcarry.prompt_note({}, HEAD) == ""
-    assert verdictcarry.prompt_note({"sha": JUDGED, "experiments": []}, HEAD) == ""
-    assert verdictcarry.prompt_note({"sha": "", "experiments": [_exp()]}, HEAD) == ""
+    assert verdictcarry.prompt_note(prior, JUDGED, 5) == ""
+    assert verdictcarry.prompt_note({}, HEAD, 5) == ""
+    assert verdictcarry.prompt_note({"sha": JUDGED, "experiments": []}, HEAD, 5) == ""
+    assert verdictcarry.prompt_note({"sha": "", "experiments": [_exp()]}, HEAD, 5) == ""
     rendered = dispatcher.render_prompt(dispatcher.JUDGE_PROMPT, dict(
         dispatcher.judge_prompt_vars(
             wf=None, risk="normal", task_id="t", task_title="", task_body="", branch_name="b",
@@ -525,6 +525,24 @@ def test_the_limited_prior_set_keeps_survivors_first():
     assert verdictcarry.with_prior({"experiments": []}, prior, 3) == (
         {"experiments": [HUE, _exp(), RET]}, 3)
     assert verdictcarry.with_prior({"experiments": []}, prior, 0) == ({"experiments": []}, 0)
+    # a prior record repeating one experiment verbatim spends one slot on it, not two
+    twice = {"experiments": [dict(HUE), dict(HUE), dict(RET)]}
+    assert verdictcarry.with_prior({"experiments": []}, twice, 2) == (
+        {"experiments": [HUE, RET]}, 2)
+
+
+def test_the_judge_prompt_counts_only_what_the_cap_lets_it_rerun(tmp_path, monkeypatch):
+    """The note must not promise a re-run of experiments `with_prior` will drop."""
+    prior = {"sha": JUDGED, "experiments": [_exp(), HUE, RET]}
+    assert "re-runs that round's 2 experiment(s)" in verdictcarry.prompt_note(prior, HEAD, 2)
+    wf = _seed(tmp_path)
+    report = judge.Report(outcomes=[judge.Outcome(judge.Experiment(**e), judge.KILLED, "")
+                                    for e in (_exp(), HUE, RET)])
+    verdictcarry.record("abc123", "https://github.com/o/r/pull/91", JUDGED, report)
+    monkeypatch.setattr(dispatcher, "judge_max_experiments", lambda risk: 2)
+    with dispatcher._db() as conn:
+        row = conn.execute("SELECT * FROM runs WHERE task_id='abc123'").fetchone()
+    assert "2 experiment(s)" in dispatcher._judge_vars(wf, row, tmp_path, HEAD)["prior_round"]
 
 
 def test_the_record_marks_which_experiments_survived():

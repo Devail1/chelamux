@@ -112,17 +112,22 @@ def with_prior(raw: dict, prior: dict, limit: int) -> tuple[dict, int]:
     new = raw.get("experiments")
     new = new if isinstance(new, list) else []
     seen = {key(e) for e in new}
-    added = [e for e in prior.get("experiments") or [] if key(e) not in seen]
+    added = []
+    for e in prior.get("experiments") or []:
+        if key(e) not in seen:    # a verbatim repeat, new or prior, never takes a slot twice
+            seen.add(key(e))
+            added.append(e)
     added.sort(key=lambda e: not (isinstance(e, dict) and e.get("survived") is True))
     added = [{k: v for k, v in e.items() if k != "survived"} if isinstance(e, dict) else e
              for e in added[:max(0, limit)]]
     return dict(raw, experiments=added + new), len(added)
 
 
-def prompt_note(prior: dict, head: str) -> str:
-    """The judge prompt's view of a prior round — "" when there is none, or it was this head."""
+def prompt_note(prior: dict, head: str, limit: int) -> str:
+    """The judge prompt's view of a prior round — "" when there is none, or it was this head.
+    The count is what :func:`with_prior` will actually re-run: at most ``limit``."""
     sha = prior.get("sha") or ""
-    n = len(prior.get("experiments") or [])
+    n = min(len(prior.get("experiments") or []), max(0, limit))
     if not sha or not n or sha == head:
         return ""
     return (f"\n   🔁 **This PR was judged before, on `{sha[:12]}`.** chela re-runs that round's "
