@@ -1515,7 +1515,10 @@ def run_events(runs: list[dict], seen: dict[str, str],
             elif judge_state == judge.J_PROSE_ONLY:
                 out.append(_event(
                     "run_judge_clean",
-                    f"📄 {label} — prose-only, merged on green CI (no judge round) — {ref}"
+                    # CMX-272: stamped is not merged — the PR is still OPEN until
+                    # `chela merge` lands it, so this must never read as DONE.
+                    f"📄 {label} — prose-only, no judge round needed — merge-ready on green "
+                    f"CI, land it with chela merge {task_id} — {ref}"
                     f"{' · ' + snippet if snippet else ''}", payload, wid=wid))
             elif judge_state == judge.J_STANDARD_NO_JUDGE:
                 out.append(_event(
