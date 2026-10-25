@@ -2573,7 +2573,8 @@ def cmd_task_finished(args) -> None:
                                         getattr(args, "sweep_equivalent", None) or [])
     if sync.get("since"):
         # ⚖️🔀 CMX-334: the base moved while the checks ran — no second battery for it.
-        move = dispatcher.reconcile_base_move(args.task_id, sync["since"], experiments)
+        move = dispatcher.reconcile_base_move(
+            args.task_id, sync["since"], experiments if "self_check" in checks else None)
         if not move.get("ok"):
             print(f"task-finished: 🔀 {move['error']}")
             sys.exit(1)

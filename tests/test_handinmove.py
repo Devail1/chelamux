@@ -195,3 +195,46 @@ def test_a_failed_merge_or_an_unreadable_pr_refuses(repo):
     assert _git(repo[1], "rev-parse", "HEAD^@") == _git(repo[1], "rev-parse", "HEAD~1")
     with patch.object(judge, "_changed_files", return_value=None):
         assert _reconcile(repo)["error"] == "could not list this PR's own files"
+
+
+def test_unlisted_tests_run_the_full_suite(tmp_path):
+    failed = subprocess.CompletedProcess([], 128, "", "no repo")
+    with patch.object(basesync, "_git", return_value=failed) as git:
+        assert handinmove.related_tests(tmp_path, ["README.md"]) is None
+    git.assert_called_once_with(tmp_path, "ls-files", "--", "*.py")
+
+
+def test_no_experiment_on_the_overlap_runs_none(repo, tmp_path):
+    _advance(repo[0], {"p.py": PR.replace("def g(x):\n    return x", "def g(x):\n    return -x")})
+    exps = tmp_path / "e.json"
+    exps.write_text(json.dumps({"experiments": [{"guard": "q", "file": "q.py",
+                                                 "before": "1", "after": "2"}]}))
+    with patch.object(judge, "run_suite", return_value=GREEN), \
+            patch.object(judge, "run_self_check") as sc:
+        out = _reconcile(repo, str(exps))
+    assert out["ok"] and out["moved"]["experiments_rerun"] == 0 and not sc.called
+
+
+def test_a_push_that_cannot_be_requested_refuses(repo):
+    _advance(repo[0], {"README.md": "moved\n"})
+    with patch.object(dispatcher, "request_push", return_value={"ok": False, "error": "x"}):
+        out = dispatcher.reconcile_base_move("cmx-88", repo[2], None)
+    assert out == {"ok": False, "error": "merged origin/dev, but could not request its push: x"}
+
+
+@pytest.mark.parametrize("tier, passed", [("core", "e.json"), ("standard", None)])
+def test_only_a_tier_that_runs_experiments_re_runs_them(repo, tier, passed):
+    import sys
+
+    from chela import main
+
+    ok = {"ok": True, "blocking": 0, "cannot_verify": "", "outcomes": [], "unrun": []}
+    argv = ["chela", "task-finished", "cmx-88", "--self-check-experiments", "e.json"]
+    with patch.object(sys, "argv", argv), \
+            patch.object(dispatcher, "hand_in_tier", return_value=tier), \
+            patch.object(dispatcher, "verify_self_check", return_value=ok), \
+            patch.object(dispatcher, "verify_sweep", return_value={"ok": True, "skipped": "x"}), \
+            patch.object(dispatcher, "verify_standard_hand_in", return_value={"ok": True}), \
+            patch.object(dispatcher, "reconcile_base_move", return_value={"ok": True}) as rec:
+        main.main()
+    rec.assert_called_once_with("cmx-88", repo[2], passed)
