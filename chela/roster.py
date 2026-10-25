@@ -102,13 +102,18 @@ def record(live: dict, agents, now_epoch: str | None,
     ``None`` (and no write) when ``now_epoch`` cannot be read — an unknown epoch has nothing
     to key a snapshot on, and writing one under a fake key would make a later join look like
     it found a match when it didn't.
+
+    CMX-337: the default records the LIVE session (:func:`chela.sessions.live_session_of_window`)
+    as ``session_source: "live"``, and the process's ``--resume`` launch id only as
+    ``"launch"`` when nothing live can say. A ``/clear`` moves the live session while the
+    launch id stays put, so a launch answer never overwrites a live one recorded for the same
+    claude process (``pid``) earlier in this epoch. A caller's own ``session_for`` carries no
+    source: its provenance is unknown.
     """
     if not now_epoch:
         return None
-    if session_for is None:
-        from chela import sessions
-        pane_map = sessions.panes()
-        session_for = lambda wid: sessions.session_of_window(wid, pane_map)  # noqa: E731
+    identify = _identify_from_panes() if session_for is None else (
+        lambda wid: {"session_id": session_for(wid)})
 
     data = _load(path)
     epochs = data["epochs"]
@@ -118,10 +123,15 @@ def record(live: dict, agents, now_epoch: str | None,
         rec = {"first_seen": now, "last_seen": now, "windows": {}}
         epochs[now_epoch] = rec
     rec["last_seen"] = now
-    windows = {
-        wid: {"name": live.get(wid) or "", "cwd": cwd_for(wid), "session_id": session_for(wid)}
-        for wid in sorted(agents)
-    }
+    before = rec.get("windows") or {}
+    windows = {}
+    for wid in sorted(agents):
+        seen = identify(wid)
+        prev = before.get(wid) or {}
+        if (seen.get("session_source") != "live" and prev.get("session_source") == "live"
+                and prev.get("pid") is not None and prev.get("pid") == seen.get("pid")):
+            seen = {k: prev[k] for k in ("session_id", "session_source", "pid")}
+        windows[wid] = {"name": live.get(wid) or "", "cwd": cwd_for(wid), **seen}
     # CMX-275: a window this epoch's previous sample had and this one does not was CLOSED
     # while its server lived (UI close, `chela kill`, `/exit`) — a dead server has no epoch
     # to record under, and a shutdown's own teardown is filtered by `closed()`. Kept per
@@ -138,6 +148,23 @@ def record(live: dict, agents, now_epoch: str | None,
     _prune(epochs)
     _save(data, path)
     return rec
+
+
+def _identify_from_panes() -> Callable[[str], dict]:
+    """The default identity reader for :func:`record`: ONE pane snapshot for the whole tick."""
+    from chela import sessions
+    pane_map = sessions.panes()
+
+    def identify(wid: str) -> dict:
+        pane = pane_map.get(wid)
+        pid = getattr(pane, "claude_pid", None)
+        sid = sessions.live_session_of_window(wid, pane_map)
+        if sid:
+            return {"session_id": sid, "session_source": "live", "pid": pid}
+        launched = getattr(pane, "resumed", None)
+        return {"session_id": launched, "session_source": "launch" if launched else None,
+                "pid": pid}
+    return identify
 
 
 def window(dead_epoch: str | None, wid: str, *, path: Path | None = None) -> dict | None:
