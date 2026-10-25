@@ -2892,8 +2892,9 @@ def judge_run(
         _run_ctx["on_slot_wait"] = _slot_wait
         raw, err = load_experiments(experiments_path)
         if not err:      # ⚖️🔀 CMX-289: the prior round's set first — never a fresh sample
-            raw, prior_n = verdictcarry.with_prior(raw, verdictcarry.load(task_id, pr_url))
-            exp_cap += min(prior_n, exp_cap)   # the re-run never crowds out new lines' experiments
+            raw, prior_n = verdictcarry.with_prior(raw, verdictcarry.load(task_id, pr_url),
+                                                   exp_cap)
+            exp_cap += prior_n   # ≤ 2 × cap: the re-run never crowds out new lines' experiments
         base_branch = wf.get("workspace", "base_branch", default="master")
         base_branch = base_branch if isinstance(base_branch, str) else ""
         reprovisioned = False
