@@ -1630,11 +1630,17 @@ def run_events(runs: list[dict], seen: dict[str, str],
             # at-cap run never reaches this branch (CMX-58).
             # 🏗️🔁 CMX-192: numbered against the budget it actually spends — a review round
             # against the rework cap, an infra restart (already counted) against its own.
-            nxt = (_next_round(run) if not run.get("last_error")
-                   else f"RETRY after: {str(run['last_error'])[:60]}")
+            # 🔀 CMX-294: a free conflict round leads with its own wording, never "sent back
+            # for rework" — that phrasing is the charged one.
+            retry = (f"RETRY after: {str(run['last_error'])[:60]}" if run.get("last_error")
+                     else "")
+            if _free_conflict_round(run):
+                lead = _conflict_round(run) + (f" — {retry}" if retry else "")
+            else:
+                lead = f"sent back for rework — {retry or _next_round(run)}"
             out.append(_event(
                 "run_changes_requested",
-                f"📥 {label} sent back for rework — {nxt} — the next dispatcher tick "
+                f"📥 {label} {lead} — the next dispatcher tick "
                 f"re-spawns it in its own worktree — {ref}"
                 f"{' · ' + snippet if snippet else ''}", payload, wid=wid))
         elif status == "failed":
@@ -1705,10 +1711,44 @@ def _next_round(run: dict) -> str:
     """🏗️🔁 CMX-192. The round the next re-spawn spends, named by its budget."""
     from chela import dispatcher
     fields = _cap_fields(run)
+    if dispatcher.free_conflict_round(fields):
+        return _conflict_round(run)
     if dispatcher.rework_cause(fields) == dispatcher.REWORK_CAUSE_INFRA:
         return (f"infra restart {dispatcher.infra_restarts(fields)} of "
                 f"{dispatcher.infra_restart_cap(fields)}, not a review round")
     return f"rework {dispatcher.review_reworks(fields) + 1} of {_effective_rework_cap(run)}"
+
+
+def _free_conflict_round(run: dict) -> bool:
+    from chela import dispatcher
+    return dispatcher.free_conflict_round(_cap_fields(run))
+
+
+def _conflict_round(run: dict) -> str:
+    """🔀 CMX-294. A free conflict round, named as one — never numbered as a charged rework:
+    "rework 4 of 4" read as the last chance on a round the PR comment calls not charged. The
+    round's own grant is not spent yet, so it is left out of the charged count."""
+    from chela import dispatcher
+    fields = _cap_fields(run)
+    free = fields["conflict_reworks"]
+    used = max(0, dispatcher.review_reworks(fields) - (free - 1))
+    # No parens or semicolons: the summary is sanitized before it is typed at a prompt.
+    return (f"🔀 sent back to merge {_base_branch(run)} — conflict round {free} of "
+            f"{dispatcher.MAX_FREE_CONFLICT_REWORKS}, not charged, reworks used {used} of "
+            f"{_effective_rework_cap(run) - free}")
+
+
+def _base_branch(run: dict) -> str:
+    """The run's workflow base branch, for a notice. Unreadable ⇒ a generic name, never a
+    guessed branch."""
+    from chela.workflow import load_workflow_cached
+    try:   # the cached loader keeps the last good config; one that never parsed is None
+        base = load_workflow_cached(run["workflow_path"]).workflow.get(
+            "workspace", "base_branch", default="master")
+    except Exception as e:  # noqa: BLE001 — a notice must not crash the inbox tick
+        log.warning("inbox: %s: could not read the base branch: %s", run.get("task_id"), e)
+        return "its base branch"
+    return str(base)
 
 
 def _rework_cap_reached(run: dict) -> bool:
