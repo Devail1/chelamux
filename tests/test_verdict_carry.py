@@ -25,6 +25,7 @@ from chela import contract, dispatcher, event_log, judge, verdictcarry
 from chela.dispatcher import CI_PASSING, CIStatus
 from tests.test_judge import (
     FAKE_GUARD_TEST, REAL_GUARD_TEST, _exp, _judge_run, _run_row, _tick, _wf,
+    _workflow_repo,
 )
 
 JUDGED, HEAD = "judged000001", "head00000002"
@@ -135,6 +136,30 @@ def test_a_git_that_will_not_run_is_unknown(repo, monkeypatch):
     assert verdictcarry.moved_pr_paths(repo, "dev", "HEAD~1", "HEAD") is None
 
 
+def test_a_head_pair_git_cannot_diff_is_unknown_even_when_both_pr_diffs_read(repo):
+    """Both merge-base diffs read fine, but `git diff judged head` itself fails (exit 128):
+    its empty stdout must never read as "no PR path moved". RED with the returncode check
+    dropped — the carry would then fire on a head nobody compared."""
+    with patch.object(judge, "_changed_files", return_value=["a.py"]):
+        assert verdictcarry.moved_pr_paths(repo, "dev", "0" * 40, "f" * 40) is None
+
+
+@pytest.mark.parametrize("unread", ["judged", "head"])
+def test_one_pr_diff_git_cannot_read_is_unknown_even_when_the_head_pair_diffs(repo, unread):
+    """Each side alone: the head pair diffs fine, only ONE merge-base diff is unknown. RED
+    with that side's `is None` clause dropped (an unknown file set is never base-only)."""
+    _git(repo, "update-ref", "refs/remotes/origin/dev", "dev")
+    judged = _git(repo, "rev-parse", "HEAD~1")
+    head = _git(repo, "rev-parse", "HEAD")
+    bad = judged if unread == "judged" else head
+
+    def changed(_repo, _base, sha):
+        return None if sha == bad else ["a.py"]
+
+    with patch.object(judge, "_changed_files", side_effect=changed):
+        assert verdictcarry.moved_pr_paths(repo, "dev", judged, head) is None
+
+
 # --- the trigger: carry, or judge as before --------------------------------------------
 
 
@@ -196,7 +221,8 @@ def test_a_head_move_that_touches_a_pr_path_is_judged_again(tmp_path, moved):
     {"judge_state": judge.J_PROSE_ONLY},
     {"judge_sha": HEAD},
     {"judge_sha": None},
-], ids=["blocked", "cannot-verify", "prose-only", "same-head", "never-judged"])
+    {"pr_head_sha": None},
+], ids=["blocked", "cannot-verify", "prose-only", "same-head", "never-judged", "no-head"])
 def test_only_a_clean_verdict_on_an_older_head_is_ever_carried(tmp_path, over):
     wf = _seed(tmp_path, **over)
     with dispatcher._db() as conn:
@@ -269,6 +295,31 @@ def test_a_rejudge_reruns_the_prior_rounds_experiments_first(tmp_path):
         ("the colourblind glyph cue", judge.SURVIVED), ("the hue", judge.KILLED)]
 
 
+def test_a_held_out_experiment_rerun_from_the_prior_round_stays_held_out(tmp_path):
+    """⭐ A held-out experiment re-run on round 2 must still be held out: reported as held
+    out, and its guard never named in the PR comment. RED if the record drops the flag."""
+    result, run, _ = _judge_run(tmp_path, REAL_GUARD_TEST,
+                                {"experiments": [_exp(held_out=True)]})
+    assert result["state"] == judge.J_CLEAN
+    rec = verdictcarry.load("abc123", run["pr_url"])
+    assert [e["held_out"] for e in rec["experiments"]] == [True]
+
+    wt = tmp_path / ".chela" / "wts" / "judge-abc123"
+    (wt / "test_guard.py").write_text(FAKE_GUARD_TEST)    # it now SURVIVES: the PR comment
+    subprocess.run(["git", "-C", str(wt), "-c", "user.name=t", "-c", "user.email=t@example.com",
+                    "commit", "-qam", "weaken"], check=True)
+    exp_file = tmp_path / "round2.json"
+    exp_file.write_text(json.dumps({"experiments": [HUE]}))
+    posted: list[str] = []
+    with patch.object(dispatcher, "_post_pr_comment",
+                      side_effect=lambda url, d, body: (posted.append(body), (True, ""))[1]):
+        result = judge.judge_run("abc123", exp_file, cleanup=False)
+    assert result["state"] == judge.J_BLOCKED
+    assert [o["guard"] for o in result["outcomes"]] == ["the hue"]   # visible ones only
+    assert result["held_out"] == {"total": 1, "survived": 1}
+    assert posted and all("the colourblind glyph cue" not in body for body in posted)
+
+
 def test_with_prior_puts_the_prior_set_first_and_drops_verbatim_repeats():
     prior = {"experiments": [_exp(), HUE]}
     raw, n = verdictcarry.with_prior({"experiments": [HUE], "notes": [1]}, prior)
@@ -283,6 +334,53 @@ def test_a_prior_round_of_another_pr_is_not_this_prs(tmp_path):
     assert verdictcarry.load("abc123", "https://github.com/o/r/pull/1")["sha"] == JUDGED
     assert verdictcarry.load("abc123", "https://github.com/o/r/pull/2") == {}
     assert verdictcarry.load("abc123", None) == {}
+
+
+@pytest.mark.parametrize("url", [None, ""], ids=["none", "empty"])
+def test_a_run_with_no_pr_url_never_reads_a_prior_round(url):
+    """A record written with no PR url matches no PR — not even another url-less one."""
+    report = judge.Report(outcomes=[judge.Outcome(judge.Experiment(**_exp()), judge.KILLED, "")])
+    verdictcarry.record("abc123", None, JUDGED, report)
+    assert verdictcarry.store_path("abc123").exists()
+    assert verdictcarry.load("abc123", url) == {}
+
+
+def test_a_stale_head_round_records_no_prior_set(tmp_path):
+    """A round judged on a head the PR no longer has is not the prior round of the live one."""
+    repo = _workflow_repo(tmp_path, "abc123", FAKE_GUARD_TEST)
+    with dispatcher._db() as conn:
+        _run_row(conn, repo, "abc123", judge_sha="oldsha000001", pr_head_sha="newsha000002")
+    exp_file = tmp_path / "experiments.json"
+    exp_file.write_text(json.dumps({"experiments": [_exp()]}))
+    with patch.object(dispatcher, "_post_pr_comment", return_value=(True, "")):
+        result = judge.judge_run("abc123", exp_file, cleanup=False)
+    assert result["state"] == judge.J_STALE_HEAD
+    assert not verdictcarry.store_path("abc123").exists()
+
+
+def test_the_record_names_the_sha_actually_judged_not_the_rows_head(tmp_path):
+    """The live PR head still equals the judged sha (not stale) while the row's
+    `pr_head_sha` lags: the record keeps the sha the battery ran on."""
+    repo = _workflow_repo(tmp_path, "abc123", REAL_GUARD_TEST)
+    with dispatcher._db() as conn:
+        _run_row(conn, repo, "abc123", judge_sha="oldsha000001", pr_head_sha="newsha000002")
+    exp_file = tmp_path / "experiments.json"
+    exp_file.write_text(json.dumps({"experiments": [_exp()]}))
+    with patch.object(dispatcher, "_post_pr_comment", return_value=(True, "")), \
+         patch.object(dispatcher, "pr_live_head_sha", return_value="oldsha000001"):
+        result = judge.judge_run("abc123", exp_file, cleanup=False)
+    assert result["state"] == judge.J_CLEAN
+    run = dispatcher.resolve_run("abc123")
+    assert verdictcarry.load("abc123", run["pr_url"])["sha"] == "oldsha000001"
+
+
+def test_with_no_prior_round_the_cap_is_unchanged(tmp_path, monkeypatch):
+    """The cap only grows by the prior set's size — a first round runs exactly `cap`."""
+    from chela import config
+
+    monkeypatch.setattr(config, "judge_max_experiments", lambda risk: 1)
+    result, _, _ = _judge_run(tmp_path, REAL_GUARD_TEST, {"experiments": [_exp(), HUE]})
+    assert [o["guard"] for o in result["outcomes"]] == ["the colourblind glyph cue"]
 
 
 def test_a_round_that_measured_nothing_keeps_the_last_real_one():
@@ -329,6 +427,8 @@ def test_repeated_carries_keep_one_prefix_and_the_original_detail():
     once = verdictcarry.carried_detail(JUDGED, HEAD, "every guard held")
     twice = verdictcarry.carried_detail(HEAD, "third0000003", once)
     assert twice == "carried: base-only merge (head00000002 → third0000003); every guard held"
+    bare = verdictcarry.carried_detail(HEAD, "third0000003", verdictcarry.CARRIED)
+    assert bare == "carried: base-only merge (head00000002 → third0000003); "
 
 
 def test_a_git_error_in_the_carry_is_judged_never_raised(tmp_path):
