@@ -339,6 +339,22 @@ mutation CreateIssue($input: IssueCreateInput!) {
 }
 """
 
+# CMX-305: the nightly sweep files its issues with labels BY NAME (`risk:normal`, `sweep`).
+# A workspace label (no team) or one of this team's; a missing one is created on the team.
+LABELS_BY_NAME_QUERY = """
+query LabelsByName($names: [String!]) {
+  issueLabels(first: 100, filter: { name: { in: $names } }) {
+    nodes { id name team { key } }
+  }
+}
+"""
+
+CREATE_LABEL_MUTATION = """
+mutation CreateLabel($input: IssueLabelCreateInput!) {
+  issueLabelCreate(input: $input) { success issueLabel { id name } }
+}
+"""
+
 # `blockedBy` is a `blocks` relation stored on the BLOCKER (see _blockers): issueId is the
 # blocker, relatedIssueId the issue it blocks.
 CREATE_RELATION_MUTATION = """
@@ -1084,7 +1100,7 @@ class LinearSource:
         return archived
 
     def create_issue(self, title: str, description: str = "", priority: int = 0,
-                     blocked_by=(), parent: str | None = None) -> dict:
+                     blocked_by=(), parent: str | None = None, labels=()) -> dict:
         """📐 CMX-6 — create one issue in this team, in its first configured READY state,
         and a ``blocks`` relation from each of ``blocked_by`` (identifiers of this team).
         🗂️ CMX-326: a project-scoped workflow puts it in its project, and its blockers and
@@ -1095,7 +1111,9 @@ class LinearSource:
         caller keeps the typed brief. A relation that fails AFTER the issue exists is a
         warning, not an error: the issue is real, and creating it twice would be worse.
         📏 CMX-126: ``parent`` (an identifier of this team) makes it a sub-issue of that
-        issue, inheriting its labels (so its risk) — a size-gate split's slice."""
+        issue, inheriting its labels (so its risk) — a size-gate split's slice.
+        🧹 CMX-305: ``labels`` are label NAMES, added to a parent's inherited ones; one that
+        can be neither found nor created is a warning, never a lost issue."""
         title = (title or "").strip()
         if not title:
             raise LinearError("input", "a title is required")
@@ -1140,13 +1158,17 @@ class LinearSource:
             fields["parentId"] = node["id"]
             fields["labelIds"] = [lbl["id"] for lbl in (node.get("labels") or {}).get("nodes")
                                   or [] if isinstance(lbl, dict) and lbl.get("id")]
+        warnings = []
+        names = [str(n).strip() for n in (labels or ()) if str(n).strip()]
+        if names:
+            ids, warnings = self._label_ids(names, team_id)
+            fields["labelIds"] = list(dict.fromkeys(fields.get("labelIds", []) + ids))
         data = self._call(CREATE_ISSUE_MUTATION, {"input": fields}, cache=False)
         created = data.get("issueCreate") or {}
         issue = created.get("issue") if isinstance(created, dict) else None
         if not (isinstance(created, dict) and created.get("success") and isinstance(issue, dict)
                 and issue.get("id") and issue.get("identifier")):
             raise LinearError("graphql", "Linear did not create the issue")
-        warnings = []
         for ident, bid in blocker_ids.items():
             try:
                 rel = self._call(CREATE_RELATION_MUTATION, {"input": {
@@ -1161,6 +1183,40 @@ class LinearSource:
                 warnings.append(f"could not mark {issue['identifier']} blocked by {ident}")
         return {"identifier": issue["identifier"], "url": str(issue.get("url") or ""),
                 "title": str(issue.get("title") or title), "warnings": warnings}
+
+    def _label_ids(self, names: list[str], team_id: str) -> tuple[list[str], list[str]]:
+        """🧹 CMX-305: ``(label ids, warnings)`` for label ``names`` — a workspace label or
+        this team's, else one created on the team. Only a create whose ``success`` is true
+        counts, whatever node came back. A label that can be neither read nor created is a
+        warning: the issue is still worth filing without it."""
+        try:
+            data = self._call(LABELS_BY_NAME_QUERY, {"names": names}, cache=False)
+        except LinearError as e:
+            return [], [f"could not read labels {', '.join(names)}: {e}"]
+        found: dict[str, str] = {}
+        for lbl in ((data.get("issueLabels") or {}).get("nodes") or []):
+            if not (isinstance(lbl, dict) and lbl.get("id") and lbl.get("name") in names):
+                continue
+            team = lbl["team"].get("key") if isinstance(lbl.get("team"), dict) else None
+            if team in (None, self.team):
+                found.setdefault(lbl["name"], lbl["id"])
+        ids, warnings = [], []
+        for name in names:
+            if name not in found:
+                try:
+                    made = (self._call(CREATE_LABEL_MUTATION, {"input": {
+                        "name": name, "teamId": team_id}}, cache=False)
+                        .get("issueLabelCreate") or {})
+                except LinearError as e:
+                    made = {"error": str(e)}
+                label = made.get("issueLabel") if made.get("success") is True else None
+                if not (isinstance(label, dict) and label.get("id")):
+                    warnings.append(f"label {name!r} could not be created"
+                                    + (f": {made['error']}" if made.get("error") else ""))
+                    continue
+                found[name] = label["id"]
+            ids.append(found[name])
+        return ids, warnings
 
     def issue_links(self, identifier: str) -> dict | None:
         """📏 CMX-143 — ``{"priority", "blocked_by"}`` for one issue of this team, read FRESH
