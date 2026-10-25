@@ -142,7 +142,7 @@ def test_record_defaults_to_resolving_the_session_from_the_live_panes(roster, mo
         return {"@1": "sid-alpha"}.get(wid)
 
     monkeypatch.setattr(sessions, "panes", _fake_panes)
-    monkeypatch.setattr(sessions, "session_of_window", _fake_session_of_window)
+    monkeypatch.setattr(sessions, "live_session_of_window", _fake_session_of_window)
 
     # NO session_for argument — this is exactly how _reconcile_loop calls it.
     # THREE windows, because the promise is one snapshot per TICK, not per window.
@@ -150,7 +150,7 @@ def test_record_defaults_to_resolving_the_session_from_the_live_panes(roster, mo
                         _cwd_for({"@1": "/home/x", "@9": "/a", "@8": "/b"}))
 
     assert rec["windows"]["@1"]["session_id"] == "sid-alpha", (
-        "the default session_for must resolve through sessions.session_of_window — "
+        "the default session_for must resolve through sessions.live_session_of_window — "
         "a blank session_id makes every REVIVABLE verdict impossible"
     )
     # ⛔ NOT "was it called" — the promise in record()'s docstring is ONE snapshot shared
@@ -179,13 +179,13 @@ def test_record_default_session_lands_on_disk_not_just_in_the_return_value(roste
     def _fake_session_of_window(wid, pane_map=None):
         return {"@2": "sid-beta"}.get(wid)
 
-    orig_panes, orig_sow = sessions.panes, sessions.session_of_window
+    orig_panes, orig_sow = sessions.panes, sessions.live_session_of_window
     sessions.panes = lambda: sessions_panes
-    sessions.session_of_window = _fake_session_of_window
+    sessions.live_session_of_window = _fake_session_of_window
     try:
         roster.record({"@2": "cmx-9"}, {"@2"}, NEW, _cwd_for({"@2": "/tmp"}))
     finally:
-        sessions.panes, sessions.session_of_window = orig_panes, orig_sow
+        sessions.panes, sessions.live_session_of_window = orig_panes, orig_sow
 
     on_disk = json.loads((roster._STORE).read_text())
     assert on_disk["epochs"][NEW]["windows"]["@2"]["session_id"] == "sid-beta"

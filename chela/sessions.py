@@ -948,6 +948,25 @@ def session_of_window(wid: str | None,
     if not wid:
         return None
     pane_map = panes() if pane_map is None else pane_map
+    sid = live_session_of_window(wid, pane_map)
+    if sid:
+        return sid
+    pane = pane_map.get(wid)
+    return pane.resumed if pane else None
+
+
+def live_session_of_window(wid: str | None,
+                           pane_map: dict[str, Pane] | None = None) -> str | None:
+    """:func:`session_of_window` WITHOUT its last tier, the ``--resume <sid>`` command line.
+
+    CMX-337: that command line is the session the process was LAUNCHED with. A ``/clear`` or
+    ``/resume`` inside the window moves the live session on while the command line keeps the
+    old id, so only the event log and Claude Code's own registry follow it. ``None`` when
+    neither can say — the caller decides what a launch-time answer is worth.
+    """
+    if not wid:
+        return None
+    pane_map = panes() if pane_map is None else pane_map
     pane = pane_map.get(wid)
     if pane and pane.started is not None:
         sid = _session_from_log(wid, since=pane.started)
@@ -957,12 +976,7 @@ def session_of_window(wid: str | None,
     # shares its cwd with another agent had NO identity once its SessionStart record aged
     # out of the ring — every later hook is filed `wid: null` for exactly that ambiguity —
     # and `chela watch` recorded the orchestrator with self-heal disarmed.
-    sid = registry_session(pane.claude_pid) if pane else None
-    if sid:
-        return sid
-    if pane and pane.resumed:
-        return pane.resumed
-    return None
+    return registry_session(pane.claude_pid) if pane else None
 
 
 def wid_for_session(session_id: str | None,
