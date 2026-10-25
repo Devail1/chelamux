@@ -63,11 +63,12 @@ def store_path(task_id: str) -> Path:
 
 def record(task_id: str, pr_url: str | None, sha: str | None, report: "judge.Report") -> None:
     """Keep the experiments this round actually measured (KILLED or SURVIVED — an INVALID one
-    proved nothing) for the next round of the same PR. Never raises: a lost record costs the
-    next round its prior set, never this round's verdict."""
+    proved nothing) for the next round of the same PR, each marked ``survived``. Never raises:
+    a lost record costs the next round its prior set, never this round's verdict."""
     try:
-        items = [dict(o.experiment.as_dict(), held_out=o.held_out) for o in report.outcomes
-                 if o.verdict in (judge.KILLED, judge.SURVIVED)]
+        items = [dict(o.experiment.as_dict(), held_out=o.held_out,
+                      survived=o.verdict == judge.SURVIVED)
+                 for o in report.outcomes if o.verdict in (judge.KILLED, judge.SURVIVED)]
         if not items:    # an unknown round measured nothing: keep the last real one
             return
         path = store_path(task_id)
@@ -95,23 +96,38 @@ def load(task_id: str, pr_url: str | None) -> dict:
     return rec
 
 
-def with_prior(raw: dict, prior: dict) -> tuple[dict, int]:
-    """``raw`` with the prior round's experiments FIRST (they claim the cap before any new
-    one), minus any the judge proposed again verbatim; and how many were added."""
+def with_prior(raw: dict, prior: dict, limit: int) -> tuple[dict, int]:
+    """``raw`` with the prior round's experiments FIRST, minus any the judge proposed again
+    verbatim; and how many were added.
+
+    CMX-338: at most ``limit`` (the round's cap) are added, the prior round's SURVIVORS
+    first. ``judge_run`` grows the cap by exactly that many, so a round runs at most
+    2 × cap — the cap's worth of new experiments plus at most a cap's worth re-run — however
+    many rounds the PR has had. Without the limit a round's record (up to 2 × cap) would
+    become the next round's prior set and fill the whole grown cap, crowding out every new
+    experiment."""
     def key(e):
         return (e.get("file"), e.get("before"), e.get("after")) if isinstance(e, dict) else None
 
     new = raw.get("experiments")
     new = new if isinstance(new, list) else []
     seen = {key(e) for e in new}
-    added = [e for e in prior.get("experiments") or [] if key(e) not in seen]
+    added = []
+    for e in prior.get("experiments") or []:
+        if key(e) not in seen:    # a verbatim repeat, new or prior, never takes a slot twice
+            seen.add(key(e))
+            added.append(e)
+    added.sort(key=lambda e: not (isinstance(e, dict) and e.get("survived") is True))
+    added = [{k: v for k, v in e.items() if k != "survived"} if isinstance(e, dict) else e
+             for e in added[:max(0, limit)]]
     return dict(raw, experiments=added + new), len(added)
 
 
-def prompt_note(prior: dict, head: str) -> str:
-    """The judge prompt's view of a prior round — "" when there is none, or it was this head."""
+def prompt_note(prior: dict, head: str, limit: int) -> str:
+    """The judge prompt's view of a prior round — "" when there is none, or it was this head.
+    The count is what :func:`with_prior` will actually re-run: at most ``limit``."""
     sha = prior.get("sha") or ""
-    n = len(prior.get("experiments") or [])
+    n = min(len(prior.get("experiments") or []), max(0, limit))
     if not sha or not n or sha == head:
         return ""
     return (f"\n   🔁 **This PR was judged before, on `{sha[:12]}`.** chela re-runs that round's "
