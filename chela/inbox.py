@@ -126,7 +126,7 @@ from contextlib import contextmanager
 from pathlib import Path
 
 from chela import agent_manager, discovery, epoch, event_log, hooks, judge, messenger, notify, sessions, transcripts
-from chela import config, park, stall_alerts, suite_guard
+from chela import config, park, risktier, stall_alerts, suite_guard
 from chela.config import INBOX_ENABLED
 from chela.hold import human_duration
 from chela.tui_text import sanitize_prompt
@@ -1882,6 +1882,73 @@ def _judge_not_started(run: dict) -> bool:
     return not (judge_sha and judge_sha == run.get("pr_head_sha"))
 
 
+# ⚖️🪜 CMX-312: the tiers whose head is stamped a no-judge verdict once CI is green
+# (`dispatcher._NO_JUDGE_VERDICTS`) — a review-wait notice about them never names a judge.
+NO_JUDGE_TIERS = (risktier.PROSE, risktier.STANDARD)
+# A red CI already has its own notice (`ci_red`, naming the job): the review wait stays quiet.
+CI_RED_WAIT = "CI is red"
+# `(workflow_path, head sha) -> tier`: a head's file list never changes, so it is read once.
+_TIER_CACHE: dict[tuple[str, str], str] = {}
+_TIER_CACHE_MAX = 512
+
+
+def _ci_wait(run: dict) -> str | None:
+    """CMX-312: what CI is doing while IT, not a judge, holds this run in review — ``None``
+    when CI is not the wait. No judge round starts on any tier before CI is green
+    (`dispatcher._judge_candidates`: checks ``passing``/``none``, or ``failing`` on a known
+    flake of this head). A ``pr_checks`` never read (``None``) names nothing."""
+    checks, head = run.get("pr_checks"), run.get("pr_head_sha")
+    if checks == "pending":
+        return "CI is still running"
+    if checks == "failing":
+        if head and run.get("ci_known_flake_sha") == head:
+            return None                        # red only on known flakes: the judge goes ahead
+        if (head and run.get("ci_rerun_sha") == head
+                and run.get("ci_rerun_state") in ("pending", "started")):
+            return "CI is re-running a flake"
+        return CI_RED_WAIT
+    if checks == "unknown":
+        return "CI could not be read"
+    return None
+
+
+def review_tiers(runs: list[dict]) -> dict[str, str]:
+    """``{task_id: risk tier}`` of every run :func:`judge_wait_events` may speak about — the
+    :mod:`chela.risktier` tier of its PR head, read exactly as the dispatcher's no-judge stamp
+    reads it (`dispatcher._stamp_prose_only`). I/O (git), so :func:`tick` calls it outside the
+    lock. A head whose files cannot be read is left out — it reads as a judged tier, never as
+    one that skips the judge — and is not cached, so the next tick tries again."""
+    from chela.workflow import load_workflow
+    out: dict[str, str] = {}
+    for run in runs:
+        task, sha, wf_path = run.get("task_id"), run.get("pr_head_sha"), run.get("workflow_path")
+        if (not (task and sha and wf_path) or run.get("status") != "awaiting_review"
+                or run.get("pr_state") in ("merged", "closed") or not _judge_not_started(run)):
+            continue
+        try:   # the workflow's own `merge.core`/`merge.always_human` can change the tier
+            key = (str(wf_path), str(sha), os.stat(wf_path).st_mtime_ns)
+        except OSError as e:
+            log.warning("inbox: %s: could not read the PR head's tier: %s", task, e)
+            continue
+        tier = _TIER_CACHE.get(key)
+        if tier is None:
+            try:
+                wf = load_workflow(wf_path)
+                files = judge._changed_files(
+                    wf.path.parent, wf.get("workspace", "base_branch", default="master"), sha)
+            except Exception as e:  # noqa: BLE001 — an unread tier is a judged tier, not a crash
+                log.warning("inbox: %s: could not read the PR head's tier: %s", task, e)
+                continue
+            if files is None:
+                continue
+            tier = risktier.classify(files, risktier.always_human(wf), risktier.core(wf))[0]
+            if len(_TIER_CACHE) >= _TIER_CACHE_MAX:
+                _TIER_CACHE.clear()
+            _TIER_CACHE[key] = tier
+        out[task] = tier
+    return out
+
+
 # What starts a judge round is the daemon's dispatch tick, not a command — `chela judge run`
 # is the judge AGENT's own tool (it needs the agent's `--experiments`). The one thing an
 # operator can check in a single command is the queue hold, which stops every new judge.
@@ -1915,7 +1982,8 @@ def _queued_wording(run: dict, ahead: list[dict], waited: float) -> str:
 
 def judge_wait_events(runs: list[dict], store: dict, now: float,
                       windows: dict[str, str] | None = None,
-                      now_epoch: str | None = None) -> list[dict]:
+                      now_epoch: str | None = None,
+                      tiers: dict[str, str] | None = None) -> list[dict]:
     """``run_judge_not_started`` — what the old "awaiting review" notice was ever worth.
 
     A run sitting in ``awaiting_review`` longer than ``config.judge_not_started_alert_s()``
@@ -1926,7 +1994,15 @@ def judge_wait_events(runs: list[dict], store: dict, now: float,
     not a stall. While queued it is silent for ``QUEUED_ALERT_FACTOR`` stall bounds and then
     says it is queued (behind whom, since when); the stall clock restarts from the last tick
     that saw it queued, so a slot freeing up gets the full threshold to start its judge.
+
+    CMX-312: a run whose CI is not green yet waits on CI, on every tier — no judge starts
+    before it is. That wait is said once, as CI (:func:`_ci_wait`), and the stall clock
+    restarts from the last tick that saw it, as it does for a queue. ``tiers``
+    (:func:`review_tiers`) names the head's risk tier: a PROSE or STANDARD head gets a no-judge
+    verdict, so it is never "queued for the judge" and its stall never asks about a judge.
+    A run with no tier there is treated as judged — the notice it has always had.
     """
+    tiers = tiers or {}
     prev: dict = store.get("review_wait") or {}
     nxt: dict = {}
     out: list[dict] = []
@@ -1941,36 +2017,70 @@ def judge_wait_events(runs: list[dict], store: dict, now: float,
         if not isinstance(entry, dict) or entry.get("head") != head:
             entry = None                          # a new head is a new wait
         if not _judge_not_started(run):
-            if entry and (entry.get("alerted") or entry.get("queued_alerted")):
+            if entry and (entry.get("alerted") or entry.get("queued_alerted")
+                          or entry.get("ci_alerted")):
                 nxt[task] = entry                 # said once for this head — keep it said
             continue
         entry = entry or {"head": head, "since": now, "alerted": False}
         nxt[task] = entry
         waited = now - entry["since"]
-        ahead = _judges_ahead(run, runs)
-        queued = len(ahead) >= config.judge_max_concurrent()
+        tier = tiers.get(task)
+        no_judge = tier in NO_JUDGE_TIERS
+        ci = _ci_wait(run)
+        ahead = [] if no_judge or ci else _judges_ahead(run, runs)
+        queued = len(ahead) >= config.judge_max_concurrent() if ahead else False
+        if ci:
+            entry["ci_wait_at"] = now
+            entry.setdefault("ci_since", now)
+        else:
+            entry.pop("ci_since", None)           # a later CI wait is measured afresh
         if queued:
             entry["queued_at"] = now
-        if entry["alerted"]:
+        check = " ".join(STALL_CHECK_ARGV)
+        if ci:                                    # CI is the wait, said once per head
+            waited = now - entry["ci_since"]
+            if (ci == CI_RED_WAIT or entry["alerted"] or entry.get("ci_alerted")
+                    or waited < threshold):
+                continue
+            entry["ci_alerted"] = True
+            waiting_on = "ci"
+            after = (f"{tier} tier, no judge round: it is merge-ready once CI is green"
+                     if no_judge else "its judge round starts once CI is green"
+                     if tier else "nothing else is waited on until CI is green")
+            summary = (f"⏳ {_label(run)} has waited {human_duration(waited)} in review on CI "
+                       f"— {ci} on {head[:7] or '?'} — {after} — {_ref(run)}")
+        elif entry["alerted"]:
             continue
-        if queued:                                # a queue is said once, and a stall after
+        elif queued:                              # a queue is said once, and a stall after
             if entry.get("queued_alerted") or waited < QUEUED_ALERT_FACTOR * threshold:
                 continue                          # it still gets its own notice
             entry["queued_alerted"] = True
+            waiting_on = "queue"
             summary = _queued_wording(run, ahead, waited)
         else:
-            if now - (entry.get("queued_at") or entry["since"]) < threshold:
+            if now - max(entry.get("queued_at") or 0, entry.get("ci_wait_at") or 0,
+                         entry["since"]) < threshold:
                 continue
             entry["alerted"] = True
-            check = " ".join(STALL_CHECK_ARGV)
-            summary = (f"⏳ {_label(run)} has waited {human_duration(waited)} in review and NO "
-                       f"judge round has started, with no judge running — the daemon starts "
-                       f"one on its next dispatch tick: is the queue held (`{check}`) or the "
-                       f"daemon down? Or review it yourself — {_ref(run)}")
+            if no_judge:
+                waiting_on = "verdict"
+                summary = (f"⏳ {_label(run)} has waited {human_duration(waited)} in review "
+                           f"with CI green and no merge-ready verdict on its head — {tier} "
+                           f"tier, no judge round: the daemon stamps its verdict on its next "
+                           f"dispatch tick: is the queue held (`{check}`) or the daemon "
+                           f"down? — {_ref(run)}")
+            else:
+                waiting_on = "judge"
+                summary = (f"⏳ {_label(run)} has waited {human_duration(waited)} in review "
+                           f"and NO judge round has started, with no judge running — the "
+                           f"daemon starts one on its next dispatch tick: is the queue held "
+                           f"(`{check}`) or the daemon down? Or review it yourself — "
+                           f"{_ref(run)}")
         out.append(_event(
             "run_judge_not_started", summary,
             _run_payload(run, judge_state=run.get("judge_state"), waited_s=int(waited),
-                         queued_behind=[r.get("task_id") for r in ahead] if queued else []),
+                         queued_behind=[r.get("task_id") for r in ahead] if queued else [],
+                         waiting_on=waiting_on, risk_tier=tier, pr_checks=run.get("pr_checks")),
             wid=run_wid(run, windows, now_epoch)))
     store["review_wait"] = nxt
     return out
@@ -2495,6 +2605,11 @@ def _cmx86_stale(kind: str, payload: dict, run: dict) -> str | None:
             return f"run is now {status!r}, not awaiting_review"
         if not _judge_not_started(run):
             return "a judge round has started"
+        ci = _ci_wait(run)
+        if payload.get("waiting_on") == "ci" and ci is None:
+            return "CI is no longer the wait"
+        if payload.get("waiting_on") in ("judge", "queue", "verdict") and ci:
+            return f"CI is the wait again ({ci})"
     elif kind == "run_ci_red":
         if status in ("done", "closed", "failed"):
             return f"run is now {status!r}"
@@ -3238,6 +3353,7 @@ def tick(prev: dict[str, str], runs: list[dict] | None = None) -> dict[str, str]
     # CMX-86: the stuck-agent probes (git, transcripts, worktree markers), the hold file and
     # the daemon's uptime — all I/O, so all read here, outside the lock.
     probes = stuck_probes(runs)
+    tiers = review_tiers(runs)          # CMX-312: git, so outside the lock too
     from chela import hold
     held, released = hold.read(), hold.last_release()
     now = time.time()
@@ -3262,7 +3378,8 @@ def tick(prev: dict[str, str], runs: list[dict] | None = None) -> dict[str, str]
                                                   windows=windows, now_epoch=now_epoch,
                                                   expected=store["expected_edges"])
         events += r_events
-        events += judge_wait_events(runs, store, now, windows=windows, now_epoch=now_epoch)
+        events += judge_wait_events(runs, store, now, windows=windows, now_epoch=now_epoch,
+                                    tiers=tiers)
         events += hold_events(store, held, released, now)
         events += conflict_events(runs, store, windows=windows, now_epoch=now_epoch)
         events += stuck_events(runs, store, probes, now, uptime, windows=windows,
