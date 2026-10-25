@@ -13,7 +13,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path, PurePosixPath
 from typing import NamedTuple
 
-from chela import basesync, concurrency, critic, envutil, epoch, event_log, fleet, flaky, generated, hold, judge, memcap, mergegate, reviewgate, risktier, sizegate, sweep
+from chela import basesync, concurrency, critic, envutil, epoch, event_log, fleet, flaky, generated, hold, judge, memcap, mergegate, reviewgate, risktier, sizegate, sweep, verdictcarry
 from chela.config import (
     CHELA_DIR,
     TMUX_SESSION,
@@ -6995,6 +6995,8 @@ def tick(workflow_path: str | Path) -> dict:
                     continue     # ⚖️🌩️ CMX-379: sitting out a classifier outage
                 if shutting_down():
                     break        # 🔁⚖️ CMX-263: a restart is waiting — launch nothing new
+                if _carry_base_only_verdict(wf, row, conn):
+                    continue     # ⚖️🔀 CMX-289: a base-only head move keeps its clean verdict
                 if _stamp_prose_only(wf, row):
                     continue     # ⚖️🪜 CMX-265: a prose-only PR never needs a judge slot
                 if judging >= judge_max_concurrent():
@@ -8348,7 +8350,7 @@ that SURVIVES **blocks this PR at every risk level** — it is never downgraded 
    statements, fixtures parked on a default, source-constant checks instead of the rendered
    value…). Reaching for one of those shapes first is faster than rediscovering it from
    scratch.
-{{sweep_equivalents}}
+{{sweep_equivalents}}{{prior_round}}
 2. For **each guard/invariant it adds** (each new or changed test, each "must never…"
    comment, each accessibility cue), design ONE **minimal, live, syntactically valid**
    mutation to the **production** code that a real guard MUST catch:
@@ -8410,7 +8412,7 @@ def judge_prompt_vars(
     branch_name: str, base_branch: str, workspace_path: str, repo_path: str,
     project_key: str, task_number, pr_url: str, head_sha: str, experiments_path: str,
     judge_cmd: str, judge_log: str, test_cmd: str, diff_cmd: str, pr_view_cmd: str,
-    sweep_equivalents: str = "", tier: str = "",
+    sweep_equivalents: str = "", tier: str = "", prior_round: str = "",
 ) -> dict:
     """📏 CMX-408. EVERY variable :data:`JUDGE_PROMPT` renders with — the one map both the
     live judge (:func:`_judge_vars`) and the offline eval (``chela.judge_eval.design``)
@@ -8458,6 +8460,8 @@ def judge_prompt_vars(
         # mechanical sweep it says no outcome can change under. Agent-authored, so shown
         # as claims to TEST, never as findings. "" ⇒ none (the line renders empty).
         "sweep_equivalents": sweep_equivalents,
+        # ⚖️🔀 CMX-289: the prior round chela re-runs itself — "" on a first judgement.
+        "prior_round": prior_round,
         # 🏭 CMX-284: the paths `chela judge run` drops experiments on.
         "generated_paths": ", ".join(f"`{p}`" for p in generated.PATTERNS),
     }
@@ -8494,6 +8498,8 @@ def _judge_vars(
                      else "gh pr view --comments   # no PR url on the run row"),
         sweep_equivalents=_judge_sweep_equivalents(row) + _judge_size_gate(row),
         tier=tier,
+        prior_round=verdictcarry.prompt_note(
+            verdictcarry.load(row["task_id"], row["pr_url"]), sha),
     )
 
 
@@ -8748,6 +8754,43 @@ def _spawn_judge(
     conn.execute("UPDATE runs SET judge_launch_owner=NULL WHERE task_id=?", (task_id,))
     conn.commit()
     log.info("judge: %s: judging %s on %s in %s", task_id, row["pr_url"] or "?", sha[:12], worktree)
+    return True
+
+
+def _carry_base_only_verdict(wf: WorkflowDef, row: sqlite3.Row,
+                             conn: sqlite3.Connection) -> bool:
+    """⚖️🔀 CMX-289: keep a ``clean`` verdict across a head move that touches none of the PR's
+    own files (a merge from base): re-stamp ``judge_sha`` to the new head, record why, and
+    spawn no judge. ``chela merge``'s ``judge_sha == head`` check then sees the new head.
+    Anything else — another verdict, a PR path that changed, git that cannot say — is
+    judged as before (with the prior round's experiments, :mod:`chela.verdictcarry`)."""
+    judged, head, task_id = row["judge_sha"], row["pr_head_sha"], row["task_id"]
+    if row["judge_state"] != judge.J_CLEAN or not judged or not head or judged == head:
+        return False
+    base = wf.get("workspace", "base_branch", default="master")
+    try:
+        moved = verdictcarry.moved_pr_paths(wf.path.parent, base, judged, head)
+    except (OSError, ValueError) as e:   # git missing, a NUL in a sha: judge it, never abort the tick
+        log.warning("judge: %s: could not compare %s with %s: %s", task_id, judged, head, e)
+        return False
+    if moved is None or moved:
+        return False
+    detail = verdictcarry.carried_detail(judged, head, row["judge_detail"])
+    cur = conn.execute(
+        "UPDATE runs SET judge_sha=?, judge_detail=? WHERE task_id=? AND judge_state=? "
+        "AND judge_sha=? AND pr_head_sha=?",
+        (head, detail[:2000], task_id, judge.J_CLEAN, judged, head),
+    )
+    conn.commit()
+    if cur.rowcount == 0:
+        return False
+    event_log.append(
+        "judge.carried", f"{task_id}: clean verdict carried {judged[:12]} → {head[:12]} — "
+                         "the head move touched none of the PR's files",
+        payload={"task_id": task_id, "judged_sha": judged, "head_sha": head,
+                 "reason": verdictcarry.CARRIED},
+    )
+    log.info("judge: %s: %s (%s → %s)", task_id, verdictcarry.CARRIED, judged[:12], head[:12])
     return True
 
 
