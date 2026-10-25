@@ -258,7 +258,8 @@ def test_a_rejudge_reruns_the_prior_rounds_experiments_first(tmp_path):
 
     wt = tmp_path / ".chela" / "wts" / "judge-abc123"
     (wt / "test_guard.py").write_text(FAKE_GUARD_TEST)
-    subprocess.run(["git", "-C", str(wt), "commit", "-qam", "weaken"], check=True)
+    subprocess.run(["git", "-C", str(wt), "-c", "user.name=t", "-c", "user.email=t@example.com",
+                    "commit", "-qam", "weaken"], check=True)
     exp_file = tmp_path / "round2.json"
     exp_file.write_text(json.dumps({"experiments": [HUE]}))
     with patch.object(dispatcher, "_post_pr_comment", return_value=(True, "")):
