@@ -8518,7 +8518,8 @@ def _judge_vars(
         sweep_equivalents=_judge_sweep_equivalents(row) + _judge_size_gate(row),
         tier=tier,
         prior_round=verdictcarry.prompt_note(
-            verdictcarry.load(row["task_id"], row["pr_url"]), sha),
+            verdictcarry.load(row["task_id"], row["pr_url"]), sha,
+            judge_max_experiments(_row_risk(row))),
     )
 
 

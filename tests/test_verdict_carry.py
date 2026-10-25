@@ -245,6 +245,24 @@ def test_a_row_that_moved_under_the_carry_is_left_alone(tmp_path):
     assert dispatcher.resolve_run("abc123")["judge_sha"] == "other0000003"
 
 
+@pytest.mark.parametrize("state", [judge.J_BLOCKED, judge.J_CANNOT_VERIFY, judge.J_RUNNING])
+def test_a_verdict_replaced_after_the_read_is_never_overwritten_by_the_carry(tmp_path, state):
+    """CMX-338: the row is read clean, then a concurrent writer (a new verdict, a send-back,
+    a re-judge launch) replaces `judge_state` on the SAME judged sha and head — so only the
+    CAS on `judge_state` can tell. The carry writes nothing and the new verdict stands."""
+    wf = _seed(tmp_path)
+    with dispatcher._db() as conn:
+        row = conn.execute("SELECT * FROM runs WHERE task_id='abc123'").fetchone()
+        assert row["judge_state"] == judge.J_CLEAN
+        dispatcher.set_judge_state("abc123", state, "a newer verdict")
+        with patch.object(verdictcarry, "moved_pr_paths", return_value=set()):
+            assert dispatcher._carry_base_only_verdict(wf, row, conn) is False
+    run = dispatcher.resolve_run("abc123")
+    assert (run["judge_state"], run["judge_sha"], run["judge_detail"]) == (
+        state, JUDGED, "a newer verdict")
+    assert event_log.read(types=["judge.carried"])["events"] == []
+
+
 def test_chela_merge_accepts_a_carried_verdict(tmp_path):
     """The carried sha is what `contract.merge`'s `judge_sha == head` check reads."""
     (tmp_path / "WORKFLOW.md").write_text("# wf\n")
@@ -322,14 +340,14 @@ def test_a_held_out_experiment_rerun_from_the_prior_round_stays_held_out(tmp_pat
 
 def test_with_prior_puts_the_prior_set_first_and_drops_verbatim_repeats():
     prior = {"experiments": [_exp(), HUE]}
-    raw, n = verdictcarry.with_prior({"experiments": [HUE], "notes": [1]}, prior)
+    raw, n = verdictcarry.with_prior({"experiments": [HUE], "notes": [1]}, prior, 5)
     assert n == 1
     assert raw == {"experiments": [_exp(), HUE], "notes": [1]}
-    assert verdictcarry.with_prior({"experiments": [HUE]}, {}) == ({"experiments": [HUE]}, 0)
+    assert verdictcarry.with_prior({"experiments": [HUE]}, {}, 5) == ({"experiments": [HUE]}, 0)
     # a repeat is the SAME file, before AND after — any one differing is a new experiment
     for other in (dict(HUE, file="other.py"), dict(HUE, after='    hue = "red"'),
                   dict(HUE, before='    hue = "red"')):
-        assert verdictcarry.with_prior({"experiments": [other]}, prior) == (
+        assert verdictcarry.with_prior({"experiments": [other]}, prior, 5) == (
             {"experiments": [_exp(), HUE, other]}, 2), other
 
 
@@ -396,19 +414,19 @@ def test_a_round_that_measured_nothing_keeps_the_last_real_one():
     verdictcarry.record("abc123", url, HEAD, invalid)
     rec = verdictcarry.load("abc123", url)
     assert rec["sha"] == JUDGED
-    assert rec["experiments"] == [dict(_exp(), held_out=False)]
+    assert rec["experiments"] == [dict(_exp(), held_out=False, survived=True)]
 
 
 def test_the_judge_prompt_names_the_prior_round_only_for_a_new_head():
     prior = {"sha": JUDGED, "experiments": [_exp(), HUE]}
-    note = verdictcarry.prompt_note(prior, HEAD)
+    note = verdictcarry.prompt_note(prior, HEAD, 5)
     assert "judged before, on `judged000001`" in note
     assert "re-runs that round's 2 experiment(s)" in note
     assert f"`git diff {JUDGED} HEAD`" in note
-    assert verdictcarry.prompt_note(prior, JUDGED) == ""
-    assert verdictcarry.prompt_note({}, HEAD) == ""
-    assert verdictcarry.prompt_note({"sha": JUDGED, "experiments": []}, HEAD) == ""
-    assert verdictcarry.prompt_note({"sha": "", "experiments": [_exp()]}, HEAD) == ""
+    assert verdictcarry.prompt_note(prior, JUDGED, 5) == ""
+    assert verdictcarry.prompt_note({}, HEAD, 5) == ""
+    assert verdictcarry.prompt_note({"sha": JUDGED, "experiments": []}, HEAD, 5) == ""
+    assert verdictcarry.prompt_note({"sha": "", "experiments": [_exp()]}, HEAD, 5) == ""
     rendered = dispatcher.render_prompt(dispatcher.JUDGE_PROMPT, dict(
         dispatcher.judge_prompt_vars(
             wf=None, risk="normal", task_id="t", task_title="", task_body="", branch_name="b",
@@ -469,6 +487,72 @@ def test_the_prior_set_never_crowds_the_new_experiments_out_of_the_cap(tmp_path,
     with patch.object(dispatcher, "_post_pr_comment", return_value=(True, "")):
         result = judge.judge_run("abc123", exp_file, cleanup=False)
     assert [o["guard"] for o in result["outcomes"]] == ["the colourblind glyph cue", "the hue"]
+
+
+RET = {"guard": "the hue's value", "kind": "mutation", "file": "guard.py",
+       "before": '    return {"glyph": glyph, "hue": hue}',
+       "after": '    return {"glyph": glyph, "hue": "grey"}'}
+
+
+def test_a_round_runs_at_most_twice_the_cap_and_new_experiments_always_run(tmp_path,
+                                                                          monkeypatch):
+    """CMX-338 — THE BOUND: a round runs at most cap new + cap re-run = 2 × cap experiments.
+    Round 2 records 2 (= 2 × cap); round 3 re-runs only a cap's worth of them, so its new
+    experiment still runs. RED if the prior set is not limited (round 3 re-runs both and
+    drops the new one) or the cap is not grown by what was added."""
+    from chela import config
+
+    monkeypatch.setattr(config, "judge_max_experiments", lambda risk: 1)
+    _judge_run(tmp_path, REAL_GUARD_TEST, {"experiments": [_exp()]})
+    seen = []
+    for n, exp in ((2, HUE), (3, RET)):
+        exp_file = tmp_path / f"round{n}.json"
+        exp_file.write_text(json.dumps({"experiments": [exp]}))
+        with patch.object(dispatcher, "_post_pr_comment", return_value=(True, "")):
+            result = judge.judge_run("abc123", exp_file, cleanup=False)
+        seen.append([o["guard"] for o in result["outcomes"]])
+    assert seen == [["the colourblind glyph cue", "the hue"],
+                    ["the colourblind glyph cue", "the hue's value"]]
+    assert len(verdictcarry.load("abc123", dispatcher.resolve_run("abc123")["pr_url"])
+               ["experiments"]) == 2
+
+
+def test_the_limited_prior_set_keeps_survivors_first():
+    killed, survived = dict(_exp(), survived=False), dict(HUE, survived=True)
+    prior = {"experiments": [killed, survived, dict(RET)]}
+    assert verdictcarry.with_prior({"experiments": []}, prior, 1) == (
+        {"experiments": [HUE]}, 1)
+    assert verdictcarry.with_prior({"experiments": []}, prior, 3) == (
+        {"experiments": [HUE, _exp(), RET]}, 3)
+    assert verdictcarry.with_prior({"experiments": []}, prior, 0) == ({"experiments": []}, 0)
+    # a prior record repeating one experiment verbatim spends one slot on it, not two
+    twice = {"experiments": [dict(HUE), dict(HUE), dict(RET)]}
+    assert verdictcarry.with_prior({"experiments": []}, twice, 2) == (
+        {"experiments": [HUE, RET]}, 2)
+
+
+def test_the_judge_prompt_counts_only_what_the_cap_lets_it_rerun(tmp_path, monkeypatch):
+    """The note must not promise a re-run of experiments `with_prior` will drop."""
+    prior = {"sha": JUDGED, "experiments": [_exp(), HUE, RET]}
+    assert "re-runs that round's 2 experiment(s)" in verdictcarry.prompt_note(prior, HEAD, 2)
+    wf = _seed(tmp_path)
+    report = judge.Report(outcomes=[judge.Outcome(judge.Experiment(**e), judge.KILLED, "")
+                                    for e in (_exp(), HUE, RET)])
+    verdictcarry.record("abc123", "https://github.com/o/r/pull/91", JUDGED, report)
+    monkeypatch.setattr(dispatcher, "judge_max_experiments", lambda risk: 2)
+    with dispatcher._db() as conn:
+        row = conn.execute("SELECT * FROM runs WHERE task_id='abc123'").fetchone()
+    assert "2 experiment(s)" in dispatcher._judge_vars(wf, row, tmp_path, HEAD)["prior_round"]
+
+
+def test_the_record_marks_which_experiments_survived():
+    url = "https://github.com/o/r/pull/1"
+    report = judge.Report(outcomes=[
+        judge.Outcome(judge.Experiment(**_exp()), judge.KILLED, ""),
+        judge.Outcome(judge.Experiment(**HUE), judge.SURVIVED, "")])
+    verdictcarry.record("abc123", url, JUDGED, report)
+    assert [e["survived"] for e in verdictcarry.load("abc123", url)["experiments"]] == [
+        False, True]
 
 
 @pytest.mark.parametrize("text", ['{"pr_url": "u", "experiments": "x"}', '["u"]', "{not json"])
