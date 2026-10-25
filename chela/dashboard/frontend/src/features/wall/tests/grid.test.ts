@@ -1,7 +1,8 @@
 // CMX-247 (CMX-212 P33): the grid's layouts, driven the way the page drives them: the toolbar's
 // store setters and Gridstack's drag events, over a fake Gridstack (setup.ts). jsdom does no
 // layout, so the stage sits at the top of a 768 px viewport: the fill is 10 rows of 76.4 px.
-import { beforeEach, expect, test, vi } from 'vitest';
+import { afterAll, beforeAll, beforeEach, describe, expect, test, vi } from 'vitest';
+import css from '../../../../../static/style.css?raw';
 import { agents } from '../../../shared/store/agents.ts';
 import { setPinned, setWallAuto, setWallFocus, setWallLocked, setWallPreset, wallLayout } from '../../../shared/store/wall.ts';
 import { configureWall, renderTerminals, setTermMode, termTick } from '../index.ts';
@@ -109,9 +110,9 @@ test('a drag and a resize save the layout; a drag hides the frames and pins the 
   localStorage.removeItem('pc_wall_layout');
   const grid = document.querySelector('#term-stage .grid-stack') as HTMLElement;
   gs.fire('dragstart', tile('@1') as HTMLElement);
-  expect([grid.className, document.body.className]).toEqual(['grid-stack gs-dragging term-dragging', 'term-dragging']);
+  expect([grid.className, document.body.className]).toEqual(['grid-stack wall-movable gs-dragging term-dragging', 'term-dragging']);
   gs.fire('dragstop', tile('@1') as HTMLElement);
-  expect([grid.className, document.body.className]).toEqual(['grid-stack', '']);
+  expect([grid.className, document.body.className]).toEqual(['grid-stack wall-movable', '']);
   expect(saved()).toEqual({ '@1': c(0, 0, 6, 10), '@2': c(6, 0, 6, 10) });
   localStorage.removeItem('pc_wall_layout');
   gs.fire('resizestart');
@@ -217,6 +218,51 @@ test('Focus with no one waiting takes the first pane; auto and Focus exclude eac
   expect(wallLayout.get()).toMatchObject({ auto: false, focus: true });
   expect(cells('@1', '@2')).toEqual({ '@1': c(0, 0, 8, 10), '@2': c(8, 0, 4, 10) });
   setWallFocus(false);
+});
+
+// CMX-329 (§7 10-24): the header shows the move cursor only where Gridstack can move a tile;
+// in Focus a strip pane's header is a pointer (a click promotes it), the large pane's and Auto's
+// the default. The title keeps the default too: it renames on a double-click, it is not a link.
+// style.css is parsed once, in beforeAll (CMX-311: ~2 s under jsdom).
+describe('under style.css', () => {
+  let style: HTMLStyleElement;
+  beforeAll(() => {
+    style = document.createElement('style');
+    style.textContent = css;
+    document.head.append(style);
+  });
+  afterAll(() => style.remove());
+
+  const cursors = (wid: string) => {
+    const head = tile(wid)?.querySelector('.gs-head') as HTMLElement;
+    const grip = head.querySelector('.gs-grip') as HTMLElement;
+    const title = grip.querySelector('.pane-title') as HTMLElement;
+    return [head, grip, title].map((el) => getComputedStyle(el).cursor);
+  };
+
+  test('the move cursor shows only where a tile can move', async () => {
+    await wall([agent('@1'), agent('@2', { needs_human: true })]);
+    expect(last('enableMove')).toBe(true);
+    expect(cursors('@1')).toEqual(['auto', 'move', 'move']);
+    setWallLocked(true); // a locked drag still moves (it swaps)
+    expect(last('enableMove')).toBe(true);
+    expect(cursors('@1')).toEqual(['auto', 'move', 'move']);
+    setWallLocked(false);
+    setWallAuto(true);
+    expect(last('enableMove')).toBe(false);
+    expect(cursors('@1')).toEqual(['auto', 'auto', 'default']);
+    setWallAuto(false);
+    setWallFocus(true);
+    expect(last('enableMove')).toBe(false);
+    expect(tile('@1')?.classList.contains('wall-focus-strip')).toBe(true);
+    expect(cursors('@1')).toEqual(['pointer', 'pointer', 'default']); // a click brings it forward
+    expect(cursors('@2')).toEqual(['auto', 'auto', 'default']); // the large pane: nothing to promote
+    tile('@1')?.querySelector<HTMLElement>('.gs-head')?.click();
+    expect(tile('@1')?.classList.contains('wall-focus-main')).toBe(true);
+    setWallFocus(false);
+    expect(last('enableMove')).toBe(true);
+    expect(cursors('@1')).toEqual(['auto', 'move', 'move']);
+  });
 });
 
 test('a resize refits the wall, debounced', async () => {
