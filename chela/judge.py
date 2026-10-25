@@ -2790,7 +2790,7 @@ def judge_run(
     ⛔ It never merges and never approves. A clean run is left in ``awaiting_review``, where
     the orchestrator finds it.
     """
-    from chela import config, dispatcher, event_log, workflow
+    from chela import config, dispatcher, event_log, verdictcarry, workflow
     from chela.sources import run_risk
 
     run = dispatcher.resolve_run(ident)
@@ -2891,6 +2891,9 @@ def judge_run(
         _run_ctx["task"] = task_id                   # ⏸️ CMX-214: whose freeze run_suite credits
         _run_ctx["on_slot_wait"] = _slot_wait
         raw, err = load_experiments(experiments_path)
+        if not err:      # ⚖️🔀 CMX-289: the prior round's set first — never a fresh sample
+            raw, prior_n = verdictcarry.with_prior(raw, verdictcarry.load(task_id, pr_url))
+            exp_cap += min(prior_n, exp_cap)   # the re-run never crowds out new lines' experiments
         base_branch = wf.get("workspace", "base_branch", default="master")
         base_branch = base_branch if isinstance(base_branch, str) else ""
         reprovisioned = False
@@ -2997,6 +3000,8 @@ def judge_run(
             judge_cfg.held_out_fraction if held_out else 0.0,
             sha=verified_sha, stale=stale_head, pr_url=pr_url, tier=tier,
         )
+        if not stale_head:
+            verdictcarry.record(task_id, pr_url, verified_sha, report)
 
         if stale_head:
             log.warning(
