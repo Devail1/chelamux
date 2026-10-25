@@ -279,8 +279,10 @@ def test_tick_reconciling_a_review_row_that_left_the_tracker_reaps_its_strays(
     wf = _wf(tmp_path)
     with dispatcher._db() as conn:
         _row(conn, workflow_path=str(wf.path), status="awaiting_review",
-             worktree_path="/wt/struck")
-    _tick(wf, _Source(), _FakeTmux(), "open")
+             worktree_path="/wt/struck", pr_url=None, pr_state=None)
+    # 🗂️⏸️ CMX-308: the PR (read off the transcript, so phase 0 never saw it) has MERGED —
+    # an open one would hold the row instead.
+    _tick(wf, _Source(), _FakeTmux(), "merged", read_pr_url="https://github.com/o/r/pull/80")
     assert dispatcher.resolve_run("abc123")["status"] == "done"
     assert reaped == [("/wt/struck", str(wf.path))]
 

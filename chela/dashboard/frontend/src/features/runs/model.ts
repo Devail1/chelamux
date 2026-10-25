@@ -51,7 +51,11 @@ export function runCardNote(run: Run | null | undefined): { text: string; closed
   const reason = run && run.status === 'closed' ? String(run.close_reason || '').trim() : '';
   if (reason) return { text: `Closed: ${reason}`, closed: true };
   const err = run && run.last_error ? String(run.last_error) : '';
-  return err ? { text: err, closed: false } : null;
+  if (err) return { text: err, closed: false };
+  // 🗂️⏸️ CMX-308: reconcile is holding this run — its task left the tracker, its PR has
+  // not merged. A note, not an error; a real `last_error` still wins.
+  const held = run && run.tracker_note ? String(run.tracker_note).trim() : '';
+  return held ? { text: held, closed: true } : null;
 }
 
 // 📝 CMX-52. The agent's own `chela task-finished --handoff` note, as one display line, or

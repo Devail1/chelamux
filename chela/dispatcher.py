@@ -1591,6 +1591,10 @@ def ensure_schema(conn: sqlite3.Connection) -> sqlite3.Connection:
         ("base_sync", "ALTER TABLE runs ADD COLUMN base_sync TEXT"),
         # 🔎 CMX-209. JSON {no_review_reason}: a code hand-in let through with no `## Review`.
         ("review_gate", "ALTER TABLE runs ADD COLUMN review_gate TEXT"),
+        # 🗂️⏸️ CMX-308. Why reconcile is HOLDING a run whose task left the tracker: its PR
+        # has not merged, so leaving is not done-evidence. Display-only (the Work card
+        # shows it when there is no `last_error`); cleared when the task is open again.
+        ("tracker_note", "ALTER TABLE runs ADD COLUMN tracker_note TEXT"),
         # ⏸️ CMX-318. `chela park`: when (`parked_at`, NULL ⇒ not parked), why, until what
         # (an ISO time or `run:<ID>`) and by whom. The stuck detector skips a parked run;
         # a claim or a rework re-spawn clears all four (`chela/park.py`).
@@ -4596,6 +4600,11 @@ def approve(ident: str, body: str = "", force: bool = False) -> dict:
     }
 
 
+# 🗂️⏸️ CMX-308: the prefix of `tracker_note` — reconcile holding a run whose task left the
+# tracker while its PR is not merged (the rest names the PR's state).
+TRACKER_LEFT_NOTE = "issue left the tracker's ready states; "
+
+
 # 🧊🔓 CMX-387: the statuses `reopen` accepts. `done` only under `_done_reopen_refusal`.
 REOPENABLE_STATUSES = ("needs_human", "done")
 
@@ -4616,6 +4625,8 @@ def _done_reopen_refusal(run: dict) -> str | None:
     * the task must not be struck ``- [x]`` in its tracker — the dispatcher strikes only on
       merge, so a struck line says this task is finished whatever the PR says. A tracker
       this cannot read (or a tracker kind with no notion of a struck line) is refused.
+      🗂️🔓 CMX-308: except ``linear``, which chela never strikes — its issues close on
+      GitHub's say-so, even for another task's PR — so its OPEN PR above is the evidence.
     """
     wf_path = run.get("workflow_path")
     repo_dir = str(Path(wf_path).parent) if wf_path else None
@@ -4628,7 +4639,15 @@ def _done_reopen_refusal(run: dict) -> str | None:
         return (f"run is `done` and its PR is {pr_state.upper()} — only a `done` run whose PR "
                 "is still OPEN can be reopened; a merged or closed PR stays closed.")
     try:
-        source = get_source(load_workflow(wf_path))
+        wf = load_workflow(wf_path)
+        # 🗂️🔓 CMX-308: a linear tracker has no struck line — chela never strikes a Linear
+        # issue on merge; its state moves on GitHub's say-so (Linear's own integration closes
+        # an issue a merged PR NAMES, even another task's PR). The PR state read above is the
+        # finished-or-not evidence there, so an OPEN PR is enough. Other kinds keep the
+        # struck-line check below (gh_issues, with no `closed_ids_from_text`, stays refused).
+        if wf.get("tracker", "kind") == "linear":
+            return None
+        source = get_source(wf)
     except Exception as e:  # noqa: BLE001 — any failure to read the tracker is a refusal
         return (f"run is `done` and its tracker could not be loaded ({e}) — refusing to reopen "
                 "without knowing whether the task was struck done.")
@@ -5764,6 +5783,7 @@ def tick(workflow_path: str | Path) -> dict:
         "reconciled_done": 0,
         "reconciled_closed": 0,
         "reconciled_failed": 0,
+        "tracker_left_pr_open": 0,
         "push_applied": 0,
         "task_finished_applied": 0,
         "dispatched": 0,
@@ -5963,6 +5983,11 @@ def tick(workflow_path: str | Path) -> dict:
         if tracker_gone is None:
             tracker_gone = set()
         for row in rows:
+            if row["tracker_note"] and row["task_id"] in open_ids:
+                # 🗂️⏸️ CMX-308: the held task is open in the tracker again — the note is moot.
+                conn.execute("UPDATE runs SET tracker_note=NULL WHERE task_id=?",
+                             (row["task_id"],))
+                conn.commit()
             # ⛔🏃‍♂️💀 issue #491: `RECONCILE_MERGE_STATUSES_WITH_RUNNING`, not
             # `RECONCILE_MERGE_STATUSES` — a `running` row whose rework spawn raced an
             # out-of-band merge (`_respawn_rework` flips an EXISTING row that already owns
@@ -6003,15 +6028,17 @@ def tick(workflow_path: str | Path) -> dict:
                         )
                         if note:
                             judge_detail += f" — also: {note['body']}"
+                # 🗂️⏸️ CMX-308: `tracker_note=NULL` — a hold note is moot once the PR merged.
                 if unjudged:
                     conn.execute(
-                        "UPDATE runs SET status='done', judge_state=?, judge_detail=? "
-                        "WHERE task_id=?",
+                        "UPDATE runs SET status='done', judge_state=?, judge_detail=?, "
+                        "tracker_note=NULL WHERE task_id=?",
                         (judge.J_UNJUDGED_MERGED, judge_detail[:2000], row["task_id"]),
                     )
                 else:
                     conn.execute(
-                        "UPDATE runs SET status='done' WHERE task_id=?", (row["task_id"],)
+                        "UPDATE runs SET status='done', tracker_note=NULL WHERE task_id=?",
+                        (row["task_id"],),
                     )
                 if outside:
                     conn.execute(
@@ -6063,7 +6090,8 @@ def tick(workflow_path: str | Path) -> dict:
                 # STATUS_CHIPS['closed'] pill + kanbanlanemodel.js's STATUS_LANE map.
                 _end_agent(row["window_name"], row)
                 conn.execute(
-                    "UPDATE runs SET status='closed' WHERE task_id=?", (row["task_id"],)
+                    "UPDATE runs SET status='closed', tracker_note=NULL WHERE task_id=?",
+                    (row["task_id"],),
                 )
                 conn.commit()
                 _cleanup_worktree_on_done(wf, row)
@@ -6212,12 +6240,42 @@ def tick(workflow_path: str | Path) -> dict:
                 # the original ended_at so the timestamp reflects when the agent
                 # finished, not when the human merged the PR.
                 wf_path = row["workflow_path"]
-                pr_url = row["pr_url"] or _read_pr_url(
-                    row["window_name"], str(Path(wf_path).parent) if wf_path else None)
+                repo_dir = str(Path(wf_path).parent) if wf_path else None
+                pr_url = row["pr_url"] or _read_pr_url(row["window_name"], repo_dir)
+                # 🗂️⏸️ CMX-308: leaving the tracker is done-evidence only for a PR that has
+                # MERGED. Linear's GitHub integration moves an issue to Done when ANY merged
+                # PR names it (CMX-119 was closed by another task's PR while its own sat
+                # OPEN, green and mergeable) — and `done` is terminal: no reopen, adopt or
+                # requeue brought it back. So the PR is read live here, and a row whose PR is
+                # not merged keeps its status, window and worktree, with a visible note. Its
+                # end comes from the PR: the merged / closed-PR branches above, once phase 0
+                # sees it. An unreadable state holds too — unknown never reads as merged.
+                live_state = None
+                if pr_url:
+                    live_state, _mergeable = _read_pr_status(pr_url, repo_dir)
+                if pr_url and live_state != "merged":
+                    note = TRACKER_LEFT_NOTE + (
+                        "PR still open" if live_state == "open" else
+                        "PR state could not be read" if live_state is None else
+                        f"PR is {live_state}")
+                    cur = conn.execute(
+                        "UPDATE runs SET tracker_note=?, pr_url=COALESCE(?, pr_url), "
+                        "pr_state=COALESCE(?, pr_state) WHERE task_id=? "
+                        "AND tracker_note IS NOT ?",
+                        (note, pr_url, live_state, row["task_id"], note),
+                    )
+                    conn.commit()
+                    summary["tracker_left_pr_open"] += 1
+                    if cur.rowcount:
+                        log.warning("Task %s left the tracker but its PR is not merged (%s) — "
+                                    "kept %s, not done", row["task_id"], live_state or "state "
+                                    "unreadable", row["status"])
+                    continue
                 _end_agent(row["window_name"], row)
                 conn.execute(
-                    "UPDATE runs SET status='done', pr_url=COALESCE(?, pr_url) WHERE task_id=?",
-                    (pr_url, row["task_id"]),
+                    "UPDATE runs SET status='done', pr_url=COALESCE(?, pr_url), "
+                    "pr_state=COALESCE(?, pr_state), tracker_note=NULL WHERE task_id=?",
+                    (pr_url, live_state, row["task_id"]),
                 )
                 conn.commit()
                 _cleanup_worktree_on_done(wf, row)

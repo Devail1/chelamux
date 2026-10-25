@@ -224,7 +224,11 @@ def test_reconcile_to_done_keeps_the_recorded_pr_over_the_transcript(tmp_path):
     by letting the transcript win at that site (`_read_pr_url(...) or row["pr_url"]`) ⇒
     the closed row carries `acme/widgets/pull/7` ⇒ RED."""
     row, _ = _tick_off_the_tracker(tmp_path, status="awaiting_review", tmux_windows=[])
-    assert row["status"] == "done"          # the branch under test really ran
+    # 🗂️⏸️ CMX-308: the recorded PR is still OPEN, so the row is HELD (the branch under
+    # test really ran: it wrote its note). Let the transcript win and its MERGED PR would
+    # close the row `done` instead.
+    assert row["status"] == "awaiting_review"
+    assert row["tracker_note"] == dispatcher.TRACKER_LEFT_NOTE + "PR still open"
     assert row["pr_url"] == REAL_PR
 
 
