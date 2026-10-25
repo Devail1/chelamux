@@ -326,6 +326,11 @@ def test_with_prior_puts_the_prior_set_first_and_drops_verbatim_repeats():
     assert n == 1
     assert raw == {"experiments": [_exp(), HUE], "notes": [1]}
     assert verdictcarry.with_prior({"experiments": [HUE]}, {}) == ({"experiments": [HUE]}, 0)
+    # a repeat is the SAME file, before AND after — any one differing is a new experiment
+    for other in (dict(HUE, file="other.py"), dict(HUE, after='    hue = "red"'),
+                  dict(HUE, before='    hue = "red"')):
+        assert verdictcarry.with_prior({"experiments": [other]}, prior) == (
+            {"experiments": [_exp(), HUE, other]}, 2), other
 
 
 def test_a_prior_round_of_another_pr_is_not_this_prs(tmp_path):
@@ -403,6 +408,7 @@ def test_the_judge_prompt_names_the_prior_round_only_for_a_new_head():
     assert verdictcarry.prompt_note(prior, JUDGED) == ""
     assert verdictcarry.prompt_note({}, HEAD) == ""
     assert verdictcarry.prompt_note({"sha": JUDGED, "experiments": []}, HEAD) == ""
+    assert verdictcarry.prompt_note({"sha": "", "experiments": [_exp()]}, HEAD) == ""
     rendered = dispatcher.render_prompt(dispatcher.JUDGE_PROMPT, dict(
         dispatcher.judge_prompt_vars(
             wf=None, risk="normal", task_id="t", task_title="", task_body="", branch_name="b",
@@ -421,6 +427,7 @@ def test_the_live_judge_prompt_carries_the_recorded_prior_round(tmp_path):
         row = conn.execute("SELECT * FROM runs WHERE task_id='abc123'").fetchone()
     note = dispatcher._judge_vars(wf, row, tmp_path, HEAD)["prior_round"]
     assert "judged before, on `judged000001`" in note and "1 experiment(s)" in note
+    assert dispatcher._judge_vars(wf, row, tmp_path, JUDGED)["prior_round"] == ""
 
 
 def test_repeated_carries_keep_one_prefix_and_the_original_detail():
