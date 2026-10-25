@@ -106,6 +106,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import subprocess
 import time
 from dataclasses import dataclass
@@ -231,6 +232,10 @@ def _classify(store: str, wid: str, stamped_epoch: str | None, session_id: str |
         return None
     roster_row = roster_lookup(stamped_epoch, wid) or {}
     sid = session_id or roster_row.get("session_id")
+    # CMX-337: a store row's id is a launch-time fact (spawn, `chela watch`); a `/clear` in
+    # the window moved the session on. The roster's LIVE-observed id for this window wins.
+    if roster_row.get("session_source") == "live" and roster_row.get("session_id"):
+        sid = roster_row["session_id"]
     cwd = roster_row.get("cwd")
     label = roster_row.get("name") or ""
     new_wid = wid_for_session(sid) if sid else None
@@ -750,6 +755,20 @@ def _source_epochs(previous: str, ended: list[tuple[str, dict]]) -> list[str]:
     return [previous]
 
 
+def lineage(name: str | None, cwd: str | None) -> tuple[str, str] | None:
+    """CMX-337: a window's lineage across tmux epochs — its name and its cwd. A relaunch is
+    named after its folder with a collision-safe ``-N`` (:func:`chela.spawn.spawn_window`), so
+    ``<folder>-N`` folds back to ``<folder>``; any other name is kept whole (``cmx-337`` stays
+    ``cmx-337``). ``None`` when either is unknown: an unknown lineage never matches another."""
+    if not name or not cwd:
+        return None
+    cwd = os.path.normpath(cwd)
+    m = re.fullmatch(r"(.+)-\d+", name)
+    if m and m.group(1) == os.path.basename(cwd):
+        name = m.group(1)
+    return name, cwd
+
+
 def _write_marker(marker: Path, now_epoch: str, owed: list[dict]) -> None:
     marker.parent.mkdir(parents=True, exist_ok=True)
     marker.write_text(json.dumps({"epoch": now_epoch, **({"owed": owed} if owed else {})}))
@@ -771,6 +790,35 @@ def closed_note(info: dict) -> str:
     """Why a session the user closed is not resumed — the one sentence every surface prints."""
     when = time.strftime("%Y-%m-%d %H:%M", time.localtime(info.get("closed_at") or 0))
     return f"closed by the user at {when} (was {info.get('wid') or '?'})"
+
+
+def _one_per_lineage(rows: list[Verdict], carried: list[Verdict],
+                     sources: list[str]) -> tuple[list[Verdict], list[ApplyResult]]:
+    """CMX-337: never resume two sessions into one window lineage (:func:`lineage`). Rows of
+    the NEWEST epoch win. A carried row was resumed INTO ``sources[0]`` but never sampled
+    there, so it ranks just behind that epoch's own rows and ahead of every older one. Rows
+    of the same epoch never supersede each other — those windows were alive side by side."""
+    carried_ids = {id(v) for v in carried}
+    rank = {ep: float(i if i == 0 else i + 1) for i, ep in enumerate(sources)}
+
+    def age(v: Verdict) -> float:
+        return 1.0 if id(v) in carried_ids else rank.get(v.stamped_epoch, len(sources) + 1.0)
+
+    newest: dict = {}
+    for v in rows:
+        key = lineage(v.label, v.cwd)
+        if key and (key not in newest or age(v) < age(newest[key])):
+            newest[key] = v
+    keep, superseded = [], []
+    for v in rows:
+        winner = newest.get(lineage(v.label, v.cwd))
+        if winner is None or age(winner) == age(v):
+            keep.append(v)
+        else:
+            superseded.append(ApplyResult(v, SKIPPED, (
+                f"superseded by session {winner.session_id} of the same window, from a "
+                "newer tmux epoch")))
+    return keep, superseded
 
 
 def boot_pass(now_epoch: str | None, *, resume_enabled: bool, gather, marker: Path,
@@ -809,10 +857,15 @@ def boot_pass(now_epoch: str | None, *, resume_enabled: bool, gather, marker: Pa
         log.info("restore boot pass: baseline tmux epoch %s recorded", now_epoch)
         return None
     ended = (roster_epochs or roster.ended)(now_epoch)
-    sampled = {w.get("session_id") for ep, ws in ended if ep == previous for w in ws.values()}
+    sample = [w for ep, ws in ended if ep == previous for w in ws.values()]
+    sampled = {w.get("session_id") for w in sample}
+    # CMX-337: a sample showing the owed window's LINEAGE retires it too — a `/clear` there
+    # moved the session id on, and that sample, not the older epoch it came from, is the truth.
+    sampled_lineages = {lineage(w.get("name"), w.get("cwd")) for w in sample} - {None}
     owed = [o for o in (owed if isinstance(owed, list) else [])
             if isinstance(o, dict) and o.get("session_id") and o.get("cwd")
-            and o["session_id"] not in sampled]
+            and o["session_id"] not in sampled
+            and lineage(o.get("label"), o["cwd"]) not in sampled_lineages]
     _write_marker(marker, now_epoch, owed)
     sources = _source_epochs(previous, ended)
     closed = (closed_lookup or roster.closed)(sources)
@@ -841,11 +894,13 @@ def boot_pass(now_epoch: str | None, *, resume_enabled: bool, gather, marker: Pa
                 v.stamped_epoch:
             continue                     # this session is already owed from a newer epoch
         rows.append(v)
+    rows, superseded = _one_per_lineage(rows, carried, sources)
     if resume_enabled:
         results = (resume_fn or resume)(rows, runs)
     else:
         results = [ApplyResult(v, SKIPPED, "CHELA_RESTORE_RESUME is off — report only")
                    for v in rows]
+    results = [*results, *superseded]
     _write_marker(marker, now_epoch, still_live + [
         {"session_id": r.verdict.session_id, "cwd": r.verdict.cwd, "label": r.verdict.label,
          "wid": r.verdict.wid, "store": r.verdict.store}
