@@ -28,6 +28,8 @@ The adapter is `chela/sources/linear.py` (CMX-432).
    tracker:
      kind: linear
      team: ABC              # the team KEY, also the identifier prefix (ABC-12)
+     project: Web           # optional: one Linear project of the team (see "Several
+                            # repos on one team" below)
      ready_states: [Todo]   # optional: the state names chela may CLAIM from (default Todo)
      done_state: Done       # optional: the state chela sets on merge
                             # (default: the team's first `completed` state)
@@ -78,6 +80,49 @@ its issue (`CMX-12 ↗`). **New task** in the Work toolbar (or the ⌘K palette)
 in the team's ready state, with optional *blocked by* relations; only the dashboard calls
 Linear, so the key never reaches the browser.
 
+## Several repos on one team (`project:`)
+
+Linear's free plan allows two teams. To run a third repo from Linear, give each workflow on
+a shared team its own project:
+
+```yaml
+tracker:
+  kind: linear
+  team: CMX
+  project: Tapgrid     # the project's name, its slug id, or its id
+```
+
+With `project:` set, everything this workflow does is limited to that project: the open
+set, the ID refresh, the reads behind every state write (claim, review, merge, close,
+requeue), and **New task** and size-gate splits, which create their issue in the project.
+A blocker or parent must be an issue of the same project. An issue moved out of the
+project during a run reads as gone, and the run closes, as when an issue is deleted.
+Without `project:`, nothing changes.
+
+The value is matched against the team's projects by id, then slug id, then name (case does
+not matter). If it matches no project, or two, or the projects cannot be read, the read
+fails: the workflow claims nothing, closes nothing, and the daemon log shows one ERROR. It
+never falls back to the whole team.
+
+Identifiers keep the TEAM key in every project (`CMX-12` in Tapgrid too). That is Linear's
+rule.
+
+**No issue is claimed twice.** chela refuses a configuration in which two dispatched
+workflows (`CHELA_DISPATCH_WORKFLOWS`) could take the same issue: when two workflows read
+the same team, both must set `project:` and the projects must differ. Otherwise both
+workflows refuse to claim work, read nothing, and `chela doctor` reports each one as
+"tracker is refusing to claim work", naming the other workflow. Two different spellings
+of one project (its name in one file, its slug id in the other) are caught too, once the
+team's projects are read: both workflows' reads then fail, with one ERROR in the log.
+
+**The archive sweep stays per team.** The 250-issue cap counts the whole workspace, so the
+sweep (below) always reads the whole team, whichever project the workflow is in. It runs at
+most once per 15 minutes per team, however many workflows share the team, and every
+workflow on the team sweeps with the **largest** `keep_done` any of them sets, so one
+workflow's sweep never archives what another keeps.
+
+The dashboard's Work view still has one entry per workflow.
+
 ## Sharing a counter with an old `TODO.md` queue
 
 If the team key equals the workflow's old `project_key` (chelamux's own case: `CMX`),
@@ -114,7 +159,8 @@ visible and archives only older ones (CMX-8):
   the sweep once right away, so a close that puts the team over `keep_done` archives the
   oldest finished issue now, not 15 minutes later. A failure is logged and retried on the
   next tick. It never crashes the dispatcher.
-- **The sweep** runs every 15 minutes per team. It applies the `keep_done` rule to every
+- **The sweep** runs every 15 minutes per team (even when several project-scoped workflows
+  share the team). It applies the `keep_done` rule to every
   finished issue that is not archived yet, whoever closed it: the integration, a human, or
   chela. It archives at most 50 per sweep, oldest first. It also publishes the team's
   non-archived count to `$CHELA_DIR/linear-issue-counts.json`.
@@ -130,8 +176,8 @@ issues.
 An archived issue is still readable: `fetch_by_ids` includes archived issues and reports
 each one as done, so archiving never makes a finished task look missing.
 
-chela never creates sub-issues, and never creates issues at all. Issues are written by a
-human in Linear.
+Issues are written by a human in Linear, or created by chela's **New task** and by a
+size-gate split (a sub-issue of the oversized task).
 
 ## The GitHub integration
 
