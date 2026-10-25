@@ -329,10 +329,13 @@ export function applyWallFocus(): void {
 }
 
 /** Auto-arrange and Focus compute the layout, so a manual move or resize is off while either is on;
- * lock turns resize off (a drag swaps). Called after every build, so a reload keeps the feel. */
+ * lock turns resize off (a drag swaps). Called after every build, so a reload keeps the feel.
+ * `wall-movable` mirrors enableMove: style.css shows the move cursor only under it (CMX-329). */
 export function applyWallInteractivity(): void {
   const { locked, auto, focus } = wallLayout.get();
-  grid?.enableMove(!auto && !focus);
+  const movable = !auto && !focus;
+  grid?.enableMove(movable);
+  gsEl()?.classList.toggle('wall-movable', movable);
   grid?.enableResize(!locked && !auto && !focus);
 }
 
