@@ -117,18 +117,49 @@ def _signal(pids: list[int], sig: int) -> list[int]:
     return sent
 
 
+def _judge_agent_pid(run: dict) -> int | None:
+    """The claude in ``run``'s judge window, only when it is provably THAT judge, else None.
+
+    ⛔ CMX-340: a stale ``judge_window_id`` once named another agent's claude, and freezing
+    it stopped that agent for hours. The id must be this tmux server's (its stamped epoch),
+    and the claude's cwd must be this run's judge worktree. Anything unreadable is None:
+    the run's own record (:func:`judge.live_judge_run`) still finds a detached judge.
+    """
+    from chela import agent_manager, epoch, sessions
+    from chela.workflow import load_workflow_cached
+
+    wid = run.get("judge_window_id")      # never "": tmux reads that as the ACTIVE pane
+    stamped, wf_path = run.get("judge_window_epoch"), run.get("workflow_path")
+    if not wid or not stamped or not wf_path or stamped != epoch.current():
+        return None
+    wf = load_workflow_cached(wf_path).workflow
+    pid = agent_manager.claude_pid(wid) if wf is not None else None
+    cwd = sessions._proc_cwd(pid) if pid else None
+    if not cwd:
+        return None
+    expected = judge.judge_worktree_path(wf, run["task_id"])
+    found = Path(cwd).resolve()
+    if found == expected or expected in found.parents:
+        return pid
+    log.warning("fleet pause: %s's judge window %s holds pid %s in %s, not its judge worktree: "
+                "not freezing it", run["task_id"], wid, pid, found)
+    return None
+
+
 def _freeze_judges(state: dict) -> None:
-    """SIGSTOP every running judge's tree (one already frozen is left as it is)."""
-    from chela import agent_manager, dispatcher
+    """SIGSTOP every running judge's tree (one already frozen is left as it is).
+
+    A run that is over is never frozen, whatever its ``judge_state`` says (CMX-340: an
+    override-merge left one ``running``, with a window id tmux had since given away)."""
+    from chela import dispatcher
 
     judges = state.setdefault("judges", {})
     for run in dispatcher.list_runs():
         task = run.get("task_id")
-        if not task or run.get("judge_state") != judge.J_RUNNING or task in judges:
+        if (not task or run.get("judge_state") != judge.J_RUNNING or task in judges
+                or run.get("status") in dispatcher.TERMINAL_STATUSES):
             continue
-        wid = run.get("judge_window_id")      # never "": tmux reads that as the ACTIVE pane
-        roots = [agent_manager.claude_pid(wid) if wid else None,
-                 (judge.live_judge_run(task) or {}).get("pid")]
+        roots = [_judge_agent_pid(run), (judge.live_judge_run(task) or {}).get("pid")]
         pids = procguard.process_tree([p for p in roots if isinstance(p, int)])
         if not pids:
             continue
