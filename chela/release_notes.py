@@ -278,8 +278,6 @@ def shipped_fragments(changelog_text: str, changelog_d: Path) -> list[Path]:
     has nothing to compare and is never called shipped here.
     """
     dated = _dated_text(changelog_text)
-    if not dated:
-        return []
     shipped = []
     for path in _fragment_paths(changelog_d):
         bullet = next((ln.strip() for ln in path.read_text(encoding="utf-8").splitlines()

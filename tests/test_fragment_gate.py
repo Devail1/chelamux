@@ -131,3 +131,13 @@ def test_a_fragment_without_a_bullet_is_never_called_shipped(tmp_path, monkeypat
     wt = _wt(tmp_path, monkeypatch, ())
     (wt / "changelog.d" / "CMX-5-x.md").write_text("### Added\n")      # in the dated text too
     assert dispatcher.check_changelog_fragments("cmx-88") == {"ok": True}
+
+
+@pytest.mark.parametrize("changelog", [RELEASED, None, "# Changelog\n\n## [Unreleased]\n"])
+def test_an_unreadable_fragment_fails_closed_even_before_any_release(tmp_path, monkeypatch,
+                                                                     changelog):
+    wt = _wt(tmp_path, monkeypatch, (), changelog=changelog)
+    (wt / "changelog.d" / "CMX-5-x.md").write_bytes(b"### Added\n\n- \xff\xfe bad\n")
+    out = dispatcher.check_changelog_fragments("cmx-88")
+    assert out["ok"] is False
+    assert out["error"].startswith("could not read this branch's changelog — ")
