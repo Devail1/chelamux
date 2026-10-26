@@ -48,9 +48,10 @@ OVER_STATUSES = ("done", "closed", "needs_human")
 TEST_RUNNERS = ("pytest", "py.test", "vitest")
 DETACHED_FLAG = "--detached-child"         # chela judge run --detach's own child
 DAEMON_MARKERS = ("God Daemon (",)         # argv[0] of a self-daemonizing proc: ppid 1 by design
-DAEMON_OWNER_FILE = "chela-tests-owner.pid"  # tests/conftest.py: the pytest that owns a PM2_HOME
 TMUX_ARG_FLAGS = ("-c", "-f", "-S", "-T")    # tmux's other global flags that take a value
 TEST_TMUX_SOCKET_RE = re.compile(r"chelatest-(\d+)-")  # a test's `tmux -L chelatest-<its pid>-…`
+SUITE_SCOPE_RE = re.compile(r"/(chela-suite-[0-9a-f]+)\.scope$")  # suite_guard.bounded's unit
+DAEMON_DO_NOT_KILL = "do not kill while a suite runs"
 FLEET_PAUSE_FILE = fleet.STATE_FILE_NAME  # CMX-214's `--pause --all` state
 
 _TEST_ID_RE = re.compile(r"[\w./-]+::[^\s,;]+")
@@ -95,6 +96,8 @@ class Sources:
         self.now = time.time() if now is None else now
         self.worktrees = self.chela_dir / "worktrees"
         self._environ: dict[int, dict[str, str] | None] = {}
+        self._scopes: dict[int, str | None] = {}
+        self.daemon_suspects: set[str] = set()   # CMX-353: this scan's, kept by record()
         self._fixes: dict[tuple, tuple[Path, str] | None] = {}
         self._trees: dict[tuple, set[str] | None] = {}
 
@@ -283,6 +286,20 @@ class Sources:
                                           for kv in raw.split(b"\0") if b"=" in kv)
         return self._environ[pid]
 
+    def suite_scope(self, pid: int) -> str | None:
+        """The ``chela-suite-<id>`` systemd scope the process runs in (its cgroup v2 path),
+        else None — also when unreadable. A child re-parented to 1 keeps its cgroup."""
+        if pid not in self._scopes:
+            try:
+                text = (self.proc_root / str(pid) / "cgroup").read_text()
+            except OSError:
+                text = ""
+            hits = [m.group(1) for line in text.splitlines()   # a removed cgroup: " (deleted)"
+                    if (m := SUITE_SCOPE_RE.search(
+                        line.split(":", 2)[-1].removesuffix(" (deleted)")))]
+            self._scopes[pid] = hits[0] if hits else None
+        return self._scopes[pid]
+
     def suite_timeout(self, proc: dict) -> float:
         """``judge.suite_timeout_seconds`` from the process's worktree WORKFLOW.md, else the
         judge's default."""
@@ -379,11 +396,41 @@ def _descends(src: Sources, pid: int, root: int) -> bool:
     return False
 
 
-def _daemon_leak(src: Sources, p: dict, wt: tuple[str, str]) -> str | None:
-    """CMX-273: why a self-daemonizing process (re-parented to 1 by design) is leaked anyway,
-    or None while a live process of its run still owns its ``PM2_HOME``: one that has it in
-    its environ, or the pytest the home's :data:`DAEMON_OWNER_FILE` names (a ``PM2_HOME`` that
-    conftest set after start-up is invisible in that pytest's ``/proc`` environ)."""
+def _runs_tests(argv: list[str]) -> bool:
+    """A test runner, or a python running one (``python …/bin/pytest -q``)."""
+    return _is_test_runner(argv) or (len(argv) > 1 and Path(argv[0]).name.startswith("python")
+                                     and Path(argv[1]).name in TEST_RUNNERS)
+
+
+def _suite_live(src: Sources, p: dict, wt: tuple[str, str]) -> bool:
+    """CMX-353: True while ANY suite of the daemon's run is live — decided by run, never by
+    ``PM2_HOME``: an xdist worker sets it after start-up, so its ``/proc`` environ never shows
+    it (the 10-26 false finding). A suite is live while a process that is not itself
+    orphaned shares the daemon's ``chela-suite-*`` scope, or runs the run's worktree inside
+    such a scope, or is a test run of that worktree."""
+    scope = src.suite_scope(p["pid"])
+    for q in src.procs:
+        if (q["pid"] == p["pid"] or q["ppid"] == 1 or _is_daemon(q["argv"])
+                or _descends(src, q["pid"], p["pid"])):
+            continue                              # orphans, daemons and its own children
+        theirs = src.suite_scope(q["pid"])
+        if scope is not None and theirs == scope:
+            return True
+        if src.worktree_of(q) == wt and (theirs is not None or _runs_tests(q["argv"])):
+            return True
+    return False
+
+
+def _daemon_leak(src: Sources, p: dict, wt: tuple[str, str], status: str | None) -> str | None:
+    """CMX-273: why a self-daemonizing process (re-parented to 1 by design) is leaked, or None
+    while it is not: any suite of its run is live (:func:`_suite_live`), or it is a
+    non-orphaned daemon of a run that is not over."""
+    if p["ppid"] != 1 and status not in OVER_STATUSES:
+        return None
+    if _suite_live(src, p, wt):
+        return None
+    if status in OVER_STATUSES:
+        return f"its run is {status}"
     env = src.environ(p["pid"])
     home = (env or {}).get("PM2_HOME")
     if not home:
@@ -391,20 +438,7 @@ def _daemon_leak(src: Sources, p: dict, wt: tuple[str, str]) -> str | None:
                 + ("environ is unreadable" if env is None else "environ has no PM2_HOME"))
     if not os.path.isdir(home):
         return f"its PM2_HOME {home} is gone"
-    limit = src.suite_timeout(p)
-    if p["age_s"] > limit:
-        return f"it is older than the suite timeout ({limit:.0f}s)"
-    try:
-        owner = int((Path(home) / DAEMON_OWNER_FILE).read_text().strip())
-    except (OSError, ValueError):
-        owner = None
-    for q in src.procs:
-        if _is_daemon(q["argv"]) or src.worktree_of(q) != wt or _descends(src, q["pid"], p["pid"]):
-            continue                              # a daemon, another run, or its own child
-        if ((q["pid"] == owner and q["start"] <= p["start"])    # a reused pid starts later
-                or (src.environ(q["pid"]) or {}).get("PM2_HOME") == home):
-            return None
-    return f"no live process of its run shares its PM2_HOME {home}"
+    return f"no suite of its run is live (PM2_HOME {home})"
 
 
 def _tmux_socket(argv: list[str]) -> str | None:
@@ -456,20 +490,35 @@ def _helper_leak(src: Sources, p: dict, wt: tuple[str, str]) -> str | None:
 def rule_leaked_proc(src: Sources, state: dict) -> list[dict]:
     """CMX-253: a process under a run/judge worktree whose run is over, or that was orphaned.
     A ``--detached-child`` judge is setsid'd ON PURPOSE, so ppid 1 alone is not a leak there;
-    nor for a self-daemonizing process (:func:`_daemon_leak`), nor for a live test's own
-    detached helper — its tmux server or a script it started (:func:`_helper_leak`).
+    nor for a live test's own detached helper — its tmux server or a script it started
+    (:func:`_helper_leak`). A self-daemonizing process (:func:`_daemon_leak`) is never one
+    while a suite of its run is live, and is reported only on its 2nd scan in a row
+    (CMX-353; ``state["daemons"]`` holds the previous scan's suspects).
     CMX-274: also a test run under a RUNNING agent older than its suite timeout — a runaway
     the hand-in reaper has not reached yet (2 xdist workers pinned for 1h38m)."""
-    out = []
+    out, seen = [], set(state.get("daemons") or [])
     for p in src.procs:
         wt = src.worktree_of(p)
         if not wt:
             continue
         status = src.runs.get(wt[0])
+        if _is_daemon(p["argv"]):
+            why = _daemon_leak(src, p, wt, status)
+            key = f"{p['pid']}:{p['start']}"
+            if why is not None:
+                src.daemon_suspects.add(key)
+            if why is not None and key in seen:  # CMX-353: on a 2nd scan in a row only
+                out.append(_finding(
+                    "leaked_proc", f"pid:{p['pid']}",
+                    f"pid {p['pid']} under {wt[1]} {wt[0]} is alive but {why} on "
+                    f"2 scans in a row — {DAEMON_DO_NOT_KILL}",
+                    pid=p["pid"], ppid=p["ppid"], task=wt[0], run_status=status,
+                    argv=p["argv"][:6], cwd=p["cwd"]))
+            continue
         orphan = p["ppid"] == 1 and DETACHED_FLAG not in p["argv"]
         why = "it is orphaned (ppid 1)"
         if orphan:
-            why = (_daemon_leak if _is_daemon(p["argv"]) else _helper_leak)(src, p, wt)
+            why = _helper_leak(src, p, wt)
             orphan = why is not None
         runaway = (wt[1] == "run" and status == "running" and _is_test_runner(p["argv"])
                    and p["age_s"] > src.suite_timeout(p))
@@ -651,8 +700,11 @@ def record(chela_dir: Path, result: dict, state: dict, src: Sources) -> list[dic
     cpu = ({f"{p['pid']}:{p['start']}": [now, p["cpu_s"]] for p in src.procs
             if _is_test_runner(p["argv"]) and src.worktree_of(p)}
            if "hung_test" in clean else state.get("cpu") or {})
+    daemons = (sorted(src.daemon_suspects) if "leaked_proc" in clean
+               else state.get("daemons") or [])
     tmp = out / "state.json.tmp"
-    tmp.write_text(json.dumps({"notified": notified, "sigs": sigs, "cpu": cpu}))
+    tmp.write_text(json.dumps({"notified": notified, "sigs": sigs, "cpu": cpu,
+                               "daemons": daemons}))
     os.replace(tmp, out / "state.json")
     return fresh
 
