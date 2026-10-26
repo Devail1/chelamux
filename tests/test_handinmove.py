@@ -441,3 +441,22 @@ def test_a_hand_in_with_no_since_never_reconciles(repo):
             patch.object(dispatcher, "reconcile_base_move") as rec:
         assert _task_finished() is None
     assert not rec.called
+
+
+@pytest.mark.parametrize("files, refused", [
+    ({"lib.py": "L = 1\n", "tests/test_lib.py": "import lib\n"}, True),   # related tests
+    ({"lib.py": "L = 1\n"}, True),                                       # full suite
+    ({"README.md": "moved\n"}, False)])                                  # no related test
+def test_no_suite_configured_refuses_whenever_a_test_must_run(repo, files, refused):
+    """CMX-334's held-out survivor: an unset ``judge.test_cmd`` with a NON-EMPTY related list
+    must refuse too, not only the full-suite (``None``) case."""
+    _advance(repo[0], files)
+    with patch.object(judge, "judge_test_cmd", return_value=""), \
+            patch.object(judge, "run_suite", return_value=GREEN) as suite:
+        out = _reconcile(repo)
+    assert not suite.called
+    if refused:
+        assert out == {"ok": False, "error": "the workflow sets no `judge.test_cmd` — "
+                                             "nothing to re-run after merging origin/dev"}
+    else:
+        assert out["ok"] and out["moved"]["tests"] == "0 file(s)"
