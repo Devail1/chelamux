@@ -1,0 +1,1 @@
+- Tests no longer inherit the live `CHELA_*` environment (e.g. `CHELA_AUTO_MERGE=true` from chela.env), which turned every nightly-sweep and agent-sweep baseline red (CMX-355).
