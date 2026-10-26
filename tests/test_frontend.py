@@ -183,7 +183,9 @@ def test_the_gates_are_the_ci_frontend_job_s_less_the_vitest_run_graded_above():
     steps = yaml.safe_load((ROOT / ".github/workflows/ci.yml").read_text())["jobs"]["frontend"]
     ci = [st["run"].removeprefix("pnpm -C chela/dashboard/frontend ") for st in steps["steps"]
           if st.get("run", "").startswith("pnpm -C chela/dashboard/frontend ")]
-    assert ci == ["typecheck", "lint", "lint:boundaries", "test"]
+    assert ci == ["typecheck", "lint", "lint:boundaries", "test"], (
+        f"the CI frontend job's pnpm gates changed to {ci}: grade each new one in GATES "
+        "(or, if it is another full Vitest run, say why not) and update this list")
     assert GATES == ["typecheck", "lint", "lint:boundaries"]
     assert json.loads(PACKAGE_JSON.read_text())["scripts"]["test"] == "vitest run"
 
