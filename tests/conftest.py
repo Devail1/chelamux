@@ -63,7 +63,15 @@ from pathlib import Path
 
 import pytest
 
-import memory_cap
+# CMX-354: the helper sits beside this file. pytest puts tests/ on sys.path before it loads
+# conftest, but `import tests.conftest` (a test does) does not, so put it there ourselves.
+# A test that execs this source from a scratch dir has neither; that copy runs uncapped.
+if str(Path(__file__).resolve().parent) not in sys.path:
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+try:
+    import memory_cap
+except ModuleNotFoundError:
+    memory_cap = None
 
 # CMX-281: tests/ has no __init__.py, so pytest imports this file as the top-level module
 # ``conftest``. Importing it as ``tests.conftest`` as well runs everything below a SECOND
@@ -911,6 +919,8 @@ def pytest_sessionstart(session):
     """CMX-354: cap the memory of every process that runs tests, unless a ``chela-suite-*``
     / ``memcap`` cgroup already caps it (see ``tests/memory_cap.py``). The xdist controller
     runs no tests, so it only prints the one line; each worker caps itself."""
+    if memory_cap is None:
+        return
     config = session.config
     cap = memory_cap.wanted_cap()
     if not cap:
