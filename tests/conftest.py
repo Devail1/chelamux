@@ -102,9 +102,11 @@ _EXEMPT: tuple[Path, ...] = tuple(d / "worktrees" for d in REAL_CHELA_DIRS)
 # shell (task-finished, judge sweep). CHELA_AUTO_MERGE=true alone turned
 # test_automerge::test_disabled_by_default red, so every sweep baseline read CANNOT VERIFY.
 # Drop every inherited CHELA_* var except the ones a suite runner sets on purpose; a test
-# that needs one sets it itself. After the REAL_* capture above, which must still see an
-# exported CHELA_DIR.
-SUITE_RUNNER_CHELA_VARS: frozenset[str] = frozenset({"CHELA_ENV_FILE", "CHELA_REQUIRE_JS_TESTS"})
+# that needs one sets it itself. CHELA_DIR is kept: the redirect below overwrites it, and
+# _refuse_real_chela_dir must still see an exported one if that redirect is ever disabled
+# (test_isolation's end-to-end check).
+SUITE_RUNNER_CHELA_VARS: frozenset[str] = frozenset({"CHELA_DIR", "CHELA_ENV_FILE",
+                                                     "CHELA_REQUIRE_JS_TESTS"})
 SCRUBBED_CHELA_VARS: tuple[str, ...] = tuple(sorted(
     k for k in os.environ if k.startswith("CHELA_") and k not in SUITE_RUNNER_CHELA_VARS))
 for _k in SCRUBBED_CHELA_VARS:
