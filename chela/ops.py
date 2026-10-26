@@ -51,7 +51,6 @@ DAEMON_MARKERS = ("God Daemon (",)         # argv[0] of a self-daemonizing proc:
 TMUX_ARG_FLAGS = ("-c", "-f", "-S", "-T")    # tmux's other global flags that take a value
 TEST_TMUX_SOCKET_RE = re.compile(r"chelatest-(\d+)-")  # a test's `tmux -L chelatest-<its pid>-…`
 SUITE_SCOPE_RE = re.compile(r"/(chela-suite-[0-9a-f]+)\.scope$")  # suite_guard.bounded's unit
-DAEMON_PERSIST_SCANS = 2                   # CMX-353: a daemon is a leak on its 2nd scan in a row
 DAEMON_DO_NOT_KILL = "do not kill while a suite runs"
 FLEET_PAUSE_FILE = fleet.STATE_FILE_NAME  # CMX-214's `--pause --all` state
 
@@ -295,8 +294,9 @@ class Sources:
                 text = (self.proc_root / str(pid) / "cgroup").read_text()
             except OSError:
                 text = ""
-            hits = [m.group(1) for line in text.splitlines()
-                    if (m := SUITE_SCOPE_RE.search(line.split(":", 2)[-1]))]
+            hits = [m.group(1) for line in text.splitlines()   # a removed cgroup: " (deleted)"
+                    if (m := SUITE_SCOPE_RE.search(
+                        line.split(":", 2)[-1].removesuffix(" (deleted)")))]
             self._scopes[pid] = hits[0] if hits else None
         return self._scopes[pid]
 
@@ -397,8 +397,9 @@ def _descends(src: Sources, pid: int, root: int) -> bool:
 
 
 def _runs_tests(argv: list[str]) -> bool:
-    """A test runner, or an interpreter running one (``python …/bin/pytest -q``)."""
-    return _is_test_runner(argv) or (len(argv) > 1 and Path(argv[1]).name in TEST_RUNNERS)
+    """A test runner, or a python running one (``python …/bin/pytest -q``)."""
+    return _is_test_runner(argv) or (len(argv) > 1 and Path(argv[0]).name.startswith("python")
+                                     and Path(argv[1]).name in TEST_RUNNERS)
 
 
 def _suite_live(src: Sources, p: dict, wt: tuple[str, str]) -> bool:
@@ -424,12 +425,12 @@ def _daemon_leak(src: Sources, p: dict, wt: tuple[str, str], status: str | None)
     """CMX-273: why a self-daemonizing process (re-parented to 1 by design) is leaked, or None
     while it is not: any suite of its run is live (:func:`_suite_live`), or it is a
     non-orphaned daemon of a run that is not over."""
+    if p["ppid"] != 1 and status not in OVER_STATUSES:
+        return None
     if _suite_live(src, p, wt):
         return None
     if status in OVER_STATUSES:
         return f"its run is {status}"
-    if p["ppid"] != 1:
-        return None
     env = src.environ(p["pid"])
     home = (env or {}).get("PM2_HOME")
     if not home:
@@ -510,7 +511,7 @@ def rule_leaked_proc(src: Sources, state: dict) -> list[dict]:
                 out.append(_finding(
                     "leaked_proc", f"pid:{p['pid']}",
                     f"pid {p['pid']} under {wt[1]} {wt[0]} is alive but {why} on "
-                    f"{DAEMON_PERSIST_SCANS} scans in a row — {DAEMON_DO_NOT_KILL}",
+                    f"2 scans in a row — {DAEMON_DO_NOT_KILL}",
                     pid=p["pid"], ppid=p["ppid"], task=wt[0], run_status=status,
                     argv=p["argv"][:6], cwd=p["cwd"]))
             continue

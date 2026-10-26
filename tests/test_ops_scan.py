@@ -276,6 +276,8 @@ def test_a_reused_pid_is_not_the_previous_scans_suspect(env, pm2):
     (dict(argv=["python", "-m", "pytest"]), True),
     (dict(argv=["python", "x"]), False),                       # no scope, not a test run
     (dict(argv=["python", "/v/pytest.py"]), False),            # pytest.py is not pytest
+    (dict(argv=["python3.13", "/v/bin/vitest"]), True),
+    (dict(argv=["vim", "pytest"]), False),                     # not a python running it
     (dict(argv=["/v/bin/pytest"], cwd="CMX-2"), False),        # another run's test
     (dict(argv=["/v/bin/pytest"], cwd="judge-CMX-1"), False),  # its judge's, not the run's
     (dict(cgroup=cg(SCOPE), ppid=1), False),                   # an orphan shares nothing
@@ -306,6 +308,8 @@ def test_a_daemon_outside_any_scope_is_not_live_by_a_scoped_stranger(env, pm2):
     (cg(SCOPE), SCOPE),
     (f"12:memory:/app.slice/{SCOPE}.scope\n0::/x.scope\n", SCOPE),   # cgroup v1 lines too
     ("0::/app.slice/chela-suite-1f78.scope", "chela-suite-1f78"),    # no trailing newline
+    ("0::/app.slice/chela-suite-1f78.scope (deleted)\n", "chela-suite-1f78"),  # removed cgroup
+    ("0::/app.slice/chela-suite-1f78.scope (gone)\n", None),
     ("0::/app.slice/xchela-suite-1f78.scope\n", None),               # anchored at a /
     ("0::/app.slice/chela-suite-1f78.scope/sub\n", None),            # the scope itself
     ("0::/app.slice/chela-suite-1F78.scope\n", None),                # hex is lowercase
