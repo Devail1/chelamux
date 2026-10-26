@@ -25,12 +25,14 @@ def digest():
              "event": "opened", "ts": 3}], "total": 2},
         "sessions": {"items": [{
             "wid": "@3", "recap": "working on CMX-5",
-            "prompts": {"items": [{"ts": 1, "text": "Start on   CMX-8 please"}], "total": 1},
+            "prompts": {"items": [{"ts": 1, "text": "Start on   CMX-8 please"},
+                                  {"ts": 2, "text": "tidy the build scripts, then the parser"}],
+                        "total": 2},
             "edits": {"items": ["chela/parser.py"], "total": 1}}], "total": 1},
         "board": {"items": [
-            {"id": "CMX-5", "title": "parser", "state": "Todo"},
+            {"id": "CMX-5", "title": "Parser", "state": "Todo"},
             {"id": "CMX-6", "title": "export", "state": "In Progress"},
-            {"id": "CMX-7", "title": "docs", "state": "In Progress"},
+            {"id": "CMX-7", "title": "documentation", "state": "In Progress"},
             {"id": "CMX-8", "title": "backlog item", "state": "Backlog"},
             {"id": "CMX-9", "title": "reviewing", "state": "In Review"},
             {"id": "CMX-10", "title": "telemetry", "state": "In Progress"},
@@ -85,7 +87,8 @@ INVALID = [
      "CMX-8 is Backlog, not In Progress: only started work can be stale"),
     ({"issue": "CMX-9", "action": "flag_stale", "evidence": [COMMIT]},
      "CMX-9 is In Review, not In Progress: only started work can be stale"),
-    # In Progress, but the window names it: by id (a PR, a commit) or by a title word.
+    # In Progress, but the window names it: by id alone (no title word of CMX-7 is in
+    # PR #42), or by a title word.
     ({"issue": "CMX-7", "action": "flag_stale", "evidence": [COMMIT]},
      "CMX-7 is not stale: pr:#42 names it"),
     ({"issue": "CMX-6", "action": "flag_stale", "evidence": [COMMIT]},
@@ -138,6 +141,60 @@ def test_only_valid_proposals_survive():
         ("CMX-7", "comment"), ("CMX-10", "flag_stale"), ("", "new_backlog_issue"),
         ("CMX-5", "in_progress"), ("CMX-5", "in_progress"), ("CMX-7", "comment")]
     assert [d["reason"] for d in dropped] == [why for _, why in INVALID if why]
+
+
+STALE = {"issue": "CMX-10", "action": "flag_stale", "evidence": [COMMIT]}
+
+
+@pytest.mark.parametrize("kind,ref,text", [
+    ("commit", "abc1234567", "CMX-10: wire the parser"),
+    ("pr", "#41", "CMX-10: ship it"),
+    ("prompt", "@3.p1", "pick up cmx-10 again"),
+    ("edit", "@3.e1", "notes/cmx-10.md"),
+])
+@pytest.mark.parametrize("by", ["id", "title word"])
+def test_flag_stale_is_refused_when_any_item_names_the_issue(kind, ref, text, by):
+    """Each way of naming an issue, ALONE, keeps it from being stale: the id with no title
+    word (CMX-10 is "telemetry"), and the title word with no id — in every kind of item."""
+    if by == "title word":
+        text = text.lower().replace("cmx-10", "telemetry")
+    d = digest()
+    items = {"commit": d["commits"]["items"][0], "pr": d["prs"]["items"][0]}
+    if kind in items:
+        items[kind]["subject" if kind == "commit" else "title"] = text
+    else:
+        d["sessions"]["items"][0][kind + "s"]["items"][0] = (
+            {"ts": 1, "text": text} if kind == "prompt" else text)
+    kept, dropped = keeper_run.validate([STALE], d)
+    assert kept == []
+    assert [x["reason"] for x in dropped] == [f"CMX-10 is not stale: {kind}:{ref} names it"]
+    assert keeper_run.validate([STALE], digest())[0] == [STALE]       # and unnamed, it is stale
+
+
+def test_a_title_word_counts_only_when_it_is_in_the_quote():
+    """@3.p2 holds "parser" (CMX-5's title), but only outside the quoted fragment."""
+    off = {"issue": "CMX-5", "action": "in_progress",
+           "evidence": [ev("prompt", "@3.p2", "tidy the build scripts")]}
+    on = {"issue": "CMX-5", "action": "in_progress",
+          "evidence": [ev("prompt", "@3.p2", "then the parser")]}
+    kept, dropped = keeper_run.validate([off, on], digest())
+    assert kept == [on]
+    assert [x["reason"] for x in dropped] == ["evidence_unrelated: prompt:@3.p2 is not about CMX-5"]
+
+
+@pytest.mark.parametrize("title,about", [
+    ("a fix for the cli", False),     # every word is under KEYWORD_MIN_CHARS: "the" is quoted
+    ("the wire", True),               # "wire" is exactly KEYWORD_MIN_CHARS long
+    ("WIRE", True),                   # case does not matter
+])
+def test_only_title_words_of_keyword_length_make_an_item_about_the_issue(title, about):
+    d = digest()
+    d["board"]["items"][3]["title"] = title                     # CMX-8; COMMIT names CMX-5
+    p = {"issue": "CMX-8", "action": "in_progress", "evidence": [COMMIT]}
+    kept, dropped = keeper_run.validate([p], d)
+    assert kept == ([p] if about else [])
+    assert [x["reason"] for x in dropped] == (
+        [] if about else ["evidence_unrelated: commit:abc1234567 is not about CMX-8"])
 
 
 def test_a_short_item_is_quoted_whole():
