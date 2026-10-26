@@ -94,6 +94,9 @@ ACTIVE_STATUSES = ("claimed", "running")
 # ⏹️⚖️ CMX-286: where a send-back (conflict, CI red, request-changes) leaves a run — and the
 # rework it re-spawns. A judge still running there is grading a head that can never merge.
 SENT_BACK_STATUSES = ("changes_requested", *ACTIVE_STATUSES)
+# ⏹️⚖️ CMX-340: a run that left review for good (merged, overridden, closed, failed). Its
+# judge's window id is no one's to signal: a fleet pause never freezes one of these.
+TERMINAL_STATUSES = ("done", "closed", "failed")
 
 # A PR is open and the verdict is out of the agent's hands. `changes_requested` is a
 # rework the dispatcher will pick up; `needs_human` is a rework that hit the cap and
@@ -6867,7 +6870,7 @@ def tick(workflow_path: str | Path) -> dict:
         # was, and a human is told why.
         # ⏹️⚖️ CMX-286: FIRST, stop a judge whose run was sent back (1c above, or a human)
         # or whose head moved — else the watchdog below holds its slot up to its wall.
-        summary["judge_cancelled"] = _cancel_moot_judges(conn, wf)
+        summary["judge_cancelled"] = _cancel_moot_judges(conn, wf, live_windows)
         summary["judge_lost"] = _judge_watchdog(conn, wf, live_windows)
 
         # 1e′. ⚖️🧊 CMX-253: a `cannot_verify` that SPENT its retry budget on the CURRENT
@@ -9044,16 +9047,21 @@ JUDGE_RETRY_MESSAGE = ("resume: a fleet pause froze you mid-call, so your last m
                        "call failed. Retry it once and continue; it is not a verdict.")
 
 
-def _cancel_moot_judges(conn: sqlite3.Connection, wf: WorkflowDef) -> int:
+def _cancel_moot_judges(conn: sqlite3.Connection, wf: WorkflowDef,
+                        live_windows: set[str] | frozenset[str] = frozenset()) -> int:
     """⏹️⚖️ CMX-286: stop every live judge whose round can no longer produce a usable verdict.
 
     Seen twice on 10-19/20: CMX-264's conflict handling sent a PR back while its judge kept
     running on the obsolete head — the watchdog's "still alive — holding" kept one of the
     judge slots for up to an hour, and the first ended ``cannot_verify … run already moved
     to running``. A round is moot once its run is in :data:`SENT_BACK_STATUSES`, or is still
-    under review on a head other than the one judged (both shas known). The row is CAS'd to
-    ``cancelled`` on THIS round first (a verdict that landed meanwhile is left alone), which
-    frees the slot and announces nothing; then the round-end reaper the watchdog uses runs:
+    under review on a head other than the one judged (both shas known), or (CMX-340) has left
+    review for good (:data:`TERMINAL_STATUSES`) and its judge is gone: no live run, and no
+    judge window in ``live_windows`` (an agent not yet at ``--detach``). The row is CAS'd
+    to ``cancelled`` on THIS round first (a verdict that landed meanwhile is left alone),
+    which frees the slot and announces nothing, and its ``judge_window_id`` (and epoch) is
+    cleared: tmux may give that id to another window (CMX-340). Then the round-end reaper the
+    watchdog uses runs:
     window, detached run (:func:`judge.cancel_judge_run`), worktree. A launch still in flight
     in another process is left to it — the next tick sees its run. Returns how many."""
     cancelled = 0
@@ -9065,6 +9073,12 @@ def _cancel_moot_judges(conn: sqlite3.Connection, wf: WorkflowDef) -> int:
         judged, head = row["judge_sha"], row["pr_head_sha"]
         if status in SENT_BACK_STATUSES:
             reason = f"its run was sent back (now {status!r})"
+        elif (status in TERMINAL_STATUSES
+              and judge.judge_window_name(row["branch_name"] or "") not in live_windows
+              and judge.live_judge_run(task_id, judge.judge_worktree_path(wf, task_id)) is None):
+            # A LIVE judge here is left to finish: on a merged PR it may still record a
+            # CMX-239 blocked-race verdict. A dead one only leaves a stale row behind.
+            reason = f"its run left review (now {status!r}) and its judge is gone"
         elif status == "awaiting_review" and judged and head and judged != head:
             reason = f"its PR head moved ({judged[:12]} → {head[:12]})"
         else:
@@ -9072,7 +9086,8 @@ def _cancel_moot_judges(conn: sqlite3.Connection, wf: WorkflowDef) -> int:
         if _judge_launch_owner(row) is not None and not _judge_launch_interrupted(row):
             continue
         cur = conn.execute(
-            "UPDATE runs SET judge_state=?, judge_detail=?, judge_launch_owner=NULL "
+            "UPDATE runs SET judge_state=?, judge_detail=?, judge_launch_owner=NULL, "
+            "judge_window_id=NULL, judge_window_epoch=NULL "
             "WHERE task_id=? AND judge_state=? AND judge_started_at IS ?",
             (judge.J_CANCELLED, f"judge cancelled: {reason}", task_id, judge.J_RUNNING,
              row["judge_started_at"]),

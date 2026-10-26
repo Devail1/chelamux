@@ -5,14 +5,26 @@ from __future__ import annotations
 
 import signal
 import time
+from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
-from chela import agent_manager, dispatcher, fleet, judge, procguard
+from chela import agent_manager, dispatcher, epoch, fleet, judge, procguard, sessions, workflow
 from tests.test_judge_classifier_outage import projects  # noqa: F401, F811
 from tests.test_judge_wall import MIN, _judging_run, _own_runs_db, _st, _watch  # noqa: F401
 
 TREE = {10: 1, 11: 10, 12: 11, 20: 1, 21: 20, 99: 1}     # claude 10, run 20, 99 unrelated
+
+
+def _judge_identity(monkeypatch, tmp_path, cwds):
+    """This tmux server is epoch ``e1``; every workflow's judge worktree is ``wt/judge-<task>``."""
+    monkeypatch.setattr(epoch, "current", lambda: "e1")
+    monkeypatch.setattr(workflow, "load_workflow_cached",
+                        lambda p: SimpleNamespace(workflow=SimpleNamespace(path=Path(p))))
+    monkeypatch.setattr(judge, "judge_worktree_path",
+                        lambda wf, task: (tmp_path / "wt" / f"judge-{task}").resolve())
+    monkeypatch.setattr(sessions, "_proc_cwd", lambda pid: str(cwds[pid]) if pid in cwds else None)
 
 
 @pytest.fixture
@@ -27,12 +39,14 @@ def world(tmp_path, monkeypatch):
         calls.append((pid, sig, judge.read_freeze("T1")["intervals"][-1][1] is None))
 
     runs = [{"task_id": "T1", "status": "awaiting_review", "judge_state": judge.J_RUNNING,
-             "judge_window_id": "@7", "judge_started_at": "r1"},
+             "judge_window_id": "@7", "judge_started_at": "r1", "judge_window_epoch": "e1",
+             "workflow_path": str(tmp_path / "WORKFLOW.md")},
             {"task_id": "T2", "status": "awaiting_review", "judge_state": "clean"},
             {"task_id": "T3", "judge_state": judge.J_RUNNING}]       # no window, no pids
     monkeypatch.setattr(dispatcher, "list_runs", lambda: runs)
     monkeypatch.setattr(procguard, "_ppids", lambda: dict(TREE))
     monkeypatch.setattr(agent_manager, "claude_pid", lambda wid: {"@7": 10}[wid])
+    _judge_identity(monkeypatch, tmp_path, {10: tmp_path / "wt" / "judge-T1"})
     monkeypatch.setattr(judge, "live_judge_run", lambda task: {"T1": {"pid": 20}, "T2": {"pid": 99}}.get(task))
     monkeypatch.setattr(fleet.os, "kill", kill)
     monkeypatch.setattr(fleet.inbox, "_selfcheck_scan", lambda: [])
