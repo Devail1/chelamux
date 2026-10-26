@@ -13,7 +13,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path, PurePosixPath
 from typing import NamedTuple
 
-from chela import basesync, concurrency, critic, envutil, epoch, event_log, fleet, flaky, generated, handinmove, hold, judge, memcap, mergegate, reviewgate, risktier, sizegate, sweep, verdictcarry
+from chela import basesync, concurrency, critic, envutil, epoch, event_log, fleet, flaky, generated, handinmove, hold, judge, memcap, mergegate, release_notes, reviewgate, risktier, sizegate, sweep, verdictcarry
 from chela.config import (
     CHELA_DIR,
     TMUX_SESSION,
@@ -3339,6 +3339,29 @@ def check_hand_in_size(task_id: str, oversize_reason: str | None = None,
     return {"ok": False, "error": (
         f"this branch changes {lines} lines (limit {limit}; docs/media excluded). Split it "
         "into ≤-limit PRs (--split-plan); only if it truly cannot be split, pass --oversize-reason '<why>'.")}
+
+
+def check_changelog_fragments(task_id: str) -> dict:
+    """📝 CMX-356: refuse a bare ``changelog.d/CMX-<id>.md`` whose id already shipped in a
+    dated ``CHANGELOG.md`` section of the run's own worktree — before any suite runs, with a
+    rename hint. The suite's repo-hygiene test fails on the same file, but only after a full
+    run and with no word about renaming. ``{"ok"}`` or ``{"ok": False, "error"}``; a read
+    that fails refuses, since unknown is not checked."""
+    with _db() as conn:
+        row = conn.execute("SELECT * FROM runs WHERE task_id=?", (task_id,)).fetchone()
+    if row is None or not row["worktree_path"]:
+        return {"ok": False, "error": f"no run with a worktree on record for {task_id}"}
+    worktree = Path(row["worktree_path"])
+    changelog = worktree / "CHANGELOG.md"
+    try:
+        text = changelog.read_text() if changelog.exists() else ""
+        stale = release_notes.stale_fragments(text, worktree / "changelog.d")
+    except (OSError, ValueError) as e:
+        return {"ok": False, "error": f"could not read this branch's changelog — {e}. "
+                                      "Unknown is not checked."}
+    if stale:
+        return {"ok": False, "error": release_notes.rename_hint(stale)}
+    return {"ok": True}
 
 
 def check_review_section(task_id: str, no_review_reason: str | None = None) -> dict:

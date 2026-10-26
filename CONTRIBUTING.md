@@ -69,8 +69,9 @@ its own corruption. Write guards that would catch you.
   message is composed from the branch's commit messages, so strip it at merge time
   (`gh pr merge --squash --body …`) if a branch carries one.
 - **Add a changelog fragment.** Any user-facing change adds a new file under
-  [`changelog.d/`](changelog.d/README.md), named `CMX-<your-task-id>.md`, with a Keep a
-  Changelog category heading (Added / Changed / Fixed) and the PR number — see that
+  [`changelog.d/`](changelog.d/README.md), named `CMX-<your-task-id>-<slug>.md` (slug from
+  your branch; never a bare `CMX-<id>.md`, which collides with an old released task of the
+  same number), with a Keep a Changelog category heading (Added / Changed / Fixed) and the PR number — see that
   directory's README for the exact format. **Never edit [CHANGELOG.md](CHANGELOG.md)
   directly**: every dispatched branch used to append to the same `## [Unreleased]`
   section, which collided on that exact spot the moment two branches were open at once —

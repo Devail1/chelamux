@@ -264,6 +264,23 @@ def stale_fragments(changelog_text: str, changelog_d: Path) -> list[Path]:
     return stale
 
 
+def rename_hint(stale: list[Path]) -> str:
+    """CMX-356: the refusal for a bare `CMX-<id>.md` whose id already shipped.
+
+    Issue numbering restarted, so a NEW task routinely reuses the number of an old,
+    released one (the old series ran to about CMX-391) and its bare-named fragment
+    reads as stale. A slugged name, `CMX-<id>-<slug>.md`, is never matched by
+    `_FRAGMENT_NAME`, so renaming is the whole fix for a new fragment.
+    """
+    names = ", ".join(f"changelog.d/{p.name}" for p in stale)
+    first = stale[0].name
+    return (f"{names} already appear(s) in a dated CHANGELOG.md section — an older task "
+            "shipped under the same number. If the fragment is yours, rename it to "
+            "`changelog.d/CMX-<id>-<slug>.md` (slug from your branch name), e.g. "
+            f"`git mv changelog.d/{first} changelog.d/{first[:-3]}-<slug>.md`. If it "
+            "really shipped, back-merge `main` so the release's fragment deletions arrive.")
+
+
 def promote_unreleased(changelog_text: str, version: str, date: str, changelog_d: Path) -> str:
     """Return `changelog_text` with the CURRENT `## [Unreleased]` body, plus every
     fragment under `changelog_d`, promoted into a new `## [version] — date` section

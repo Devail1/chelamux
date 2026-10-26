@@ -2506,6 +2506,11 @@ def cmd_task_finished(args) -> None:
     if not sync.get("ok"):
         print(f"task-finished: 🔀 {sync['error']}")
         sys.exit(1)
+    # 📝 CMX-356: a bare fragment name that collides with a released id — a file read.
+    fragments = dispatcher.check_changelog_fragments(args.task_id)
+    if not fragments.get("ok"):
+        print(f"task-finished: 📝 {fragments['error']}")
+        sys.exit(1)
     # 📏 CMX-126: the size gate runs FIRST — an oversized diff is refused before its sweep.
     size = dispatcher.check_hand_in_size(args.task_id, getattr(args, "oversize_reason", None),
                                          getattr(args, "split_plan", None))
