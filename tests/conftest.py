@@ -97,6 +97,19 @@ REAL_CLAUDE_DIR: Path = Path.home() / ".claude"
 # not the bug.
 _EXEMPT: tuple[Path, ...] = tuple(d / "worktrees" for d in REAL_CHELA_DIRS)
 
+# CMX-355: CHELA_ENV_FILE="" keeps chela.env from being *read*, but every process that runs
+# the suite on a live machine already *exported* it: the daemon (nightly sweep), each agent's
+# shell (task-finished, judge sweep). CHELA_AUTO_MERGE=true alone turned
+# test_automerge::test_disabled_by_default red, so every sweep baseline read CANNOT VERIFY.
+# Drop every inherited CHELA_* var except the ones a suite runner sets on purpose; a test
+# that needs one sets it itself. After the REAL_* capture above, which must still see an
+# exported CHELA_DIR.
+SUITE_RUNNER_CHELA_VARS: frozenset[str] = frozenset({"CHELA_ENV_FILE", "CHELA_REQUIRE_JS_TESTS"})
+SCRUBBED_CHELA_VARS: tuple[str, ...] = tuple(sorted(
+    k for k in os.environ if k.startswith("CHELA_") and k not in SUITE_RUNNER_CHELA_VARS))
+for _k in SCRUBBED_CHELA_VARS:
+    del os.environ[_k]
+
 # What every import-time latch (dispatcher.DB_PATH, scheduler.DB_PATH, launcher._STORE,
 # config.CONTEXT_CACHE_DIR …) resolves against. Per-test dirs come from the fixture below;
 # this one exists because those latches happen before any fixture can run.
