@@ -40,6 +40,7 @@ from chela import (
     hooks,
     inbox,
     judge,
+    keeper,
     launcher,
     malloc_arenas,
     messenger,
@@ -3223,6 +3224,22 @@ def cmd_ops_scan(args) -> None:
     print(json.dumps(result, indent=2) if args.json else ops.render(result))
 
 
+def cmd_keeper_digest(args) -> None:
+    """CMX-346: what happened in a workflow's repo since the last digest (no LLM, no writes
+    to the tracker). Exit 2 on an unreadable workflow or a bad `--since`."""
+    try:
+        wf = workflow.load_workflow(args.workflow)
+    except Exception as e:  # noqa: BLE001 — a WORKFLOW.md that does not parse
+        print(f"keeper digest: {args.workflow} could not be read: {e}", file=sys.stderr)
+        sys.exit(2)
+    try:
+        since = keeper.parse_since(args.since) if args.since else None
+    except ValueError as e:
+        print(f"keeper digest: {e}", file=sys.stderr)
+        sys.exit(2)
+    print(keeper.run(wf, since=since, as_json=args.json), end="")
+
+
 def cmd_judge_ack_blocked_race(args) -> None:
     """🧊 CMX-336: acknowledge a `J_BLOCKED_RACE` row that can never resolve the ordinary
     way (the PR is merged or closed, so nothing will ever push a new head past the judged
@@ -4264,6 +4281,17 @@ def main() -> None:
         "--notify", action="store_true",
         help="What the daemon runs: also append to $CHELA_DIR/ops/findings.jsonl and queue "
              "ONE inbox notice for new findings")
+    p_keeper = sub.add_parser("keeper", help="Keeper mode: keep a workflow's board aligned")
+    keeper_sub = p_keeper.add_subparsers(dest="keeper_cmd", required=True)
+    p_kdigest = keeper_sub.add_parser(
+        "digest", help="What happened in the workflow's repo since the last digest "
+                       "(sessions, prompts, edits, commits, PRs, the open board). No LLM")
+    p_kdigest.add_argument("workflow", help="Path to the WORKFLOW.md")
+    p_kdigest.add_argument(
+        "--since", metavar="DURATION",
+        help="Look back this far (600, 90m, 2h, 1d) instead of from the stored cursor "
+             "(default with no cursor: 60m)")
+    p_kdigest.add_argument("--json", action="store_true", help="Machine-readable output")
     p_jack = judge_sub.add_parser(
         "ack-blocked-race",
         help="🧊 Acknowledge a blocked_race verdict that can never resolve on its own "
@@ -4777,6 +4805,8 @@ def main() -> None:
             p_judge.print_help()
     elif args.command == "ops":
         cmd_ops_scan(args)
+    elif args.command == "keeper":
+        cmd_keeper_digest(args)
     elif args.command == "adopt":
         cmd_adopt(args)
     elif args.command == "merge":
