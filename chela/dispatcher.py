@@ -3342,10 +3342,12 @@ def check_hand_in_size(task_id: str, oversize_reason: str | None = None,
 
 
 def check_changelog_fragments(task_id: str) -> dict:
-    """📝 CMX-356: refuse a bare ``changelog.d/CMX-<id>.md`` whose id already shipped in a
-    dated ``CHANGELOG.md`` section of the run's own worktree — before any suite runs, with a
-    rename hint. The suite's repo-hygiene test fails on the same file, but only after a full
-    run and with no word about renaming. ``{"ok"}`` or ``{"ok": False, "error"}``; a read
+    """📝 CMX-356: refuse a fragment that cannot ship (see
+    :func:`release_notes.fragment_problems`) — a bare ``changelog.d/CMX-<id>.md`` whose id
+    collides with an old, released task (rename it), or one whose text already shipped
+    (delete it) — read from the run's own worktree, before any suite runs. The suite's
+    repo-hygiene test fails on the same file, but only after a full run and with no word
+    about which fix applies. ``{"ok"}`` or ``{"ok": False, "error"}``; a read
     that fails refuses, since unknown is not checked."""
     with _db() as conn:
         row = conn.execute("SELECT * FROM runs WHERE task_id=?", (task_id,)).fetchone()
@@ -3354,13 +3356,13 @@ def check_changelog_fragments(task_id: str) -> dict:
     worktree = Path(row["worktree_path"])
     changelog = worktree / "CHANGELOG.md"
     try:
-        text = changelog.read_text() if changelog.exists() else ""
-        stale = release_notes.stale_fragments(text, worktree / "changelog.d")
+        text = changelog.read_text(encoding="utf-8") if changelog.exists() else ""
+        problems = release_notes.fragment_problems(text, worktree / "changelog.d")
     except (OSError, ValueError) as e:
         return {"ok": False, "error": f"could not read this branch's changelog — {e}. "
                                       "Unknown is not checked."}
-    if stale:
-        return {"ok": False, "error": release_notes.rename_hint(stale)}
+    if problems:
+        return {"ok": False, "error": problems}
     return {"ok": True}
 
 

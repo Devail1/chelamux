@@ -5,4 +5,5 @@
   that already shipped, and its bare `changelog.d/CMX-<id>.md` read as an already-released
   fragment. Fragments are now named `CMX-<id>-<slug>.md` (slug from the branch), and
   `chela task-finished` refuses a bare name that collides before any suite runs, with a
-  rename hint. (CMX-356)
+  rename hint. A fragment whose text already shipped (bare or slugged) is told to go
+  instead: renaming it would only hide it until it republishes. (CMX-356)
