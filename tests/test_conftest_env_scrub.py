@@ -10,7 +10,7 @@ ROOT = Path(__file__).resolve().parent.parent
 def _run_canary(extra_env):
     env = {"HOME": os.environ["HOME"], "PATH": os.environ["PATH"], **extra_env}
     probe = ("import os, conftest, json; print(json.dumps({k: os.environ.get(k) for k in "
-             "('CHELA_AUTO_MERGE', 'CHELA_JUDGE_MAX_CONCURRENT', 'CHELA_REQUIRE_JS_TESTS')}))")
+             "('CHELA_AUTO_MERGE', 'CHELA_JUDGE_MAX_CONCURRENT', 'CHELA_REQUIRE_JS_TESTS', 'CHELA_TEST_MEMORY_CAP')}))")
     out = subprocess.run([sys.executable, "-c", probe], cwd=ROOT / "tests", env=env,
                          capture_output=True, text=True, timeout=60)
     assert out.returncode == 0, out.stderr[-2000:]
@@ -20,9 +20,9 @@ def _run_canary(extra_env):
 
 def test_live_chela_env_is_scrubbed_but_the_runner_allowlist_survives():
     seen = _run_canary({"CHELA_AUTO_MERGE": "true", "CHELA_JUDGE_MAX_CONCURRENT": "2",
-                        "CHELA_REQUIRE_JS_TESTS": "1"})
+                        "CHELA_REQUIRE_JS_TESTS": "1", "CHELA_TEST_MEMORY_CAP": "2G"})
     assert seen == {"CHELA_AUTO_MERGE": None, "CHELA_JUDGE_MAX_CONCURRENT": None,
-                    "CHELA_REQUIRE_JS_TESTS": "1"}
+                    "CHELA_REQUIRE_JS_TESTS": "1", "CHELA_TEST_MEMORY_CAP": "2G"}
 
 
 def test_automerge_default_holds_under_a_live_env():

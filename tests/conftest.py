@@ -118,7 +118,8 @@ _EXEMPT: tuple[Path, ...] = tuple(d / "worktrees" for d in REAL_CHELA_DIRS)
 SUITE_RUNNER_CHELA_VARS: frozenset[str] = frozenset({"CHELA_DIR", "CHELA_ENV_FILE",
                                                      "CHELA_REQUIRE_JS_TESTS"})
 SCRUBBED_CHELA_VARS: tuple[str, ...] = tuple(sorted(
-    k for k in os.environ if k.startswith("CHELA_") and k not in SUITE_RUNNER_CHELA_VARS))
+    k for k in os.environ if k.startswith("CHELA_") and k not in SUITE_RUNNER_CHELA_VARS
+    and not k.startswith("CHELA_TEST_")))  # CHELA_TEST_* are the suite's own knobs (CMX-354)
 for _k in SCRUBBED_CHELA_VARS:
     del os.environ[_k]
 
