@@ -76,7 +76,8 @@ def test_first_exhaustion_requeues_with_the_addendum_and_the_second_is_needs_hum
     assert row["cap_requeues"] == 1
     [prompt] = gh["prompts"]
     assert "## ♻️ Re-queued after the rework cap" in prompt
-    assert "**Start fresh** from `dev`" in prompt and "`cmx-33-task`" in prompt
+    assert "**Start fresh** from `dev`" in prompt
+    assert "(`git diff origin/dev...origin/cmx-33-task`)" in prompt   # the OLD branch to read
     assert "g_eq2 (chela/b.py)" in prompt and "(2 review round(s))" in prompt
 
     # The fresh attempt exhausts too ⇒ only NOW needs_human, said to be the second.
