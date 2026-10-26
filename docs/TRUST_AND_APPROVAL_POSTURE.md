@@ -109,18 +109,20 @@ and what does its output need before it changes anything real.**
 
 ## 3. What a dispatched agent's output needs before it changes anything real (approval)
 
-Three independent layers, each narrower than the last. How many of them a PR meets depends
-on its **risk tier** (`chela/risktier.py`, read from the PR's live file list; the full table is
+Three independent layers, each narrower than the last. Not every PR meets all three before
+merge: which ones it meets depends on its **risk tier** (`chela/risktier.py`, read from the PR's live file list; the full table is
 "Risk tiers" in `docs/ESCALATION_CONTRACT.md`):
 
 | Tier | Which PRs | What `chela merge` needs |
 |---|---|---|
 | **always-human** | any file on an ALWAYS-HUMAN path (`WORKFLOW.md`, `.github/workflows/**`, `plugin/**`, the merge gate's own modules, `scripts/release*`) | the operator's approved `--override`, even with a clean judge verdict |
 | **core** | any core path (the dispatcher, the judge, the workflow loader, the sources, the merge and containment machinery) or an agent-instruction file (`CLAUDE.md`, `AGENTS.md`) | green CI and a clean judge verdict on the current head |
-| **standard** | everything else: product and UI work | green CI; no per-PR judge. The hand-in runs `hand_in.lint_cmd` and one full suite, and the nightly sweep mutates what merged |
+| **standard** | everything else: product and UI work | green CI; no per-PR judge. The hand-in runs `hand_in.lint_cmd` (skipped when unset) and one full suite, and the nightly sweep mutates what merged |
 | **prose** | every file is docs, a changelog fragment or media | green CI |
 
-An unreadable or empty file list is never prose or standard: it takes the core path.
+A workflow can add paths to the always-human and core sets (`merge.always_human`,
+`merge.core`), never remove a default. An unreadable or empty file list is never prose or
+standard: it takes the core path.
 
 **a. CI**: the mechanical baseline every PR must clear regardless of anything below.
 
@@ -135,8 +137,10 @@ comment and can never send a run back.
 The judge meets every **core** PR before merge. A **standard** PR meets the same mechanics
 after merge instead: once a day the nightly sweep (`chela/sweep_nightly.py`) mutates the lines
 standard-tier PRs landed on the base branch and files one tracker issue per surviving guard
-category, so a weak guard there is found and filed, not blocked. A **prose** PR has nothing to
-mutate.
+category, so a weak guard there is filed after merge, not blocked before it. The sweep is a
+backstop, not a gate: `sweep.enabled: false` turns it off, a night that ends CANNOT VERIFY or
+with mutations UNRUN does not advance its covered window (the next night looks again), and a
+line a later core PR rewrote is not swept twice. A **prose** PR has nothing to mutate.
 
 **c. The merge gate** (`chela/contract.py::merge`), the only function allowed to run
 `gh pr merge`, a pure function of `(run row, live GitHub facts)` with no `--force`:
