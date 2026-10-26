@@ -41,6 +41,7 @@ from chela import (
     inbox,
     judge,
     keeper,
+    keeper_run,
     launcher,
     malloc_arenas,
     messenger,
@@ -3240,6 +3241,41 @@ def cmd_keeper_digest(args) -> None:
     print(keeper.run(wf, since=since, as_json=args.json), end="")
 
 
+def cmd_keeper_run(args) -> None:
+    """CMX-347: digest → one model call → validated proposals → ONE inbox approval. Nothing
+    is written to the tracker here. Exit 1 when the model call failed, 2 on bad input."""
+    try:
+        wf = workflow.load_workflow(args.workflow)
+        since = keeper.parse_since(args.since) if args.since else None
+    except Exception as e:  # noqa: BLE001 — a WORKFLOW.md that does not parse, a bad --since
+        print(f"keeper run: {e}", file=sys.stderr)
+        sys.exit(2)
+    out = keeper_run.run(wf, since=since, model=args.model)
+    if out.get("error"):
+        print(f"keeper run: the model call failed: {out['error']}", file=sys.stderr)
+        sys.exit(1)
+    print(f"keeper run: {len(out['proposals'])} proposal(s), {out['dropped']} dropped by "
+          "validation" + (f" — batch {out['batch']}" if out["batch"] else ""))
+    for i, p in enumerate(out["proposals"], 1):
+        print(f"  {i}. {p['action']} {p['issue'] or p.get('title')}")
+
+
+def cmd_keeper_decide(args) -> None:
+    """CMX-347: approve (all, or `--only 1,3`) or dismiss a pending keeper batch."""
+    try:
+        only = {int(x) for x in args.only.split(",")} if getattr(args, "only", None) else None
+    except ValueError:
+        print(f"keeper approve: --only takes 1-based numbers, got {args.only!r}", file=sys.stderr)
+        sys.exit(2)
+    out = keeper_run.decide(args.batch, approve=args.keeper_cmd == "approve", only=only,
+                            by=os.environ.get("USER") or "terminal")
+    if out.get("error"):
+        print(f"keeper {args.keeper_cmd}: {out['error']}", file=sys.stderr)
+        sys.exit(1)
+    for i, result in enumerate(out["results"], 1):
+        print(f"  {i}. {result}")
+
+
 def cmd_judge_ack_blocked_race(args) -> None:
     """🧊 CMX-336: acknowledge a `J_BLOCKED_RACE` row that can never resolve the ordinary
     way (the PR is merged or closed, so nothing will ever push a new head past the judged
@@ -4292,6 +4328,20 @@ def main() -> None:
         help="Look back this far (600, 90m, 2h, 1d) instead of from the stored cursor "
              "(default with no cursor: 60m)")
     p_kdigest.add_argument("--json", action="store_true", help="Machine-readable output")
+    p_krun = keeper_sub.add_parser(
+        "run", help="Digest, then one model call proposes evidence-cited board changes; "
+                    "queues ONE inbox approval. Writes nothing to the tracker")
+    p_krun.add_argument("workflow", help="Path to the WORKFLOW.md")
+    p_krun.add_argument("--since", metavar="DURATION", help="As for `keeper digest`")
+    p_krun.add_argument("--model", help="Model for the proposal call "
+                                        "(default: the workflow's keeper.model, else sonnet)")
+    for verb, text in (("approve", "Apply a pending batch's proposals to the tracker"),
+                       ("dismiss", "Drop a pending batch; nothing is written")):
+        p_kdecide = keeper_sub.add_parser(verb, help=text)
+        p_kdecide.add_argument("batch", help="The batch id `keeper run` printed")
+        if verb == "approve":
+            p_kdecide.add_argument("--only", metavar="N,M",
+                                   help="Approve only these 1-based proposals; reject the rest")
     p_jack = judge_sub.add_parser(
         "ack-blocked-race",
         help="🧊 Acknowledge a blocked_race verdict that can never resolve on its own "
@@ -4806,7 +4856,8 @@ def main() -> None:
     elif args.command == "ops":
         cmd_ops_scan(args)
     elif args.command == "keeper":
-        cmd_keeper_digest(args)
+        {"digest": cmd_keeper_digest, "run": cmd_keeper_run}.get(
+            args.keeper_cmd, cmd_keeper_decide)(args)
     elif args.command == "adopt":
         cmd_adopt(args)
     elif args.command == "merge":

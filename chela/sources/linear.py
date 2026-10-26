@@ -325,6 +325,12 @@ mutation SetState($id: String!, $stateId: String!) {
 }
 """
 
+COMMENT_MUTATION = """
+mutation Comment($input: CommentCreateInput!) {
+  commentCreate(input: $input) { success }
+}
+"""
+
 ARCHIVE_MUTATION = """
 mutation Archive($id: String!) {
   issueArchive(id: $id) { success }
@@ -967,6 +973,22 @@ class LinearSource:
             return "failed"
         log.info("linear: %s → %s (requeued)", task_id, target.get("name"))
         return "set"
+
+    def comment(self, task_id: str, body: str) -> str:
+        """CMX-347 — add a comment to one issue of this team. ``set`` when Linear took it,
+        ``skipped`` for an id of another team or an empty body, ``failed`` otherwise. Never
+        raises: the caller (``chela keeper``) reports each write's outcome."""
+        if self.config_error:
+            return "failed"
+        if self._number_of(task_id) is None or not str(body or "").strip():
+            return "skipped"
+        try:
+            data = self._call(COMMENT_MUTATION, {"input": {
+                "issueId": str(task_id).upper(), "body": body}}, cache=False)
+        except LinearError as e:
+            log.warning("linear: could not comment on %s: %s", task_id, e)
+            return "failed"
+        return "set" if (data.get("commentCreate") or {}).get("success") else "failed"
 
     def superseding_issue(self, reason: str, own_id: str) -> str | None:
         """The identifier of this team's issue a close ``reason`` says supersedes ``own_id``
