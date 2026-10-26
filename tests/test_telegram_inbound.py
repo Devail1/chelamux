@@ -605,6 +605,105 @@ def test_refresh_tap_edits_the_screenshot_in_place_and_sends_no_key():
     assert query.message.photos == [] and query.message.texts == []
 
 
+# ── CMX-343: the PNG is drawn on the pane's real grid, captioned with it ──────
+
+class _PhotoMessage(_FakeCallbackMessage):
+    def __init__(self, thread_id=4):
+        super().__init__(thread_id)
+        self.text = "/screenshot"
+        self.photo = None
+        self.document = None
+        self.captions: list[str | None] = []
+
+    async def reply_photo(self, photo, caption=None, **_kw):
+        self.photos.append(photo.read())
+        self.captions.append(caption)
+
+
+class _ScreenshotUpdate:
+    def __init__(self):
+        self.message = _PhotoMessage()
+        self.effective_chat = type("Chat", (), {"id": 777})()
+
+
+def _png_width(png):
+    import io
+
+    from PIL import Image
+
+    return Image.open(io.BytesIO(png)).size[0]
+
+
+def _screenshot_handler(*, pane_size):
+    from telegram.ext import CommandHandler
+
+    from chela.telegram.inbound import build_application
+
+    app = build_application(
+        "123:fake-token",
+        TopicRouter("777", "@3", "4", sender=_StubSender()),
+        capture=lambda _wid, **_kw: "❯",
+        pane_size=pane_size,
+    )
+    handlers = [h for group in app.handlers.values() for h in group]
+    return next(h for h in handlers
+                if isinstance(h, CommandHandler) and "screenshot" in h.commands).callback
+
+
+def _run_screenshot(pane_size):
+    import asyncio
+
+    pytest.importorskip("chela.telegram.screenshot")
+    update = _ScreenshotUpdate()
+    asyncio.run(_screenshot_handler(pane_size=pane_size)(update, None))
+    return update.message
+
+
+def test_screenshot_reply_is_sized_to_the_pane_and_captioned_with_its_geometry():
+    asked: list[str] = []
+    wide = _run_screenshot(lambda wid: asked.append(wid) or (200, 40))
+    narrow = _run_screenshot(lambda wid: (80, 24))
+    assert asked == ["@3"]
+    assert wide.texts == [] and len(wide.photos) == 1
+    assert wide.captions == ["200×40"]
+    assert narrow.captions == ["80×24"]
+    assert _png_width(wide.photos[0]) > _png_width(narrow.photos[0])
+
+
+@pytest.mark.parametrize("pane_size", [
+    lambda _wid: None,
+    lambda _wid: (_ for _ in ()).throw(RuntimeError("tmux gone")),
+])
+def test_screenshot_without_geometry_still_sends_a_photo_with_no_caption(pane_size):
+    msg = _run_screenshot(pane_size)
+    assert msg.texts == [] and len(msg.photos) == 1
+    assert msg.captions == [None]
+    assert _png_width(msg.photos[0]) == _png_width(_run_screenshot(lambda _w: (80, 24)).photos[0])
+
+
+def test_refresh_edit_carries_the_geometry_caption():
+    import asyncio
+
+    pytest.importorskip("chela.telegram.screenshot")
+    from telegram.ext import CallbackQueryHandler
+
+    from chela.telegram.inbound import build_application
+
+    app = build_application(
+        "123:fake-token",
+        TopicRouter("777", "@3", "4", sender=_StubSender()),
+        capture=lambda _wid, **_kw: "❯",
+        pane_size=lambda _wid: (120, 40),
+        send_key=lambda _wid, _key: True,
+    )
+    handlers = [h for group in app.handlers.values() for h in group]
+    on_key = [h for h in handlers if isinstance(h, CallbackQueryHandler)][-1].callback
+    update = _FakeCallbackUpdate(f"{_KEY_CB_PREFIX}{_REFRESH_KEY_ID}")
+    asyncio.run(on_key(update, None))
+    (edit,) = update.callback_query.edits
+    assert edit["media"].caption == "120×40"
+
+
 # ── CMX-50: a gate answered from Telegram sends NOTHING to the pane ──────────
 
 def _qa_handler(*, drafts, send_key):

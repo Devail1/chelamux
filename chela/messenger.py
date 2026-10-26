@@ -365,6 +365,31 @@ def capture_pane(window_id: str, *, ansi: bool = False) -> str:
     return out.stdout if out.returncode == 0 else ""
 
 
+_RE_PANE_SIZE = re.compile(r"(\d+)x(\d+)")
+
+
+def pane_size(window_id: str) -> tuple[int, int] | None:
+    """``(columns, rows)`` of ``window_id``'s tmux pane, or None when tmux can't say.
+
+    The ``/screenshot`` renderer sizes its PNG to this grid (CMX-343): ``capture-pane -p``
+    strips trailing blanks, so the capture alone can't tell a mostly-empty 120-column pane
+    from a 2-column one. Read-only, like :func:`capture_pane`.
+    """
+    target = f"{config.current_session()}:{window_id}"
+    cmd = ["tmux", "display-message", "-p", "-t", target, "#{pane_width}x#{pane_height}"]
+    try:
+        out = subprocess.run(cmd, capture_output=True, text=True, timeout=5)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if out.returncode != 0:
+        return None
+    m = _RE_PANE_SIZE.fullmatch(out.stdout.strip())
+    if m is None:
+        return None
+    cols, rows = int(m.group(1)), int(m.group(2))
+    return (cols, rows) if cols > 0 and rows > 0 else None
+
+
 _RE_SGR = re.compile(r"\x1b\[([0-9;]*)m")
 # What may precede the first visible glyph after `❯`: spaces (Claude Code renders a NO-BREAK
 # SPACE, U+00A0, there) and SGR escapes.
