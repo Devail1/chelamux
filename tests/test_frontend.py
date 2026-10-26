@@ -19,6 +19,12 @@ from chela.procguard import run_contained
 ROOT = Path(__file__).resolve().parent.parent
 FRONTEND = ROOT / "chela" / "dashboard" / "frontend"
 VITEST = FRONTEND / "node_modules" / "vitest" / "vitest.mjs"
+# Budgets, from CI's standalone `frontend` job (33 green runs to 2026-10-26, idle runner):
+# p95 typecheck 10 s, lint 13 s, lint:boundaries 3 s, the whole Vitest suite 112 s (max 115).
+# Inside pytest the same commands share 4 cores with xdist's workers, so a full Vitest run gets
+# well over p95 x 2: a 180 s budget timed it out twice in CI (CMX-352) and 300 never has.
+GATE_TIMEOUT = 180      # the cheap gates: over 10x the slowest one's p95
+VITEST_TIMEOUT = 300    # a whole Vitest run: 2.7x its idle p95
 # Named by path so the judge's test selection (it reads test sources for the file names they
 # mention) runs this file when the toolchain-proof component is mutated.
 SAMPLE = FRONTEND / "src/features/version/lib/VersionBadge.tsx"
@@ -50,7 +56,7 @@ def test_frontend_vitest_suite():
     proc = run_contained(
         # 300: the suite is ~4 CPU-minutes (CMX-221's Settings tests alone ~50s), and CI runs it
         # beside xdist's workers on 4 cores; 120 timed out on dev itself at 3d8e78d9.
-        [str(node), str(VITEST), "run"], timeout=300, cwd=str(FRONTEND), env=env,
+        [str(node), str(VITEST), "run"], timeout=VITEST_TIMEOUT, cwd=str(FRONTEND), env=env,
         watch=os.getppid() if os.environ.get("PYTEST_XDIST_WORKER") else None,
     )
     if proc.returncode != 0:
@@ -120,10 +126,12 @@ TSCONFIG = FRONTEND / "tsconfig.json"
 ESLINT_CONFIG = FRONTEND / "eslint.config.js"
 PACKAGE_JSON = FRONTEND / "package.json"
 GATE_FIXTURES = ROOT / "tests" / "fixtures" / "frontend_gates"
-GATES = ["typecheck", "lint", "lint:boundaries", "test"]
+# CMX-352: not `test`. Over the committed tree it is `vitest run` again, a second full suite in
+# the same pytest run beside `test_frontend_vitest_suite`, and it was the one that timed out.
+GATES = ["typecheck", "lint", "lint:boundaries"]
 
 
-def _pnpm(cwd, script, *args):
+def _pnpm(cwd, script, *args, timeout=GATE_TIMEOUT):
     pnpm = shutil.which("pnpm")
     if not pnpm:
         _did_not_run(f"pnpm is not installed — the frontend `{script}` gate DID NOT RUN")
@@ -134,7 +142,7 @@ def _pnpm(cwd, script, *args):
     # GitHub Actions makes vitest/tsc colour their output; the assertions below match plain text.
     env.pop("FORCE_COLOR", None)
     env["NO_COLOR"] = "1"
-    proc = run_contained([pnpm, "--silent", "run", script, *args], timeout=180,
+    proc = run_contained([pnpm, "--silent", "run", script, *args], timeout=timeout,
                          cwd=str(cwd), env=env)
     # (code, stdout, stderr), never the process: an assert on `proc.returncode` makes pytest
     # print the whole repr, unscrubbed output included (see `_shown`).
@@ -166,6 +174,53 @@ def test_shown_output_never_reads_as_a_load_error_to_the_judge():
 def test_each_ci_gate_passes_the_committed_tree(script):
     code, out, err = _pnpm(FRONTEND, script)
     assert code == 0, _shown(out + err, 4000)
+
+
+def test_the_gates_are_the_ci_frontend_job_s_less_the_vitest_run_graded_above():
+    """CMX-352: every pnpm gate the CI `frontend` job runs is graded here, except `test`,
+    which is `vitest run` and so already graded by `test_frontend_vitest_suite`."""
+    import yaml
+    steps = yaml.safe_load((ROOT / ".github/workflows/ci.yml").read_text())["jobs"]["frontend"]
+    ci = [st["run"].removeprefix("pnpm -C chela/dashboard/frontend ") for st in steps["steps"]
+          if st.get("run", "").startswith("pnpm -C chela/dashboard/frontend ")]
+    assert ci == ["typecheck", "lint", "lint:boundaries", "test"], (
+        f"the CI frontend job's pnpm gates changed to {ci}: grade each new one in GATES "
+        "(or, if it is another full Vitest run, say why not) and update this list")
+    assert GATES == ["typecheck", "lint", "lint:boundaries"]
+    assert json.loads(PACKAGE_JSON.read_text())["scripts"]["test"] == "vitest run"
+
+
+# CI's standalone `frontend` job, p95 over 33 green runs to 2026-10-26 (seconds).
+_MEASURED_P95 = {"typecheck": 10, "lint": 13, "lint:boundaries": 3, "test": 112}
+
+
+@pytest.mark.parametrize("script", ["typecheck", "lint", "lint:boundaries", "test"])
+def test_each_pnpm_run_gets_a_budget_of_at_least_twice_its_measured_p95(
+    monkeypatch, tmp_path, script,
+):
+    calls = []
+
+    def fake_run(argv, **kw):
+        calls.append((argv, kw))
+        out = [a for a in argv if a.startswith("--outputFile.json=")]
+        if out:
+            Path(out[0].split("=", 1)[1]).write_text('{"testResults": []}')
+        return subprocess.CompletedProcess(argv, 0, b"", b"")
+
+    monkeypatch.setattr(shutil, "which", lambda _: "/opt/pnpm")
+    (tmp_path / "node_modules" / ".bin").mkdir(parents=True)
+    monkeypatch.setattr(sys.modules[__name__], "FRONTEND", tmp_path)
+    monkeypatch.setattr(sys.modules[__name__], "run_contained", fake_run)
+    tree = tmp_path / "tree"
+    if script == "test":    # the only way `test` runs now: over a fixture copy, with a report
+        _run_with_report(tree)
+    else:
+        _pnpm(tree, script)
+    [(argv, kw)] = calls
+    assert argv[:4] == ["/opt/pnpm", "--silent", "run", script]
+    assert (kw["cwd"], set(kw)) == (str(tree), {"timeout", "cwd", "env"})
+    assert kw["timeout"] == (300 if script == "test" else 180)
+    assert kw["timeout"] >= 2 * _MEASURED_P95[script]
 
 
 def test_typecheck_is_strict_over_src_and_the_config_files_and_still_compiles_allowjs(tmp_path):
@@ -229,7 +284,7 @@ def _run_with_report(tree, *args):
     """`pnpm test` over `tree` with Vitest's JSON report beside its usual output."""
     report = tree.parent / "vitest-report.json"
     code, out, _ = _pnpm(tree, "test", *args, "--reporter=default", "--reporter=json",
-                         f"--outputFile.json={report}")
+                         f"--outputFile.json={report}", timeout=VITEST_TIMEOUT)
     if not report.is_file():
         pytest.fail(f"vitest wrote no JSON report:\n{_shown(out, 4000)}")
     return code, out, json.loads(report.read_text())

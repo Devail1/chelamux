@@ -9,8 +9,8 @@
       <sub>Desktop: the Wall, Work (board, runs, schedules) &amp; Settings on <kbd>Ctrl</kbd>+<kbd>,</kbd></sub>
     </td>
     <td align="center" valign="top">
-      <img src="docs/img/chela-demo-mobile.gif" alt="chela on a phone: single-pane wall, agent pill switcher, the + New session menu and the keybar" width="150"><br>
-      <sub>Phone: pill switcher, “+” New session, keybar</sub>
+      <img src="docs/img/chela-demo-mobile.gif" alt="chela on a phone: single-pane wall, switching sessions from the sidebar drawer, the New session menu and the keybar" width="150"><br>
+      <sub>Phone: sidebar drawer, New session, keybar</sub>
     </td>
   </tr>
 </table>
