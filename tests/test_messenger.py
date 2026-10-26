@@ -10,15 +10,16 @@ All tmux calls are stubbed — no live tmux.
 """
 from __future__ import annotations
 
-import pytest
-
 import json
 import os
 import re
 import socket as socket_module
+import subprocess
 import threading
 from unittest import mock
 from unittest.mock import patch
+
+import pytest
 
 from chela import config, messenger
 
@@ -208,7 +209,7 @@ def test_pane_size_is_none_when_tmux_fails():
 
 @pytest.mark.parametrize("exc", [
     FileNotFoundError("tmux"),                                  # an OSError subclass
-    __import__("subprocess").TimeoutExpired(["tmux"], 5),       # a SubprocessError subclass
+    subprocess.TimeoutExpired(["tmux"], 5),                     # a SubprocessError subclass
 ])
 def test_pane_size_is_none_when_tmux_cannot_run(exc):
     with patch.object(messenger.subprocess, "run", side_effect=exc), \
