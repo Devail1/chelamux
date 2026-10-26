@@ -10,7 +10,7 @@
 #                     port. Nothing of your real fleet is reachable.
 # 2. record.mjs     — Playwright drives it: desktop 1440×900 (Wall + sidebar: hold Alt,
 #                     archive → unarchive; → Work → Ctrl+,
-#                     Settings), phone 390×844 (pill switcher → "+" New session → keybar).
+#                     Settings), phone 390×844 (drawer → switch session → New session → keybar).
 # 3. ffmpeg         — MP4 for the landing page, palette GIF (≤ 8 MB) for the README,
 #                     written over the old files at the same paths.
 # 4. fleet.py down  — always, even on failure.

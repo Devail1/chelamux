@@ -195,7 +195,7 @@ async function desktop(browser) {
     // Archive the finished session: it CLOSES (CMX-75) — its pane leaves the Wall...
     await point(page, `${row('worker')} .row-more`);
     await page.waitForTimeout(700);
-    await point(page, '#row-menu [data-act="archive"]');
+    await point(page, '[role="menu"] [role="menuitem"]:has-text("Archive")');
     await page.waitForTimeout(900);
     // Right after a window closes, the sidebar briefly labels the live rows by their bare
     // window id ("@2") until the next agents poll brings their titles back. Cut over it.
@@ -206,9 +206,7 @@ async function desktop(browser) {
     }, null, { timeout: 20000 });
     rec.start();
     await page.waitForTimeout(1300);
-    // ...and Unarchive resumes it in a new window.
-    await point(page, '.side-archived-toggle');
-    await page.waitForTimeout(800);
+    // ...and Unarchive resumes it in a new window, from the sidebar's Archived section.
     await point(page, '.side-archived .group-head');
     await page.waitForTimeout(900);
     await point(page, '.side-archived .row-unarchive');
@@ -225,8 +223,6 @@ async function desktop(browser) {
     }, null, { timeout: 40000, polling: 100 });
     rec.start();
     await page.waitForTimeout(1200);
-    await point(page, '.side-archived-toggle');           // Hide archived — back as it was
-    await page.waitForTimeout(900);
     await point(page, '.side-item[data-view="work"]');    // → Work (board)
     await page.waitForTimeout(2600);
     await point(page, '#work-seg .work-seg-btn[data-seg="runs"]');
@@ -246,46 +242,52 @@ async function desktop(browser) {
     return n;
 }
 
-// A phone pill is keyed by its window id and labelled by Claude's title, so find it by
-// window NAME through the dashboard's own agent list (the desktop clip's unarchive gave
-// `worker` a new window id).
-async function pills(page) {
-    const wids = await page.evaluate(async () => {
-        const r = await fetch('/api/agents');
-        const d = await r.json();
-        const out = {};
-        for (const a of (Array.isArray(d) ? d : d.agents || [])) if (a && a.window_id) out[a.name] = a.window_id;
-        return out;
-    });
-    return (name) => {
-        if (!wids[name]) throw new Error(`record.mjs: no window named ${name} in the demo fleet`);
-        return `.term-pill[data-wid="${wids[name]}"]`;
-    };
+// The phone has no pill strip since the React port: a session is switched to from the
+// drawer (the pane head's menu button), by tapping its sidebar row.
+const DRAWER = '#term-stage.term-single .gs-head-menu';
+
+// On the record (`rec`), it cuts over the second the pane spends reconnecting, blank.
+async function switchTo(page, name, rec = null) {
+    if (rec) {
+        await point(page, DRAWER, { tap: true });
+        await page.waitForTimeout(1100);
+        await point(page, row(name), { tap: true });
+        await page.waitForTimeout(250);
+        rec.pause();
+        await page.waitForTimeout(2500);
+        rec.start();
+    } else {
+        await page.locator(DRAWER).first().tap();
+        await page.waitForTimeout(600);
+        await page.locator(row(name)).first().tap();
+    }
 }
 
 async function mobile(browser) {
     const { context, page } = await newPage(browser, { width: 390, height: 844 }, true);
-    const pill = await pills(page);
     // Visit every pane once, off the record: a pane's first connect is a blank
     // iframe plus ttyd's size overlay, and that is not what switching looks like.
-    for (const name of ['docs-site', 'worker', 'infra', 'api-server']) {
-        await page.locator(pill(name)).first().tap();
+    for (const name of ['worker', 'infra', 'api-server', 'docs-site']) {
+        await switchTo(page, name);
         await page.waitForTimeout(2500);
     }
     const rec = await screencast(page, join(outDir, 'mobile.frames'));
     rec.start();
     await page.waitForTimeout(1600);
-    await point(page, pill('docs-site'), { tap: true });
-    await page.waitForTimeout(1600);
-    await point(page, pill('worker'), { tap: true });
-    await page.waitForTimeout(1600);
-    await point(page, '#term-stage.term-single .gs-head-menu', { tap: true });  // CMX-313: the drawer, with New session
+    await switchTo(page, 'worker', rec);
+    await page.waitForTimeout(1800);
+    await point(page, DRAWER, { tap: true });              // the drawer's New session (CMX-313)
+    await page.waitForTimeout(1100);
+    await point(page, '.sidebar-new-btn', { tap: true });
     await page.waitForTimeout(2000);
     await page.keyboard.press('Escape');
-    await page.mouse.click(200, 600).catch(() => {});
     await page.waitForTimeout(500);
-    await point(page, pill('api-server'), { tap: true });
-    await page.waitForTimeout(700);
+    await point(page, row('api-server'), { tap: true });
+    await page.waitForTimeout(250);
+    rec.pause();
+    await page.waitForTimeout(2500);
+    rec.start();
+    await page.waitForTimeout(900);
     await page.locator('#term-keybar').evaluate(el => el.scrollTo({ left: el.scrollWidth, behavior: 'smooth' }));
     await page.waitForTimeout(1300);
     await page.locator('#term-keybar').evaluate(el => el.scrollTo({ left: 0, behavior: 'smooth' }));
