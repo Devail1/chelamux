@@ -1967,7 +1967,7 @@ def test_judge_blocks_at_the_review_cap_escalate_with_still_fails_review(tmp_pat
     wf = _wf(tmp_path)
     with dispatcher._db() as conn:
         _row(conn, workflow_path=str(wf.path), rework_count=3, review_reworks=1,
-             infra_restarts=2)
+             infra_restarts=2, cap_requeues=1)      # CMX-290: its one requeue is spent
     assert dispatcher.request_changes("abc123", "still broken", post_comment=False)["ok"]
 
     summary = _tick(wf, _FakeGh(rollup=[_check_run("test", conclusion="SUCCESS")]))

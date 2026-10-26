@@ -1570,6 +1570,12 @@ def ensure_schema(conn: sqlite3.Connection) -> sqlite3.Connection:
         # `-r2` keeps `-r2`). Without `--requeue`, `closed` stays terminal (CMX-265).
         ("requeue_pending", "ALTER TABLE runs ADD COLUMN requeue_pending INTEGER DEFAULT 0"),
         ("requeue_count", "ALTER TABLE runs ADD COLUMN requeue_count INTEGER DEFAULT 0"),
+        # ♻️ CMX-290. A run that spends its rework cap is closed and re-queued ONCE as a fresh
+        # attempt (`_cap_requeue`); `cap_requeues` counts those, so the SAME task exhausting
+        # again goes to `needs_human`. `requeue_addendum` is what the fresh attempt's prompt
+        # is told about the earlier rounds. Both survive the claim (`_REQUEUE_KEEP`).
+        ("cap_requeues", "ALTER TABLE runs ADD COLUMN cap_requeues INTEGER DEFAULT 0"),
+        ("requeue_addendum", "ALTER TABLE runs ADD COLUMN requeue_addendum TEXT"),
         # 📝 CMX-52. The agent's own handoff note — what it wants the reviewer to know —
         # passed as `chela task-finished --handoff` and written here by the daemon when it
         # applies the completion marker (`mark_awaiting_review`). NULL ⇒ no handoff was
@@ -5078,7 +5084,7 @@ def requeue_hint(task_id: str) -> str:
 
 def close_run(ident: str, reason: str, *, force: bool = False, close_pr: bool = False,
               remove_worktree: bool = False, by: str | None = None,
-              requeue: bool = False) -> dict:
+              requeue: bool = False, comment: str | None = None) -> dict:
     """🗂️✖️ Mark an abandoned or superseded run ``closed``, with a reason a human can read.
 
     Before this, the one path to ``status='closed'`` was reconcile's closed-PR branch in
@@ -5202,7 +5208,7 @@ def close_run(ident: str, reason: str, *, force: bool = False, close_pr: bool = 
     pr_closed = False
     comment_posted, comment_detail = False, "no open PR"
     if pr_open:
-        body = f"🗂️✖️ Run closed by chela: {reason}"
+        body = comment or f"🗂️✖️ Run closed by chela: {reason}"
         if close_pr:
             pr_closed, comment_detail = _gh_pr_close(run.get("pr_url"), repo_dir, body)
             comment_posted = pr_closed
@@ -5659,7 +5665,7 @@ def _refused(error: str | None, refused: bool = False) -> dict:
         "open": 0, "reconciled_done": 0, "reconciled_closed": 0, "reconciled_failed": 0,
         "dispatched": 0,
         "pr_state_refreshed": 0, "watchdog_renudged": 0, "tracker_struck": 0,
-        "reworked": 0, "escalated": 0, "ci_failed": 0, "ci_infra_failed": 0,
+        "reworked": 0, "escalated": 0, "cap_requeued": 0, "ci_failed": 0, "ci_infra_failed": 0,
         "ci_rerun": 0, "ci_flake": 0, "ci_known_flake": 0, "base_merged": 0, "base_conflict": 0,
         "base_infra": 0, "judged": 0, "judge_cancelled": 0, "judge_lost": 0, "judge_stranded": 0,
         "trial_ledger": 0, "disk_budget_exceeded": False, "window_reaped": 0,
@@ -5834,6 +5840,7 @@ def tick(workflow_path: str | Path) -> dict:
         "tracker_transitions": 0,
         "reworked": 0,
         "escalated": 0,
+        "cap_requeued": 0,
         "ci_failed": 0,
         "ci_infra_failed": 0,
         "ci_rerun": 0,
@@ -6871,13 +6878,18 @@ def tick(workflow_path: str | Path) -> dict:
                     ],
                 )
                 summary["escalated"] += 1
+            elif review_cap_reached(row) and not (row["cap_requeues"] or 0):
+                # ♻️ CMX-290: nobody reviews tasks, so a FIRST exhaustion is re-queued as a
+                # fresh, narrower attempt instead of waiting on a person.
+                summary["cap_requeued"] += _cap_requeue(conn, wf, row)
             elif review_cap_reached(row):
                 _escalate(
                     conn, row,
-                    f"rework cap reached ({review_reworks(row)}/{effective_cap}; infra "
-                    f"restarts: {infra_restarts(row)}) — the PR still fails review. Branch, "
-                    "worktree and PR are preserved; every verdict is on the run row "
-                    "(review_history).",
+                    f"second rework-cap exhaustion of this task — rework cap reached "
+                    f"({review_reworks(row)}/{effective_cap}; infra restarts: "
+                    f"{infra_restarts(row)}) again after the first was closed and re-queued "
+                    "as a fresh attempt; the PR still fails review. Branch, worktree and PR "
+                    "are preserved; every verdict is on the run row (review_history).",
                     recommendation="Fix it yourself on the branch and `chela reopen` — read "
                                     "the review history on the run first for what every rework "
                                     "round already tried, then push the fix and reopen to put "
@@ -7539,7 +7551,7 @@ def rework_cap_reached(row) -> bool:
 _REQUEUE_KEEP = frozenset({
     "task_id", "workflow_path", "title", "status", "attempt", "started_at", "task_number",
     "brief", "risk", "risk_reason", "tracker_url", "review_history", "requeue_count",
-    "last_error",
+    "last_error", "cap_requeues", "requeue_addendum",
 })
 
 
@@ -7658,6 +7670,10 @@ def _spawn(wf: WorkflowDef, task: Task, attempt: int, conn: sqlite3.Connection, 
     conn.commit()
 
     prompt = render_prompt(wf.prompt_template, hook_vars)
+    if requeue:
+        addendum = conn.execute("SELECT requeue_addendum FROM runs WHERE task_id=?",
+                                (task.id,)).fetchone()["requeue_addendum"]
+        prompt += f"\n\n{addendum}" if addendum else ""
     _launch_agent(
         wf, task.id, window_name, worktree, prompt, conn,
         hook_vars=hook_vars, fresh_worktree=created,
@@ -8111,6 +8127,62 @@ def _format_escalation(reason: str, recommendation: str = "", options: list[str]
     if options:
         body += "\n\nOptions:\n" + "\n".join(f"  - {o}" for o in options if (o or "").strip())
     return body
+
+
+def _survivor_rounds(reviews: list[dict]) -> str:
+    """♻️ CMX-290. Every review round's survivors, one section per round — grouped by mutation
+    shape (CMX-289/335's ``shape_sites.shape``), or the verdict's first line when it carried
+    no structured mutations (a human's review, a CI send-back)."""
+    from chela import shape_sites
+    out = []
+    for r in reviews:
+        if r.get("verdict") != "changes_requested":
+            continue
+        groups: dict[tuple[str, str], list[str]] = {}
+        for m in r.get("mutations") or []:
+            key = shape_sites.shape(str(m.get("before", "")), str(m.get("after", "")))
+            groups.setdefault(key, []).append(f"{m.get('guard', '?')} ({m.get('file', '?')})")
+        lines = [f"- `{k}` on `{t}` — {'; '.join(g)}" for (k, t), g in groups.items()]
+        first = next(iter(str(r.get("body") or "").strip().splitlines()), "")[:300]
+        out.append(f"**Round {r.get('round', '?')}**\n" + ("\n".join(lines) or f"- {first}"))
+    return "\n\n".join(out) or "(no review round recorded a verdict)"
+
+
+def _cap_requeue(conn: sqlite3.Connection, wf: WorkflowDef, row: sqlite3.Row) -> int:
+    """♻️ CMX-290. A FIRST rework-cap exhaustion: close the PR (branch kept) with every round's
+    survivors as its comment, and re-queue the task as a fresh attempt whose prompt carries
+    them (``requeue_addendum``). The fresh attempt STARTS FRESH from the base — the old branch
+    is where the cap was already spent, and the CMX-65 requeue gives it a new ``-r<N>`` branch
+    — but is pointed at the old branch to read. Returns 1 when the run was re-queued; 0 (the
+    row is left for the next tick, which re-tries) when ``close_run`` refused."""
+    summary = _survivor_rounds(reviews_of(dict(row)))
+    rounds = review_reworks(row)
+    base = wf.get("workspace", "base_branch", default="master")
+    addendum = (
+        "## ♻️ Re-queued after the rework cap\n\n"
+        f"An earlier attempt at this task (branch `{row['branch_name']}`) spent its whole "
+        f"rework budget ({rounds} review round(s)) and still failed review; its PR is closed "
+        f"and its branch is kept. **Start fresh** from `{base}` on your own branch — do not "
+        f"build on `{row['branch_name']}`, but read it (`git diff origin/{base}..."
+        f"origin/{row['branch_name']}`) for what was tried. Take the narrowest change that "
+        "meets the brief, and guard every group below from your first commit.\n\n"
+        f"### What the earlier rounds tried, and what survived\n\n{summary}")
+    comment = ("♻️ Rework cap reached — chela closes this PR (the branch is kept) and "
+               "re-queues the task as a fresh attempt with every round's survivors in its "
+               f"brief.\n\n{summary}")
+    conn.commit()
+    got = close_run(row["task_id"], f"rework cap reached ({rounds} review rounds) — re-queued "
+                    "as a fresh attempt", force=True, by="dispatcher", requeue=True,
+                    comment=comment)
+    if not got.get("ok"):
+        log.warning("Task %s: rework-cap requeue refused: %s", row["task_id"], got.get("error"))
+        return 0
+    conn.execute("UPDATE runs SET cap_requeues=COALESCE(cap_requeues, 0) + 1, "
+                 "requeue_addendum=? WHERE task_id=?", (addendum, row["task_id"]))
+    conn.commit()
+    log.warning("Task %s: rework cap reached — PR closed, re-queued as a fresh attempt",
+                row["task_id"])
+    return 1
 
 
 def _escalate(conn: sqlite3.Connection, row: sqlite3.Row, reason: str, *,
