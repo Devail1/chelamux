@@ -196,6 +196,12 @@ def test_shape_of_a_multi_line_or_duplicate_call_corruption():
     assert shape_sites.shape("x = 1\nif n == 3:", "x = 1\nif n != 3:") == ("compare", "n==3")
     # Only a whitespace change: no line differs stripped, so the first line stands.
     assert shape_sites.shape("    return 1", "return 1") == ("line", "return 1")
+    # Of two changed lines the FIRST is the target, not the last.
+    assert shape_sites.shape("a = 1\nb = 2", "a = 0\nb = 0") == ("line", "a = 1")
+    # A re-indented line ahead of the real change is not the changed line, after either side.
+    assert shape_sites.shape("return 1\nx = 1", "    return 1\nx = 2") == ("line", "x = 1")
+    # A blank line is never the fallback target.
+    assert shape_sites.shape("\nreturn 1", "\n    return 1") == ("line", "return 1")
     # One of two same-name calls dropped is still a dropped call; both kept is not.
     assert shape_sites.shape("f(a)\nf(b)", "f(a)") == ("call", "f")
     assert shape_sites.shape("f(a)\nf(b)", "f(b)\nf(a)") == ("line", "f(a)")
