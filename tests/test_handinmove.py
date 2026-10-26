@@ -9,7 +9,7 @@ from unittest.mock import patch
 
 import pytest
 
-from chela import basesync, dispatcher, handinmove, judge
+from chela import basesync, dispatcher, handinmove, judge, judge_select
 from tests.test_judge_sweep import TEST_CMD, _git, _run_row, _task_finished
 
 PR = "def f(x):\n    return x\n\n\n\n\ndef g(x):\n    return x\n"
@@ -343,3 +343,101 @@ def test_an_unreadable_workflow_refuses(repo, tmp_path):
     (tmp_path / "WORKFLOW.md").unlink()
     out = dispatcher.reconcile_base_move("cmx-88", repo[2], None)
     assert out["ok"] is False and out["error"].startswith(f"{tmp_path / 'WORKFLOW.md'} could not")
+
+
+def test_an_empty_base_sha_is_unreadable(tmp_path):
+    ok_but_empty = subprocess.CompletedProcess([], 0, "  \n", "")
+    with patch.object(basesync, "_git", return_value=ok_but_empty), \
+            pytest.raises(RuntimeError, match="could not read origin/dev"):
+        basesync.base_sha(tmp_path, "dev")
+
+
+def test_a_base_still_on_since_is_no_move_even_when_head_is_behind(tmp_path):
+    with patch.object(basesync, "check", return_value={"behind": 2, "conflicts": []}), \
+            patch.object(basesync, "base_sha", return_value="s"), \
+            patch.object(basesync, "_git") as git:
+        assert basesync.moved(tmp_path, "dev", "s") is None
+    assert not git.called
+
+
+def test_render_names_both_an_allowed_behind_and_a_move():
+    rec = {"base": "dev", "behind": 1, "allow_behind": True,
+           "moved": {"from": "a", "to": "b", "tests": "full suite", "overlap": []}}
+    assert basesync.render(rec) == (
+        "🔀 Handed in 1 commit(s) behind origin/dev with --allow-behind (merges cleanly). "
+        "🔀 origin/dev moved mid-check (a → b); merged in, related tests re-run (full suite), "
+        "no PR file overlapped.")
+
+
+def test_a_run_with_no_workflow_on_record_refuses(repo):
+    with dispatcher._db() as conn:
+        conn.execute("UPDATE runs SET workflow_path='' WHERE task_id='cmx-88'")
+        conn.commit()
+    assert dispatcher.reconcile_base_move("cmx-88", repo[2], None) == {
+        "ok": False, "error": "no run with a worktree on record for cmx-88"}
+
+
+@pytest.mark.parametrize("rel", ["web/app.js", "web/app.ts", "web/App.tsx", "web/app.mjs"])
+def test_a_js_or_ts_base_file_selects_its_tests(tmp_path, rel):
+    class Picks:
+        def __init__(self, *a):
+            pass
+
+        def select(self, path):
+            return judge_select.Selection(["tests/test_web.py"], 1, "observed")
+
+    listed = subprocess.CompletedProcess([], 0, "tests/test_web.py\n", "")
+    with patch.object(basesync, "_git", return_value=listed), \
+            patch.object(judge_select, "Selector", Picks):
+        assert handinmove.related_tests(tmp_path, [rel]) == ["tests/test_web.py"]
+
+
+def test_only_test_files_are_selected(repo):
+    _advance(repo[0], {"lib.py": "L = 1\n", "helper.py": "import lib\n",
+                       "tests/test_lib.py": "import lib\n"})
+    _git(repo[1], "fetch", "-q", "origin")
+    _git(repo[1], "merge", "-q", "--no-edit", "origin/dev")
+    assert handinmove.related_tests(repo[1], ["lib.py"]) == ["tests/test_lib.py"]
+
+
+def test_an_overlap_with_no_experiments_file_re_runs_none(repo):
+    _advance(repo[0], {"p.py": PR.replace("def g(x):\n    return x", "def g(x):\n    return -x")})
+    with patch.object(judge, "run_suite", return_value=GREEN), \
+            patch.object(judge, "load_experiments") as load, \
+            patch.object(judge, "run_self_check") as sc:
+        out = _reconcile(repo)
+    assert out["ok"] and out["moved"]["overlap"] == ["p.py"]
+    assert out["moved"]["experiments_rerun"] == 0 and not load.called and not sc.called
+
+
+def test_a_failed_overlap_re_run_names_how_many_it_ran(repo, tmp_path):
+    _advance(repo[0], {"p.py": PR.replace("def g(x):\n    return x", "def g(x):\n    return -x")})
+    exps = tmp_path / "e.json"
+    one = {"guard": "f", "file": "p.py", "before": "x + 1", "after": "x - 1"}
+    exps.write_text(json.dumps({"experiments": [one, dict(one, guard="g")]}))
+    reply = {"ok": True, "blocking": 1, "cannot_verify": "", "unrun": []}
+    with patch.object(judge, "run_self_check", return_value=reply), \
+            patch.object(judge, "run_suite", return_value=GREEN):
+        out = _reconcile(repo, str(exps))
+    assert out["error"] == ("origin/dev moved during the checks and touched this PR's p.py; "
+                            "the 2 experiment(s) there: 1 SURVIVED, CANNOT VERIFY: -, 0 UNRUN")
+
+
+def test_a_chained_suite_runs_whole_rather_than_extended(repo):
+    _advance(repo[0], {"lib.py": "L = 1\n", "tests/test_lib.py": "import lib\n"})
+    chained = f"{TEST_CMD} && npm test"
+    with patch.object(judge, "judge_test_cmd", return_value=chained), \
+            patch.object(judge, "run_suite", return_value=GREEN) as suite:
+        out = _reconcile(repo)
+    assert out["ok"] and out["moved"]["tests"] == "1 file(s)"
+    assert suite.call_args.args == (chained, repo[1])
+
+
+def test_a_hand_in_with_no_since_never_reconciles(repo):
+    with patch.object(dispatcher, "check_base_sync",
+                      return_value={"ok": True, "record": None}), \
+            patch.object(dispatcher, "check_no_new_guards", return_value=False), \
+            patch.object(dispatcher, "verify_sweep", return_value={"ok": True, "skipped": "x"}), \
+            patch.object(dispatcher, "reconcile_base_move") as rec:
+        assert _task_finished() is None
+    assert not rec.called
