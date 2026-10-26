@@ -109,7 +109,18 @@ and what does its output need before it changes anything real.**
 
 ## 3. What a dispatched agent's output needs before it changes anything real (approval)
 
-Three independent layers, each narrower than the last:
+Three independent layers, each narrower than the last. How many of them a PR meets depends
+on its **risk tier** (`chela/risktier.py`, read from the PR's live file list; the full table is
+"Risk tiers" in `docs/ESCALATION_CONTRACT.md`):
+
+| Tier | Which PRs | What `chela merge` needs |
+|---|---|---|
+| **always-human** | any file on an ALWAYS-HUMAN path (`WORKFLOW.md`, `.github/workflows/**`, `plugin/**`, the merge gate's own modules, `scripts/release*`) | the operator's approved `--override`, even with a clean judge verdict |
+| **core** | any core path (the dispatcher, the judge, the workflow loader, the sources, the merge and containment machinery) or an agent-instruction file (`CLAUDE.md`, `AGENTS.md`) | green CI and a clean judge verdict on the current head |
+| **standard** | everything else: product and UI work | green CI; no per-PR judge. The hand-in runs `hand_in.lint_cmd` and one full suite, and the nightly sweep mutates what merged |
+| **prose** | every file is docs, a changelog fragment or media | green CI |
+
+An unreadable or empty file list is never prose or standard: it takes the core path.
 
 **a. CI**: the mechanical baseline every PR must clear regardless of anything below.
 
@@ -121,6 +132,12 @@ restores it, so a guard that survives its own corruption is a fact, not a judgme
 module docstring). Findings that are taste rather than a mechanical fact become a PR
 comment and can never send a run back.
 
+The judge meets every **core** PR before merge. A **standard** PR meets the same mechanics
+after merge instead: once a day the nightly sweep (`chela/sweep_nightly.py`) mutates the lines
+standard-tier PRs landed on the base branch and files one tracker issue per surviving guard
+category, so a weak guard there is found and filed, not blocked. A **prose** PR has nothing to
+mutate.
+
 **c. The merge gate** (`chela/contract.py::merge`), the only function allowed to run
 `gh pr merge`, a pure function of `(run row, live GitHub facts)` with no `--force`:
 
@@ -130,13 +147,19 @@ comment and can never send a run back.
    `workspace.base_branch` (`dev` for chelamux itself), and is never
    `main`/`master`/`production`/… unless that workflow explicitly committed to exactly
    that branch;
-3. the judge said `clean` against the PR's *current* head commit, read live from GitHub;
+3. the judge said `clean` against the PR's *current* head commit, read live from GitHub. A
+   standard or prose PR carries the no-judge verdict the dispatcher stamped instead
+   (`standard_no_judge`, `prose_only`), and the gate re-classifies the live diff to check it
+   still fits that tier. A `clean` verdict is carried across a head move that touches none of
+   the PR's own files, such as a merge from the base branch: `judge_sha` is re-stamped to the
+   new head, not re-judged (`chela/verdictcarry.py`);
 4. CI is green;
 5. GitHub reports the PR open and `MERGEABLE`;
 6. **if the actor is the auto-launched orchestrator** (`$CHELA_ACTOR ==
    auto-orchestrator`), a human's attended-lease must be live. A human's own `chela merge`
    carries no actor stamp and needs no lease, because the human *is* the attendance
-   (`chela/personas/lease.py`).
+   (`chela/personas/lease.py`);
+7. the PR's live file list is readable and touches no always-human path.
 
 Any miss refuses, naming the exact clause. Every merge is logged with its justification
 to the event log.
@@ -181,7 +204,7 @@ migrates its tracker from `markdown` to `gh_issues`.
 |---|---|---|
 | Who may trigger a dispatch | `chela/sources/gh_issues.py`, `chela/sources/markdown.py` | this doc §1 |
 | What a running agent may do | `chela/dispatcher.py::resolve_agent_cmd`, `chela/dispatcher.py::_strip_agent_env_cmd` + `chela/envutil.py::AGENT_ENV_ALLOW` (env allowlist), `chela/workflow.py::workspace_escape`, `chela/memcap.py`, `chela/sandbox.py` (opt-in, off for chelamux) | this doc §2, `RESOURCE_ISOLATION.md`, `SANDBOX_BOUNDARY.md` |
-| What approves a merge | `chela/judge.py`, `chela/contract.py::merge` | this doc §3, `ESCALATION_CONTRACT.md` |
+| What approves a merge | `chela/risktier.py` (tier), `chela/judge.py` (core, before merge), `chela/sweep_nightly.py` (standard, after merge), `chela/verdictcarry.py` (carry), `chela/contract.py::merge` | this doc §3, `ESCALATION_CONTRACT.md` |
 | What a human must decide instead of the orchestrator | `chela/contract.py::escalate` | `ESCALATION_CONTRACT.md`'s decision taxonomy |
 
 This is chela's answer to **SPEC 10.5** ("Each implementation MUST document its chosen

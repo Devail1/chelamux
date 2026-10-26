@@ -518,9 +518,19 @@ uv run chela status</code></pre>
         <code>--permission-mode auto</code> classifier, with no inherited MCP servers and an
         allowlisted environment. A measured sandbox exists and is <strong>opt-in per workflow</strong>
         (<code>agent.sandbox: true</code> in <code>WORKFLOW.md</code>).</p>
-        <p>What chela does guarantee is the other end: nothing an agent writes reaches your base
-        branch through <code>chela merge</code> without a clean judge verdict on its head commit or
-        your audited approval. The full posture:
+        <p>What chela does guarantee is the other end, and how much depends on the PR's risk tier.
+        In every tier, a PR that touches an <strong>always-human</strong> path (the workflow file,
+        CI config, the merge gate itself) merges only with your audited approval. Otherwise
+        <code>chela merge</code> needs green CI plus:</p>
+        <p><strong>Core</strong> (the dispatcher, the judge, the merge machinery, agent instructions):
+        a clean judge verdict on its head commit, or your audited approval. The judge corrupts each
+        guard the PR claims and checks its tests turn red. A clean verdict is carried across a head
+        move that only merges in the base branch (re-stamped, not re-judged).</p>
+        <p><strong>Standard</strong> (product and UI work): no per-PR judge. The agent's hand-in runs
+        lint and one full suite, and a nightly sweep then corrupts what merged the same way and files
+        an issue for each guard that survives.</p>
+        <p><strong>Prose</strong> (docs, changelog, media): green CI.</p>
+        <p>The full posture:
         <a href="https://github.com/Devail1/chelamux/blob/main/docs/TRUST_AND_APPROVAL_POSTURE.md">TRUST_AND_APPROVAL_POSTURE.md</a>.</p>
       </div>
     </details>
