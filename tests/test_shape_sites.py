@@ -188,3 +188,25 @@ def test_a_compare_target_matches_whole_operands_only():
     assert not shape_sites.matches("compare", "n<0", "if min<0:")
     assert not shape_sites.matches("compare", "n<0", "if n<0x10:")
     assert not shape_sites.matches("compare", "n<0", "if self.n<0:")
+
+
+def test_shape_of_a_multi_line_or_duplicate_call_corruption():
+    # The target is the line the corruption CHANGED, never the multi-line before's first line.
+    assert shape_sites.shape("x = 1\nreturn 1", "x = 1\nreturn 0") == ("line", "return 1")
+    assert shape_sites.shape("x = 1\nif n == 3:", "x = 1\nif n != 3:") == ("compare", "n==3")
+    # Only a whitespace change: no line differs stripped, so the first line stands.
+    assert shape_sites.shape("    return 1", "return 1") == ("line", "return 1")
+    # One of two same-name calls dropped is still a dropped call; both kept is not.
+    assert shape_sites.shape("f(a)\nf(b)", "f(a)") == ("call", "f")
+    assert shape_sites.shape("f(a)\nf(b)", "f(b)\nf(a)") == ("line", "f(a)")
+
+
+def test_a_held_out_before_hides_EVERY_line_it_spans(tmp_path):
+    root = _pr(tmp_path / "repo")
+    lines = REAPER_PY.splitlines()
+    at = lines.index("def stop_c(w_stop_c):")
+    held = _outcome("SECRET", "\n".join(lines[at - 3:at + 2]), "")  # its call is the LAST line
+    found = shape_sites.groups(root, "dev", [_outcome("g", "    _end_agent(w_stop_a)", "    pass")],
+                               hidden=[SimpleNamespace(experiment=SimpleNamespace(
+                                   file="reaper.py", before=held.experiment.before))])
+    assert found[0]["sites"] == [s for s in _site_lines() if s != f"reaper.py:{at + 2}"]
