@@ -474,6 +474,9 @@ class Report:
     # 🎲 CMX-195: tests that failed the baseline once and passed a re-run of just them.
     baseline_flakes: list[str] = field(default_factory=list)
     suite_logs: list[str] = field(default_factory=list)
+    # ⚖️🧩 CMX-335: the visible survivors grouped by shape + target, each with EVERY same-shape
+    # site in the PR's diff (:func:`chela.shape_sites.groups`). Rendered by ``block_body``.
+    shape_groups: list[dict] = field(default_factory=list)
 
     @property
     def blocking(self) -> list[Outcome]:
@@ -1844,6 +1847,10 @@ def _run_experiments(
             # CMX-19: the diff's SHAPE is what triggered this, and a re-run of the same commit
             # has the same shape — only a human or a new commit can resolve it.
             report.cannot_verify_final = True
+    if report.visible_blocking:
+        # ⚖️🧩 CMX-335: found from the diff, never recalled — only VISIBLE survivors (CMX-395).
+        from chela import shape_sites
+        report.shape_groups = shape_sites.groups(worktree, base_branch, report.visible_blocking)
     return report
 
 
@@ -2387,6 +2394,8 @@ def block_body(report: Report, pr_url: str | None, test_cmd: str) -> str:
             f"* measured by: {o.measured_by}",
             "",
         ]
+    from chela import shape_sites
+    parts += shape_sites.render(report.shape_groups)
     held = _held_out_section(report)
     if held:
         parts.append(held)
