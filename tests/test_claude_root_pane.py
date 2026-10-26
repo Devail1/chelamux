@@ -162,10 +162,10 @@ class _Tmux:
 
     def __call__(self, argv, **kw):
         self.calls.append((list(argv), kw))
-        if argv[:2] == ["tmux", "display-message"] and argv[-1] == "#{pane_pid}":
+        if argv[:2] == ["tmux", "display-message"] and argv[-1].endswith("#{pane_pid}"):
             wid = argv[argv.index("-t") + 1].split(":", 1)[1]
-            return subprocess.CompletedProcess(argv, 0, stdout=self.pane_pids[wid] + "\n",
-                                               stderr="")
+            return subprocess.CompletedProcess(
+                argv, 0, stdout=f"{wid}\tw{wid[1:]}\t{self.pane_pids[wid]}\n", stderr="")
         if argv[:2] == ["tmux", "display-message"]:
             return subprocess.CompletedProcess(argv, 0, stdout="bash\n", stderr="")
         if argv[0] == "pgrep":
@@ -186,7 +186,8 @@ def tmux(proc, monkeypatch):
 
 def test_per_window_claude_pid_names_the_root(tmux):
     assert agent_manager.claude_pid("@16") == 100
-    assert tmux.calls == [(["tmux", "display-message", "-t", "s:@16", "-p", "#{pane_pid}"],
+    assert tmux.calls == [(["tmux", "display-message", "-t", "s:@16", "-p",
+                            "#{window_id}\t#{window_name}\t#{pane_pid}"],
                            {"capture_output": True, "text": True, "timeout": 5})]
     assert agent_manager.claude_pid("@20") == 201           # shell + child: unchanged
     assert agent_manager.claude_pid("@30") is None          # bare shell

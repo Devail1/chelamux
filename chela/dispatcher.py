@@ -13,7 +13,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path, PurePosixPath
 from typing import NamedTuple
 
-from chela import basesync, concurrency, critic, envutil, epoch, event_log, fleet, flaky, generated, hold, judge, memcap, mergegate, reviewgate, risktier, sizegate, sweep
+from chela import basesync, concurrency, critic, envutil, epoch, event_log, fleet, flaky, generated, handinmove, hold, judge, memcap, mergegate, reviewgate, risktier, sizegate, sweep, verdictcarry
 from chela.config import (
     CHELA_DIR,
     TMUX_SESSION,
@@ -94,6 +94,9 @@ ACTIVE_STATUSES = ("claimed", "running")
 # ⏹️⚖️ CMX-286: where a send-back (conflict, CI red, request-changes) leaves a run — and the
 # rework it re-spawns. A judge still running there is grading a head that can never merge.
 SENT_BACK_STATUSES = ("changes_requested", *ACTIVE_STATUSES)
+# ⏹️⚖️ CMX-340: a run that left review for good (merged, overridden, closed, failed). Its
+# judge's window id is no one's to signal: a fleet pause never freezes one of these.
+TERMINAL_STATUSES = ("done", "closed", "failed")
 
 # A PR is open and the verdict is out of the agent's hands. `changes_requested` is a
 # rework the dispatcher will pick up; `needs_human` is a rework that hit the cap and
@@ -3266,7 +3269,36 @@ def check_base_sync(task_id: str, allow_behind: bool = False) -> dict:
     if state["behind"]:
         return {"ok": True, "record": {"base": base, "behind": state["behind"],
                                        "allow_behind": True}}
-    return {"ok": True, "record": None}
+    try:
+        since = basesync.base_sha(row["worktree_path"], base)
+    except RuntimeError as e:
+        return {"ok": False, "error": f"could not check this branch against its base — {e}"}
+    return {"ok": True, "record": None, "since": since}
+
+
+def reconcile_base_move(task_id: str, since: str, experiments: str | None) -> dict:
+    """⚖️🔀 CMX-334: after task-finished's checks — :func:`chela.handinmove.reconcile` on the
+    run's own worktree. A base it merged in is pushed: a push request is filed unless one is
+    still pending (the daemon pushes the branch as it stands when it applies that one)."""
+    with _db() as conn:
+        row = conn.execute("SELECT * FROM runs WHERE task_id=?", (task_id,)).fetchone()
+    if row is None or not row["worktree_path"] or not row["workflow_path"]:
+        return {"ok": False, "error": f"no run with a worktree on record for {task_id}"}
+    try:
+        wf = load_workflow(row["workflow_path"])
+    except Exception as e:
+        return {"ok": False, "error": f"{row['workflow_path']} could not be read: {e}"}
+    base = wf.get("workspace", "base_branch", default="master")
+    out = handinmove.reconcile(Path(row["worktree_path"]), wf, row["workflow_path"], base,
+                               since, experiments)
+    if out.get("moved"):
+        out["record"] = {"base": base, "moved": out["moved"]}
+        if not _push_request_path(row["worktree_path"]).exists():
+            pushed = request_push(task_id)
+            if not pushed.get("ok"):
+                return {"ok": False, "error": f"merged origin/{base}, but could not request "
+                                              f"its push: {pushed.get('error')}"}
+    return out
 
 
 def check_hand_in_size(task_id: str, oversize_reason: str | None = None,
@@ -6867,7 +6899,7 @@ def tick(workflow_path: str | Path) -> dict:
         # was, and a human is told why.
         # ⏹️⚖️ CMX-286: FIRST, stop a judge whose run was sent back (1c above, or a human)
         # or whose head moved — else the watchdog below holds its slot up to its wall.
-        summary["judge_cancelled"] = _cancel_moot_judges(conn, wf)
+        summary["judge_cancelled"] = _cancel_moot_judges(conn, wf, live_windows)
         summary["judge_lost"] = _judge_watchdog(conn, wf, live_windows)
 
         # 1e′. ⚖️🧊 CMX-253: a `cannot_verify` that SPENT its retry budget on the CURRENT
@@ -7003,6 +7035,8 @@ def tick(workflow_path: str | Path) -> dict:
                     continue     # ⚖️🌩️ CMX-379: sitting out a classifier outage
                 if shutting_down():
                     break        # 🔁⚖️ CMX-263: a restart is waiting — launch nothing new
+                if _carry_base_only_verdict(wf, row, conn):
+                    continue     # ⚖️🔀 CMX-289: a base-only head move keeps its clean verdict
                 if _stamp_prose_only(wf, row):
                     continue     # ⚖️🪜 CMX-265: a prose-only PR never needs a judge slot
                 if judging >= judge_max_concurrent():
@@ -8367,7 +8401,7 @@ that SURVIVES **blocks this PR at every risk level** — it is never downgraded 
    statements, fixtures parked on a default, source-constant checks instead of the rendered
    value…). Reaching for one of those shapes first is faster than rediscovering it from
    scratch.
-{{sweep_equivalents}}
+{{sweep_equivalents}}{{prior_round}}
 2. For **each guard/invariant it adds** (each new or changed test, each "must never…"
    comment, each accessibility cue), design ONE **minimal, live, syntactically valid**
    mutation to the **production** code that a real guard MUST catch:
@@ -8429,7 +8463,7 @@ def judge_prompt_vars(
     branch_name: str, base_branch: str, workspace_path: str, repo_path: str,
     project_key: str, task_number, pr_url: str, head_sha: str, experiments_path: str,
     judge_cmd: str, judge_log: str, test_cmd: str, diff_cmd: str, pr_view_cmd: str,
-    sweep_equivalents: str = "", tier: str = "",
+    sweep_equivalents: str = "", tier: str = "", prior_round: str = "",
 ) -> dict:
     """📏 CMX-408. EVERY variable :data:`JUDGE_PROMPT` renders with — the one map both the
     live judge (:func:`_judge_vars`) and the offline eval (``chela.judge_eval.design``)
@@ -8477,6 +8511,8 @@ def judge_prompt_vars(
         # mechanical sweep it says no outcome can change under. Agent-authored, so shown
         # as claims to TEST, never as findings. "" ⇒ none (the line renders empty).
         "sweep_equivalents": sweep_equivalents,
+        # ⚖️🔀 CMX-289: the prior round chela re-runs itself — "" on a first judgement.
+        "prior_round": prior_round,
         # 🏭 CMX-284: the paths `chela judge run` drops experiments on.
         "generated_paths": ", ".join(f"`{p}`" for p in generated.PATTERNS),
     }
@@ -8513,6 +8549,9 @@ def _judge_vars(
                      else "gh pr view --comments   # no PR url on the run row"),
         sweep_equivalents=_judge_sweep_equivalents(row) + _judge_size_gate(row),
         tier=tier,
+        prior_round=verdictcarry.prompt_note(
+            verdictcarry.load(row["task_id"], row["pr_url"]), sha,
+            judge_max_experiments(_row_risk(row))),
     )
 
 
@@ -8770,6 +8809,43 @@ def _spawn_judge(
     return True
 
 
+def _carry_base_only_verdict(wf: WorkflowDef, row: sqlite3.Row,
+                             conn: sqlite3.Connection) -> bool:
+    """⚖️🔀 CMX-289: keep a ``clean`` verdict across a head move that touches none of the PR's
+    own files (a merge from base): re-stamp ``judge_sha`` to the new head, record why, and
+    spawn no judge. ``chela merge``'s ``judge_sha == head`` check then sees the new head.
+    Anything else — another verdict, a PR path that changed, git that cannot say — is
+    judged as before (with the prior round's experiments, :mod:`chela.verdictcarry`)."""
+    judged, head, task_id = row["judge_sha"], row["pr_head_sha"], row["task_id"]
+    if row["judge_state"] != judge.J_CLEAN or not judged or not head or judged == head:
+        return False
+    base = wf.get("workspace", "base_branch", default="master")
+    try:
+        moved = verdictcarry.moved_pr_paths(wf.path.parent, base, judged, head)
+    except (OSError, ValueError) as e:   # git missing, a NUL in a sha: judge it, never abort the tick
+        log.warning("judge: %s: could not compare %s with %s: %s", task_id, judged, head, e)
+        return False
+    if moved is None or moved:
+        return False
+    detail = verdictcarry.carried_detail(judged, head, row["judge_detail"])
+    cur = conn.execute(
+        "UPDATE runs SET judge_sha=?, judge_detail=? WHERE task_id=? AND judge_state=? "
+        "AND judge_sha=? AND pr_head_sha=?",
+        (head, detail[:2000], task_id, judge.J_CLEAN, judged, head),
+    )
+    conn.commit()
+    if cur.rowcount == 0:
+        return False
+    event_log.append(
+        "judge.carried", f"{task_id}: clean verdict carried {judged[:12]} → {head[:12]} — "
+                         "the head move touched none of the PR's files",
+        payload={"task_id": task_id, "judged_sha": judged, "head_sha": head,
+                 "reason": verdictcarry.CARRIED},
+    )
+    log.info("judge: %s: %s (%s → %s)", task_id, verdictcarry.CARRIED, judged[:12], head[:12])
+    return True
+
+
 def _stamp_prose_only(wf: WorkflowDef, row: sqlite3.Row) -> bool:
     """⚖️🪜 CMX-265: stamp ``prose_only`` on a PROSE PR's head BEFORE the judge slot gate —
     and (CMX-296) ``standard_no_judge`` on a STANDARD one.
@@ -9000,16 +9076,21 @@ JUDGE_RETRY_MESSAGE = ("resume: a fleet pause froze you mid-call, so your last m
                        "call failed. Retry it once and continue; it is not a verdict.")
 
 
-def _cancel_moot_judges(conn: sqlite3.Connection, wf: WorkflowDef) -> int:
+def _cancel_moot_judges(conn: sqlite3.Connection, wf: WorkflowDef,
+                        live_windows: set[str] | frozenset[str] = frozenset()) -> int:
     """⏹️⚖️ CMX-286: stop every live judge whose round can no longer produce a usable verdict.
 
     Seen twice on 10-19/20: CMX-264's conflict handling sent a PR back while its judge kept
     running on the obsolete head — the watchdog's "still alive — holding" kept one of the
     judge slots for up to an hour, and the first ended ``cannot_verify … run already moved
     to running``. A round is moot once its run is in :data:`SENT_BACK_STATUSES`, or is still
-    under review on a head other than the one judged (both shas known). The row is CAS'd to
-    ``cancelled`` on THIS round first (a verdict that landed meanwhile is left alone), which
-    frees the slot and announces nothing; then the round-end reaper the watchdog uses runs:
+    under review on a head other than the one judged (both shas known), or (CMX-340) has left
+    review for good (:data:`TERMINAL_STATUSES`) and its judge is gone: no live run, and no
+    judge window in ``live_windows`` (an agent not yet at ``--detach``). The row is CAS'd
+    to ``cancelled`` on THIS round first (a verdict that landed meanwhile is left alone),
+    which frees the slot and announces nothing, and its ``judge_window_id`` (and epoch) is
+    cleared: tmux may give that id to another window (CMX-340). Then the round-end reaper the
+    watchdog uses runs:
     window, detached run (:func:`judge.cancel_judge_run`), worktree. A launch still in flight
     in another process is left to it — the next tick sees its run. Returns how many."""
     cancelled = 0
@@ -9021,6 +9102,12 @@ def _cancel_moot_judges(conn: sqlite3.Connection, wf: WorkflowDef) -> int:
         judged, head = row["judge_sha"], row["pr_head_sha"]
         if status in SENT_BACK_STATUSES:
             reason = f"its run was sent back (now {status!r})"
+        elif (status in TERMINAL_STATUSES
+              and judge.judge_window_name(row["branch_name"] or "") not in live_windows
+              and judge.live_judge_run(task_id, judge.judge_worktree_path(wf, task_id)) is None):
+            # A LIVE judge here is left to finish: on a merged PR it may still record a
+            # CMX-239 blocked-race verdict. A dead one only leaves a stale row behind.
+            reason = f"its run left review (now {status!r}) and its judge is gone"
         elif status == "awaiting_review" and judged and head and judged != head:
             reason = f"its PR head moved ({judged[:12]} → {head[:12]})"
         else:
@@ -9028,7 +9115,8 @@ def _cancel_moot_judges(conn: sqlite3.Connection, wf: WorkflowDef) -> int:
         if _judge_launch_owner(row) is not None and not _judge_launch_interrupted(row):
             continue
         cur = conn.execute(
-            "UPDATE runs SET judge_state=?, judge_detail=?, judge_launch_owner=NULL "
+            "UPDATE runs SET judge_state=?, judge_detail=?, judge_launch_owner=NULL, "
+            "judge_window_id=NULL, judge_window_epoch=NULL "
             "WHERE task_id=? AND judge_state=? AND judge_started_at IS ?",
             (judge.J_CANCELLED, f"judge cancelled: {reason}", task_id, judge.J_RUNNING,
              row["judge_started_at"]),

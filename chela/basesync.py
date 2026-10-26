@@ -49,6 +49,30 @@ def check(worktree: str | Path, base: str) -> dict:
     return {"behind": int(count.stdout.strip()), "conflicts": conflicts}
 
 
+def base_sha(worktree: str | Path, base: str) -> str:
+    """The sha ``origin/<base>`` points at, as last fetched. Raises RuntimeError when unreadable."""
+    out = _git(worktree, "rev-parse", "--verify", "--quiet", f"origin/{base}^{{commit}}")
+    if out.returncode != 0 or not out.stdout.strip():
+        raise RuntimeError(f"could not read origin/{base}: {out.stderr.strip()[:200]}")
+    return out.stdout.strip()
+
+
+def moved(worktree: str | Path, base: str, since: str) -> dict | None:
+    """⚖️🔀 CMX-334: did ``origin/<base>`` move past ``since`` (the sha the hand-in's checks
+    started on) without HEAD having it? ``None`` when not; else :func:`check`'s answer plus
+    ``to`` and ``dev_files`` — every path the new base commits touched. Raises RuntimeError
+    when git cannot say: an unknown move is never "did not move"."""
+    state = check(worktree, base)
+    to = base_sha(worktree, base)
+    if to == since or not state["behind"]:
+        return None
+    diff = _git(worktree, "diff", "--name-only", "--no-renames", since, to)
+    if diff.returncode != 0:
+        raise RuntimeError(f"could not list what origin/{base} changed since {since[:12]}: "
+                           f"{diff.stderr.strip()[:200]}")
+    return dict(state, to=to, dev_files=[f for f in diff.stdout.splitlines() if f.strip()])
+
+
 def refusal(base: str, behind: int, conflicts: list[str]) -> str:
     """The actionable message: what is wrong, then the exact commands to fix it. A merge,
     never a rebase — ``request-push`` does a plain push, which a rewritten branch fails."""
@@ -69,7 +93,15 @@ def refusal(base: str, behind: int, conflicts: list[str]) -> str:
 
 def render(record: dict) -> str:
     """One line for the judge from the ``runs.base_sync`` record, "" when there is none."""
-    if not record.get("allow_behind"):
-        return ""
-    return (f"🔀 Handed in {record.get('behind')} commit(s) behind origin/"
-            f"{record.get('base')} with --allow-behind (merges cleanly).")
+    lines = []
+    if record.get("allow_behind"):
+        lines.append(f"🔀 Handed in {record.get('behind')} commit(s) behind origin/"
+                     f"{record.get('base')} with --allow-behind (merges cleanly).")
+    move = record.get("moved")
+    if isinstance(move, dict):
+        overlap = move.get("overlap") or []
+        lines.append(f"🔀 origin/{record.get('base')} moved mid-check ({move.get('from')} → "
+                     f"{move.get('to')}); merged in, related tests re-run ({move.get('tests')}), "
+                     + (f"experiments re-run on the overlap: {', '.join(overlap)}." if overlap
+                        else "no PR file overlapped."))
+    return " ".join(lines)

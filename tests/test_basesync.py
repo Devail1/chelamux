@@ -61,7 +61,8 @@ def test_behind_but_clean_is_refused_without_the_flag_and_recorded_with_it(repo)
 
 
 def test_up_to_date_is_accepted_and_a_missing_remote_fails_closed(repo, tmp_path):
-    assert dispatcher.check_base_sync("cmx-88") == {"ok": True, "record": None}
+    assert dispatcher.check_base_sync("cmx-88") == {
+        "ok": True, "record": None, "since": _git(repo[0], "rev-parse", "HEAD")}
     _git(repo[1], "remote", "set-url", "origin", str(tmp_path / "gone.git"))
     out = dispatcher.check_base_sync("cmx-88", True)
     assert out["ok"] is False
