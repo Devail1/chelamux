@@ -1849,8 +1849,15 @@ def _run_experiments(
             report.cannot_verify_final = True
     if report.visible_blocking:
         # ⚖️🧩 CMX-335: found from the diff, never recalled — only VISIBLE survivors (CMX-395).
+        # Their sites never list a held-out survivor's lines. An enrichment: a crash here
+        # never costs the block it is decorating.
         from chela import shape_sites
-        report.shape_groups = shape_sites.groups(worktree, base_branch, report.visible_blocking)
+        try:
+            report.shape_groups = shape_sites.groups(worktree, base_branch,
+                                                     report.visible_blocking,
+                                                     hidden=report.held_out_blocking)
+        except Exception as e:  # noqa: BLE001
+            log.warning("judge: same-shape sites could not be listed: %s", e)
     return report
 
 

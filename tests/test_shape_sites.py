@@ -149,3 +149,42 @@ def test_render_caps_the_list_and_counts_the_rest():
     assert "- `f.py:50`" in text and "- `f.py:51`" not in text
     assert "- … and 3 more" in text
     assert shape_sites.render([]) == []
+
+
+def test_a_held_out_survivors_line_is_never_listed_beside_a_visible_one(tmp_path):
+    root = _pr(tmp_path / "repo")
+    visible = {"guard": "stop_a ends its agent", "file": "reaper.py",
+               "before": "    _end_agent(w_stop_a)", "after": "    pass"}
+    held = {"guard": "SECRET-HELD", "file": "reaper.py", "held_out": True,
+            "before": "    _end_agent(w_stop_c)\n    return 1", "after": "    return 1"}
+    report = judge.run_experiments(root, TEST_CMD, {"experiments": [visible, held]},
+                                   timeout=120, base_branch="dev")
+    assert [o.verdict for o in report.outcomes] == [judge.SURVIVED, judge.SURVIVED]
+    held_line = next(s for s in _site_lines()
+                     if REAPER_PY.splitlines()[int(s.split(":")[1]) - 1].strip()
+                     == "_end_agent(w_stop_c)")
+    assert report.shape_groups[0]["sites"] == [s for s in _site_lines() if s != held_line]
+    assert f"`{held_line}`" not in judge.block_body(report, None, TEST_CMD)
+
+
+def test_a_site_finder_crash_never_costs_the_block(tmp_path, monkeypatch):
+    root = _pr(tmp_path / "repo")
+
+    def boom(*a, **k):
+        raise RuntimeError("regex blew up")
+
+    monkeypatch.setattr(shape_sites, "groups", boom)
+    exp = {"guard": "g", "file": "reaper.py", "before": "    _end_agent(w_stop_c)",
+           "after": "    pass"}
+    report = judge.run_experiments(root, TEST_CMD, {"experiments": [exp]}, timeout=120,
+                                   base_branch="dev")
+    assert report.state == judge.J_BLOCKED and report.shape_groups == []
+    assert "### 1. [MUTATION] g" in judge.block_body(report, None, TEST_CMD)
+
+
+def test_a_compare_target_matches_whole_operands_only():
+    assert shape_sites.matches("compare", "n<0", "if n < 0:")
+    assert shape_sites.matches("compare", "n<0", "if (n<0)")
+    assert not shape_sites.matches("compare", "n<0", "if min<0:")
+    assert not shape_sites.matches("compare", "n<0", "if n<0x10:")
+    assert not shape_sites.matches("compare", "n<0", "if self.n<0:")

@@ -66,13 +66,17 @@ def matches(kind: str, target: str, line: str) -> bool:
     if kind == "call":
         return target in _calls(line)
     if kind == "compare":
-        return target in line.replace(" ", "")
+        # Whole operands only: ``n<0`` is not a site of ``min<0`` or ``n<0x10``.
+        return any("".join(m.groups()).replace(" ", "") == target
+                   for m in _RE_CMP.finditer(line))
     return line.strip() == target
 
 
-def diff_sites(worktree: Path, base_branch: str, kind: str, target: str) -> list[str] | None:
-    """Every ``file:line`` the PR changed vs ``origin/<base_branch>`` with the shape — ``None``
-    when the diff cannot be read: unknown sites are never "no other site"."""
+def diff_sites(worktree: Path, base_branch: str, kind: str, target: str,
+               hidden: frozenset[str] = frozenset()) -> list[str] | None:
+    """Every ``file:line`` the PR changed vs ``origin/<base_branch>`` with the shape, minus
+    ``hidden`` — ``None`` when the diff cannot be read: unknown sites are never "no other
+    site"."""
     if not base_branch or not target:
         return None
     lines, err = sweep.changed_lines(worktree, f"origin/{base_branch}")
@@ -85,20 +89,39 @@ def diff_sites(worktree: Path, base_branch: str, kind: str, target: str) -> list
         except (OSError, UnicodeDecodeError):
             return None
         sites += [f"{rel}:{n}" for n in sorted(lines[rel])
-                  if n <= len(src) and matches(kind, target, src[n - 1])]
+                  if n <= len(src) and matches(kind, target, src[n - 1])
+                  and f"{rel}:{n}" not in hidden]
     return sites
 
 
-def groups(worktree: Path, base_branch: str, outcomes: list) -> list[dict]:
+def _lines_of(worktree: Path, outcomes: list) -> frozenset[str]:
+    """Every ``file:line`` an outcome's ``before`` spans in the worktree (CMX-395: the held-out
+    survivors, whose sites are never named)."""
+    out = set()
+    for o in outcomes:
+        e = o.experiment
+        try:
+            text = (worktree / e.file).read_text()
+        except (OSError, UnicodeDecodeError):
+            continue
+        at = text.find(e.before)
+        if at >= 0:
+            first = text.count("\n", 0, at) + 1
+            out.update(f"{e.file}:{n}" for n in range(first, first + e.before.count("\n") + 1))
+    return frozenset(out)
+
+
+def groups(worktree: Path, base_branch: str, outcomes: list, hidden: list = ()) -> list[dict]:
     """One ``{kind, target, guards, sites}`` per shape among ``outcomes`` (judge ``Outcome``s),
-    in first-seen order. ``sites`` is ``None`` when the diff could not be read."""
+    in first-seen order. ``sites`` is ``None`` when the diff could not be read, and never names
+    a line of a ``hidden`` (held-out) outcome."""
     out: dict[tuple[str, str], dict] = {}
     for o in outcomes:
         key = shape(o.experiment.before, o.experiment.after)
         g = out.setdefault(key, {"kind": key[0], "target": key[1], "guards": []})
         g["guards"].append(o.experiment.guard)
     for (kind, target), g in out.items():
-        g["sites"] = diff_sites(worktree, base_branch, kind, target)
+        g["sites"] = diff_sites(worktree, base_branch, kind, target, _lines_of(worktree, hidden))
     return list(out.values())
 
 
@@ -113,7 +136,7 @@ def render(found: list[dict]) -> list[str]:
     for g in found:
         sites = g["sites"]
         count = "could not be listed (the diff was unreadable)" if sites is None else \
-            f"{len(sites)} site(s) in this PR's diff"
+            f"{len(sites)} site(s) in this PR's diff (non-test .py/.js/.mjs searched)"
         parts += [f"**`{g['kind']}` on `{g['target']}`** — survived: "
                   f"{'; '.join(g['guards'])} — {count}", ""]
         parts += [f"- `{s}`" for s in (sites or [])[:MAX_SITES]]
