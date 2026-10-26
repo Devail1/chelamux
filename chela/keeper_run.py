@@ -7,9 +7,11 @@ tracker until that person says so (``chela keeper approve|dismiss <batch>``).
 
 **The model proposes; code decides what may be proposed.** :func:`validate` drops every
 proposal that cites no evidence, cites a ref the digest does not hold, quotes text the
-cited item does not contain, uses an action outside :data:`ACTIONS`, moves an issue to In
-Progress from anywhere but Todo/Backlog, or calls an issue done without a MERGED PR in the
-digest whose title names it. The model never sees the tracker and never writes to it.
+cited item does not contain, cites an item that is not about the issue (it neither names
+the id nor quotes a word of the title: ``evidence_unrelated``), uses an action outside
+:data:`ACTIONS`, moves an issue to In Progress from anywhere but Todo/Backlog, flags stale
+an issue that is not In Progress or that something in the window names, or calls an issue
+done without a MERGED PR it cites whose title names it. The model never sees the tracker and never writes to it.
 
 **Every write is attributed**: a comment from "chela keeper" naming the approver, the
 batch and the evidence. Every proposal and its outcome (``dropped``, ``proposed``,
@@ -20,6 +22,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import secrets
 import time
 from pathlib import Path
@@ -30,6 +33,8 @@ from chela.workflow import WorkflowDef
 ACTIONS = ("in_progress", "comment", "new_backlog_issue", "flag_stale", "done")
 EVIDENCE_KINDS = ("commit", "pr", "prompt", "edit")
 START_STATES = ("todo", "backlog")
+STALE_STATE = "in progress"
+KEYWORD_MIN_CHARS = 4                  # a title word shorter than this ("a", "fix") is in anything
 NEW_ISSUE_STATES = ("Backlog",)        # never a READY state: the dispatcher would claim it
 QUOTE_MIN_CHARS = 12
 LANDED = ("set", "already", "struck", "created")
@@ -54,9 +59,10 @@ a `kind` and a `ref`. Propose board changes ONLY where the evidence shows the bo
 - done: a MERGED pr names the issue
 - comment: a short factual note an issue should carry (put it in `comment`)
 - new_backlog_issue: work is happening that no issue covers (give `title`; `issue` = "")
-- flag_stale: an In Progress issue nothing in the window touched
+- flag_stale: an In Progress issue nothing in the window names (cite any item)
 Every proposal cites evidence: copy `kind` and `ref` exactly as given, and `quote` a
-verbatim fragment of that item's `text`. Proposals without such evidence are discarded.
+verbatim fragment of that item's `text`. Except for flag_stale, each item cited must be
+about the issue: name its id, or quote a word of its title. Other proposals are discarded.
 Propose nothing when nothing is wrong. Return JSON only.
 
 """
@@ -92,6 +98,12 @@ def _ref(kind, ref) -> str:
     return f"#{ref}" if kind == "pr" and ref.isdigit() else ref
 
 
+def _about(issue: str, title, text, quote: str, key: str) -> bool:
+    """Whether an item (its ``text``, the ``quote`` cited from it) is about ``issue``."""
+    words = {w for w in re.findall(r"[a-z0-9]+", _norm(title)) if len(w) >= KEYWORD_MIN_CHARS}
+    return issue in keeper.issue_ids([text], key) or bool(words & set(re.findall(r"[a-z0-9]+", quote)))
+
+
 def _drop_reason(p, d: dict, idx: dict) -> str | None:
     """Why proposal ``p`` must not reach a person, or None when it may."""
     if not isinstance(p, dict):
@@ -102,7 +114,7 @@ def _drop_reason(p, d: dict, idx: dict) -> str | None:
     evidence = p.get("evidence")
     if not isinstance(evidence, list) or not evidence:
         return "no evidence"
-    cited = []
+    cited, quoted = [], []
     for e in evidence:
         if not isinstance(e, dict):
             return "evidence is not an object"
@@ -117,23 +129,32 @@ def _drop_reason(p, d: dict, idx: dict) -> str | None:
         if not quote or len(quote) < min(QUOTE_MIN_CHARS, len(text)) or quote not in text:
             return f"evidence {kind}:{ref} does not say that"
         cited.append((kind, item))
+        quoted.append((f"{kind}:{ref}", item["text"], quote))
     if action == "new_backlog_issue":
         return None if str(p.get("title") or "").strip() else "new issue without a title"
-    state = {t["id"].upper(): t["state"] for t in d["board"]["items"]}.get(issue)
+    board = {t["id"].upper(): t for t in d["board"]["items"]}
+    row, key = board.get(issue, {}), d["tracker_key"]
+    state, title = row.get("state"), row.get("title")
     if state is None:
         return f"{issue or 'no issue'} is not on the board"
     if action == "in_progress" and str(state).lower() not in START_STATES:
         return f"{issue} is {state}, not Todo or Backlog"
-    if action == "flag_stale" and str(state).lower() in START_STATES:
-        return f"{issue} is {state}: it has not started, so it cannot be stale"
+    if action == "flag_stale":
+        if str(state).lower() != STALE_STATE:
+            return f"{issue} is {state}, not In Progress: only started work can be stale"
+        named = next((f"{k}:{r}" for (k, r), v in idx.items()
+                      if _about(issue, title, v["text"], _norm(v["text"]), key)), None)
+        return f"{issue} is not stale: {named} names it" if named else None
     if action == "comment" and not str(p.get("comment") or "").strip():
         return "comment without text"
     if action == "done" and not any(
             kind == "pr" and item.get("event") == "merged"
-            and issue in keeper.issue_ids([item["text"]], d["tracker_key"])
+            and issue in keeper.issue_ids([item["text"]], key)
             for kind, item in cited):
         return "done without a merged PR that names the issue"
-    return None
+    stray = next((ref for ref, text, quote in quoted
+                  if not _about(issue, title, text, quote, key)), None)
+    return f"evidence_unrelated: {stray} is not about {issue}" if stray else None
 
 
 def validate(proposals, d: dict) -> tuple[list[dict], list[dict]]:

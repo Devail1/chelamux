@@ -15,8 +15,9 @@ from chela.sources.linear import LinearError, LinearSource
 def digest():
     return {
         "tracker_key": "CMX", "cursor": {"seq": 9, "boot_id": "b", "ts": 100.0},
-        "commits": {"items": [{"sha": "abc1234567", "ts": 1,
-                               "subject": "CMX-5: wire the parser"}], "total": 1},
+        "commits": {"items": [{"sha": "abc1234567", "ts": 1, "subject": "CMX-5: wire the parser"},
+                              {"sha": "def5678901", "ts": 2, "subject": "CMX-6: export the rows"}],
+                    "total": 2},
         "prs": {"items": [
             {"number": 41, "title": "CMX-6: ship the export", "state": "MERGED",
              "event": "merged", "ts": 2},
@@ -31,7 +32,9 @@ def digest():
             {"id": "CMX-6", "title": "export", "state": "In Progress"},
             {"id": "CMX-7", "title": "docs", "state": "In Progress"},
             {"id": "CMX-8", "title": "backlog item", "state": "Backlog"},
-            {"id": "CMX-9", "title": "reviewing", "state": "In Review"}], "total": 5},
+            {"id": "CMX-9", "title": "reviewing", "state": "In Review"},
+            {"id": "CMX-10", "title": "telemetry", "state": "In Progress"},
+            {"id": "CMX-11", "title": "parser rewrite", "state": "In Progress"}], "total": 7},
     }
 
 
@@ -47,7 +50,7 @@ VALID = [
     {"issue": "CMX-6", "action": "done", "evidence": [MERGED]},
     {"issue": "CMX-7", "action": "comment", "comment": "draft PR is open",
      "evidence": [ev("pr", "42", "draft the docs")]},
-    {"issue": "CMX-7", "action": "flag_stale", "evidence": [ev("edit", "@3.e1", "chela/parser.py")]},
+    {"issue": "CMX-10", "action": "flag_stale", "evidence": [ev("edit", "@3.e1", "chela/parser.py")]},
     {"issue": "", "action": "new_backlog_issue", "title": "parser docs", "evidence": [COMMIT]},
 ]
 INVALID = [
@@ -77,9 +80,33 @@ INVALID = [
     ({"issue": "CMX-5", "action": "in_progress", "evidence": [ev("pr", ["41"], "ship the export")]},
      "evidence without a kind and a ref"),
     ({"issue": "CMX-5", "action": "flag_stale", "evidence": [COMMIT]},
-     "CMX-5 is Todo: it has not started, so it cannot be stale"),
+     "CMX-5 is Todo, not In Progress: only started work can be stale"),
     ({"issue": "CMX-8", "action": "flag_stale", "evidence": [COMMIT]},
-     "CMX-8 is Backlog: it has not started, so it cannot be stale"),
+     "CMX-8 is Backlog, not In Progress: only started work can be stale"),
+    ({"issue": "CMX-9", "action": "flag_stale", "evidence": [COMMIT]},
+     "CMX-9 is In Review, not In Progress: only started work can be stale"),
+    # In Progress, but the window names it: by id (a PR, a commit) or by a title word.
+    ({"issue": "CMX-7", "action": "flag_stale", "evidence": [COMMIT]},
+     "CMX-7 is not stale: pr:#42 names it"),
+    ({"issue": "CMX-6", "action": "flag_stale", "evidence": [COMMIT]},
+     "CMX-6 is not stale: commit:def5678901 names it"),
+    ({"issue": "CMX-11", "action": "flag_stale", "evidence": [COMMIT]},
+     "CMX-11 is not stale: commit:abc1234567 names it"),
+    # every cited item must be about THE issue: its id in the item, or a title word quoted
+    ({"issue": "CMX-5", "action": "in_progress", "evidence": [ev("pr", "#42", "draft the docs")]},
+     "evidence_unrelated: pr:#42 is not about CMX-5"),
+    ({"issue": "CMX-5", "action": "in_progress", "evidence": [COMMIT, ev("pr", "42", "draft the docs")]},
+     "evidence_unrelated: pr:42 is not about CMX-5"),
+    ({"issue": "CMX-7", "action": "comment", "comment": "x", "evidence": [COMMIT]},
+     "evidence_unrelated: commit:abc1234567 is not about CMX-7"),
+    ({"issue": "CMX-6", "action": "done", "evidence": [MERGED, COMMIT]},
+     "evidence_unrelated: commit:abc1234567 is not about CMX-6"),
+    ({"issue": "CMX-8", "action": "in_progress", "evidence": [ev("edit", "@3.e1", "chela/parser.py")]},
+     "evidence_unrelated: edit:@3.e1 is not about CMX-8"),
+    ({"issue": "CMX-5", "action": "in_progress", "evidence": [ev("edit", "@3.e1", "chela/parser.py")]},
+     None),                                    # no id, but it quotes the title word "parser"
+    ({"issue": "CMX-7", "action": "comment", "comment": "x", "evidence": [ev("pr", 42, "draft the docs")]},
+     None),                                    # an int ref is the same PR
     ({"issue": "CMX-5", "action": "cancel", "evidence": [COMMIT]}, "action 'cancel' is not allowed"),
     ({"issue": "CMX-9", "action": "in_progress", "evidence": [COMMIT]},
      "CMX-9 is In Review, not Todo or Backlog"),
@@ -97,6 +124,9 @@ INVALID = [
      "done without a merged PR that names the issue"),
     ({"issue": "CMX-5", "action": "done", "evidence": [COMMIT]},
      "done without a merged PR that names the issue"),
+    # a merged PR naming CMX-6 IS in the digest, but this proposal does not cite it
+    ({"issue": "CMX-6", "action": "done", "evidence": [ev("commit", "def5678901", "export the rows")]},
+     "done without a merged PR that names the issue"),
     ("not a dict", "not an object"),
 ]
 
@@ -105,15 +135,15 @@ def test_only_valid_proposals_survive():
     kept, dropped = keeper_run.validate(VALID + [p for p, _ in INVALID], digest())
     assert [(p["issue"], p["action"]) for p in kept] == [
         ("CMX-5", "in_progress"), ("CMX-8", "in_progress"), ("CMX-6", "done"),
-        ("CMX-7", "comment"), ("CMX-7", "flag_stale"), ("", "new_backlog_issue"),
-        ("CMX-5", "in_progress")]
+        ("CMX-7", "comment"), ("CMX-10", "flag_stale"), ("", "new_backlog_issue"),
+        ("CMX-5", "in_progress"), ("CMX-5", "in_progress"), ("CMX-7", "comment")]
     assert [d["reason"] for d in dropped] == [why for _, why in INVALID if why]
 
 
 def test_a_short_item_is_quoted_whole():
     d = digest()
     d["sessions"]["items"][0]["edits"]["items"] = ["a.py"]
-    p = {"issue": "CMX-7", "action": "flag_stale", "evidence": [ev("edit", "@3.e1", "a.py")]}
+    p = {"issue": "CMX-10", "action": "flag_stale", "evidence": [ev("edit", "@3.e1", "a.py")]}
     assert keeper_run.validate([p], d)[0] == [p]
     p["evidence"] = [ev("edit", "@3.e1", "a.p")]
     assert keeper_run.validate([p], d)[0] == []
@@ -159,12 +189,12 @@ class FakeTracker:
 @pytest.fixture
 def state(tmp_path, monkeypatch):
     monkeypatch.setattr(config, "CHELA_DIR", tmp_path / "chela")
-    sent, saved = [], []
+    sent, saved, built = [], [], []
     monkeypatch.setattr(inbox, "enqueue", lambda *a: sent.append(a) or True)
-    monkeypatch.setattr(keeper, "build", lambda wf, since=None: digest())
+    monkeypatch.setattr(keeper, "build", lambda wf, since=None: built.append(since) or digest())
     monkeypatch.setattr(keeper, "save_cursor", lambda wf, c: saved.append(c))
     monkeypatch.setattr(keeper, "repo_roots", lambda wf: ("/repo", ["/repo"]))
-    return {"sent": sent, "saved": saved}
+    return {"sent": sent, "saved": saved, "built": built}
 
 
 class WF:
@@ -192,14 +222,15 @@ def _run(proposals, error=None, **kw):
 
 
 def test_run_logs_every_proposal_and_queues_one_inbox_item(state):
-    out, seen = _run([VALID[0], VALID[2], INVALID[2][0]])
-    assert seen["model"] == "sonnet" and seen["cwd"] == "/repo"
+    out, seen = _run([VALID[0], VALID[2], INVALID[2][0]], since=600)
+    assert seen["model"] == "sonnet" and seen["cwd"] == "/repo" and state["built"] == [600]
     assert seen["prompt"].startswith(keeper_run.PROMPT)
     facts = json.loads(seen["prompt"][len(keeper_run.PROMPT):])
     assert {"kind": "prompt", "ref": "@3.p1", "text": "Start on   CMX-8 please"} in facts["evidence"]
     assert {"kind": "pr", "ref": "#41", "text": "CMX-6: ship the export",
             "event": "merged"} in facts["evidence"]
     assert facts["recaps"] == [{"session": "@3", "recap": "working on CMX-5"}]
+    assert facts["board"] == digest()["board"]["items"]
     assert out["dropped"] == 1 and len(out["proposals"]) == 2
     assert [r["outcome"] for r in rows()] == ["dropped", "proposed", "proposed"]
     assert rows()[0]["reason"] == "evidence commit:fffffff000 is not in the digest"
@@ -207,6 +238,7 @@ def test_run_logs_every_proposal_and_queues_one_inbox_item(state):
     (kind, summary, payload), = state["sent"]
     assert kind == "keeper_proposals" and payload["batch"] == out["batch"]
     assert payload["proposals"] == out["proposals"] and payload["dropped"] == 1
+    assert payload["workflow"] == WF.path
     assert f"chela keeper approve {out['batch']}" in summary and "2 board change(s)" in summary
     assert state["saved"] == [digest()["cursor"]]
 
@@ -251,12 +283,14 @@ def test_approve_all_writes_exactly_the_proposals_attributed(state):
     assert kinds == [
         ("transition", "CMX-5"), ("comment", "CMX-5"), ("transition", "CMX-8"),
         ("comment", "CMX-8"), ("close", "CMX-6"), ("comment", "CMX-6"),
-        ("comment", "CMX-7"), ("comment", "CMX-7"), ("create", "parser docs"),
+        ("comment", "CMX-7"), ("comment", "CMX-10"), ("create", "parser docs"),
         ("comment", "CMX-100")]
     assert fake.writes[0][2] == "in_progress"
     assert fake.writes[8][3] == ("Backlog",)       # never a READY state the dispatcher claims
     comments = [w[2] for w in fake.writes if w[0] == "comment"]
     assert all(note in c and "— chela keeper (" in c for c in comments)
+    assert "— chela keeper (in_progress, approved by liav" in comments[0]
+    assert "— chela keeper (done, approved by liav" in comments[2]
     assert "commit abc1234567: “wire the parser”" in comments[0]
     assert comments[3].startswith("draft PR is open\n\n")
     assert comments[4].startswith("⚠️ Flagged stale\n\n")
@@ -327,8 +361,10 @@ def test_a_failed_enqueue_still_keeps_the_batch(state, monkeypatch):
 def test_dismiss_writes_nothing_and_logs_rejected(state):
     batch = _batch(state, VALID[:2])
     fake = FakeTracker()
-    assert keeper_run.decide(batch, approve=False, source=fake, env={})["results"] == ["rejected"] * 2
+    assert keeper_run.decide(batch, approve=False, by="liav", source=fake, env={})["results"] == [
+        "rejected"] * 2
     assert fake.writes == [] and [r["outcome"] for r in rows()][-2:] == ["rejected"] * 2
+    assert [r["by"] for r in rows()[-2:]] == ["liav"] * 2
 
 
 def test_approve_one_by_one(state):
@@ -347,12 +383,34 @@ def test_a_failed_write_is_logged_and_the_rest_still_apply(state):
     assert [r["outcome"] for r in rows()][-2:] == ["failed", "accepted"]
 
 
-def test_no_comment_when_the_state_write_did_not_land(state):
-    batch = _batch(state, [VALID[0]])
+def test_an_already_applied_write_is_accepted_without_a_comment(state):
+    """The board already said so: the person's approval stands (accepted, which the
+    acceptance rate counts), but nothing changed, so there is nothing to attribute."""
+    batch = _batch(state, [VALID[0], VALID[2]])
     fake = FakeTracker()
     fake.transition = lambda issue, edge: "already"
-    assert keeper_run.decide(batch, approve=True, source=fake, env={})["results"] == ["already"]
+    fake.close_tasks = lambda ids: {i: "already" for i in ids}
+    assert keeper_run.decide(batch, approve=True, source=fake, env={})["results"] == [
+        "already", "already"]
     assert fake.writes == []
+    assert [(r["outcome"], r["result"]) for r in rows()[-2:]] == [("accepted", "already")] * 2
+
+
+def test_approve_reopens_the_tracker_of_the_proposing_workflow(state, monkeypatch):
+    batch = _batch(state, VALID[:1])
+    opened, fake = [], FakeTracker()
+    monkeypatch.setattr("chela.workflow.load_workflow", lambda path: opened.append(path) or "wf")
+    monkeypatch.setattr("chela.sources.get_source", lambda wf: fake if wf == "wf" else None)
+    assert keeper_run.decide(batch, approve=True, env={})["results"] == ["set"]
+    assert opened == [WF.path] and [w[:2] for w in fake.writes][0] == ("transition", "CMX-5")
+
+
+def test_the_stored_batch_is_the_validated_one(state):
+    """Approval applies what survived validation, never what the model said."""
+    batch = _batch(state, [p for p, _ in INVALID[:6]] + [VALID[0]])
+    fake = FakeTracker()
+    assert keeper_run.decide(batch, approve=True, source=fake, env={})["results"] == ["set"]
+    assert [w[:2] for w in fake.writes] == [("transition", "CMX-5"), ("comment", "CMX-5")]
 
 
 @pytest.mark.parametrize("bad", ["../x", "ab/cd", "", "ａｂ"])
@@ -490,6 +548,20 @@ def test_cli_empty_only_is_not_approve_all(state, monkeypatch, capsys):
         main.main()
     assert exc.value.code == 1 and fake.writes == []
     assert "--only must name proposals 1 to 2" in capsys.readouterr().err
+
+
+def test_cli_dismiss_writes_nothing(state, monkeypatch, capsys):
+    monkeypatch.delenv("CLAUDECODE", raising=False)
+    monkeypatch.delenv("CHELA_ACTOR", raising=False)
+    monkeypatch.setenv("USER", "liav")
+    batch = _batch(state, VALID[:2])
+    fake = FakeTracker()
+    monkeypatch.setattr("chela.sources.get_source", lambda wf: fake)
+    monkeypatch.setattr(main.workflow, "load_workflow", lambda p: WF())
+    monkeypatch.setattr("sys.argv", ["chela", "keeper", "dismiss", batch])
+    main.main()
+    assert capsys.readouterr().out == "  1. rejected\n  2. rejected\n" and fake.writes == []
+    assert [(r["outcome"], r["by"]) for r in rows()[-2:]] == [("rejected", "liav")] * 2
 
 
 def test_cli_says_when_the_inbox_is_off(state, monkeypatch, capsys):
