@@ -257,3 +257,89 @@ def test_an_unreadable_experiments_file_refuses_on_an_overlap(repo, tmp_path):
         out = _reconcile(repo, str(tmp_path / "missing.json"))
     assert out["ok"] is False and not sc.called
     assert "touched this PR's p.py; the 0 experiment(s) there: " in out["error"]
+
+
+def test_a_base_already_merged_in_is_no_move(repo):
+    """origin/dev moved past ``since``, but HEAD already has it: nothing to merge or re-run."""
+    _advance(repo[0], {"lib.py": "L = 1\n"})
+    _git(repo[1], "fetch", "-q", "origin")
+    _git(repo[1], "merge", "-q", "--no-edit", "origin/dev")
+    head = _git(repo[1], "rev-parse", "HEAD")
+    with patch.object(judge, "run_suite", return_value=GREEN) as suite:
+        assert _reconcile(repo) == {"ok": True, "moved": None}
+    assert not suite.called and _git(repo[1], "rev-parse", "HEAD") == head
+
+
+def test_a_merge_that_fails_part_way_is_aborted(repo):
+    """The conflict pre-check missed it, so the merge itself starts and stops half-applied."""
+    _advance(repo[0], {"p.py": "conflict\n", "lib.py": "L = 1\n"})
+    _git(repo[1], "fetch", "-q", "origin")
+    head = _git(repo[1], "rev-parse", "HEAD")
+    clean = {"behind": 1, "conflicts": []}
+    with patch.object(basesync, "check", return_value=clean), \
+            patch.object(judge, "run_suite") as suite:
+        out = _reconcile(repo)
+    assert out["error"].startswith("`git merge origin/dev` failed: ") and not suite.called
+    assert _git(repo[1], "rev-parse", "HEAD") == head
+    merging = subprocess.run(["git", "rev-parse", "-q", "--verify", "MERGE_HEAD"],
+                             cwd=repo[1], capture_output=True, text=True)
+    assert merging.returncode != 0
+    assert _git(repo[1], "status", "--porcelain") == ""
+    assert not (repo[1] / "lib.py").exists()
+
+
+def test_an_unreadable_base_sha_fails_the_base_check_closed(repo):
+    with patch.object(basesync, "base_sha", side_effect=RuntimeError("nope")):
+        out = dispatcher.check_base_sync("cmx-88")
+    assert out == {"ok": False, "error": "could not check this branch against its base — nope"}
+
+
+def test_the_overlap_re_run_is_wired_to_the_workflow_and_cleans_up(repo, tmp_path):
+    _advance(repo[0], {"p.py": PR.replace("def g(x):\n    return x", "def g(x):\n    return -x")})
+    exps = tmp_path / "e.json"
+    mine = {"guard": "f", "file": "p.py", "before": "x + 1", "after": "x - 1"}
+    exps.write_text(json.dumps({"level": "core", "experiments": ["junk", mine]}))
+    calls = []
+
+    def self_check(worktree, path, **kw):
+        calls.append((worktree, path, json.loads(Path(path).read_text()), kw))
+        return {"ok": True, "blocking": 0, "cannot_verify": "", "unrun": []}
+
+    with patch.object(judge, "run_suite", return_value=GREEN), \
+            patch.object(judge, "run_self_check", side_effect=self_check):
+        assert _reconcile(repo, str(exps))["ok"]
+    [(worktree, path, body, kw)] = calls
+    assert worktree == repo[1] and kw == {"workflow_path": "W.md"}
+    assert body == {"level": "core", "experiments": [mine]}
+    assert not Path(path).exists()
+
+
+def test_a_prose_move_needs_no_suite(repo):
+    _advance(repo[0], {"README.md": "moved\n"})
+    with patch.object(judge, "judge_test_cmd", return_value=""), \
+            patch.object(judge, "run_suite") as suite:
+        out = _reconcile(repo)
+    assert out["ok"] and out["moved"]["tests"] == "0 file(s)" and not suite.called
+
+
+def test_two_base_files_one_test_select_it_once(repo):
+    _advance(repo[0], {"lib.py": "L = 1\n", "lib2.py": "M = 1\n",
+                       "tests/test_lib.py": "import lib\nimport lib2\n"})
+    _git(repo[1], "fetch", "-q", "origin")
+    _git(repo[1], "merge", "-q", "--no-edit", "origin/dev")
+    assert handinmove.related_tests(repo[1], ["lib.py", "lib2.py"]) == ["tests/test_lib.py"]
+
+
+def test_a_renamed_base_file_lists_both_paths(repo):
+    _git(repo[0], "mv", "p.py", "p2.py")
+    _git(repo[0], "commit", "-qm", "rename")
+    _git(repo[0], "push", "-q", "origin", "dev")
+    _git(repo[1], "fetch", "-q", "origin")
+    state = basesync.moved(repo[1], "dev", repo[2])
+    assert sorted(state["dev_files"]) == ["p.py", "p2.py"]
+
+
+def test_an_unreadable_workflow_refuses(repo, tmp_path):
+    (tmp_path / "WORKFLOW.md").unlink()
+    out = dispatcher.reconcile_base_move("cmx-88", repo[2], None)
+    assert out["ok"] is False and out["error"].startswith(f"{tmp_path / 'WORKFLOW.md'} could not")
