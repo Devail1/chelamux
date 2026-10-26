@@ -2482,7 +2482,8 @@ def test_the_judge_never_shells_out_to_a_merge(tmp_path):
     with patch.object(judge.subprocess, "run", side_effect=spy):
         _judge_run(tmp_path, FAKE_GUARD_TEST, {"experiments": [_exp()]})
 
-    flat = [" ".join(str(p) for p in c) for c in calls]
+    # ⚖️🧩 CMX-335: `git merge-base` only READS (the same-shape site finder diffs the PR).
+    flat = [" ".join(str(p) for p in c if p != "merge-base") for c in calls]
     assert not [c for c in flat if "merge" in c or "pr review" in c]
 
 
