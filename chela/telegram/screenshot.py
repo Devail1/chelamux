@@ -76,6 +76,14 @@ _DEFAULT_BG = (30, 30, 30)
 
 _ANSI_PATTERN = re.compile(r"\x1b\[([0-9;]*)m")
 
+# The smallest grid a screenshot is drawn on (CMX-343). The image is sized to the pane's
+# real grid, never to its longest non-blank line: ``capture-pane -p`` strips trailing
+# blanks, so an idle Claude Code prompt captured as one ``❯`` came out a few pixels wide
+# and Telegram upscaled it to mush. A pane narrower than this (a phone client shrank the
+# window) is still padded out, so text stays readable at Telegram's display width.
+MIN_COLS = 80
+MIN_ROWS = 24
+
 
 @dataclass
 class _Style:
@@ -227,16 +235,31 @@ def _parse_line(line: str, with_ansi: bool) -> list[_Segment]:
     return segments or [_Segment("", _Style())]
 
 
-def text_to_image(text: str, *, font_size: int = 24, with_ansi: bool = True) -> bytes:
+def text_to_image(
+    text: str,
+    *,
+    font_size: int = 24,
+    with_ansi: bool = True,
+    cols: int | None = None,
+    rows: int | None = None,
+) -> bytes:
     """Render ``text`` to a dark-background PNG and return its bytes.
 
     ``with_ansi`` parses SGR colour escapes (from ``capture-pane -e``); with it
     off (or on text that has none) everything renders in the default fg. Always
     returns non-empty PNG bytes for any input, including the empty string.
+
+    The canvas is the terminal's grid, not the text's bounding box: at least
+    ``max(cols, MIN_COLS)`` cells wide and ``max(rows, MIN_ROWS)`` lines tall
+    (``cols``/``rows`` are the pane's ``#{pane_width}``/``#{pane_height}``; None
+    when unknown), with content top-aligned and blank cells left as background.
+    A line wider than that grid still widens the image rather than clipping.
     """
     font = _load_font(font_size)
     chain = _load_fallback_chain(font_size)
     lines = text.split("\n")
+    if len(lines) > 1 and lines[-1] == "":
+        lines.pop()  # capture-pane ends every row with "\n"; that is no extra row
     line_segments = [_parse_line(line, with_ansi) for line in lines]
     # Split each segment into (run_text, face) runs once, up front, so a
     # segment that mixes e.g. plain text and a spinner glyph draws each run
@@ -260,8 +283,11 @@ def text_to_image(text: str, *, font_size: int = 24, with_ansi: bool = True) -> 
                 w += bbox[2] - bbox[0]
         max_width = max(max_width, w)
 
-    img_width = max(1, int(max_width)) + padding * 2
-    img_height = line_height * max(1, len(lines)) + padding * 2
+    cell_width = probe.textlength("M", font=font)
+    grid_width = max(cols or 0, MIN_COLS) * cell_width
+    grid_rows = max(rows or 0, MIN_ROWS)
+    img_width = int(max(max_width, grid_width)) + padding * 2
+    img_height = line_height * max(len(lines), grid_rows) + padding * 2
 
     img = Image.new("RGB", (img_width, img_height), _DEFAULT_BG)
     draw = ImageDraw.Draw(img)
