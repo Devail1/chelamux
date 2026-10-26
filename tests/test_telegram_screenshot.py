@@ -131,3 +131,96 @@ def test_renders_hebrew_to_png_without_tofu():
     png = screenshot.text_to_image("שלום עולם", font_size=24, with_ansi=False)
     assert png.startswith(b"\x89PNG")
     assert len(png) > 100
+
+
+# ── CMX-343: the PNG is the pane's GRID, never the longest non-blank line ─────
+#
+# capture-pane -p strips trailing blanks, so Claude Code idle at its prompt captures as a
+# lone "❯". Sized to that line the image was a few pixels wide and Telegram upscaled it to
+# a blurry glyph. The canvas is now max(pane cols, 80) cells × max(pane rows, 24) lines.
+
+_PAD = 16  # the renderer's margin on each side
+
+
+def _size(png):
+    import io
+
+    from PIL import Image
+
+    return Image.open(io.BytesIO(png)).size
+
+
+def _cell_and_line(font_size=24):
+    from PIL import Image, ImageDraw
+
+    font = screenshot._load_font(font_size)
+    cell = ImageDraw.Draw(Image.new("RGB", (1, 1))).textlength("M", font=font)
+    return cell, int(font_size * 1.4)
+
+
+def test_a_lone_prompt_glyph_renders_on_at_least_an_80x24_grid():
+    cell, line = _cell_and_line()
+    width, height = _size(screenshot.text_to_image("❯"))
+    assert width >= int(80 * cell) + 2 * _PAD
+    assert height >= 24 * line + 2 * _PAD
+
+
+def test_a_200_column_pane_renders_200_columns_wide():
+    cell, _line = _cell_and_line()
+    width, _height = _size(screenshot.text_to_image("❯", cols=200, rows=50))
+    assert width == int(200 * cell) + 2 * _PAD
+
+
+def test_a_narrow_pane_is_still_padded_to_80_columns():
+    cell, _line = _cell_and_line()
+    width, _height = _size(screenshot.text_to_image("❯", cols=40, rows=24))
+    assert width == int(80 * cell) + 2 * _PAD
+
+
+def test_a_tall_pane_renders_its_own_row_count():
+    _cell, line = _cell_and_line()
+    _width, height = _size(screenshot.text_to_image("❯", cols=80, rows=40))
+    assert height == 40 * line + 2 * _PAD
+
+
+def test_a_short_pane_is_still_padded_to_24_rows():
+    _cell, line = _cell_and_line()
+    _width, height = _size(screenshot.text_to_image("❯", cols=80, rows=10))
+    assert height == 24 * line + 2 * _PAD
+
+
+def test_capture_panes_trailing_newline_is_not_an_extra_row():
+    # capture-pane ends EVERY row with "\n": a 30-row capture is 30 rows, not 31.
+    _cell, line = _cell_and_line()
+    _width, height = _size(screenshot.text_to_image("x\n" * 30, cols=80, rows=30))
+    assert height == 30 * line + 2 * _PAD
+
+
+def test_more_captured_lines_than_pane_rows_still_all_render():
+    _cell, line = _cell_and_line()
+    _width, height = _size(screenshot.text_to_image("x\n" * 50, cols=80, rows=30))
+    assert height == 50 * line + 2 * _PAD
+
+
+def test_a_line_wider_than_the_grid_widens_the_image_rather_than_clipping():
+    cell, _line = _cell_and_line()
+    width, _height = _size(screenshot.text_to_image("M" * 150, cols=80, rows=24))
+    assert width >= 150 * cell + 2 * _PAD - 2
+
+
+def test_content_stays_top_aligned_and_leading_blank_rows_are_kept():
+    import io
+
+    from PIL import Image
+
+    _cell, line = _cell_and_line()
+    img = Image.open(io.BytesIO(
+        screenshot.text_to_image("\n\nMMMM", cols=80, rows=24, with_ansi=False)))
+
+    def has_ink(top, bottom):
+        bg = (30, 30, 30)
+        return any(img.getpixel((x, y)) != bg
+                   for y in range(top, bottom) for x in range(_PAD, _PAD + 100))
+
+    assert not has_ink(_PAD, _PAD + 2 * line), "the two leading blank rows were trimmed"
+    assert has_ink(_PAD + 2 * line, _PAD + 3 * line), "row 3 should hold the text"

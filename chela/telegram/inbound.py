@@ -352,6 +352,7 @@ def build_application(
     on_topic_closed=None,
     on_topic_reopened=None,
     capture=None,
+    pane_size=None,
     send_escape=None,
     send_key=None,
     drafts=None,
@@ -400,6 +401,12 @@ def build_application(
     message's topic and never trusts a window id off the wire — so they honour the
     exact same chat/topic gate as a routed message, stay silent outside it, and
     reply into the SAME forum topic. Injectable for testing.
+
+    ``pane_size(window_id) -> (cols, rows) | None`` (default
+    :func:`chela.messenger.pane_size`) sizes the PNG to the pane's real grid instead of
+    its longest non-blank line (CMX-343), and the reply's caption names that geometry
+    (``120×40``) so an odd size is visible. Unknown geometry falls back to the
+    renderer's 80×24 floor with no caption.
 
     Taps on an **AskUserQuestion** answer keyboard (the ``qa:`` callbacks the pane
     watcher attaches — see :mod:`chela.telegram.gatewatch`) route to a second
@@ -488,6 +495,7 @@ def build_application(
         ) from e
 
     capture = capture or messenger.capture_pane
+    pane_size = pane_size or messenger.pane_size
     send_escape = send_escape or messenger.send_escape
     send_key = send_key or messenger.send_key
     launch_session = launch_session or launch_claude_window
@@ -635,6 +643,19 @@ def build_application(
             log.debug("MarkdownV2 screenshot rejected; sending plain", exc_info=True)
             await msg.reply_text(body, reply_markup=keyboard)
 
+    def _render(window_id: str, pane: str) -> tuple[bytes, str | None]:
+        """``pane`` as a PNG on ``window_id``'s real grid, plus its ``120×40`` caption."""
+        from chela.telegram.screenshot import text_to_image
+
+        try:
+            size = pane_size(window_id)
+        except Exception:  # geometry is a nicety — the 80×24 floor still applies
+            log.debug("pane size unavailable for %s", window_id, exc_info=True)
+            size = None
+        cols, rows = size if size else (None, None)
+        png = text_to_image(pane, cols=cols, rows=rows)
+        return png, (f"{cols}×{rows}" if size else None)
+
     async def _reply_screenshot(reply_to, window_id: str) -> None:
         """Capture ``window_id`` and reply to ``reply_to`` with a PNG snapshot.
 
@@ -652,19 +673,20 @@ def build_application(
             await reply_to.reply_text("❌ Couldn't capture the terminal pane.")
             return
         try:
-            from chela.telegram.screenshot import text_to_image
+            import chela.telegram.screenshot  # noqa: F401 — Pillow present?
         except ImportError:  # Pillow not installed — degrade to a text snapshot
             log.debug("Pillow unavailable; sending screenshot as text")
             await _reply_text_snapshot(reply_to, pane)
             return
         try:
-            png = await asyncio.to_thread(text_to_image, pane)
+            png, caption = await asyncio.to_thread(_render, window_id, pane)
             # reply_photo inherits the message's forum topic, so the PNG lands
             # back in the SAME topic the command arrived on; the control-key
             # keyboard rides along so the terminal can be driven from the reply.
             await reply_to.reply_photo(
                 photo=io.BytesIO(png),
                 filename="screenshot.png",
+                caption=caption,
                 reply_markup=_screenshot_keyboard(),
             )
         except Exception:  # rendering/upload failed — fall back to text
@@ -682,16 +704,14 @@ def build_application(
         falling back to a duplicate post.
         """
         try:
-            from chela.telegram.screenshot import text_to_image
-
             if delay:
                 await asyncio.sleep(delay)  # let the pane repaint after a keystroke
             pane = capture(window_id, ansi=True)
             if not pane.strip():
                 return
-            png = await asyncio.to_thread(text_to_image, pane)
+            png, caption = await asyncio.to_thread(_render, window_id, pane)
             await query.edit_message_media(
-                media=InputMediaPhoto(io.BytesIO(png)),
+                media=InputMediaPhoto(io.BytesIO(png), caption=caption),
                 reply_markup=_screenshot_keyboard(),
             )
         except Exception:  # unchanged pane, stale message, or no Pillow — ignore

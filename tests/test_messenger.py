@@ -14,9 +14,12 @@ import json
 import os
 import re
 import socket as socket_module
+import subprocess
 import threading
 from unittest import mock
 from unittest.mock import patch
+
+import pytest
 
 from chela import config, messenger
 
@@ -172,6 +175,46 @@ def test_capture_pane_returns_empty_on_error():
         messenger.subprocess, "run", return_value=_FakeResult(returncode=1)
     ), patch.object(messenger.config, "current_session", return_value="chela"):
         assert messenger.capture_pane("@2") == ""
+
+
+# --- pane_size — the grid the /screenshot PNG is drawn on (CMX-343) -----------
+
+def test_pane_size_pins_the_full_display_message_call_and_parses_cols_rows():
+    with patch.object(messenger.subprocess, "run",
+                      return_value=_FakeResult(stdout="120x40\n")) as m, \
+            patch.object(messenger.config, "current_session", return_value="chela"):
+        assert messenger.pane_size("@2") == (120, 40)
+    assert m.call_args_list[0].args == (
+        ["tmux", "display-message", "-p", "-t", "chela:@2", "#{pane_width}x#{pane_height}"],
+    )
+    assert m.call_args_list[0].kwargs == {"capture_output": True, "text": True, "timeout": 5}
+
+
+@pytest.mark.parametrize("stdout", [
+    "", "\n", "120", "120x", "x40", "120x40x9", "a120x40", "120x40 junk", "-1x40", "0x40", "120x0",
+    "#{pane_width}x#{pane_height}",
+])
+def test_pane_size_is_none_on_unparseable_or_empty_geometry(stdout):
+    with patch.object(messenger.subprocess, "run", return_value=_FakeResult(stdout=stdout)), \
+            patch.object(messenger.config, "current_session", return_value="chela"):
+        assert messenger.pane_size("@2") is None
+
+
+def test_pane_size_is_none_when_tmux_fails():
+    with patch.object(messenger.subprocess, "run",
+                      return_value=_FakeResult(stdout="120x40\n", returncode=1)), \
+            patch.object(messenger.config, "current_session", return_value="chela"):
+        assert messenger.pane_size("@2") is None
+
+
+@pytest.mark.parametrize("exc", [
+    FileNotFoundError("tmux"),                                  # an OSError subclass
+    subprocess.TimeoutExpired(["tmux"], 5),                     # a SubprocessError subclass
+])
+def test_pane_size_is_none_when_tmux_cannot_run(exc):
+    with patch.object(messenger.subprocess, "run", side_effect=exc), \
+            patch.object(messenger.config, "current_session", return_value="chela"):
+        assert messenger.pane_size("@2") is None
 
 
 def test_send_key_sends_named_key_without_enter():
