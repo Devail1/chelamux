@@ -206,6 +206,43 @@ def test_a_short_item_is_quoted_whole():
     assert keeper_run.validate([p], d)[0] == []
 
 
+@pytest.mark.parametrize("quote,kept", [
+    ("wire the par", True),                   # exactly QUOTE_MIN_CHARS
+    ("wire the pa", False),                   # one short of it, though it IS in the text
+])
+def test_the_quote_floor_sits_at_quote_min_chars(quote, kept):
+    p = {"issue": "CMX-5", "action": "in_progress", "evidence": [ev("commit", "abc1234567", quote)]}
+    assert keeper_run.validate([p], digest())[0] == ([p] if kept else [])
+
+
+def test_an_empty_quote_of_an_empty_item_says_nothing():
+    d = digest()
+    d["sessions"]["items"][0]["edits"]["items"] = [""]
+    p = {"issue": "CMX-10", "action": "flag_stale", "evidence": [ev("edit", "@3.e1", "")]}
+    assert keeper_run.validate([p], d)[1][0]["reason"] == "evidence edit:@3.e1 does not say that"
+
+
+def test_a_padded_ref_is_the_same_item():
+    p = {"issue": "CMX-5", "action": "in_progress",
+         "evidence": [ev("commit", " abc1234567 ", "wire the parser")]}
+    assert keeper_run.validate([p], digest())[0] == [{**p, "issue": "CMX-5"}]
+
+
+def test_a_blank_new_issue_title_is_dropped():
+    p = {"issue": "", "action": "new_backlog_issue", "title": "  ", "evidence": [COMMIT]}
+    assert keeper_run.validate([p], digest())[1][0]["reason"] == "new issue without a title"
+
+
+@pytest.mark.parametrize("event", ["opened", "closed", None])
+def test_done_needs_a_pr_whose_event_is_merged(event):
+    """Only ``merged`` counts: not "anything but opened"."""
+    d = digest()
+    d["prs"]["items"][0]["event"] = event                       # PR #41 names CMX-6
+    kept, dropped = keeper_run.validate([{"issue": "CMX-6", "action": "done", "evidence": [MERGED]}], d)
+    assert kept == []
+    assert dropped[0]["reason"] == "done without a merged PR that names the issue"
+
+
 @pytest.mark.parametrize("bad", [None, {"proposals": []}, "x"])
 def test_a_non_list_answer_proposes_nothing(bad):
     assert keeper_run.validate(bad, digest()) == ([], [])

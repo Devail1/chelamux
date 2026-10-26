@@ -16,7 +16,7 @@ floor to 1 changes nothing that a test can see. In the flag_stale branch, every 
 names an In Progress issue by id also holds a word of its title, so the id clause can be
 deleted without a failure ([[62b|shape 62b]]).
 
-**Mutations that defeated it:** (CMX-347)
+**Mutation that defeats it:** (CMX-347)
 
 ```diff
 - if not _about(issue, title, text, quote, key)), None)
