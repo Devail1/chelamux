@@ -3256,6 +3256,9 @@ def cmd_keeper_run(args) -> None:
         sys.exit(1)
     print(f"keeper run: {len(out['proposals'])} proposal(s), {out['dropped']} dropped by "
           "validation" + (f" — batch {out['batch']}" if out["batch"] else ""))
+    if out["batch"] and not out.get("notified"):
+        print("  ⚠ not queued in the inbox (it is off or unwritable): decide with "
+              f"`chela keeper approve|dismiss {out['batch']}`")
     for i, p in enumerate(out["proposals"], 1):
         print(f"  {i}. {p['action']} {p['issue'] or p.get('title')}")
 
@@ -3263,7 +3266,8 @@ def cmd_keeper_run(args) -> None:
 def cmd_keeper_decide(args) -> None:
     """CMX-347: approve (all, or `--only 1,3`) or dismiss a pending keeper batch."""
     try:
-        only = {int(x) for x in args.only.split(",")} if getattr(args, "only", None) else None
+        raw = getattr(args, "only", None)
+        only = None if raw is None else {int(x) for x in raw.split(",") if x.strip()}
     except ValueError:
         print(f"keeper approve: --only takes 1-based numbers, got {args.only!r}", file=sys.stderr)
         sys.exit(2)

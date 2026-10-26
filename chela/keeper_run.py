@@ -30,6 +30,9 @@ from chela.workflow import WorkflowDef
 ACTIONS = ("in_progress", "comment", "new_backlog_issue", "flag_stale", "done")
 EVIDENCE_KINDS = ("commit", "pr", "prompt", "edit")
 START_STATES = ("todo", "backlog")
+NEW_ISSUE_STATES = ("Backlog",)        # never a READY state: the dispatcher would claim it
+QUOTE_MIN_CHARS = 12
+LANDED = ("set", "already", "struck", "created")
 DEFAULT_MODEL = "sonnet"
 ACTOR = "chela keeper"
 
@@ -103,12 +106,17 @@ def _drop_reason(p, d: dict, idx: dict) -> str | None:
     for e in evidence:
         if not isinstance(e, dict):
             return "evidence is not an object"
-        item = idx.get((e.get("kind"), _ref(e.get("kind"), e.get("ref"))))
+        kind, ref, quote = e.get("kind"), e.get("ref"), _norm(e.get("quote"))
+        if kind not in EVIDENCE_KINDS or not isinstance(ref, (str, int)):
+            return "evidence without a kind and a ref"
+        item = idx.get((kind, _ref(kind, ref)))
         if item is None:
-            return f"evidence {e.get('kind')}:{e.get('ref')} is not in the digest"
-        if not _norm(e.get("quote")) or _norm(e.get("quote")) not in _norm(item["text"]):
-            return f"evidence {e.get('kind')}:{e.get('ref')} does not say that"
-        cited.append((e["kind"], item))
+            return f"evidence {kind}:{ref} is not in the digest"
+        text = _norm(item["text"])
+        # A quote shorter than QUOTE_MIN_CHARS ("a", "the") is in almost anything.
+        if not quote or len(quote) < min(QUOTE_MIN_CHARS, len(text)) or quote not in text:
+            return f"evidence {kind}:{ref} does not say that"
+        cited.append((kind, item))
     if action == "new_backlog_issue":
         return None if str(p.get("title") or "").strip() else "new issue without a title"
     state = {t["id"].upper(): t["state"] for t in d["board"]["items"]}.get(issue)
@@ -116,6 +124,8 @@ def _drop_reason(p, d: dict, idx: dict) -> str | None:
         return f"{issue or 'no issue'} is not on the board"
     if action == "in_progress" and str(state).lower() not in START_STATES:
         return f"{issue} is {state}, not Todo or Backlog"
+    if action == "flag_stale" and str(state).lower() in START_STATES:
+        return f"{issue} is {state}: it has not started, so it cannot be stale"
     if action == "comment" and not str(p.get("comment") or "").strip():
         return "comment without text"
     if action == "done" and not any(
@@ -182,26 +192,36 @@ def run(wf: WorkflowDef, *, since: int | None = None, model: str | None = None,
     proposals, error = (asker or ask_model)(_prompt(d), model=model_for(wf, model), cwd=keeper.repo_roots(wf)[0])
     if error is not None:
         return {"error": error}
-    if d["cursor"]:
-        keeper.save_cursor(wf, d["cursor"])
     batch = secrets.token_hex(8)
     kept, dropped = validate(proposals, d)
+    out = {"batch": batch if kept else None, "proposals": kept, "dropped": len(dropped)}
+    if kept:
+        path = _batch_path(batch)
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(json.dumps({"batch": batch, "workflow": str(wf.path),
+                                        "proposals": kept, "ts": time.time()}),
+                            encoding="utf-8")
+        except OSError as exc:
+            return {"error": f"the batch could not be saved: {exc}"}
     for x in dropped:
         log(batch, "dropped", x["proposal"], reason=x["reason"])
     for p in kept:
         log(batch, "proposed", p)
-    out = {"batch": batch if kept else None, "proposals": kept, "dropped": len(dropped)}
     if kept:
-        path = _batch_path(batch)
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps({"batch": batch, "workflow": str(wf.path),
-                                    "proposals": kept, "ts": time.time()}), encoding="utf-8")
-        out["notified"] = inbox.enqueue(
-            "keeper_proposals",
-            f"🗂️ keeper: {len(kept)} board change(s) proposed for {d['tracker_key']} "
-            f"({len(dropped)} dropped) — chela keeper approve {batch} / dismiss {batch}",
-            {"batch": batch, "workflow": str(wf.path), "proposals": kept,
-             "dropped": len(dropped)})
+        try:
+            out["notified"] = inbox.enqueue(
+                "keeper_proposals",
+                f"🗂️ keeper: {len(kept)} board change(s) proposed for {d['tracker_key']} "
+                f"({len(dropped)} dropped) — the operator runs chela keeper approve {batch}"
+                f" or dismiss {batch}",
+                {"batch": batch, "workflow": str(wf.path), "proposals": kept,
+                 "dropped": len(dropped)})
+        except Exception:                     # noqa: BLE001 — the batch is saved; say so
+            out["notified"] = False
+    # Last: only a run whose proposals are safely stored consumes its window.
+    if d["cursor"]:
+        keeper.save_cursor(wf, d["cursor"])
     return out
 
 
@@ -211,42 +231,60 @@ def _attribution(p: dict, batch: str, by: str) -> str:
 
 
 def apply(source, p: dict, batch: str, by: str) -> str:
-    """One approved proposal → its tracker write(s), each attributed. The outcome word of
-    the write; ``set``/``already``/``struck`` mean it landed."""
+    """One approved proposal → its tracker write(s), each attributed. Its first word is in
+    :data:`LANDED` when the write landed; a missing attribution comment is named after it."""
     note = _attribution(p, batch, by)
     action, issue = p["action"], p["issue"]
     if action in ("comment", "flag_stale"):
         head = p.get("comment") or ("⚠️ Flagged stale" if action == "flag_stale" else "")
         return source.comment(issue, f"{head}\n\n{note}".strip())
     if action == "new_backlog_issue":
-        created = source.create_issue(p["title"], description=p.get("comment") or "")
-        return source.comment(created["identifier"], note)
-    if action == "in_progress":
+        created = source.create_issue(p["title"], description=p.get("comment") or "",
+                                      state_names=NEW_ISSUE_STATES)
+        issue, result = created["identifier"], f"created {created['identifier']}"
+    elif action == "in_progress":
         result = source.transition(issue, "in_progress")
     else:
         result = source.close_tasks([issue]).get(issue, "missing")
-    if result in ("set", "struck"):
-        source.comment(issue, note)
+    if result.split()[0] in ("set", "struck", "created"):
+        said = source.comment(issue, note)
+        if said != "set":
+            result += f" (attribution comment {said})"
     return result
 
 
 def decide(batch: str, *, approve: bool, only: set[int] | None = None, by: str = "terminal",
-           source=None) -> dict:
-    """Approve (all, or the 1-based indexes in ``only``) or dismiss a pending batch. The
-    proposals come from the stored batch, never from the caller; claiming the file by
-    rename means a second decision on the same batch finds nothing to apply."""
+           source=None, env=None) -> dict:
+    """Approve (all, or the 1-based indexes in ``only``) or dismiss a pending batch. Only
+    the operator decides: an agent's process is refused, as for a merge override. The
+    proposals come from the stored batch, never from the caller. Everything that can fail
+    before a write (the record, ``only``, the tracker) is checked BEFORE the batch is
+    claimed by rename, so a failure leaves it pending and a second decision finds nothing."""
+    from chela import overrides
+    refusal = overrides.agent_refusal(env)
+    if refusal:
+        return {"error": refusal}
     if not batch.isascii() or not batch.isalnum():
         return {"error": f"not a batch id: {batch!r}"}
     pending, done = _batch_path(batch), _batch_path(batch, "decided")
     try:
-        os.replace(pending, done)
-        rec = json.loads(done.read_text(encoding="utf-8"))
+        rec = json.loads(pending.read_text(encoding="utf-8"))
     except (OSError, ValueError) as exc:
         return {"error": f"no pending batch {batch} ({exc})"}
+    n = len(rec["proposals"])
+    if only is not None and (not only or not only <= set(range(1, n + 1))):
+        return {"error": f"--only must name proposals 1 to {n}"}
     if approve and source is None:
         from chela.sources import get_source
         from chela.workflow import load_workflow
-        source = get_source(load_workflow(rec["workflow"]))
+        try:
+            source = get_source(load_workflow(rec["workflow"]))
+        except Exception as exc:              # noqa: BLE001 — the batch stays pending
+            return {"error": f"the tracker could not be opened: {exc}"}
+    try:
+        os.replace(pending, done)
+    except OSError as exc:
+        return {"error": f"no pending batch {batch} ({exc})"}
     results = []
     for i, p in enumerate(rec["proposals"], 1):
         if not approve or (only is not None and i not in only):
@@ -257,7 +295,7 @@ def decide(batch: str, *, approve: bool, only: set[int] | None = None, by: str =
             result = apply(source, p, batch, by)
         except Exception as exc:              # noqa: BLE001 — one failed write never stops the rest
             result = f"failed: {exc}"
-        ok = result in ("set", "already", "struck")
+        ok = result.split()[0] in LANDED
         log(batch, "accepted" if ok else "failed", p, by=by, result=result)
         results.append(result)
     return {"batch": batch, "results": results}
