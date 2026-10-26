@@ -63,6 +63,16 @@ from pathlib import Path
 
 import pytest
 
+# CMX-354: the helper sits beside this file. pytest puts tests/ on sys.path before it loads
+# conftest, but `import tests.conftest` (a test does) does not, so put it there ourselves.
+# A test that execs this source from a scratch dir has neither; that copy runs uncapped.
+if str(Path(__file__).resolve().parent) not in sys.path:
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+try:
+    import memory_cap
+except ModuleNotFoundError:
+    memory_cap = None
+
 # CMX-281: tests/ has no __init__.py, so pytest imports this file as the top-level module
 # ``conftest``. Importing it as ``tests.conftest`` as well runs everything below a SECOND
 # time — a second sandbox, a second gh fence prepended to PATH — and every test after it in
@@ -96,6 +106,22 @@ REAL_CLAUDE_DIR: Path = Path.home() / ".claude"
 # checkout the suite is running from. That subtree is source, not state; reading it is
 # not the bug.
 _EXEMPT: tuple[Path, ...] = tuple(d / "worktrees" for d in REAL_CHELA_DIRS)
+
+# CMX-355: CHELA_ENV_FILE="" keeps chela.env from being *read*, but every process that runs
+# the suite on a live machine already *exported* it: the daemon (nightly sweep), each agent's
+# shell (task-finished, judge sweep). CHELA_AUTO_MERGE=true alone turned
+# test_automerge::test_disabled_by_default red, so every sweep baseline read CANNOT VERIFY.
+# Drop every inherited CHELA_* var except the ones a suite runner sets on purpose; a test
+# that needs one sets it itself. CHELA_DIR is kept: the redirect below overwrites it, and
+# _refuse_real_chela_dir must still see an exported one if that redirect is ever disabled
+# (test_isolation's end-to-end check).
+SUITE_RUNNER_CHELA_VARS: frozenset[str] = frozenset({"CHELA_DIR", "CHELA_ENV_FILE",
+                                                     "CHELA_REQUIRE_JS_TESTS"})
+SCRUBBED_CHELA_VARS: tuple[str, ...] = tuple(sorted(
+    k for k in os.environ if k.startswith("CHELA_") and k not in SUITE_RUNNER_CHELA_VARS
+    and not k.startswith("CHELA_TEST_")))  # CHELA_TEST_* are the suite's own knobs (CMX-354)
+for _k in SCRUBBED_CHELA_VARS:
+    del os.environ[_k]
 
 # What every import-time latch (dispatcher.DB_PATH, scheduler.DB_PATH, launcher._STORE,
 # config.CONTEXT_CACHE_DIR …) resolves against. Per-test dirs come from the fixture below;
@@ -903,3 +929,23 @@ def _no_live_gh(monkeypatch):
         return real_init(self, args, *a, **kw)
 
     monkeypatch.setattr(subprocess.Popen, "__init__", guarded_init)
+
+
+def pytest_sessionstart(session):
+    """CMX-354: cap the memory of every process that runs tests, unless a ``chela-suite-*``
+    / ``memcap`` cgroup already caps it (see ``tests/memory_cap.py``). The xdist controller
+    runs no tests, so it only prints the one line; each worker caps itself."""
+    if memory_cap is None:
+        return
+    config = session.config
+    cap = memory_cap.wanted_cap()
+    if not cap:
+        return
+    worker = hasattr(config, "workerinput")
+    if worker or getattr(config.option, "dist", "no") == "no":
+        if not memory_cap.install(cap):
+            return
+    if not worker:
+        reporter = config.pluginmanager.get_plugin("terminalreporter")
+        if reporter is not None:
+            reporter.write_line(memory_cap.describe(cap))
