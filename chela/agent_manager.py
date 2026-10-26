@@ -84,16 +84,33 @@ def wid_env_prefix(window_id: str) -> str:
     return f"export CHELA_WID={shlex.quote(window_id)} && "
 
 
+def _exact_pane_pid(window_id: str) -> str | None:
+    """The pane pid of the window that IS ``window_id``, or None when there is no such window.
+
+    ⛔ CMX-340: ``display-message -t`` never fails on a missing target — tmux falls back to
+    the CURRENT pane and exits 0. Measured 2026-10-25: a dead judge's ``@261`` answered with
+    another agent's pane, and a fleet pause SIGSTOPped that agent's whole tree for 2h27m. So
+    the window that answered is echoed back and must be the one asked for: its ``@id``, or
+    for a bare name its exact name (tmux would also take a prefix).
+    """
+    result = subprocess.run(
+        ["tmux", "display-message", "-t", f"{config.current_session()}:{window_id}", "-p",
+         "#{window_id}\t#{window_name}\t#{pane_pid}"],
+        capture_output=True, text=True, timeout=5,
+    )
+    parts = result.stdout.rstrip("\n").split("\t")
+    if result.returncode != 0 or len(parts) != 3:
+        return None
+    wid, name, pane_pid = parts
+    if window_id != (wid if window_id.startswith("@") else name):
+        return None
+    return pane_pid.strip() or None
+
+
 def is_claude_running(window_id: str) -> bool:
     """Check if a claude process is running in the given tmux window."""
     try:
-        result = subprocess.run(
-            ["tmux", "display-message", "-t", f"{config.current_session()}:{window_id}", "-p", "#{pane_pid}"],
-            capture_output=True, text=True, timeout=5,
-        )
-        if result.returncode != 0:
-            return False
-        pane_pid = result.stdout.strip()
+        pane_pid = _exact_pane_pid(window_id)
         if not pane_pid:
             return False
         from chela import sessions  # lazy: sessions.py imports us back
@@ -595,12 +612,8 @@ def claude_pid(window_id: str) -> int | None:
         pane = batch.pane(window_id)
         return pane.direct_claude_pid if pane is not None else None
     try:
-        result = subprocess.run(
-            ["tmux", "display-message", "-t", f"{config.current_session()}:{window_id}", "-p", "#{pane_pid}"],
-            capture_output=True, text=True, timeout=5,
-        )
-        pane_pid = result.stdout.strip()
-        if result.returncode != 0 or not pane_pid:
+        pane_pid = _exact_pane_pid(window_id)
+        if not pane_pid:
             return None
         from chela import sessions  # lazy: sessions.py imports us back
         if sessions.pane_root_is_claude(int(pane_pid)):
