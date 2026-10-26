@@ -175,6 +175,7 @@ def test_the_seeded_rules_file_stays_under_the_length_cap():
 @pytest.mark.parametrize("needle", [
     "Never wrap `chela task-finished` in an outer `timeout`",
     "Full suites run one at a time box-wide",
+    "Never run a full suite yourself",
     "Merge `origin/<base>`",
     "check `git diff` for a leftover mutation",
     "If the same failure repeats twice, stop and report",
