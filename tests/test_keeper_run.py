@@ -515,3 +515,12 @@ def test_cli_run_model_failure_exits_1(state, monkeypatch):
     with pytest.raises(SystemExit) as exc:
         main.main()
     assert exc.value.code == 1
+
+
+def test_linear_comment_with_a_config_error_writes_nothing(tmp_path, monkeypatch):
+    t = Transport(reply=OK)
+    src = _linear(t, tmp_path, monkeypatch)
+    src.config_error = "no API key"
+    t.calls.clear()
+    assert src.comment("CMX-4", "hi") == "failed"
+    assert t.calls == []

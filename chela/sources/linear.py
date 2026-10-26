@@ -979,8 +979,6 @@ class LinearSource:
         ``skipped`` for an id of another team or an empty body, ``missing`` for no such
         issue, ``failed`` otherwise. Never
         raises: the caller (``chela keeper``) reports each write's outcome."""
-        if self.config_error:
-            return "failed"
         if self._number_of(task_id) is None or not str(body or "").strip():
             return "skipped"
         found = self._nodes_by_id([task_id])
