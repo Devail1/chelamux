@@ -85,9 +85,9 @@ def test_first_exhaustion_requeues_with_the_addendum_and_the_second_is_needs_hum
     assert (summary["cap_requeued"], summary["escalated"]) == (0, 1)
     run = dispatcher.resolve_run("CMX-33")
     assert run["status"] == "needs_human"
-    assert run["last_error"].startswith("second rework-cap exhaustion of this task")
+    assert run["last_error"].startswith("second exhaustion: rework cap reached (2/2;")
     [notice] = [e for e in inbox.run_events([run], {})[0] if e["kind"] == "run_needs_human"]
-    assert "second rework-cap exhaustion" in notice["summary"]
+    assert "second exhaustion: rework cap reached 2/2" in notice["summary"]
     assert len(gh["closed"]) == 1                       # the second PR is left open
 
 

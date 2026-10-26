@@ -6885,11 +6885,11 @@ def tick(workflow_path: str | Path) -> dict:
             elif review_cap_reached(row):
                 _escalate(
                     conn, row,
-                    f"second rework-cap exhaustion of this task — rework cap reached "
-                    f"({review_reworks(row)}/{effective_cap}; infra restarts: "
-                    f"{infra_restarts(row)}) again after the first was closed and re-queued "
-                    "as a fresh attempt; the PR still fails review. Branch, worktree and PR "
-                    "are preserved; every verdict is on the run row (review_history).",
+                    f"second exhaustion: rework cap reached ({review_reworks(row)}/"
+                    f"{effective_cap}; infra restarts: {infra_restarts(row)}) again — the "
+                    "first was closed and re-queued as a fresh attempt; the PR still fails "
+                    "review. Branch, worktree and PR are preserved; every verdict is on the "
+                    "run row (review_history).",
                     recommendation="Fix it yourself on the branch and `chela reopen` — read "
                                     "the review history on the run first for what every rework "
                                     "round already tried, then push the fix and reopen to put "
@@ -7166,11 +7166,13 @@ def tick(workflow_path: str | Path) -> dict:
                 log.exception("Dispatch failed for task %s", task.id)
                 conn.execute(
                     """INSERT INTO runs (task_id, workflow_path, title, status, attempt, last_error, started_at, brief)
-                       VALUES (?, ?, ?, 'failed', ?, ?, ?, ?)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                        ON CONFLICT(task_id) DO UPDATE SET
-                         status='failed', attempt=excluded.attempt, last_error=excluded.last_error,
-                         brief=excluded.brief""",
-                    (task.id, str(wf.path), task.title, attempt, str(e), _now(), _task_brief(task)),
+                         status=excluded.status, attempt=excluded.attempt,
+                         last_error=excluded.last_error, brief=excluded.brief""",
+                    (task.id, str(wf.path), task.title,
+                     "needs_human" if isinstance(e, BranchNamesExhausted) else "failed",
+                     attempt, str(e), _now(), _task_brief(task)),
                 )
                 if requeue:
                     # The requeued attempt failed before it owned anything: drop the CLOSED
@@ -7420,16 +7422,27 @@ def _remote_branch_exists(repo_path: Path, branch: str) -> bool:
     return local.returncode == 0
 
 
+# ♻️ CMX-290: how many names `_unused_remote_branch` tries before it gives up. An unbounded
+# loop over `ls-remote` spins forever on a remote (or a stub) that answers "exists" to all.
+MAX_BRANCH_CANDIDATES = 50
+
+
+class BranchNamesExhausted(RuntimeError):
+    """No free branch name within :data:`MAX_BRANCH_CANDIDATES` — the claim goes to
+    ``needs_human`` (a retry would ask the same remote the same question)."""
+
+
 def _unused_remote_branch(repo_path: Path, branch: str) -> str:
     """``branch``, or ``branch-2``, ``branch-3``, … — the first name ``origin`` does not
     already have. 📐🔗 CMX-432: a Linear branch name is the tracker's, so it can collide
     with a branch a previous run left on the remote; that branch is never reused."""
-    if not _remote_branch_exists(repo_path, branch):
-        return branch
-    n = 2
-    while _remote_branch_exists(repo_path, f"{branch}-{n}"):
-        n += 1
-    return f"{branch}-{n}"
+    for n in range(1, MAX_BRANCH_CANDIDATES + 1):
+        name = branch if n == 1 else f"{branch}-{n}"
+        if not _remote_branch_exists(repo_path, name):
+            return name
+    raise BranchNamesExhausted(
+        f"no free branch name: origin reports {branch!r} and {branch}-2..-"
+        f"{MAX_BRANCH_CANDIDATES} all taken — check `git ls-remote origin` by hand")
 
 
 def _task_brief(task: Task) -> str | None:

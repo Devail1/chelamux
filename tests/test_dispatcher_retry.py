@@ -335,7 +335,7 @@ def test_the_same_row_WOULD_escalate_without_the_grant(tmp_path, monkeypatch):
     source = _Source("abc123")
     with dispatcher._db() as conn:
         _row(conn, workflow_path=str(wf.path), status="changes_requested",
-             rework_count=2, retry_count=0,
+             rework_count=2, retry_count=0, cap_requeues=1,     # CMX-290: 2nd
              review_history=json.dumps([{"round": 1, "at": "t", "body": "verdict 1"}]))
 
     with patch.object(dispatcher, "load_workflow_cached", return_value=_status(wf)), \
@@ -360,7 +360,7 @@ def test_a_used_up_grant_escalates_again_at_the_new_effective_cap(tmp_path, monk
     source = _Source("abc123")
     with dispatcher._db() as conn:
         _row(conn, workflow_path=str(wf.path), status="changes_requested",
-             rework_count=3, retry_count=1,
+             rework_count=3, retry_count=1, cap_requeues=1,     # CMX-290: 2nd
              review_history=json.dumps([{"round": 1, "at": "t", "body": "verdict 1"}]))
 
     with patch.object(dispatcher, "load_workflow_cached", return_value=_status(wf)), \
