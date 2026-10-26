@@ -48,7 +48,7 @@ import uuid
 from pathlib import Path
 from typing import NamedTuple
 
-from chela import config
+from chela import config, event_log
 from chela.discovery import get_windows_by_id
 
 log = logging.getLogger(__name__)
@@ -401,6 +401,15 @@ _RE_IMAGE_CHIP = re.compile(r"\[Image #\d+\]")
 # An image delivery re-reads its prompt this many times, this far apart, for the submit.
 _SUBMIT_POLLS = 6
 _SUBMIT_POLL_SECONDS = 0.5
+# chela.hooks.event_type("UserPromptSubmit") — the log type of Claude Code's submit hook.
+_PROMPT_SUBMIT_EVENT = "hook.user_prompt_submit"
+# How much of a caption's first line a submitted prompt must carry to be ours.
+_CARRIES_PREFIX = 60
+# The line chela.telegram.media.receive_photo delivers ahead of a downloaded photo's path.
+# Claude Code turns that path into an attachment, so the agent's transcript records the
+# turn as ``"<caption>\n\n📎 image:"`` + an ``image`` block — the submit verify above and
+# the outbound parser (never echo a photo back into its topic, CMX-36) both key on it.
+INBOUND_IMAGE_MARKER = "📎 image:"
 
 
 class PendingDraft(Exception):
@@ -456,27 +465,76 @@ def deliver_prompt(window_id: str, text: str) -> bool:
     return send_tmux(window_id, text)
 
 
+def _hook_cursor() -> dict | None:
+    """The event log's position before a send — None if it cannot be read."""
+    try:
+        return event_log.tip()
+    except Exception:  # noqa: BLE001 — no cursor only costs the hook evidence
+        log.warning("deliver: event-log tip unreadable — verifying on the pane alone",
+                    exc_info=True)
+        return None
+
+
+def _carries(prompt: str, text: str) -> bool:
+    """Is the submitted ``prompt`` the turn our ``text`` went into?
+
+    Claude Code turns the pasted path into an attachment, so the path itself is gone from
+    the prompt; the image marker before it survives, and so does a caption's opening (the
+    hook log keeps only a preview, past which a long caption hides the marker).
+    """
+    head = (text.strip().splitlines() or [""])[0][:_CARRIES_PREFIX]
+    return INBOUND_IMAGE_MARKER in prompt or bool(head) and head in prompt
+
+
+def _prompt_submitted(window_id: str, text: str, cursor: dict | None) -> bool:
+    """Did ``window_id``'s Claude Code submit a turn carrying ``text`` after ``cursor``?
+
+    The AUTHORITATIVE submit signal (CMX-344): UserPromptSubmit fires when Claude Code
+    takes the turn, so it cannot be fooled by what the pane happens to show. Only a prompt
+    that carries our delivery counts (:func:`_carries`) — a scheduler injection or a human
+    turn in the same window says nothing about a chip stranded meanwhile. A missing cursor
+    or an unreadable log is no evidence — never a submit — and the pane check decides.
+    """
+    if cursor is None:
+        return False
+    try:
+        found = event_log.read(cursor["seq"], after_boot=cursor["boot_id"],
+                               types=[_PROMPT_SUBMIT_EVENT], wid=window_id)
+    except Exception:  # noqa: BLE001 — see the docstring
+        log.warning("deliver: event log unreadable — verifying on the pane alone",
+                    exc_info=True)
+        return False
+    return any(_carries(str((e.get("payload") or {}).get("prompt") or ""), text)
+               for e in found["events"])
+
+
 def deliver_image(window_id: str, text: str) -> str:
     """Deliver an image path and VERIFY Claude Code submitted it.
 
-    ``"submitted"`` once the prompt reads empty; ``"unsubmitted"`` if it never did, or
-    could not be read (unknown is never success); ``"failed"`` if the send failed. Claude
-    Code converts the pasted path into an ``[Image #N]`` chip asynchronously and can
-    swallow an Enter that lands meanwhile, stranding the chip on the prompt — while the
-    chip is still there, Enter is pressed once more.
+    ``"submitted"`` once the window's UserPromptSubmit hook fires (:func:`_prompt_submitted`)
+    or, as the fallback, the prompt reads empty; ``"unsubmitted"`` if neither happened, or
+    the prompt could not be read (unknown is never success); ``"failed"`` if the send
+    failed. Claude Code converts the pasted path into an ``[Image #N]`` chip asynchronously
+    and can swallow an Enter that lands meanwhile, stranding the chip on the prompt — while
+    the chip is still there and no submit was seen, Enter is pressed once more.
     """
+    cursor = _hook_cursor()
     if not deliver_prompt(window_id, text):
         return "failed"
     resent = False
     for _ in range(_SUBMIT_POLLS):
         time.sleep(_SUBMIT_POLL_SECONDS)
+        if _prompt_submitted(window_id, text, cursor):
+            return "submitted"
         draft = _read_draft(window_id)
         if draft == "":
             return "submitted"
         if draft and not resent and _RE_IMAGE_CHIP.search(draft):
             resent = True
             resend_enter(window_id)
-    return "unsubmitted"
+    # The hook can land after the last pane read: one more poll's wait, then a last look.
+    time.sleep(_SUBMIT_POLL_SECONDS)
+    return "submitted" if _prompt_submitted(window_id, text, cursor) else "unsubmitted"
 
 
 def send_key(window_id: str, key: str) -> bool:
