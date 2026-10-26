@@ -59,6 +59,10 @@ INVALID = [
      "evidence pr:abc1234567 is not in the digest"),
     ({"issue": "CMX-5", "action": "in_progress", "evidence": [ev("commit", "abc1234567", "rm -rf")]},
      "evidence commit:abc1234567 does not say that"),
+    # long enough to pass the length floor, but the commit never said it
+    ({"issue": "CMX-5", "action": "in_progress",
+      "evidence": [ev("commit", "abc1234567", "drop the production database")]},
+     "evidence commit:abc1234567 does not say that"),
     ({"issue": "CMX-5", "action": "in_progress", "evidence": [ev("commit", "abc1234567", " ")]},
      "evidence commit:abc1234567 does not say that"),
     ({"issue": "CMX-5", "action": "in_progress", "evidence": [COMMIT, "junk"]},
