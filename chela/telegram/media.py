@@ -25,7 +25,7 @@ import time
 from pathlib import Path
 from typing import Callable
 
-from chela.messenger import PendingDraft
+from chela.messenger import INBOUND_IMAGE_MARKER, PendingDraft
 
 log = logging.getLogger(__name__)
 
@@ -42,12 +42,6 @@ MEDIA_READ_TIMEOUT = 60.0
 # its length is the number of retries, so ``len + 1`` attempts in all.
 RETRY_BACKOFF = (1.0, 3.0)
 
-# The line :func:`receive_photo` delivers ahead of a downloaded photo's path. Claude
-# Code turns that path into an attachment, so the agent's transcript records the turn
-# as ``"<caption>\n\n📎 image:"`` + an ``image`` block — and the outbound parser keys
-# on this marker to never echo a photo back into the topic it came from (CMX-36).
-INBOUND_IMAGE_MARKER = "📎 image:"
-
 # (chat_id, thread_id) -> window_id | None — the router's chat/topic gate.
 Resolve = Callable[[object, object], "str | None"]
 # (window_id, text) -> ok — the tmux sender (chela.messenger.deliver_prompt).
@@ -60,6 +54,14 @@ PENDING_DRAFT_TEXT = (
     "⚠️ Not sent: the agent's prompt still holds an unsubmitted message, and this one "
     "would be merged into it. Submit or clear it (/screenshot), then resend."
 )
+
+
+def unconfirmed_image_text(name: str) -> str:
+    """The reply when the image's submit could not be confirmed (``"unsubmitted"``)."""
+    return (
+        f"⚠️ Image delivered, but its submit wasn't confirmed: {name}. Open /screenshot "
+        "— tap Enter only if it is still on the agent's prompt."
+    )
 
 
 def _format_size(num_bytes: int) -> str:
@@ -235,11 +237,9 @@ async def receive_photo(
     if status == "submitted":
         await _reply(msg, f"📎 Image sent to the agent: {saved.name}")
     elif status == "unsubmitted":
-        await _reply(
-            msg,
-            f"⚠️ Image delivered but not submitted: {saved.name} is sitting on the "
-            "agent's prompt. Open /screenshot and tap Enter to submit it.",
-        )
+        # Unconfirmed, not proven stranded: an Enter on a prompt that already submitted
+        # sends an empty or duplicate turn (CMX-344), so the human checks first.
+        await _reply(msg, unconfirmed_image_text(saved.name))
     else:
         await _reply(msg, "❌ Couldn't deliver the image to the agent.")
 
