@@ -248,3 +248,12 @@ def test_prose_selects_no_tests_and_any_other_non_code_file_runs_the_full_suite(
     listed = subprocess.CompletedProcess([], 0, "", "")
     with patch.object(basesync, "_git", return_value=listed):
         assert handinmove.related_tests(tmp_path, files) == want
+
+
+def test_an_unreadable_experiments_file_refuses_on_an_overlap(repo, tmp_path):
+    _advance(repo[0], {"p.py": PR.replace("def g(x):\n    return x", "def g(x):\n    return -x")})
+    with patch.object(judge, "run_suite", return_value=GREEN), \
+            patch.object(judge, "run_self_check") as sc:
+        out = _reconcile(repo, str(tmp_path / "missing.json"))
+    assert out["ok"] is False and not sc.called
+    assert "touched this PR's p.py; the 0 experiment(s) there: " in out["error"]
