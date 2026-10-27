@@ -13,7 +13,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path, PurePosixPath
 from typing import NamedTuple
 
-from chela import basesync, concurrency, critic, envutil, epoch, event_log, fleet, flaky, generated, handinmove, hold, judge, memcap, mergegate, reviewgate, risktier, sizegate, sweep, verdictcarry
+from chela import basesync, concurrency, critic, envutil, epoch, event_log, fleet, flaky, generated, handinmove, hold, judge, memcap, mergegate, park, reviewgate, risktier, sizegate, sweep, verdictcarry
 from chela.config import (
     CHELA_DIR,
     TMUX_SESSION,
@@ -1605,6 +1605,10 @@ def ensure_schema(conn: sqlite3.Connection) -> sqlite3.Connection:
         ("parked_reason", "ALTER TABLE runs ADD COLUMN parked_reason TEXT"),
         ("parked_until", "ALTER TABLE runs ADD COLUMN parked_until TEXT"),
         ("parked_by", "ALTER TABLE runs ADD COLUMN parked_by TEXT"),
+        # ⏸️ CMX-339. Where the watchdog's idle clock restarts: stamped on every tick the run
+        # is parked, so an unparked agent gets the full idle budget again, not an instant
+        # nudge measured from `started_at`.
+        ("idle_clock_at", "ALTER TABLE runs ADD COLUMN idle_clock_at TEXT"),
     ):
         if _column in existing_columns:
             continue  # already migrated — no DDL attempted, nothing to fail
@@ -1661,6 +1665,27 @@ def _db():
 
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def _watchdog_park(conn, row) -> dict | None:
+    """⏸️ CMX-339: the park that holds ``row`` off the idle watchdog — or None.
+
+    A manual park counts until it outlives itself (:func:`chela.park.overdue`: past its
+    ``--until``, its ``run:<ID>`` ended, or past :func:`chela.config.park_max_s`) — the same
+    rule that ends its shield from the stuck notice. Else an open suite-slot wait in the
+    run's worktree (CMX-119): an agent queued behind another suite sits at an empty prompt
+    while its background ``task-finished`` waits."""
+    from chela import config, suite_guard
+    run = dict(row)
+    parked = park.manual(run)
+    if parked is not None:
+        runs_by_id = {r["task_id"]: dict(r)
+                      for r in conn.execute("SELECT task_id, status FROM runs")}
+        if park.overdue(parked, time.time(), runs_by_id, config.park_max_s()) is None:
+            return parked
+    if not run.get("worktree_path"):
+        return None
+    return park.slot(run, suite_guard.waits_in(run["worktree_path"]), [])
 
 
 def _parse_ts(ts: str | None) -> datetime | None:
@@ -5454,7 +5479,8 @@ def park_run(ident: str, reason: str, until: str | None = None, by: str = "") ->
 
 def unpark_run(ident: str, by: str = "") -> dict:
     """⏸️ CMX-318: clear a park. The stuck clock restarts from now (the inbox kept the run
-    active while parked), so an unparked agent gets the full quiet budget again."""
+    active while parked), so an unparked agent gets the full quiet budget again — and so does
+    the watchdog's idle clock (CMX-339), even for a park no dispatcher tick ever saw."""
     run = resolve_run(ident)
     if run is None:
         return {"ok": False, "error": f"no run matches {ident!r} (task id, branch, or window name)"}
@@ -5462,7 +5488,8 @@ def unpark_run(ident: str, by: str = "") -> dict:
     with _db() as conn:
         cur = conn.execute(
             "UPDATE runs SET parked_at=NULL, parked_reason=NULL, parked_until=NULL, "
-            "parked_by=NULL WHERE task_id=? AND parked_at IS NOT NULL", (task_id,))
+            "parked_by=NULL, idle_clock_at=?, idle_nudged_at=NULL "
+            "WHERE task_id=? AND parked_at IS NOT NULL", (_now(), task_id))
         conn.commit()
     if cur.rowcount == 0:
         return {"ok": False, "task_id": task_id, "error": f"{task_id} is not parked"}
@@ -5830,6 +5857,7 @@ def tick(workflow_path: str | Path) -> dict:
         "pr_state_refreshed": 0,
         "watchdog_renudged": 0,
         "watchdog_unblocked": 0,
+        "watchdog_parked": 0,
         "tracker_struck": 0,
         "tracker_transitions": 0,
         "reworked": 0,
@@ -6388,7 +6416,20 @@ def tick(workflow_path: str | Path) -> dict:
                 and row["window_name"]
                 and row["window_name"] in live_windows
             ):
+                # ⏸️ CMX-339: a parked agent is idle ON PURPOSE — never nudged back toward
+                # its task, never failed. Each parked tick restarts the idle clock and drops
+                # any nudge, so once the park ends the full budget applies from zero.
+                if _watchdog_park(conn, row) is not None:
+                    conn.execute(
+                        "UPDATE runs SET idle_clock_at=?, idle_nudged_at=NULL WHERE task_id=?",
+                        (_now(), row["task_id"]),
+                    )
+                    summary["watchdog_parked"] += 1
+                    continue
                 started = _parse_ts(row["started_at"])
+                clock = _parse_ts(row["idle_clock_at"])
+                if started is not None and clock is not None:
+                    started = max(started, clock)
                 idle_age_ok = (
                     started is not None
                     and (datetime.now(timezone.utc) - started).total_seconds()
@@ -7643,7 +7684,7 @@ def _spawn(wf: WorkflowDef, task: Task, attempt: int, conn: sqlite3.Connection, 
              window_epoch=NULL, brief=excluded.brief, risk=excluded.risk,
              risk_reason=excluded.risk_reason, tracker_url=excluded.tracker_url,
              tracker_edge=NULL, parked_at=NULL, parked_reason=NULL, parked_until=NULL,
-             parked_by=NULL""",
+             parked_by=NULL, idle_clock_at=NULL""",
         (task.id, str(wf.path), task.title, window_name, str(worktree), branch, _now(), attempt,
          task_number, _task_brief(task), run_risk(task.risk), task.risk_reason, task.url),
     )
@@ -8333,7 +8374,7 @@ def _respawn_rework(
         "UPDATE runs SET status='running', rework_count=?, started_at=?, ended_at=NULL, "
         "last_error=NULL, idle_nudged_at=NULL, window_id=NULL, window_epoch=NULL, "
         "parked_at=NULL, parked_reason=NULL, parked_until=NULL, parked_by=NULL, "
-        "worktree_path=?, review_reworks=? "
+        "idle_clock_at=NULL, worktree_path=?, review_reworks=? "
         "WHERE task_id=?",
         (rework_round, _now(), str(worktree), review_round, task_id),
     )
