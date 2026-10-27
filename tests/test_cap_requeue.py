@@ -104,3 +104,21 @@ def test_a_requeue_close_run_refuses_leaves_the_run_for_the_next_tick(repo, team
     assert (row["status"], row["cap_requeues"], row["requeue_addendum"]) == (
         "changes_requested", 0, None)
     assert gh["closed"] == []
+
+
+def test_the_addendum_names_the_workflows_own_base_not_dev(repo, team, gh):
+    """A base other than the fixture's `dev` (lean-alpha's `main`): a `{base}` hardcoded to
+    `dev` in the addendum's start point or diff command reads the wrong branch."""
+    team.issues = {"CMX-33": issue(33, "In Review")}
+    _cr._old_attempt(repo, status="changes_requested", review_history=json.dumps(ROUNDS))
+    _exhausted()
+    wf = dispatcher.load_workflow(_cr._wf(repo))
+    wf.config["workspace"]["base_branch"] = "main"
+
+    with dispatcher._db() as conn:
+        row = conn.execute("SELECT * FROM runs WHERE task_id='CMX-33'").fetchone()
+        assert dispatcher._cap_requeue(conn, wf, row) == 1
+    addendum = _row("CMX-33")["requeue_addendum"]
+    assert "**Start fresh** from `main`" in addendum
+    assert "(`git diff origin/main...origin/cmx-33-task`)" in addendum
+    assert "origin/dev" not in addendum
