@@ -9,6 +9,7 @@ These hold for every run. When the orchestrator corrects an agent, the fix lands
 - Merge `origin/<base>` into your branch before `task-finished`; it refuses a branch that is behind.
 - If a hand-in or self-check is killed (memory, signal), check `git diff` for a leftover mutation, restore it with an edit, then STOP and report to the orchestrator; don't restart it on your own, because a second run can stack on the first.
 - If the same failure repeats twice, stop and report instead of looping; a third try rarely differs.
+- Name your changelog fragment `changelog.d/CMX-<id>-<slug>.md` (slug from your branch), never a bare `CMX-<id>.md`: an old, released task shares the number, and `task-finished` refuses it.
 - Never put another issue's id in a PR title or body; Linear auto-closes any issue a merged PR names.
 - Don't `pgrep -f "<literal>"`, since it matches your own shell; use a bracketed pattern like `[c]hela …`.
 - Reply to the orchestrator with SendMessage, not tmux, so the message carries who sent it.

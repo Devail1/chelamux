@@ -227,11 +227,7 @@ def released_task_ids(changelog_text: str) -> set[str]:
     pending, not published, and a fragment for the same task is a duplicate to be
     merged by `_merge_duplicate_subheadings`, not an error.
     """
-    dated = next((m for m in _iter_headings(changelog_text)
-                  if m.group("version") != "Unreleased"), None)
-    if dated is None:
-        return set()
-    return {m.group("id") for m in _TASK_MARKER.finditer(changelog_text[dated.start():])}
+    return {m.group("id") for m in _TASK_MARKER.finditer(_dated_text(changelog_text))}
 
 
 def stale_fragments(changelog_text: str, changelog_d: Path) -> list[Path]:
@@ -262,6 +258,61 @@ def stale_fragments(changelog_text: str, changelog_d: Path) -> list[Path]:
         if m and m.group("id") in released:
             stale.append(path)
     return stale
+
+
+def _dated_text(changelog_text: str) -> str:
+    """Everything from the first dated (non-`Unreleased`) heading down, or `""`."""
+    dated = next((m for m in _iter_headings(changelog_text)
+                  if m.group("version") != "Unreleased"), None)
+    return "" if dated is None else changelog_text[dated.start():]
+
+
+def shipped_fragments(changelog_text: str, changelog_d: Path) -> list[Path]:
+    """CMX-356: fragments whose first bullet line already appears, verbatim, in a dated
+    section — whatever the file is named, so a slugged `CMX-<id>-<slug>.md` that a release
+    consumed and a skipped back-merge left alive is caught too.
+
+    This is what tells a fragment that really shipped apart from a NEW fragment that only
+    reuses an old, released number (numbering restarted; the old series ran to about
+    CMX-391): the new one's text is not in the changelog yet. A fragment with no bullet
+    has nothing to compare and is never called shipped here.
+    """
+    dated = _dated_text(changelog_text)
+    shipped = []
+    for path in _fragment_paths(changelog_d):
+        bullet = next((ln.strip() for ln in path.read_text(encoding="utf-8").splitlines()
+                       if ln.lstrip().startswith("- ")), None)
+        if bullet is not None and bullet in dated:
+            shipped.append(path)
+    return shipped
+
+
+def fragment_problems(changelog_text: str, changelog_d: Path) -> str:
+    """CMX-356: why this tree's fragments cannot ship, or `""` when they can.
+
+    Two different mistakes, two different fixes. A fragment whose text already shipped
+    must be DELETED (back-merge `main`), never renamed — a rename hides it from
+    `stale_fragments` and it republishes. A bare `CMX-<id>.md` whose id only collides
+    with an old, released task must be RENAMED to `CMX-<id>-<slug>.md`, which
+    `_FRAGMENT_NAME` never matches.
+    """
+    shipped = shipped_fragments(changelog_text, changelog_d)
+    collided = [p for p in stale_fragments(changelog_text, changelog_d) if p not in shipped]
+    problems = []
+    if shipped:
+        names = ", ".join(f"changelog.d/{p.name}" for p in shipped)
+        problems.append(
+            f"{names}: already published in a dated CHANGELOG.md section — back-merge "
+            "`main` so the release's fragment deletions arrive, or delete it if you are "
+            "certain it shipped. Do not rename it: a renamed copy still republishes.")
+    if collided:
+        names = ", ".join(f"changelog.d/{p.name}" for p in collided)
+        first = collided[0].name
+        problems.append(
+            f"{names}: an older, released task has the same number — rename it to "
+            "`changelog.d/CMX-<id>-<slug>.md` (slug from your branch name), e.g. "
+            f"`git mv changelog.d/{first} changelog.d/{first[:-3]}-<slug>.md`.")
+    return " ".join(problems)
 
 
 def promote_unreleased(changelog_text: str, version: str, date: str, changelog_d: Path) -> str:
