@@ -30,6 +30,7 @@ from chela import (
     config,
     context,
     contract,
+    digest,
     discovery,
     dispatcher,
     doctor,
@@ -64,6 +65,7 @@ from chela import (
     userconfig,
     wait,
     workflow,
+    worktree_gc,
 )
 from chela.personas import autolaunch, lease
 from chela.config import (
@@ -264,6 +266,7 @@ def cmd_run(args) -> None:
     last_ops_scan = 0.0
     ops_child = None
     nightly_child = None      # CMX-303: the nightly sweep — one detached child at a time
+    gc_child = None           # CMX-357: the daily worktree GC — same shape
     # Held in memory, exactly like `waiting_seen`: it is the PREVIOUS status snapshot
     # the inbox edge-triggers against. Starting empty means a fresh daemon baselines
     # silently on its first tick instead of announcing every already-idle agent. (A
@@ -439,6 +442,14 @@ def cmd_run(args) -> None:
                     log.exception("Ops scan spawn failed")
                 last_ops_scan = now
 
+            # 🧹 CMX-357: the daily worktree GC — due by its own stamp on disk (a daemon restart
+            # does not re-run it), spawned niced and detached, never waited on.
+            try:
+                if worktree_gc.due():
+                    gc_child = worktree_gc.spawn(gc_child)
+            except Exception:
+                log.exception("Worktree GC spawn failed")
+
             # ⚖️🧹🌙 CMX-303: the nightly sweep of what the standard tier merged unjudged —
             # spawned detached at `sweep.nightly_at`, one at a time, never waited on.
             try:
@@ -494,6 +505,13 @@ def cmd_run(args) -> None:
                     autolaunch.maybe_teardown(inbox.load(), inbox_statuses)
                 except Exception:
                     log.exception("Orchestrator teardown check failed")
+
+            # 📰 CMX-320: the scheduled digest of what the interrupt rules held back. Off
+            # unless `digest.enabled` is set in config.json; cheap when nothing is owed.
+            try:
+                digest.daemon_tick()
+            except Exception:
+                log.exception("Digest tick failed")
 
             # Agent rooms: a targeted handoff/question/blocker whose recipient was sitting
             # at a gate is PARKED, never pasted (that paste would answer the gate). This is
@@ -973,6 +991,24 @@ def cmd_events(args) -> None:
         if batch["corrupt_lines"]:
             print(f"note: skipped {batch['corrupt_lines']} unparseable line(s)",
                   file=sys.stderr)
+
+
+def cmd_digest(args) -> None:
+    """Print the digest now (CMX-320): needs you, waiting on others, done since last, changed.
+
+    Covers from the last digest sent (or the last 24 hours) unless ``--since-hours`` says
+    otherwise. ``--send`` delivers it like a scheduled one (inbox, phone, event log) and
+    restarts the "since last" clock; a plain print leaves the clock alone.
+    """
+    if args.send:
+        out = digest.send()
+        print(out["text"])
+        print(f"\nqueued for the orchestrator: {out['queued']} · pushed: {out['pushed']}",
+              file=sys.stderr)
+        return
+    since = time.time() - args.since_hours * 3600 if args.since_hours is not None else None
+    text, payload = digest.compose(since=since)
+    print(json.dumps({"text": text, **payload}) if args.json else text)
 
 
 def cmd_events_emit(args) -> None:
@@ -3230,6 +3266,14 @@ def cmd_ops_scan(args) -> None:
     print(json.dumps(result, indent=2) if args.json else ops.render(result))
 
 
+def cmd_ops_worktrees(args) -> None:
+    """``chela ops worktrees`` (CMX-357): the orphan worktrees under each dispatched
+    workflow's root, with count and size. ``--gc`` collects them (what the daemon runs)."""
+    results = worktree_gc.run(args.workflow or config.DISPATCH_WORKFLOWS, dry_run=not args.gc)
+    print(json.dumps(results, indent=2) if args.json
+          else worktree_gc.render(results, dry_run=not args.gc))
+
+
 def cmd_keeper_digest(args) -> None:
     """CMX-346: what happened in a workflow's repo since the last digest (no LLM, no writes
     to the tracker). Exit 2 on an unreadable workflow or a bad `--since`."""
@@ -4023,6 +4067,14 @@ def main() -> None:
     p_rdigest.add_argument("--limit", type=int, default=50, metavar="N",
                            help="Show the last N events (default: 50)")
 
+    p_digest = sub.add_parser("digest", help="The brief of what waited: needs you, waiting, "
+                                             "done, changed")
+    p_digest.add_argument("--since-hours", type=float, default=None, metavar="H",
+                          help="Cover the last H hours (default: since the last digest sent)")
+    p_digest.add_argument("--send", action="store_true",
+                          help="Deliver it now (inbox + phone) and restart the clock")
+    p_digest.add_argument("--json", action="store_true", help="Emit {text, since, counts}")
+
     # events — the durable log: replay from a cursor, filter, tail. `emit` is the
     # programmatic append, exposed to the shell (and to N concurrent writers).
     p_ev = sub.add_parser("events", help="Replay / filter / follow the event log")
@@ -4326,6 +4378,15 @@ def main() -> None:
         "--notify", action="store_true",
         help="What the daemon runs: also append to $CHELA_DIR/ops/findings.jsonl and queue "
              "ONE inbox notice for new findings")
+    p_owt = ops_sub.add_parser(
+        "worktrees", help="Orphan worktrees (no live run, or a run done/closed ≥3 days): count "
+                          "and size per workflow root")
+    p_owt.add_argument("--gc", action="store_true",
+                       help="What the daemon runs daily: remove them (keeping the branch), "
+                            "salvaging a dirty one to $CHELA_DIR/worktree-salvage/ first")
+    p_owt.add_argument("--workflow", action="append", default=[],
+                       help="A WORKFLOW.md to scan (repeatable; default: the dispatched ones)")
+    p_owt.add_argument("--json", action="store_true", help="Machine-readable output")
     p_keeper = sub.add_parser("keeper", help="Keeper mode: keep a workflow's board aligned")
     keeper_sub = p_keeper.add_subparsers(dest="keeper_cmd", required=True)
     p_kdigest = keeper_sub.add_parser(
@@ -4798,6 +4859,8 @@ def main() -> None:
             room_cmds[args.room_cmd](args)
         else:
             p_room.print_help()
+    elif args.command == "digest":
+        cmd_digest(args)
     elif args.command == "events":
         if args.events_cmd == "emit":
             cmd_events_emit(args)
@@ -4863,7 +4926,10 @@ def main() -> None:
         else:
             p_judge.print_help()
     elif args.command == "ops":
-        cmd_ops_scan(args)
+        if args.ops_cmd == "worktrees":
+            cmd_ops_worktrees(args)
+        else:
+            cmd_ops_scan(args)
     elif args.command == "keeper":
         {"digest": cmd_keeper_digest, "run": cmd_keeper_run}.get(
             args.keeper_cmd, cmd_keeper_decide)(args)
