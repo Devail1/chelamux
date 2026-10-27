@@ -16,6 +16,10 @@ slipped through. Two things now park a run:
 detector, so a process inside the run's own worktree, or any Claude Code session that is
 not the orchestrator, is refused.
 
+The dispatcher's idle watchdog skips a parked run too (CMX-339): it is neither nudged
+back toward its task nor failed for sitting at an empty prompt, and its idle clock restarts
+once the park ends.
+
 A manual park is not forever: one ``run_park_overdue`` notice fires once it outlives its
 ``--until`` or :func:`chela.config.park_max_s` (:func:`overdue`). A park only counts while
 the run is ``claimed``/``running``; a claim or a rework re-spawn clears it.
