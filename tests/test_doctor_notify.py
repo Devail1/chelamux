@@ -216,6 +216,8 @@ def _run_daemon_ticks(monkeypatch, n: int) -> None:
     # CMX-189: cmd_run now warms agent_manager's native-status cache itself — unstubbed,
     # this spawns a REAL daemon thread hammering the real `claude` binary on a timer.
     monkeypatch.setattr(main.agent_manager, "start_background_refresh", lambda *a, **kw: None)
+    # CMX-357: the daily worktree GC is a detached child — never a real one from a test.
+    monkeypatch.setattr(main.worktree_gc, "spawn", lambda prev: prev)
 
 
 def test_the_daemon_loop_calls_doctor_check_and_notify_on_the_first_tick(monkeypatch):
