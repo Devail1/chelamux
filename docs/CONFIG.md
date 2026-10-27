@@ -187,6 +187,43 @@ may deny those). Allow the command in the orchestrator's `.claude/settings.json`
 }
 ```
 
+## Interrupt rules and the digest
+
+Off by default: every inbox event is pushed into the orchestrator as it happens. To push
+only the events that need a human and batch the rest, add a `digest` object to
+`~/.chela/config.json`:
+
+```json
+{
+  "digest": {
+    "enabled": true,
+    "times": ["09:00", "16:00"],
+    "tz": "Europe/London"
+  }
+}
+```
+
+| key | default | what |
+|---|---|---|
+| `enabled` | `false` | only a real `true` turns it on |
+| `interrupt` | see below | `fnmatch` patterns over the event kind; a match is pushed at once. Replaces the default list |
+| `times` | `["09:00", "16:00"]` | `HH:MM` times the digest is sent |
+| `tz` | host local time | an IANA zone for `times` |
+
+The default `interrupt` list (`chela/digest.py`, `DEFAULT_INTERRUPT`): `run_needs_human`,
+override and release requests and outcomes, anything ending `_failed`, `run_ci_known_flake`
+(CI still red after its re-runs), `*oom*`, `run_permission_denied`, `keeper_proposals`,
+`orchestrator.moved`, `orchestrator.escalation.*`, and the merge gate's backstop events. A
+`run_review`, a judge verdict, a CI flake that re-ran green, a conflict or a stuck notice
+waits for the digest. Add `"run_judge_clean"` to `interrupt` if the orchestrator should
+still merge as soon as a verdict lands.
+
+A held event is still appended to the event log, so `chela events` and the dashboard Feed
+show it. The digest goes to the orchestrator's inbox, the phone (`CHELA_NOTIFY_URL`) and
+the log; `chela digest` prints it now, and `chela digest --send` sends it now. An
+unreadable or wrong-typed field falls back to its default, and an unreadable config never
+holds anything back.
+
 ## `chela doctor`
 
 ```

@@ -126,7 +126,7 @@ from contextlib import contextmanager
 from pathlib import Path
 
 from chela import agent_manager, discovery, epoch, event_log, hooks, judge, messenger, notify, sessions, transcripts
-from chela import config, park, risktier, stall_alerts, suite_guard
+from chela import config, digest, park, risktier, stall_alerts, suite_guard
 from chela.config import INBOX_ENABLED
 from chela.hold import human_duration
 from chela.tui_text import sanitize_prompt
@@ -879,7 +879,9 @@ def enqueue(kind: str, summary: str, payload: dict) -> bool:
     if not enabled():
         return False
     with locked_store() as store:
-        store["queue"].append(_event(kind, summary, payload))
+        # CMX-320: no caller of this logs the event itself, so if the digest rules hold it
+        # back, `hold_for_digest` appends it to the event log instead of delivering it.
+        store["queue"].append({**_event(kind, summary, payload), "unlogged": True})
     return True
 
 
@@ -2907,6 +2909,24 @@ def raise_alarms(alarms: list[dict]) -> None:
                         title="chela: the decisions inbox is not being delivered")
 
 
+def hold_for_digest(store: dict, rule: dict | None = None) -> list[dict]:
+    """CMX-320: take every queued event the interrupt rules hold for the digest out of the
+    queue, and return them. Nothing is lost: each one is already in the event log (the tick,
+    ``ci_red``/``ci_flake`` and the move notice append theirs; an :func:`enqueue`d one, marked
+    ``unlogged``, is appended here), so ``chela events``, the Feed and the next digest see it.
+    With the rules off (the default) every kind interrupts and the queue is left alone."""
+    rule = digest.rules() if rule is None else rule
+    held, kept = [], []
+    for event in store["queue"]:
+        (held if digest.route(event.get("kind"), rule) == digest.HOLD else kept).append(event)
+    store["queue"] = kept
+    for event in held:
+        if event.get("unlogged"):
+            event_log.from_inbox(event)
+        log.info("inbox: %s held for the digest", event.get("kind"))
+    return held
+
+
 def deliver(store: dict, statuses: dict[str, str],
             runs: list[dict] | None = None,
             now_epoch: str | None = None,
@@ -2964,6 +2984,7 @@ def deliver(store: dict, statuses: dict[str, str],
     never raced against it. The windowless peer gets the same status rule: ``idle``/``busy``
     → socket, ``waiting`` (or anything else) → hold.
     """
+    hold_for_digest(store)
     if not store["queue"]:
         return []
     runs = runs or []

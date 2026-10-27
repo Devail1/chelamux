@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="chela/dashboard/static/img/banner.svg" alt="chela" width="560">
+  <img src="chela/dashboard/static/img/banner.svg" alt="chelamux" width="560">
 </p>
 
 <table align="center">
@@ -26,8 +26,10 @@
 
 # chelamux
 
-**Run Claude Code agents unattended. chela only merges a PR once it has proved the tests
+**Run Claude Code agents unattended. chelamux only merges a PR once it has proved the tests
 catch broken code.**
+
+Site: **[chelamux.com](https://chelamux.com)**. The command-line tool is `chela`.
 
 - **Tracker-driven dispatch.** A ready task in Linear, GitHub issues or a `TODO.md` becomes
   one git worktree, one agent and one PR.
@@ -177,7 +179,7 @@ Full list: [CHANGELOG.md](CHANGELOG.md).
 
 ## Documentation
 
-**[chela.pages.dev/docs](https://chela.pages.dev/docs)** is the user guide: concepts,
+**[chelamux.com/docs](https://chelamux.com/docs)** is the user guide: concepts,
 scheduling, dispatching, the orchestration loop, agent rooms, permission modes, the
 dashboard, collaborative terminals, the command reference and configuration.
 

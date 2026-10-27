@@ -1,6 +1,6 @@
 # ⚖️🧹 chela judge sweep as a GitHub Action (CMX-97): mutate the lines a PR changed, run the
 # tests, fail on survivors. Exit: 0 clean · 1 survivors · 2 cannot verify · 3 unknown.
-name: chela judge sweep
+name: chelamux judge
 description: Mutate the lines a pull request changed, run your tests, and fail on every mutation they do not catch.
 author: Liav Edry
 branding:
