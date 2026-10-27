@@ -1291,7 +1291,7 @@ def test_a_matrix_that_fails_in_several_shards_names_each_job_once():
 def test_a_log_bigger_than_a_prompt_is_truncated_to_its_tail(tmp_path):
     fake = _FakeGh(log="x" * 50_000 + "\nFAILED the last thing\n")
     with patch.object(dispatcher.subprocess, "run", side_effect=fake.run):
-        tail = dispatcher._failing_log_tail(str(tmp_path), ("42",))
+        tail = dispatcher._log_tail(dispatcher._failing_log(str(tmp_path), ("42",)))
     assert len(tail) < dispatcher.CI_LOG_TAIL_CHARS + 200
     assert "FAILED the last thing" in tail
     assert "truncated" in tail
@@ -1300,7 +1300,7 @@ def test_a_log_bigger_than_a_prompt_is_truncated_to_its_tail(tmp_path):
 def test_a_log_that_cannot_be_fetched_costs_the_tail_and_not_the_verdict(tmp_path):
     """The failing job NAMES came from the rollup and are already in hand."""
     with patch.object(dispatcher.subprocess, "run", side_effect=FileNotFoundError("no gh")):
-        tail = dispatcher._failing_log_tail(str(tmp_path), ("42",))
+        tail = dispatcher._failing_log(str(tmp_path), ("42",))
     assert "could not fetch" in tail
     body = dispatcher._ci_verdict_body(
         dispatcher.CIStatus(dispatcher.CI_FAILING, "abc", ("CI / test",)), tail, "u")
@@ -1435,7 +1435,7 @@ def test_the_log_is_read_with_errors_replace_so_one_bad_byte_cannot_kill_the_tic
     to be best-effort — and out of `tick`, which does not catch it."""
     fake = _FakeGh()
     with patch.object(dispatcher.subprocess, "run", side_effect=fake.run):
-        dispatcher._failing_log_tail(str(tmp_path), ("42",))
+        dispatcher._failing_log(str(tmp_path), ("42",))
     assert fake.kwargs[-1]["errors"] == "replace"
 
 
@@ -1453,7 +1453,7 @@ def test_a_log_fetch_that_blows_up_does_not_burn_the_red_forever(tmp_path):
     fake = _FakeGh(rollup=[_check_run("test", conclusion="FAILURE")], sha="redsha01")
 
     boom = UnicodeDecodeError("utf-8", b"\xff", 0, 1, "invalid start byte")
-    with patch.object(dispatcher, "_failing_log_tail", side_effect=boom), \
+    with patch.object(dispatcher, "_failing_log", side_effect=boom), \
          pytest.raises(UnicodeDecodeError):
         _tick(wf, fake)
 

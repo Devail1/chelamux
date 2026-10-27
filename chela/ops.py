@@ -30,7 +30,7 @@ from datetime import datetime
 from functools import cached_property
 from pathlib import Path
 
-from chela import config, fleet
+from chela import config, flaky, fleet
 
 BUDGET_S = 10.0
 INTERVAL_S = 30 * 60
@@ -165,8 +165,8 @@ class Sources:
                 flakes = json.loads(raw)
             except ValueError:
                 continue
-            out += [(task, dict(f, workflow=wf)) for f in flakes
-                    if isinstance(f, dict) and "::" in str(f.get("test"))]
+            out += [(task, dict(f, workflow=wf)) for f in flakes   # CMX-351: Vitest ids too
+                    if isinstance(f, dict) and flaky.is_test_id(f.get("test"))]
         return out
 
     def _git(self, repo: Path, *args: str) -> subprocess.CompletedProcess | None:
@@ -218,7 +218,7 @@ class Sources:
         """CMX-298: True only when git PROVES the flake's head lacks :meth:`last_fix` — a
         flake from before the test (or what it imports) was last changed. Unknown ⇒ False:
         the flake still counts."""
-        fix = self.last_fix(flake.get("workflow"), str(flake["test"]).split("::", 1)[0])
+        fix = self.last_fix(flake.get("workflow"), flaky.file_of(str(flake["test"])))
         sha = str(flake.get("sha") or "")
         if fix is None or not sha:
             return False

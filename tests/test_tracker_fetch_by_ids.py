@@ -1176,7 +1176,7 @@ def _ev_ci_red():
     return dict(
         seed=dict(pr_url=PR_URL, pr_state="open", pr_head_sha="sha-red"),
         extra=[patch.object(dispatcher, "_read_pr_checks", return_value=red),
-               patch.object(dispatcher, "_failing_log_tail", return_value=""),
+               patch.object(dispatcher, "_failing_log", return_value=""),
                patch.object(dispatcher, "_ci_infra_by_steps", side_effect=lambda ci, d: ci),
                patch.object(dispatcher, "_rerun_failed_jobs", return_value=False),  # CMX-255
                patch.object(dispatcher, "request_changes",

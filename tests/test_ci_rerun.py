@@ -204,17 +204,6 @@ def test_a_corrupt_flake_record_is_restarted_not_fatal(tmp_path, notices):
     assert [f["sha"] for f in json.loads(_run()["ci_flakes"])] == ["deadbee1"]
 
 
-@pytest.mark.parametrize("tail, test_id", [
-    ("FAILED tests/x.py::test_y - boom\n", "tests/x.py::test_y"),
-    ("ERROR tests/y.py\n", "tests/y.py"),
-    ("xFAILED tests/z.py\n", "xFAILED tests/z.py"),       # anchored: not a summary line
-    ("FAILEDtests/z.py\n", "FAILEDtests/z.py"),           # the space is required
-    ("", "?"),
-])
-def test_ci_failed_test(tail, test_id):
-    assert dispatcher._ci_failed_test(tail) == test_id
-
-
 def test_the_flake_notice_says_flake_and_not_sent_back(tmp_path, monkeypatch):
     monkeypatch.setenv("CHELA_INBOX_FILE", str(tmp_path / "inbox.json"))
     monkeypatch.setenv("CHELA_EVENTS_FILE", str(tmp_path / "events.jsonl"))

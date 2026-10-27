@@ -2533,7 +2533,7 @@ def _tick(wf, spawned, checks=dispatcher.CI_PASSING, sha="cafe1234", windows=(),
          patch.object(dispatcher.subprocess, "run", side_effect=fake_run), \
          patch.object(dispatcher, "_spawn_judge", side_effect=spawned), \
          patch.object(dispatcher, "remove_worktree", return_value=True), \
-         patch.object(dispatcher, "_failing_log_tail", return_value=""), \
+         patch.object(dispatcher, "_failing_log", return_value=""), \
          patch.object(dispatcher, "_respawn_rework", return_value=False):
         return dispatcher.tick(wf.path)
 
@@ -2770,7 +2770,7 @@ def test_a_HELD_workflow_still_escalates_a_stranded_judge_unknown(tmp_path, monk
          patch.object(dispatcher.subprocess, "run", side_effect=fake_run), \
          patch.object(dispatcher, "_spawn_judge", side_effect=spawn), \
          patch.object(dispatcher, "remove_worktree", return_value=True), \
-         patch.object(dispatcher, "_failing_log_tail", return_value=""), \
+         patch.object(dispatcher, "_failing_log", return_value=""), \
          patch.object(dispatcher, "_respawn_rework", return_value=False), \
          patch.object(dispatcher.hold, "expire_if_stale", return_value=None), \
          patch.object(dispatcher.hold, "active", return_value=held):
@@ -2835,7 +2835,7 @@ def test_a_BLOCKED_workflow_still_escalates_a_stranded_judge_unknown(tmp_path, m
          patch.object(dispatcher.subprocess, "run", side_effect=fake_run), \
          patch.object(dispatcher, "_spawn_judge", side_effect=spawn), \
          patch.object(dispatcher, "remove_worktree", return_value=True), \
-         patch.object(dispatcher, "_failing_log_tail", return_value=""), \
+         patch.object(dispatcher, "_failing_log", return_value=""), \
          patch.object(dispatcher, "_respawn_rework", return_value=False), \
          patch.object(dispatcher.hold, "expire_if_stale", return_value=None), \
          patch.object(dispatcher.hold, "active", return_value=None):

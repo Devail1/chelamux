@@ -1,0 +1,133 @@
+test (3.11)	Pytest	2026-10-25T00:15:44.1477618Z =================================== FAILURES ===================================
+test (3.11)	Pytest	2026-10-25T00:15:44.1478642Z ______________ test_each_ci_gate_passes_the_committed_tree[test] _______________
+test (3.11)	Pytest	2026-10-25T00:15:44.1479304Z [gw2] linux -- Python 3.11.17 /home/runner/work/chelamux/chelamux/.venv/bin/python
+test (3.11)	Pytest	2026-10-25T00:15:44.1479590Z 
+test (3.11)	Pytest	2026-10-25T00:15:44.1479669Z script = 'test'
+test (3.11)	Pytest	2026-10-25T00:15:44.1479784Z 
+test (3.11)	Pytest	2026-10-25T00:15:44.1479963Z     @pytest.mark.parametrize("script", GATES)
+test (3.11)	Pytest	2026-10-25T00:15:44.1480472Z     def test_each_ci_gate_passes_the_committed_tree(script):
+test (3.11)	Pytest	2026-10-25T00:15:44.1480856Z         code, out, err = _pnpm(FRONTEND, script)
+test (3.11)	Pytest	2026-10-25T00:15:44.1481210Z >       assert code == 0, _shown(out + err, 4000)
+test (3.11)	Pytest	2026-10-25T00:15:44.1481949Z E       AssertionError: ux/chelamux/node_modules/.pnpm/vite@7.3.6/node_modules/vite/dist/node/module-runner.js:1086:7)
+test (3.11)	Pytest	2026-10-25T00:15:44.1482917Z E               at request (file:///home/runner/work/chelamux/chelamux/node_modules/.pnpm/vite@7.3.6/node_modules/vite/dist/node/module-runner.js:1103:83)
+test (3.11)	Pytest	2026-10-25T00:15:44.1483467Z E         }
+test (3.11)	Pytest	2026-10-25T00:15:44.1483645Z E         
+test (3.11)	Pytest	2026-10-25T00:15:44.1484177Z E         stderr | src/features/wall/tests/wall.test.ts > the windows event reconciles by window id; off the Wall it is ignored
+test (3.11)	Pytest	2026-10-25T00:15:44.1485308Z E         [chela] owner-presence load failed Error: Cannot find module '/static/collab/presence-owner.js' imported from /home/runner/work/chelamux/chelamux/chela/dashboard/frontend/src/features/share/lib/presence.ts
+test (3.11)	Pytest	2026-10-25T00:15:44.1486055Z E             at reviveInvokeError (file:///home/runner/work/chelamux/chelamux/node_modules/.pnpm/vite@7.3.6/node_modules/vite/dist/node/module-runner.js:475:14)
+test (3.11)	Pytest	2026-10-25T00:15:44.1486678Z E             at Object.invoke (file:///home/runner/work/chelamux/chelamux/node_modules/.pnpm/vite@7.3.6/node_modules/vite/dist/node/module-runner.js:491:33)
+test (3.11)	Pytest	2026-10-25T00:15:44.1487140Z E             at processTicksAndRejections (node:internal/process/task_queues:95:5)
+test (3.11)	Pytest	2026-10-25T00:15:44.1487730Z E             at VitestModuleRunner.getModuleInformation (file:///home/runner/work/chelamux/chelamux/node_modules/.pnpm/vite@7.3.6/node_modules/vite/dist/node/module-runner.js:1086:7)
+test (3.11)	Pytest	2026-10-25T00:15:44.1488380Z E             at request (file:///home/runner/work/chelamux/chelamux/node_modules/.pnpm/vite@7.3.6/node_modules/vite/dist/node/module-runner.js:1103:83) {
+test (3.11)	Pytest	2026-10-25T00:15:44.1488734Z E           code: 'ERR_MODULE_NOT_FOUND',
+test (3.11)	Pytest	2026-10-25T00:15:44.1488956Z E           runnerError: Error: RunnerError
+test (3.11)	Pytest	2026-10-25T00:15:44.1489600Z E               at reviveInvokeError (file:///home/runner/work/chelamux/chelamux/node_modules/.pnpm/vite@7.3.6/node_modules/vite/dist/node/module-runner.js:476:64)
+test (3.11)	Pytest	2026-10-25T00:15:44.1490404Z E               at Object.invoke (file:///home/runner/work/chelamux/chelamux/node_modules/.pnpm/vite@7.3.6/node_modules/vite/dist/node/module-runner.js:491:33)
+test (3.11)	Pytest	2026-10-25T00:15:44.1504217Z E               at processTicksAndRejections (node:internal/process/task_queues:95:5)
+test (3.11)	Pytest	2026-10-25T00:15:44.1505000Z E               at VitestModuleRunner.getModuleInformation (file:///home/runner/work/chelamux/chelamux/node_modules/.pnpm/vite@7.3.6/node_modules/vite/dist/node/module-runner.js:1086:7)
+test (3.11)	Pytest	2026-10-25T00:15:44.1506043Z E               at request (file:///home/runner/work/chelamux/chelamux/node_modules/.pnpm/vite@7.3.6/node_modules/vite/dist/node/module-runner.js:1103:83)
+test (3.11)	Pytest	2026-10-25T00:15:44.1506540Z E         }
+test (3.11)	Pytest	2026-10-25T00:15:44.1506707Z E         
+test (3.11)	Pytest	2026-10-25T00:15:44.1506949Z E         Not implemented: Window's focus() method
+test (3.11)	Pytest	2026-10-25T00:15:44.1507806Z E         stderr | src/features/decisions/tests/Decisions.test.tsx > the operator's pick survives re-renders and is what gets subscribed
+test (3.11)	Pytest	2026-10-25T00:15:44.1508146Z E         re-register failed nope
+test (3.11)	Pytest	2026-10-25T00:15:44.1508297Z E         
+test (3.11)	Pytest	2026-10-25T00:15:44.1508645Z E         stderr | src/features/decisions/tests/Decisions.test.tsx > a picked session that vanished falls back to the first, never a stale wid
+test (3.11)	Pytest	2026-10-25T00:15:44.1509251Z E         re-register failed nope
+test (3.11)	Pytest	2026-10-25T00:15:44.1509406Z E         
+test (3.11)	Pytest	2026-10-25T00:15:44.1509781Z E         stderr | src/features/decisions/tests/Decisions.test.tsx > the button is DISABLED while the take-over is in flight, across a re-render and a reopen
+test (3.11)	Pytest	2026-10-25T00:15:44.1510143Z E         re-register failed x
+test (3.11)	Pytest	2026-10-25T00:15:44.1510281Z E         
+test (3.11)	Pytest	2026-10-25T00:15:44.1510928Z E         stderr | src/features/work/tests/Compact.test.tsx > ⋮ on a run: details, the PR, Linear, the branch, then the destructive ones after a separator
+test (3.11)	Pytest	2026-10-25T00:15:44.1511364Z E         The current testing environment is not configured to support act(...)
+test (3.11)	Pytest	2026-10-25T00:15:44.1511575Z E         
+test (3.11)	Pytest	2026-10-25T00:15:44.1512066Z E         stderr | src/features/work/tests/Compact.test.tsx > a backlog bullet: state "backlog", ⋮ Promote (asks) and Delete its line; a parked one has its reason and no Delete
+test (3.11)	Pytest	2026-10-25T00:15:44.1512558Z E         The current testing environment is not configured to support act(...)
+test (3.11)	Pytest	2026-10-25T00:15:44.1512829Z E         
+test (3.11)	Pytest	2026-10-25T00:15:44.1512997Z E         Not implemented: Window's focus() method
+test (3.11)	Pytest	2026-10-25T00:15:44.1513226Z E         ⎯⎯⎯⎯⎯⎯ Unhandled Errors ⎯⎯⎯⎯⎯⎯
+test (3.11)	Pytest	2026-10-25T00:15:44.1513380Z E         
+test (3.11)	Pytest	2026-10-25T00:15:44.1513557Z E         Vitest caught 1 unhandled error during the test run.
+test (3.11)	Pytest	2026-10-25T00:15:44.1513922Z E         This might cause false positive tests. Resolve unhandled errors to make sure your tests are not affected.
+test (3.11)	Pytest	2026-10-25T00:15:44.1514182Z E         
+test (3.11)	Pytest	2026-10-25T00:15:44.1514346Z E         ⎯⎯⎯⎯⎯ Uncaught Exception ⎯⎯⎯⎯⎯
+test (3.11)	Pytest	2026-10-25T00:15:44.1514549Z E         ReferenceError: window is not defined
+test (3.11)	Pytest	2026-10-25T00:15:44.1514840Z E          ❯ Timeout._onTimeout src/features/sidebar/controller.ts:66:45
+test (3.11)	Pytest	2026-10-25T00:15:44.1515189Z E              64| // The canvas changed width without a window resize, so poke the wall'…
+test (3.11)	Pytest	2026-10-25T00:15:44.1515489Z E              65| // a rebuild: no terminal reloads, tests/wall.test.mjs).
+test (3.11)	Pytest	2026-10-25T00:15:44.1515819Z E              66| const refit = () => setTimeout(() => window.dispatchEvent(new Event('r…
+test (3.11)	Pytest	2026-10-25T00:15:44.1516093Z E                |                                             ^
+test (3.11)	Pytest	2026-10-25T00:15:44.1516264Z E              67|
+test (3.11)	Pytest	2026-10-25T00:15:44.1516449Z E              68| function setCollapsed(collapsed: boolean) {
+test (3.11)	Pytest	2026-10-25T00:15:44.1516748Z E          ❯ listOnTimeout node:internal/timers:581:17
+test (3.11)	Pytest	2026-10-25T00:15:44.1517035Z E          ❯ processTimers node:internal/timers:519:7
+test (3.11)	Pytest	2026-10-25T00:15:44.1517203Z E         
+test (3.11)	Pytest	2026-10-25T00:15:44.1517618Z E         This error originated in "src/features/shell/tests/App.test.tsx" test file. It doesn't mean the error was thrown inside the file itself, but while it was running.
+test (3.11)	Pytest	2026-10-25T00:15:44.1518046Z E         ⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯
+test (3.11)	Pytest	2026-10-25T00:15:44.1518241Z E         
+test (3.11)	Pytest	2026-10-25T00:15:44.1518381Z E         
+test (3.11)	Pytest	2026-10-25T00:15:44.1518508Z E       assert 1 == 0
+test (3.11)	Pytest	2026-10-25T00:15:44.1518608Z 
+test (3.11)	Pytest	2026-10-25T00:15:44.1518723Z tests/test_frontend.py:168: AssertionError
+test (3.11)	Pytest	2026-10-25T00:15:44.1518985Z =========================== short test summary info ============================
+test (3.11)	Pytest	2026-10-25T00:15:44.1519771Z FAILED tests/test_frontend.py::test_each_ci_gate_passes_the_committed_tree[test] - AssertionError: ux/chelamux/node_modules/.pnpm/vite@7.3.6/node_modules/vite/dist/node/module-runner.js:1086:7)
+test (3.11)	Pytest	2026-10-25T00:15:44.1520416Z         at request (file:///home/runner/work/chelamux/chelamux/node_modules/.pnpm/vite@7.3.6/node_modules/vite/dist/node/module-runner.js:1103:83)
+test (3.11)	Pytest	2026-10-25T00:15:44.1520740Z   }
+test (3.11)	Pytest	2026-10-25T00:15:44.1520849Z   
+test (3.11)	Pytest	2026-10-25T00:15:44.1521266Z   stderr | src/features/wall/tests/wall.test.ts > the windows event reconciles by window id; off the Wall it is ignored
+test (3.11)	Pytest	2026-10-25T00:15:44.1521906Z   [chela] owner-presence load failed Error: Cannot find module '/static/collab/presence-owner.js' imported from /home/runner/work/chelamux/chelamux/chela/dashboard/frontend/src/features/share/lib/presence.ts
+test (3.11)	Pytest	2026-10-25T00:15:44.1522583Z       at reviveInvokeError (file:///home/runner/work/chelamux/chelamux/node_modules/.pnpm/vite@7.3.6/node_modules/vite/dist/node/module-runner.js:475:14)
+test (3.11)	Pytest	2026-10-25T00:15:44.1523227Z       at Object.invoke (file:///home/runner/work/chelamux/chelamux/node_modules/.pnpm/vite@7.3.6/node_modules/vite/dist/node/module-runner.js:491:33)
+test (3.11)	Pytest	2026-10-25T00:15:44.1523642Z       at processTicksAndRejections (node:internal/process/task_queues:95:5)
+test (3.11)	Pytest	2026-10-25T00:15:44.1524129Z       at VitestModuleRunner.getModuleInformation (file:///home/runner/work/chelamux/chelamux/node_modules/.pnpm/vite@7.3.6/node_modules/vite/dist/node/module-runner.js:1086:7)
+test (3.11)	Pytest	2026-10-25T00:15:44.1524749Z       at request (file:///home/runner/work/chelamux/chelamux/node_modules/.pnpm/vite@7.3.6/node_modules/vite/dist/node/module-runner.js:1103:83) {
+test (3.11)	Pytest	2026-10-25T00:15:44.1525086Z     code: 'ERR_MODULE_NOT_FOUND',
+test (3.11)	Pytest	2026-10-25T00:15:44.1525256Z     runnerError: Error: RunnerError
+test (3.11)	Pytest	2026-10-25T00:15:44.1525636Z         at reviveInvokeError (file:///home/runner/work/chelamux/chelamux/node_modules/.pnpm/vite@7.3.6/node_modules/vite/dist/node/module-runner.js:476:64)
+test (3.11)	Pytest	2026-10-25T00:15:44.1526213Z         at Object.invoke (file:///home/runner/work/chelamux/chelamux/node_modules/.pnpm/vite@7.3.6/node_modules/vite/dist/node/module-runner.js:491:33)
+test (3.11)	Pytest	2026-10-25T00:15:44.1526662Z         at processTicksAndRejections (node:internal/process/task_queues:95:5)
+test (3.11)	Pytest	2026-10-25T00:15:44.1527152Z         at VitestModuleRunner.getModuleInformation (file:///home/runner/work/chelamux/chelamux/node_modules/.pnpm/vite@7.3.6/node_modules/vite/dist/node/module-runner.js:1086:7)
+test (3.11)	Pytest	2026-10-25T00:15:44.1527734Z         at request (file:///home/runner/work/chelamux/chelamux/node_modules/.pnpm/vite@7.3.6/node_modules/vite/dist/node/module-runner.js:1103:83)
+test (3.11)	Pytest	2026-10-25T00:15:44.1528041Z   }
+test (3.11)	Pytest	2026-10-25T00:15:44.1528145Z   
+test (3.11)	Pytest	2026-10-25T00:15:44.1528279Z   Not implemented: Window's focus() method
+test (3.11)	Pytest	2026-10-25T00:15:44.1528635Z   stderr | src/features/decisions/tests/Decisions.test.tsx > the operator's pick survives re-renders and is what gets subscribed
+test (3.11)	Pytest	2026-10-25T00:15:44.1528953Z   re-register failed nope
+test (3.11)	Pytest	2026-10-25T00:15:44.1529244Z   
+test (3.11)	Pytest	2026-10-25T00:15:44.1529551Z   stderr | src/features/decisions/tests/Decisions.test.tsx > a picked session that vanished falls back to the first, never a stale wid
+test (3.11)	Pytest	2026-10-25T00:15:44.1529863Z   re-register failed nope
+test (3.11)	Pytest	2026-10-25T00:15:44.1529994Z   
+test (3.11)	Pytest	2026-10-25T00:15:44.1530315Z   stderr | src/features/decisions/tests/Decisions.test.tsx > the button is DISABLED while the take-over is in flight, across a re-render and a reopen
+test (3.11)	Pytest	2026-10-25T00:15:44.1530648Z   re-register failed x
+test (3.11)	Pytest	2026-10-25T00:15:44.1530782Z   
+test (3.11)	Pytest	2026-10-25T00:15:44.1531208Z   stderr | src/features/work/tests/Compact.test.tsx > ⋮ on a run: details, the PR, Linear, the branch, then the destructive ones after a separator
+test (3.11)	Pytest	2026-10-25T00:15:44.1531598Z   The current testing environment is not configured to support act(...)
+test (3.11)	Pytest	2026-10-25T00:15:44.1531799Z   
+test (3.11)	Pytest	2026-10-25T00:15:44.1532219Z   stderr | src/features/work/tests/Compact.test.tsx > a backlog bullet: state "backlog", ⋮ Promote (asks) and Delete its line; a parked one has its reason and no Delete
+test (3.11)	Pytest	2026-10-25T00:15:44.1532656Z   The current testing environment is not configured to support act(...)
+test (3.11)	Pytest	2026-10-25T00:15:44.1532852Z   
+test (3.11)	Pytest	2026-10-25T00:15:44.1532981Z   Not implemented: Window's focus() method
+test (3.11)	Pytest	2026-10-25T00:15:44.1533197Z   ⎯⎯⎯⎯⎯⎯ Unhandled Errors ⎯⎯⎯⎯⎯⎯
+test (3.11)	Pytest	2026-10-25T00:15:44.1533338Z   
+test (3.11)	Pytest	2026-10-25T00:15:44.1533497Z   Vitest caught 1 unhandled error during the test run.
+test (3.11)	Pytest	2026-10-25T00:15:44.1533820Z   This might cause false positive tests. Resolve unhandled errors to make sure your tests are not affected.
+test (3.11)	Pytest	2026-10-25T00:15:44.1534196Z   
+test (3.11)	Pytest	2026-10-25T00:15:44.1534340Z   ⎯⎯⎯⎯⎯ Uncaught Exception ⎯⎯⎯⎯⎯
+test (3.11)	Pytest	2026-10-25T00:15:44.1534514Z   ReferenceError: window is not defined
+test (3.11)	Pytest	2026-10-25T00:15:44.1534763Z    ❯ Timeout._onTimeout src/features/sidebar/controller.ts:66:45
+test (3.11)	Pytest	2026-10-25T00:15:44.1535074Z        64| // The canvas changed width without a window resize, so poke the wall'…
+test (3.11)	Pytest	2026-10-25T00:15:44.1535345Z        65| // a rebuild: no terminal reloads, tests/wall.test.mjs).
+test (3.11)	Pytest	2026-10-25T00:15:44.1535778Z        66| const refit = () => setTimeout(() => window.dispatchEvent(new Event('r…
+test (3.11)	Pytest	2026-10-25T00:15:44.1536056Z          |                                             ^
+test (3.11)	Pytest	2026-10-25T00:15:44.1536213Z        67|
+test (3.11)	Pytest	2026-10-25T00:15:44.1536368Z        68| function setCollapsed(collapsed: boolean) {
+test (3.11)	Pytest	2026-10-25T00:15:44.1536593Z    ❯ listOnTimeout node:internal/timers:581:17
+test (3.11)	Pytest	2026-10-25T00:15:44.1536810Z    ❯ processTimers node:internal/timers:519:7
+test (3.11)	Pytest	2026-10-25T00:15:44.1536965Z   
+test (3.11)	Pytest	2026-10-25T00:15:44.1537371Z   This error originated in "src/features/shell/tests/App.test.tsx" test file. It doesn't mean the error was thrown inside the file itself, but while it was running.
+test (3.11)	Pytest	2026-10-25T00:15:44.1537760Z   ⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯
+test (3.11)	Pytest	2026-10-25T00:15:44.1537897Z   
+test (3.11)	Pytest	2026-10-25T00:15:44.1537995Z   
+test (3.11)	Pytest	2026-10-25T00:15:44.5252704Z assert 1 == 0
+test (3.11)	Pytest	2026-10-25T00:15:44.5253191Z 1 failed, 10625 passed, 40 skipped, 1 xfailed in 677.99s (0:11:17)
+test (3.11)	Pytest	2026-10-25T00:15:44.9183622Z ##[error]Process completed with exit code 1.
