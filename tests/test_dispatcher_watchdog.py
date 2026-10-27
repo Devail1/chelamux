@@ -20,6 +20,7 @@ requirement for (1), and an Escape-then-fail recovery for (2).
 """
 from __future__ import annotations
 
+import json
 import subprocess
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -604,3 +605,87 @@ def test_unpark_restarts_the_idle_clock_even_for_a_park_no_tick_saw(ticking, idl
     assert summary["reconciled_failed"] == 0
     assert summary["watchdog_renudged"] == 0
     assert idle_pane == []
+
+
+# ---- 🔒 CMX-359: a watchdog write never holds the lock against a later hand-in -----------
+#
+# 10-27 14:24: the parked branch above wrote `idle_clock_at` without committing, so the tick
+# kept the WAL write lock for the rest of the reconcile loop. A LATER row's completion marker
+# runs `mark_awaiting_review` on its own connection, which then failed with "database is
+# locked" on every tick and stalled the queue. A one-run test cannot see this: with no later
+# row, the commit after the loop releases the lock first. Every watchdog write that ends a
+# row's turn is driven here, ahead of a second row that hands in.
+
+def _two_tasks(repo: Path) -> tuple[str, str]:
+    """Two open tracker tasks; the first is the one the loop reaches first."""
+    from chela.sources.markdown import MarkdownSource
+    (repo / "TODO.md").write_text("- [ ] alpha\n- [ ] beta\n")
+    for argv in (["add", "TODO.md"], ["commit", "-m", "two"], ["push", "origin", "dev"]):
+        subprocess.run(["git", "-C", str(repo), *argv], check=True, capture_output=True)
+    ids = sorted(t.id for t in MarkdownSource(_wf(repo)).list_open_tasks())
+    assert len(ids) == 2
+    return ids[0], ids[1]
+
+
+def _insert_running(repo: Path, task_id: str, *, window: str, nudged: str | None,
+                    worktree: str | None = None, pr_url: str | None = None) -> None:
+    with dispatcher._db() as conn:
+        conn.execute(
+            "INSERT INTO runs (task_id, workflow_path, title, status, window_name, "
+            "branch_name, started_at, idle_nudged_at, attempt, pr_state, worktree_path, pr_url) "
+            "VALUES (?,?,?,'running',?,?,?,?,1,'open',?,?)",
+            (task_id, str(repo / "WORKFLOW.md"), task_id, window, window, _OLD, nudged,
+             worktree, pr_url),
+        )
+        conn.commit()
+
+
+def _template_error(*a, **kw):
+    from chela.workflow import TemplateRenderError
+    raise TemplateRenderError("unknown variable {{taks_title}}")
+
+
+# (row A's window, nudge stamp, native status, prompt builder, summary key, A's end status)
+_LOCK_CASES = {
+    "parked": (WID, _OLD, "idle", None, "watchdog_parked", "running"),
+    "window_gone": ("cmx-gone", None, "idle", None, "reconciled_failed", "failed"),
+    "dialog_failed": (WID, _OLD, "waiting", None, "reconciled_failed", "failed"),
+    "dialog_escaped": (WID, None, "waiting", None, "watchdog_unblocked", "running"),
+    "idle_failed": (WID, _OLD, "idle", None, "reconciled_failed", "failed"),
+    "template_error": (WID, None, "idle", _template_error, "reconciled_failed", "failed"),
+    "renudged": (WID, None, "idle", None, "watchdog_renudged", "running"),
+}
+
+
+@pytest.mark.parametrize("case", sorted(_LOCK_CASES))
+def test_a_watchdog_write_does_not_lock_out_a_later_rows_hand_in(
+        ticking, idle_pane, monkeypatch, tmp_path, caplog, case):
+    """Row A ends its turn on a watchdog write; row B, processed after it in the same tick,
+    carries a completion marker. B reaches `awaiting_review` in THIS tick and nothing logs
+    a lock error. Drop the `conn.commit()` after A's write → B's `mark_awaiting_review`
+    waits out the busy timeout and raises "database is locked" → RED."""
+    window, nudged, status, prompt, key, a_status = _LOCK_CASES[case]
+    a_id, b_id = _two_tasks(ticking)
+    _insert_running(ticking, a_id, window=window, nudged=nudged)
+    wt_b = tmp_path / "wt-b"
+    wt_b.mkdir()
+    (wt_b / ".chela-task-finished-request.json").write_text(json.dumps({"task_id": b_id}))
+    _insert_running(ticking, b_id, window="cmx-b", nudged=None, worktree=str(wt_b),
+                    pr_url="https://github.com/example/repo/pull/1")
+    if case == "parked":
+        assert dispatcher.park_run(a_id, reason="hold", by="orch")["ok"]
+    monkeypatch.setattr(dispatcher, "_agent_status", lambda w, **_: status)
+    monkeypatch.setattr(dispatcher, "_dismiss_input_block", lambda w: None)
+    if prompt is not None:
+        monkeypatch.setattr(dispatcher, "_renudge_prompt", prompt)
+    monkeypatch.setattr(dispatcher, "_read_pr_status", lambda url, cwd: ("open", "MERGEABLE"))
+    monkeypatch.setattr(dispatcher, "reap_run_worktree", lambda *a, **kw: None)
+
+    summary = dispatcher.tick(ticking / "WORKFLOW.md")
+
+    assert summary[key] == 1
+    assert _status_of(a_id)[0] == a_status
+    assert summary["task_finished_applied"] == 1
+    assert _status_of(b_id)[0] == "awaiting_review"
+    assert not (wt_b / ".chela-task-finished-request.json").exists()
+    assert not [r for r in caplog.records if "database is locked" in r.getMessage()]
