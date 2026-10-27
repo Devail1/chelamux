@@ -1023,12 +1023,7 @@ def test_this_repo_carries_no_already_released_fragment():
     promotion merge brings a released section and a surviving fragment together.
     """
     d = release_notes._default_changelog_d_path()
-    stale = stale_fragments(_CHANGELOG.read_text(), d)
-    assert stale == [], (
-        f"{[p.name for p in stale]} already appear in a dated CHANGELOG.md section — "
-        "back-merge `main` into `dev` so the release's fragment deletions reach this "
-        "branch, or delete them by hand if you are certain they shipped"
-    )
+    assert release_notes.fragment_problems(_CHANGELOG.read_text(), d) == ""
 
 
 # ---------------------------------------------------------------------------

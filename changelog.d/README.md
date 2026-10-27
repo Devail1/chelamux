@@ -13,12 +13,17 @@ Measured on CMX-308 and CMX-309 (2026-08-18) — CMX-309 alone spent five rounds
 **Never edit `CHANGELOG.md` directly in a PR.** Instead, add one new file here:
 
 ```
-changelog.d/CMX-<task-id>.md
+changelog.d/CMX-<task-id>-<slug>.md
 ```
 
-— named after your own CMX task number (e.g. task `CMX-312` → `changelog.d/CMX-312.md`),
+— named after your own CMX task number plus a short slug from your branch name (e.g. task
+`CMX-312` on branch `…/cmx-312-changelog-fragments` → `changelog.d/CMX-312-changelog-fragments.md`),
 **not** a guess at "the next free number": two files with different names never collide, so
-there is nothing to guess. Its content is exactly what used to go under `## [Unreleased]`:
+there is nothing to guess. **Never a bare `CMX-<task-id>.md`:** issue numbering restarted, and
+the old series (up to about CMX-391) already shipped in dated `CHANGELOG.md` sections, so a bare
+name that reuses an old number reads as an already-released fragment and turns the suite red.
+`chela task-finished` refuses such a file up front and says to rename it (CMX-356).
+Its content is exactly what used to go under `## [Unreleased]`:
 one or more Keep a Changelog category headings, each with one or more bullets.
 
 ```markdown
