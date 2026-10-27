@@ -7,3 +7,5 @@
   CLI entry point, `~/.chela` and `CHELA_*` settings are unchanged. (CMX-361)
 - **The landing site serves a `robots.txt` and a `sitemap.xml`** for chelamux.com, so
   `/robots.txt` no longer falls back to the home page. (CMX-361)
+- **The GitHub Action's display name is now "chelamux judge"** (was "chela judge sweep"). The
+  `uses: Devail1/chelamux@v0` reference, inputs and outputs are unchanged. (CMX-361)
