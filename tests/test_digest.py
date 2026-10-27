@@ -303,6 +303,21 @@ def test_held_notices_are_listed_under_changed():
     assert f"• ops_findings ops scan findings {DASH}/" in lines
 
 
+def test_an_event_with_no_task_is_never_waiting():
+    events = [_ev(1, 0, "run_review", pr_url=PR + "1"),
+              _ev(2, 1, "run_parked", task_id="CMX-2")]
+    assert [e["seq"] for e in digest.build(events, T0, digest.rules({}))["waiting"]] == [2]
+
+
+def test_invalid_times_warn_and_absent_times_do_not(caplog):
+    with caplog.at_level("WARNING", logger="chela.digest"):
+        digest.rules({"enabled": True})
+    assert "times" not in caplog.text
+    with caplog.at_level("WARNING", logger="chela.digest"):
+        assert digest.rules({"times": ["4pm"]})["times"] == ["09:00", "16:00"]
+    assert "['4pm'] is not a non-empty list of HH:MM" in caplog.text
+
+
 def test_a_reopened_run_can_be_waiting_again():
     events = [_ev(1, 0, "orchestrator.merge", task_id="CMX-1"),
               _ev(2, 1, "run_reopened", task_id="CMX-1"),
@@ -447,6 +462,12 @@ def test_chela_digest_prints_without_moving_the_clock(sandbox, capsys):
     out = json.loads(capsys.readouterr().out)
     assert out["counts"]["needs_you"] == 1 and "Needs you 1" in out["text"]
     assert digest.last_sent() is None
+
+
+def test_the_digest_subcommand_is_wired(sandbox, monkeypatch, capsys):
+    monkeypatch.setattr("sys.argv", ["chela", "digest", "--since-hours", "1", "--json"])
+    main.main()
+    assert set(json.loads(capsys.readouterr().out)) == {"text", "since", "counts"}
 
 
 def test_chela_digest_send_delivers_and_moves_the_clock(sandbox, monkeypatch, capsys):

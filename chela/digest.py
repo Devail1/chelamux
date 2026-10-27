@@ -287,22 +287,20 @@ def _render_lines(parts: dict, shown: dict[str, int], since_label: str) -> list[
 def render_lines(parts: dict, since_label: str = "last digest") -> list[str]:
     """The digest as lines, at most :data:`WORD_CAP` words, a link on every item line.
 
-    Needs you shows at most :data:`NEEDS_YOU_MAX`. Over the cap, the longest of the other
-    three parts gives up its oldest line (on a tie: changed, then done, then waiting), and
-    needs you only once the others are down to their ``+N more`` lines. Every dropped line is
-    counted in its part's ``+N more`` line, which links to the dashboard.
+    Needs you shows at most :data:`NEEDS_YOU_MAX` and is never trimmed further. Over the cap,
+    the longest of the other three parts gives up its oldest line (on a tie: changed, then
+    done, then waiting). Every dropped line is counted in its part's ``+N more`` line, which
+    links to the dashboard. With every other part trimmed, what is left (the headers, at most
+    three needs-you lines and the ``+N more`` lines) is about 40 words.
     """
     shown = {key: len(parts[key]) for key, _, _ in _PARTS}
     shown["needs_you"] = min(shown["needs_you"], NEEDS_YOU_MAX)
     lines = _render_lines(parts, shown, since_label)
     while _words(lines) > WORD_CAP:
         others = [k for k in _TRIM_FIRST if shown[k] > 0]
-        if others:
-            key = max(others, key=lambda k: (shown[k], -_TRIM_FIRST.index(k)))
-        elif shown["needs_you"] > 0:
-            key = "needs_you"
-        else:
-            break
+        if not others:
+            break      # left: headers, at most 3 needs-you lines and the +N more lines
+        key = max(others, key=lambda k: (shown[k], -_TRIM_FIRST.index(k)))
         shown[key] -= 1
         lines = _render_lines(parts, shown, since_label)
     return lines

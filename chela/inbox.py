@@ -2919,8 +2919,6 @@ def hold_for_digest(store: dict, rule: dict | None = None) -> list[dict]:
     held, kept = [], []
     for event in store["queue"]:
         (held if digest.route(event.get("kind"), rule) == digest.HOLD else kept).append(event)
-    if not held:
-        return []
     store["queue"] = kept
     for event in held:
         if event.get("unlogged"):
