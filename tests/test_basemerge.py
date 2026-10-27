@@ -452,7 +452,8 @@ def test_the_cap_reads_a_row_that_has_no_conflict_column_as_zero_free_rounds():
 
 
 def test_past_three_free_conflict_rounds_a_conflict_is_charged_and_escalates(tmp_path, tried):
-    wf, fake = _setup(tmp_path, pr_mergeable="CONFLICTING", rework_count=7, conflict_reworks=3)
+    wf, fake = _setup(tmp_path, pr_mergeable="CONFLICTING", rework_count=7, conflict_reworks=3,
+                      cap_requeues=1)  # CMX-290: past the one cap requeue
     assert dispatcher.effective_rework_cap(dispatcher.resolve_run("abc123")) == 7
     summary = _tick(wf, fake)
     run = dispatcher.resolve_run("abc123")

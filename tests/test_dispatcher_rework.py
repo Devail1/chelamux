@@ -483,7 +483,7 @@ def test_round_three_escalates_to_needs_human_with_every_verdict_and_a_free_slot
     verdicts = [{"round": i, "at": "t", "body": f"verdict {i}"} for i in (1, 2, 3)]
     with dispatcher._db() as conn:
         _row(conn, workflow_path=str(wf.path), status="changes_requested",
-             rework_count=2, review_history=json.dumps(verdicts))
+             rework_count=2, review_history=json.dumps(verdicts), cap_requeues=1)  # CMX-290: 2nd
 
     with patch.object(dispatcher, "load_workflow_cached", return_value=_status(wf)), \
          patch.object(dispatcher, "get_source", return_value=source), \
@@ -531,7 +531,8 @@ def test_max_reworks_zero_escalates_the_very_first_verdict(tmp_path, monkeypatch
     wf = _wf(tmp_path)
     source = _Source("abc123")
     with dispatcher._db() as conn:
-        _row(conn, workflow_path=str(wf.path), status="changes_requested", rework_count=0)
+        _row(conn, workflow_path=str(wf.path), status="changes_requested", rework_count=0,
+             cap_requeues=1)                                   # CMX-290: past its one requeue
 
     with patch.object(dispatcher, "load_workflow_cached", return_value=_status(wf)), \
          patch.object(dispatcher, "get_source", return_value=source), \
@@ -669,7 +670,7 @@ def test_a_parked_task_is_never_RE_CLAIMED_as_a_fresh_one(tmp_path, status):
     source = _Source("abc123")
     task = source.list_open_tasks()[0]
     with dispatcher._db() as conn:
-        _row(conn, workflow_path=str(wf.path), status=status, rework_count=9)
+        _row(conn, workflow_path=str(wf.path), status=status, rework_count=9, cap_requeues=1)
 
     with patch.object(dispatcher, "load_workflow_cached", return_value=_status(wf)), \
          patch.object(dispatcher, "get_source", return_value=source), \
@@ -1245,7 +1246,7 @@ def test_a_HOLD_pauses_the_rework_but_NEVER_the_escalation(tmp_path, monkeypatch
                      created_at=now, expires_at=now + 3600)
     with dispatcher._db() as conn:
         _row(conn, task_id="over-cap", workflow_path=str(wf.path),
-             status="changes_requested", rework_count=1)
+             status="changes_requested", rework_count=1, cap_requeues=1)
         _row(conn, task_id="under-cap", workflow_path=str(wf.path),
              status="changes_requested", rework_count=0, branch_name="test-2",
              window_name="test-2")
@@ -1308,7 +1309,7 @@ def test_an_AT_CAP_block_announces_ONLY_needs_human(tmp_path, monkeypatch):
     wf = _wf(tmp_path)
     with dispatcher._db() as conn:
         _row(conn, task_id="at-cap", workflow_path=str(wf.path), status="changes_requested",
-             rework_count=3, retry_count=1,
+             rework_count=3, retry_count=1, cap_requeues=1,
              review_history=json.dumps([{"round": 4, "at": "t", "body": "still loose"}]))
 
     events, seen = inbox.run_events([dict(dispatcher.resolve_run("at-cap"))], {})
@@ -1699,3 +1700,70 @@ def test_a_HOLD_re_spawns_NO_rework_and_the_first_tick_after_resume_does(tmp_pat
     assert resumed["held"] is False
     assert resumed["reworked"] == 1                             # ⭐ resume re-spawns it
     assert respawned == ["abc123"]
+
+
+# --- ♻️ CMX-290: the first cap exhaustion re-queues; the branch search is bounded --------
+
+def test_a_FIRST_cap_exhaustion_requeues_in_this_harness_too(tmp_path, monkeypatch):
+    monkeypatch.setenv("CHELA_MAX_REWORKS", "2")
+    wf = _wf(tmp_path)
+    source = _Source("abc123")
+    with dispatcher._db() as conn:
+        _row(conn, workflow_path=str(wf.path), status="changes_requested", rework_count=2)
+
+    with patch.object(dispatcher, "load_workflow_cached", return_value=_status(wf)), \
+         patch.object(dispatcher, "get_source", return_value=source), \
+         patch.object(dispatcher, "_claim_order", return_value=source.list_open_tasks()), \
+         patch.object(dispatcher, "_remote_branch_exists", return_value=False), \
+         patch.object(dispatcher, "ensure_worktree", return_value=(tmp_path / "wt", True)), \
+         patch.object(dispatcher, "_launch_agent"), patch.object(dispatcher, "_run_critic"), \
+         patch.object(dispatcher, "_gh_pr_close", return_value=(True, "closed")) as closed, \
+         patch.object(dispatcher, "_read_pr_status", return_value=("open", "MERGEABLE")), \
+         patch.object(dispatcher.subprocess, "run", side_effect=_FakeTmux().run):
+        summary = dispatcher.tick(wf.path)
+
+    assert (summary["cap_requeued"], summary["escalated"], summary["dispatched"]) == (1, 0, 1)
+    assert closed.call_count == 1
+    run = dispatcher.resolve_run("abc123")
+    assert (run["status"], run["cap_requeues"], run["branch_name"]) == ("running", 1, "test-1-r2")
+
+
+@pytest.mark.parametrize("taken, want", [(0, "b"), (1, "b-2"), (49, "b-50")])
+def test_unused_remote_branch_returns_the_first_free_name_within_the_bound(taken, want):
+    calls = []
+    with patch.object(dispatcher, "_remote_branch_exists",
+                      side_effect=lambda repo, name: calls.append(name) or len(calls) <= taken):
+        assert dispatcher._unused_remote_branch(Path("/r"), "b") == want
+
+
+def test_unused_remote_branch_gives_up_after_50_names_and_the_claim_needs_a_human(tmp_path):
+    calls = []
+    with patch.object(dispatcher, "_remote_branch_exists",
+                      side_effect=lambda repo, name: calls.append(name) or True), \
+         pytest.raises(dispatcher.BranchNamesExhausted, match="b-2..-50 all taken"):
+        dispatcher._unused_remote_branch(Path("/r"), "b")
+    assert calls == ["b", *(f"b-{n}" for n in range(2, 51))]
+
+    wf = _wf(tmp_path)
+    source = _Source("abc123")
+    with patch.object(dispatcher, "load_workflow_cached", return_value=_status(wf)), \
+         patch.object(dispatcher, "get_source", return_value=source), \
+         patch.object(dispatcher, "_claim_order", return_value=source.list_open_tasks()), \
+         patch.object(dispatcher, "_spawn",
+                      side_effect=dispatcher.BranchNamesExhausted("no free branch name")), \
+         patch.object(dispatcher.subprocess, "run", side_effect=_FakeTmux().run):
+        dispatcher.tick(wf.path)
+    run = dispatcher.resolve_run("abc123")
+    assert (run["status"], run["last_error"]) == ("needs_human", "no free branch name")
+
+
+def test_any_other_spawn_error_still_marks_the_claim_failed(tmp_path):
+    wf = _wf(tmp_path)
+    source = _Source("abc123")
+    with patch.object(dispatcher, "load_workflow_cached", return_value=_status(wf)), \
+         patch.object(dispatcher, "get_source", return_value=source), \
+         patch.object(dispatcher, "_claim_order", return_value=source.list_open_tasks()), \
+         patch.object(dispatcher, "_spawn", side_effect=RuntimeError("tmux gone")), \
+         patch.object(dispatcher.subprocess, "run", side_effect=_FakeTmux().run):
+        dispatcher.tick(wf.path)
+    assert dispatcher.resolve_run("abc123")["status"] == "failed"

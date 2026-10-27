@@ -340,7 +340,7 @@ def _tick_changes_requested(tmp_path, risk, rework_count) -> str:
     wf = _wf(tmp_path)
     with dispatcher._db() as conn:
         _row(conn, workflow_path=str(wf.path), status="changes_requested",
-             rework_count=rework_count, risk=risk)
+             rework_count=rework_count, risk=risk, cap_requeues=1)  # CMX-290: 2nd
     with patch.object(dispatcher, "load_workflow_cached", return_value=_status(wf)), \
          patch.object(dispatcher, "get_source", return_value=_Source("abc123")), \
          patch.object(dispatcher, "_claim_order", return_value=[]), \
