@@ -3,23 +3,24 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>chela: a merge gate for unattended Claude Code agents</title>
-<meta name="description" content="Run Claude Code agents unattended. chela only merges a PR once it has proved the tests catch broken code. Tracker-driven dispatch, a mutation-testing judge bound to the PR head, and a merge gate with one-tap audited override. Local-first, AGPL-3.0.">
+<title>chelamux: a merge gate for unattended Claude Code agents</title>
+<meta name="description" content="Run Claude Code agents unattended. chelamux only merges a PR once it has proved the tests catch broken code. Tracker-driven dispatch, a mutation-testing judge bound to the PR head, and a merge gate with one-tap audited override. Local-first, AGPL-3.0.">
+<link rel="canonical" href="https://chelamux.com/">
 <link rel="icon" href="favicon.svg" type="image/svg+xml">
 <meta name="theme-color" content="#0d1117">
-<meta property="og:title" content="chela: a merge gate for unattended Claude Code agents">
-<meta property="og:description" content="Run Claude Code agents unattended. chela only merges a PR once it has proved the tests catch broken code.">
+<meta property="og:title" content="chelamux: a merge gate for unattended Claude Code agents">
+<meta property="og:description" content="Run Claude Code agents unattended. chelamux only merges a PR once it has proved the tests catch broken code.">
 <meta property="og:type" content="website">
-<meta property="og:url" content="https://chela.pages.dev/">
-<meta property="og:site_name" content="chela">
-<meta property="og:image" content="https://chela.pages.dev/img/og.png">
+<meta property="og:url" content="https://chelamux.com/">
+<meta property="og:site_name" content="chelamux">
+<meta property="og:image" content="https://chelamux.com/img/og.png">
 <meta property="og:image:width" content="1200">
 <meta property="og:image:height" content="630">
-<meta property="og:image:alt" content="chela: run Claude Code agents unattended. It only merges a PR once it has proved the tests catch broken code. Tracker → agent → judge → merge gate.">
+<meta property="og:image:alt" content="chelamux: run Claude Code agents unattended. It only merges a PR once it has proved the tests catch broken code. Tracker → agent → judge → merge gate.">
 <meta name="twitter:card" content="summary_large_image">
-<meta name="twitter:title" content="chela: a merge gate for unattended Claude Code agents">
-<meta name="twitter:description" content="Run Claude Code agents unattended. chela only merges a PR once it has proved the tests catch broken code.">
-<meta name="twitter:image" content="https://chela.pages.dev/img/og.png">
+<meta name="twitter:title" content="chelamux: a merge gate for unattended Claude Code agents">
+<meta name="twitter:description" content="Run Claude Code agents unattended. chelamux only merges a PR once it has proved the tests catch broken code.">
+<meta name="twitter:image" content="https://chelamux.com/img/og.png">
 <style>
   :root{
     --bg:#0d1117; --surface:#161b22; --surface2:#1c2230; --border:#21262d; --border-strong:#30363d;
@@ -253,11 +254,11 @@
 
 <nav aria-label="Primary">
   <img class="mark" src="favicon.svg" alt="" width="24" height="24">
-  <span class="name">chela</span>
+  <span class="name">chelamux</span>
   <span class="spacer"></span>
   <span class="links">
     <a class="wide" href="#how">How it works</a>
-    <a class="wide" href="#why">Why chela</a>
+    <a class="wide" href="#why">Why chelamux</a>
     <a class="wide" href="#faq">FAQ</a>
     <a href="docs.html">Docs</a>
     <a href="https://github.com/Devail1/chelamux">GitHub</a>
@@ -267,10 +268,11 @@
 <main>
 <header class="hero wrap">
   <div class="pitch">
-    <img class="banner" src="banner.svg" alt="chela" width="1991" height="995">
-    <h1>Run Claude Code agents unattended.<br><span class="accent">chela only merges a PR once it has proved the tests catch broken code.</span></h1>
+    <img class="banner" src="banner.svg" alt="chelamux" width="1991" height="995">
+    <h1>Run Claude Code agents unattended.<br><span class="accent">chelamux only merges a PR once it has proved the tests catch broken code.</span></h1>
     <p class="sub">A tracker task becomes a worktree, an agent and a PR; a <strong>mutation-testing
-      judge</strong> must pass on its head commit before <code>chela merge</code> will land it.</p>
+      judge</strong> must pass on its head commit before <code>chela merge</code> will land it.
+      (<code>chela</code> is the chelamux CLI.)</p>
     <div class="cta">
       <a class="btn btn-primary" href="#install">Get started</a>
       <a class="btn btn-ghost" href="https://github.com/Devail1/chelamux">
@@ -309,7 +311,7 @@ uv run chela status</code></pre>
     </ol>
     <p class="status-note">
       <strong>Status: early.</strong> The core (scheduler, dispatcher, messaging) is solid and
-      tested; the dashboard and live wall ship in the same install. chela is
+      tested; the dashboard and live wall ship in the same install. chelamux is
       <strong>self-hosted and single-user</strong>: you run it on your own machine, driving one
       Claude account (the whole fleet shares its 5h / weekly rate limits).
     </p>
@@ -359,8 +361,8 @@ uv run chela status</code></pre>
 
 <section id="why" class="wrap">
   <div class="section-head">
-    <h2>Why chela</h2>
-    <p>Other tools run agents well. chela is about what happens <em>after</em> the agent says “done”.</p>
+    <h2>Why chelamux</h2>
+    <p>Other tools run agents well. chelamux is about what happens <em>after</em> the agent says “done”.</p>
   </div>
   <div class="table-scroll" role="region" aria-labelledby="cmp-cap" tabindex="0">
     <table class="cmp">
@@ -368,7 +370,7 @@ uv run chela status</code></pre>
       <thead>
         <tr>
           <th scope="col"><span class="sr-only">Capability</span></th>
-          <th scope="col" class="us">chela</th>
+          <th scope="col" class="us">chelamux</th>
           <th scope="col">Claude desktop app / Agent view</th>
           <th scope="col">A tmux session manager</th>
           <th scope="col">A hosted issue-to-PR platform</th>
@@ -555,7 +557,7 @@ uv run chela status</code></pre>
         many sessions, and chela runs those same Claude Code sessions. What chela adds is the part
         after “done”: tracker-driven dispatch into worktrees, a mutation-testing judge whose verdict
         is bound to the PR head, and a merge command that refuses without it. See
-        <a href="#why">Why chela</a>.</p></div>
+        <a href="#why">Why chelamux</a>.</p></div>
     </details>
     <details>
       <summary>What's the license?</summary>
@@ -582,7 +584,7 @@ uv run chela status</code></pre>
     <a href="https://github.com/Devail1/chelamux/blob/main/CHANGELOG.md">Changelog</a>
     <a href="https://github.com/Devail1/chelamux/blob/main/NOTICE">Icons: Lucide (ISC)</a>
   </nav>
-  <p>chela: a merge gate and control plane for Claude Code agents on tmux</p>
+  <p>chelamux: a merge gate and control plane for Claude Code agents on tmux</p>
 </footer>
 
 <script>
