@@ -49,7 +49,7 @@ class FakeThread:
         return {"viewer": {"id": VIEWER}, "issue": {
             "identifier": "CMX-7", "title": "the title", "description": "the brief",
             "url": "https://linear.app/x/issue/CMX-7",
-            "comments": {"nodes": self.comments, "pageInfo": {"hasPreviousPage": self.more}}}}
+            "comments": {"nodes": list(self.comments), "pageInfo": {"hasPreviousPage": self.more}}}}
 
 
 def _workflow(tmp_path: Path, extra: str = "") -> Path:
@@ -122,6 +122,34 @@ def test_a_fetch_failure_says_could_not_fetch_and_exits_nonzero(tmp_path, err):
     assert code == 1
     assert text.startswith("⚠ could not fetch CMX-7 from Linear")
     assert "UNKNOWN" in text
+
+
+def test_a_response_without_the_viewer_is_a_failed_fetch(tmp_path):
+    """No viewer means no trust anchor: fail closed, never show the thread unfiltered."""
+    class NoViewer(FakeThread):
+        def __call__(self, query, variables):
+            data = super().__call__(query, variables)
+            del data["viewer"]
+            return data
+    code, text = _show(tmp_path, NoViewer([comment("STEER", VIEWER, "2026-10-20T00:00Z")]))
+    assert code == 1 and "could not fetch" in text and "STEER" not in text
+
+
+def test_each_show_reads_linear_fresh(tmp_path):
+    """A comment posted between two calls on the same source is seen by the second."""
+    fake = FakeThread([comment("OLD", VIEWER, "2026-10-20T00:00Z")])
+    path = _workflow(tmp_path)
+    _run(tmp_path, "CMX-7")
+    source = LinearSource(load_workflow(path), transport=fake)
+    assert "NEW" not in task_show.show("CMX-7", source=source)[1]
+    fake.comments.append(comment("NEW", VIEWER, "2026-10-21T00:00Z"))
+    assert "NEW" in task_show.show("CMX-7", source=source)[1]
+
+
+def test_a_blank_allowlist_entry_admits_no_email_less_user(tmp_path):
+    fake = FakeThread([comment("NO-EMAIL", "user-other", "2026-10-20T11:00Z")])
+    _, text = _show(tmp_path, fake, extra="linear:\n  comment_authors: ['', '  ']\n")
+    assert "NO-EMAIL" not in text and "(1 comment(s) dropped:" in text
 
 
 def test_a_response_without_the_issue_is_a_failed_fetch(tmp_path):
@@ -200,6 +228,17 @@ def test_the_default_is_the_run_whose_worktree_holds_the_cwd(tmp_path):
         assert task_show.own_task_id(conn, tmp_path / "nowhere", None) is None
 
 
+def test_the_newest_run_wins_for_a_shared_worktree_or_window(tmp_path):
+    wt = tmp_path / "wt"
+    wt.mkdir()
+    _run(tmp_path, "CMX-1", worktree=wt, window_id="@5", started="2026-10-27T09:00")
+    _run(tmp_path, "CMX-2", worktree=wt, window_id="@5", started="2026-10-27T11:00")
+    _run(tmp_path, "CMX-3", worktree=wt, window_id="@5", started="2026-10-27T10:00")
+    with dispatcher._db() as conn:
+        assert task_show.own_task_id(conn, wt, None) == "CMX-2"
+        assert task_show.own_task_id(conn, tmp_path / "nowhere", "@5") == "CMX-2"
+
+
 def test_no_owning_run_exits_nonzero(tmp_path):
     code, text = task_show.show(None, cwd=tmp_path)
     assert code == 1 and "no run owns" in text
@@ -218,11 +257,25 @@ def test_show_without_an_id_uses_the_cwds_run(tmp_path):
 
 def test_the_cli_exits_nonzero_on_a_failed_fetch(tmp_path, monkeypatch, capsys):
     from chela import main
-    monkeypatch.setattr(task_show, "show", lambda tid: (1, "⚠ could not fetch X"))
+    seen = []
+    monkeypatch.setattr(task_show, "show",
+                        lambda tid: seen.append(tid) or (1, "⚠ could not fetch X"))
     monkeypatch.setattr("sys.argv", ["chela", "task", "show", "CMX-7"])
     with pytest.raises(SystemExit) as e:
         main.main()
     assert e.value.code == 1 and "could not fetch X" in capsys.readouterr().out
+    assert seen == ["CMX-7"]
+
+
+@pytest.mark.parametrize("argv, tid", [(["CMX-42"], "CMX-42"), ([], None)])
+def test_the_cli_forwards_the_id_and_exits_zero_on_success(monkeypatch, capsys, argv, tid):
+    """The operator's id reaches show() verbatim; no id means "my own run" (None)."""
+    from chela import main
+    seen = []
+    monkeypatch.setattr(task_show, "show", lambda t: seen.append(t) or (0, "THE-THREAD"))
+    monkeypatch.setattr("sys.argv", ["chela", "task", "show", *argv])
+    main.main()
+    assert seen == [tid] and capsys.readouterr().out == "THE-THREAD\n"
 
 
 # --- the prompts -----------------------------------------------------------------------

@@ -192,3 +192,18 @@ def test_the_seeded_file_carries_each_rule_on_one_line(needle):
 def test_the_seeded_file_renders_through_the_real_loader():
     wf = _wf(_REPO_ROOT, {"standing_rules": "docs/AGENT_STANDING_RULES.md"})
     assert "Never wrap `chela task-finished`" in _render(wf)
+
+
+# --- CMX-287: a Linear workflow adds the `chela task show` line -----------------------
+
+@pytest.mark.parametrize("kind", ["linear", "markdown"])
+def test_a_linear_workflows_own_rules_file_still_renders_beside_the_task_show_line(
+        tmp_path, kind):
+    from chela.standing_rules import TASK_SHOW_RULE
+    _write_rules(tmp_path)
+    wf = _wf(tmp_path, {"standing_rules": "docs/RULES.md"})
+    wf.config["tracker"] = {"kind": kind, "team": "TEST"}
+    rendered = standing_rules(wf)
+    expected = f"## Standing rules\n\n{_RULE}"
+    assert rendered == (f"{expected}\n{TASK_SHOW_RULE}" if kind == "linear" else expected)
+    assert _RULE in _render(wf)
