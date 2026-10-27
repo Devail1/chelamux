@@ -842,6 +842,7 @@ def _has_pytest_cov(worktree: Path) -> bool:
 def run_baseline(
     worktree: Path, test_cmd: str, timeout: float, scratch: Path, *, select_tests: bool = True,
     failures: list[SuiteResult] | None = None, flakes: list[str] | None = None,
+    reruns: list[SuiteResult] | None = None,
 ) -> tuple[SuiteResult, "judge_select.Selector | None", str]:
     """⚡ CMX-407: THE baseline — one full-suite run on the unmutated tree, exactly as before —
     that also records what per-mutation selection needs. Returns ``(baseline, selector, why)``;
@@ -885,7 +886,12 @@ def run_baseline(
         baseline = run_suite(judge_select.extend(test_cmd, [f"--junitxml={junit}"]),
                              worktree, timeout)
     if not baseline.green:
-        baseline = _rerun_failed_once(worktree, test_cmd, timeout, baseline, failures, flakes)
+        # ⚖️🧹 CMX-341: a tail too short to hold pytest's FAILED lines still has the JUnit report.
+        named = _failing_test_names(baseline.tail) or [
+            node for node, _ in (judge_select.failed_cases(worktree, junit) or [])
+        ][:MAX_NAMED_FAILURES]
+        baseline = _rerun_failed_once(worktree, test_cmd, timeout, baseline, failures, flakes,
+                                      reruns=reruns, named=named)
     if not baseline.green:
         return baseline, None, ""
     if extra_env:
@@ -901,17 +907,35 @@ def run_baseline(
     return baseline, selector, why + (f"; {cov_note}" if cov_note else "")
 
 
+def rerun_skip_reason(baseline: SuiteResult, named: list[str]) -> str:
+    """Why a red ``baseline`` gets NO isolated re-run of ``named`` (\"\" when it does)."""
+    if not named:
+        return "its failures could not be named"
+    if baseline.errors:
+        return f"{baseline.errors} error(s) — an error is not a named failure"
+    if baseline.failed != len(named):
+        return f"{baseline.failed} failure(s), {len(named)} named"
+    if not baseline.passed:
+        return "nothing passed — the suite never ran"
+    return ""
+
+
 def _rerun_failed_once(
     worktree: Path, test_cmd: str, timeout: float, baseline: SuiteResult,
-    failures: list[SuiteResult] | None, flakes: list[str] | None,
+    failures: list[SuiteResult] | None, flakes: list[str] | None, *,
+    reruns: list[SuiteResult] | None = None, named: list[str] | None = None,
 ) -> SuiteResult:
     """🎲 CMX-195: a red baseline whose EVERY failure is a named test gets ONE re-run of just
     those tests. All of them passing ⇒ a flake: recorded in ``flakes`` and the baseline reads
-    green. ⛔ Anything else — a test red twice, an error, an unnamed failure — stays red."""
-    named = _failing_test_names(baseline.tail)
-    if not named or baseline.errors or baseline.failed != len(named) or not baseline.passed:
+    green. ⛔ Anything else — a test red twice, an error, an unnamed failure — stays red.
+    ``named`` defaults to the tail's FAILED lines; ``reruns`` (CMX-341) receives the re-run
+    itself, whatever it said."""
+    named = _failing_test_names(baseline.tail) if named is None else named
+    if rerun_skip_reason(baseline, named):
         return baseline
     rerun = run_suite(judge_select.extend(test_cmd, named), worktree, timeout)
+    if reruns is not None:
+        reruns.append(rerun)
     if not rerun.green or rerun.passed < len(named):
         if failures is not None:            # the evidence it is red twice, beside the first
             failures.append(rerun)

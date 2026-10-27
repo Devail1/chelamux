@@ -21,7 +21,25 @@ from chela.workflow import WorkflowDef
 log = logging.getLogger(__name__)
 
 
+# 🧵 CMX-287 — a Linear-tracked run is steered by comments on its issue, which the brief
+# persisted at claim time never sees; this line sends every attempt to read them.
+TASK_SHOW_RULE = (
+    "- Run `chela task show` at the start of every attempt, first dispatch and every rework "
+    "alike (read-only: your Linear issue's current description and comments, oldest first). "
+    "Comments newer than your brief are the operator's latest steer; where they conflict "
+    "with the brief, follow the comment. If it says it could not fetch, report that rather "
+    "than assume nothing changed.")
+
+
 def standing_rules(wf: WorkflowDef) -> str:
+    """The workflow's standing rules, plus :data:`TASK_SHOW_RULE` for a Linear tracker."""
+    rules = _rules_file(wf)
+    if wf.get("tracker", "kind", default=None) != "linear":
+        return rules
+    return f"{rules}\n{TASK_SHOW_RULE}" if rules else TASK_SHOW_RULE
+
+
+def _rules_file(wf: WorkflowDef) -> str:
     """The text of the workflow's ``agent.standing_rules`` file, or ``""``.
 
     ``""`` (no warning) when the key is unset; ``""`` plus a warning when it is set but
