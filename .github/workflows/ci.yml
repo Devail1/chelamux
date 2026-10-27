@@ -130,7 +130,9 @@ jobs:
       - name: Build sdist + wheel
         run: uv build
       - name: Smoke-test the built wheel
-        run: uvx --from dist/chelamux-*.whl chelamux --help
+        run: |
+          uvx --from dist/chelamux-*.whl chelamux --help
+          uvx --from dist/chelamux-*.whl python -c 'import chela.dashboard.app'
 
   # CMX-176: the dashboard's React frontend. Its Vitest suite also runs inside Pytest above
   # (tests/test_frontend.py, so the judge can grade TS).

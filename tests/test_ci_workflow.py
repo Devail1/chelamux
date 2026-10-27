@@ -886,14 +886,20 @@ def test_the_frontend_job_mapping_is_pinned_exactly(workflow):
 
 # CMX-363: the `package` job builds the sdist + wheel and runs the wheel as `uvx chelamux`,
 # pinned whole for the same reason as the frontend job.
+# The wheel runs as an adopter runs it, and imports the dashboard (whose Flask import
+# `--help` never reaches).
+_SMOKE = (
+    "uvx --from dist/chelamux-*.whl chelamux --help\n"
+    "uvx --from dist/chelamux-*.whl python -c 'import chela.dashboard.app'\n"
+)
+
 _EXPECTED_PACKAGE_JOB: dict = {
     "runs-on": "ubuntu-latest",
     "steps": [
         {"uses": "actions/checkout@v4"},
         {"name": "Install uv", "uses": "astral-sh/setup-uv@v5"},
         {"name": "Build sdist + wheel", "run": "uv build"},
-        {"name": "Smoke-test the built wheel",
-         "run": "uvx --from dist/chelamux-*.whl chelamux --help"},
+        {"name": "Smoke-test the built wheel", "run": _SMOKE},
     ],
 }
 

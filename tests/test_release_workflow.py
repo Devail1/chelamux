@@ -146,6 +146,13 @@ def test_the_workflow_reacts_to_tags_it_did_not_create(workflow):
 # already happening. So its whole mapping is pinned (an unpinned key is a place a mutation
 # hides), and the one step with logic in it, the tag/version check, is executed for real.
 
+# The wheel runs as an adopter runs it, and imports the dashboard (whose Flask import
+# `--help` never reaches).
+_SMOKE = (
+    "uvx --from dist/chelamux-*.whl chelamux --help\n"
+    "uvx --from dist/chelamux-*.whl python -c 'import chela.dashboard.app'\n"
+)
+
 _PYPI_VERSION_CHECK = """version="$(python3 -c 'import tomllib; print(tomllib.load(open("pyproject.toml", "rb"))["project"]["version"])')"
 if [ "v$version" != "$GITHUB_REF_NAME" ]; then
   echo "tag $GITHUB_REF_NAME does not match pyproject.toml version $version" >&2
@@ -164,8 +171,7 @@ _EXPECTED_PYPI_JOB: dict = {
         {"name": "Install uv", "uses": "astral-sh/setup-uv@v5"},
         {"name": "Check the tag matches pyproject's version", "run": _PYPI_VERSION_CHECK},
         {"name": "Build sdist + wheel", "run": "uv build"},
-        {"name": "Smoke-test the built wheel",
-         "run": "uvx --from dist/chelamux-*.whl chelamux --help"},
+        {"name": "Smoke-test the built wheel", "run": _SMOKE},
         {"name": "Publish to PyPI", "uses": "pypa/gh-action-pypi-publish@release/v1"},
     ],
 }

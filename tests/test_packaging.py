@@ -155,8 +155,32 @@ def test_statusline_script_falls_back_to_the_checkout(tmp_path, monkeypatch):
     assert main.statusline_script() == tmp_path / "scripts" / "cache-statusline.sh"
 
 
-def test_install_statusline_writes_the_packaged_path(tmp_path, monkeypatch):
-    monkeypatch.setattr(main, "__file__", str(_fake_layout(tmp_path, packaged=True)))
+def _install(tmp_path, monkeypatch, *, packaged: bool, write: bool) -> Path:
+    monkeypatch.setattr(main, "__file__", str(_fake_layout(tmp_path, packaged=packaged)))
+    monkeypatch.setattr(main.config, "CHELA_DIR", tmp_path / "chela-dir")
     settings = tmp_path / "settings.json"
-    main.cmd_install_statusline(argparse.Namespace(settings=str(settings), write=True, force=False))
-    assert f'"command": "{tmp_path}/chela/scripts/cache-statusline.sh"' in settings.read_text()
+    main.cmd_install_statusline(argparse.Namespace(settings=str(settings), write=write, force=False))
+    return settings
+
+
+def test_install_statusline_wires_a_stable_copy_of_the_packaged_hook(tmp_path, monkeypatch):
+    """A `uvx` install lives in uv's cache, which `uv cache prune` deletes: `--write` copies
+    the packaged hook under $CHELA_DIR, executable, and points settings.json there."""
+    settings = _install(tmp_path, monkeypatch, packaged=True, write=True)
+    stable = tmp_path / "chela-dir" / "cache-statusline.sh"
+    assert stable.read_text() == "packaged\n"
+    assert stable.stat().st_mode & stat.S_IXUSR
+    assert f'"command": "{stable}"' in settings.read_text()
+
+
+def test_install_statusline_points_a_checkout_at_its_own_script(tmp_path, monkeypatch):
+    settings = _install(tmp_path, monkeypatch, packaged=False, write=True)
+    assert f'"command": "{tmp_path}/scripts/cache-statusline.sh"' in settings.read_text()
+    assert not (tmp_path / "chela-dir" / "cache-statusline.sh").exists()
+
+
+def test_install_statusline_without_write_copies_nothing(tmp_path, monkeypatch, capsys):
+    settings = _install(tmp_path, monkeypatch, packaged=True, write=False)
+    assert f"{tmp_path}/chela/scripts/cache-statusline.sh" in capsys.readouterr().out
+    assert not settings.exists()
+    assert not (tmp_path / "chela-dir" / "cache-statusline.sh").exists()

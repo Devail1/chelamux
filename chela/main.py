@@ -15,6 +15,7 @@ import json
 import logging
 import os
 import re
+import shutil
 import signal
 import sys
 import threading
@@ -1703,6 +1704,15 @@ def cmd_install_statusline(args) -> None:
     import json as _json
 
     script = statusline_script()
+    if args.write and script.parent == Path(__file__).resolve().parent / "scripts":
+        # The packaged copy lives in the install, and a `uvx` install is a uv CACHE entry
+        # that `uv cache prune` deletes; a settings.json pointing there goes dead without a
+        # word. Wire a copy under $CHELA_DIR instead (re-running this refreshes it).
+        stable = config.CHELA_DIR / "cache-statusline.sh"
+        stable.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(script, stable)
+        stable.chmod(0o755)
+        script = stable
     snippet = {"type": "command", "command": str(script)}
     settings_path = Path(args.settings).expanduser() if args.settings else Path.home() / ".claude" / "settings.json"
 

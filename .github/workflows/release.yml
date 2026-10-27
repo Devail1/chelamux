@@ -113,7 +113,9 @@ jobs:
         run: uv build
 
       - name: Smoke-test the built wheel
-        run: uvx --from dist/chelamux-*.whl chelamux --help
+        run: |
+          uvx --from dist/chelamux-*.whl chelamux --help
+          uvx --from dist/chelamux-*.whl python -c 'import chela.dashboard.app'
 
       - name: Publish to PyPI
         uses: pypa/gh-action-pypi-publish@release/v1
