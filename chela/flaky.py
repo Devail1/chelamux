@@ -35,9 +35,12 @@ _LINE_RE = re.compile(r"^(?:([^\t]*\t[^\t]*)\t﻿?(?:\d{4}-\d\d-\d\dT[\d:.]+Z ?)
 # header (`FAIL  <spec> > <suite> > <test>`, also inside a pytest `E` block when a JS suite
 # runs under pytest). Never a line that merely says "failed" (`Test Files  1 failed (1)`, a
 # test's own stderr): a flake has to be countable by name.
-_PYTEST_ID_RE = re.compile(r"^(?:FAILED|ERROR) (\S+\.py(?:::.+?)?)(?: - .*)?$")
-_VITEST_ID_RE = re.compile(
-    r"^(?:E\s+)?FAIL\s+(\S+\.(?:test|spec)\.[cm]?[jt]sx?(?: > .+?)?)(?:\s+\[ .+ \])?$")
+# A parametrize id's brackets may hold " - " (`t[a - b]`), so they are matched whole.
+_PYTEST_ID = r"\S+\.py(?:::[^\s\[]+(?:\[[^\]\n]*\])?)?"
+_VITEST_ID = r"\S+\.(?:test|spec)\.[cm]?[jt]sx?(?: > .+?)?"
+_PYTEST_ID_RE = re.compile(rf"^(?:FAILED|ERROR) ({_PYTEST_ID})(?: - .*)?$")
+_VITEST_ID_RE = re.compile(rf"^(?:E\s+)?FAIL\s+({_VITEST_ID})(?:\s+\[ .+ \])?$")
+_TEST_ID_RE = re.compile(rf"{_PYTEST_ID}|{_VITEST_ID}")
 _ANSI_RE = re.compile(r"\x1b\[[0-9;?]*[ -/]*[@-~]")
 
 
@@ -124,7 +127,7 @@ def failing_test(log_text: str) -> str | None:
 
 def is_test_id(value: object) -> bool:
     """True for an id :func:`failing_test` can return — what a flake is counted by."""
-    return isinstance(value, str) and failing_test(f"FAILED {value}\nFAIL {value}") == value
+    return isinstance(value, str) and _TEST_ID_RE.fullmatch(value) is not None
 
 
 def file_of(test_id: str) -> str:

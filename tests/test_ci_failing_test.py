@@ -61,6 +61,7 @@ def test_what_the_old_parser_read_off_the_real_tails(name, old, in_tail):
     ("FAILED tests/x.py::test_y\n", "tests/x.py::test_y"),
     ("FAILED tests/x.py::T::test_y[a-1] - AssertionError: x\n", "tests/x.py::T::test_y[a-1]"),
     ("ERROR tests/y.py - ImportError\n", "tests/y.py"),               # a collection error
+    ("FAILED tests/x.py::t[a - b] - boom\n", "tests/x.py::t[a - b]"),   # " - " in a param
     ("ERROR tests/y.py::test_z - fixture\n", "tests/y.py::test_z"),
     ("\x1b[31mFAILED\x1b[0m tests/x.py::t - boom\n", "tests/x.py::t"),  # coloured
     ("test (3.12)\tPytest\t2026-10-26T09:15:14.8261747Z FAILED tests/x.py::t - b\n",
@@ -111,6 +112,8 @@ def test_a_log_without_a_test_id_gives_none(log):
     ("src/a.test.ts", True),
     (None, False), ("?", False), ("", False), ("re-register failed nope", False),
     ("Test Files 1 failed 1", False), ("tests/x.py::t - boom", False), (42, False),
+    ("tests/x.py::t[a - b]", True), ("tests/x.py::t[a", False),
+    ("tests/a.py::t\nFAIL src/x.test.ts > t", False), ("src/a.test.ts > t\nx", False),
 ])
 def test_is_test_id(value, ok):
     assert flaky.is_test_id(value) is ok
