@@ -33,7 +33,6 @@ from __future__ import annotations
 import fnmatch
 import json
 import logging
-import os
 import time
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -354,7 +353,7 @@ def last_slot(now: float, rule: dict) -> float | None:
 
 
 def state_path() -> Path:
-    return Path(os.environ.get("CHELA_DIGEST_STATE") or (config.CHELA_DIR / "digest.json"))
+    return Path(config.CHELA_DIR) / "digest.json"   # per call: a test redirects CHELA_DIR
 
 
 def last_sent() -> float | None:

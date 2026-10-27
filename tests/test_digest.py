@@ -15,7 +15,7 @@ from zoneinfo import ZoneInfo
 
 import pytest
 
-from chela import digest, event_log, inbox, main, messenger, notify, userconfig
+from chela import config, digest, event_log, inbox, main, messenger, notify, userconfig
 
 ORCH = "@1"
 JLM = ZoneInfo("Asia/Jerusalem")
@@ -26,7 +26,7 @@ DASH = "http://dash.test"
 def sandbox(tmp_path, monkeypatch):
     monkeypatch.setenv("CHELA_EVENTS_FILE", str(tmp_path / "events.jsonl"))
     monkeypatch.setenv("CHELA_INBOX_FILE", str(tmp_path / "inbox.json"))
-    monkeypatch.setenv("CHELA_DIGEST_STATE", str(tmp_path / "digest.json"))
+    monkeypatch.setattr(config, "CHELA_DIR", tmp_path)
     monkeypatch.setenv("CHELA_DASHBOARD_URL", DASH)
     monkeypatch.delenv("CHELA_ORCHESTRATOR_WID", raising=False)
     monkeypatch.setattr(userconfig, "_PATH", tmp_path / "config.json")
