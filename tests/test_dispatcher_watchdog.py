@@ -628,14 +628,15 @@ def _two_tasks(repo: Path) -> tuple[str, str]:
 
 
 def _insert_running(repo: Path, task_id: str, *, window: str, nudged: str | None,
-                    worktree: str | None = None, pr_url: str | None = None) -> None:
+                    worktree: str | None = None, pr_url: str | None = None,
+                    rework_count: int = 0) -> None:
     with dispatcher._db() as conn:
         conn.execute(
             "INSERT INTO runs (task_id, workflow_path, title, status, window_name, "
-            "branch_name, started_at, idle_nudged_at, attempt, pr_state, worktree_path, pr_url) "
-            "VALUES (?,?,?,'running',?,?,?,?,1,'open',?,?)",
+            "branch_name, started_at, idle_nudged_at, attempt, pr_state, worktree_path, pr_url, "
+            "rework_count) VALUES (?,?,?,'running',?,?,?,?,1,'open',?,?,?)",
             (task_id, str(repo / "WORKFLOW.md"), task_id, window, window, _OLD, nudged,
-             worktree, pr_url),
+             worktree, pr_url, rework_count),
         )
         conn.commit()
 
@@ -645,8 +646,12 @@ def _template_error(*a, **kw):
     raise TemplateRenderError("unknown variable {{taks_title}}")
 
 
-# (row A's window, nudge stamp, native status, prompt builder, summary key, A's end status)
+# (row A's window, nudge stamp, native status, prompt builder, summary key, A's end status).
+# The `rework_*` cases end A's turn in `_rework_failed`, which commits on its own; a later
+# step of the same tick escalates that verdict-less rework, hence `needs_human`.
 _LOCK_CASES = {
+    "rework_window_gone": ("cmx-gone", None, "idle", None, None, "needs_human"),
+    "rework_idle_failed": (WID, _OLD, "idle", None, None, "needs_human"),
     "parked": (WID, _OLD, "idle", None, "watchdog_parked", "running"),
     "window_gone": ("cmx-gone", None, "idle", None, "reconciled_failed", "failed"),
     "dialog_failed": (WID, _OLD, "waiting", None, "reconciled_failed", "failed"),
@@ -666,12 +671,20 @@ def test_a_watchdog_write_does_not_lock_out_a_later_rows_hand_in(
     waits out the busy timeout and raises "database is locked" → RED."""
     window, nudged, status, prompt, key, a_status = _LOCK_CASES[case]
     a_id, b_id = _two_tasks(ticking)
-    _insert_running(ticking, a_id, window=window, nudged=nudged)
+    _insert_running(ticking, a_id, window=window, nudged=nudged,
+                    rework_count=1 if case.startswith("rework_") else 0)
     wt_b = tmp_path / "wt-b"
     wt_b.mkdir()
     (wt_b / ".chela-task-finished-request.json").write_text(json.dumps({"task_id": b_id}))
     _insert_running(ticking, b_id, window="cmx-b", nudged=None, worktree=str(wt_b),
                     pr_url="https://github.com/example/repo/pull/1")
+    # The loop must reach A before B, or nothing is left open when B hands in (a silent
+    # green). Pinned on the reconcile loop's own query, which has no ORDER BY.
+    with dispatcher._db() as conn:
+        order = [r["task_id"] for r in conn.execute(
+            "SELECT * FROM runs WHERE workflow_path=? AND status IN ('claimed','running')",
+            (str(ticking / "WORKFLOW.md"),)).fetchall()]
+    assert order == [a_id, b_id]
     if case == "parked":
         assert dispatcher.park_run(a_id, reason="hold", by="orch")["ok"]
     monkeypatch.setattr(dispatcher, "_agent_status", lambda w, **_: status)
@@ -683,7 +696,8 @@ def test_a_watchdog_write_does_not_lock_out_a_later_rows_hand_in(
 
     summary = dispatcher.tick(ticking / "WORKFLOW.md")
 
-    assert summary[key] == 1
+    if key is not None:
+        assert summary[key] == 1
     assert _status_of(a_id)[0] == a_status
     assert summary["task_finished_applied"] == 1
     assert _status_of(b_id)[0] == "awaiting_review"
