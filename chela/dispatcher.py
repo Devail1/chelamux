@@ -6082,6 +6082,10 @@ def tick(workflow_path: str | Path) -> dict:
         summary["tracker_refresh_failed"] = tracker_gone is None
         if tracker_gone is None:
             tracker_gone = set()
+        # 🔒 CMX-359: every write in this loop commits before the row's `continue`. A later
+        # row's hand-in runs `mark_awaiting_review` on its OWN connection, and a write left
+        # open here holds the WAL write lock against it: "database is locked", every tick
+        # (10-27, the parked-run idle clock).
         for row in rows:
             if row["tracker_note"] and row["task_id"] in open_ids:
                 # 🗂️⏸️ CMX-308: the held task is open in the tracker again — the note is moot.
@@ -6433,6 +6437,7 @@ def tick(workflow_path: str | Path) -> dict:
                      else "tmux window disappeared",
                      attempt - 1 if rebooted else attempt, row["task_id"]),
                 )
+                conn.commit()
                 summary["reconciled_failed"] += 1
                 log.warning("Task %s failed (window gone, attempt %d%s)", row["task_id"], attempt,
                             ", tmux restarted — not counted" if rebooted else "")
@@ -6505,6 +6510,7 @@ def tick(workflow_path: str | Path) -> dict:
                                 "UPDATE runs SET status='failed', ended_at=?, last_error=? WHERE task_id=?",
                                 (_now(), "agent blocked on an input dialog with no human", row["task_id"]),
                             )
+                            conn.commit()
                             summary["reconciled_failed"] += 1
                             log.warning("Task %s failed (input-dialog block, no human to answer)", row["task_id"])
                         elif nudged is None:
@@ -6513,6 +6519,7 @@ def tick(workflow_path: str | Path) -> dict:
                                 "UPDATE runs SET idle_nudged_at=? WHERE task_id=?",
                                 (_now(), row["task_id"]),
                             )
+                            conn.commit()
                             summary["watchdog_unblocked"] += 1
                             log.warning(
                                 "Task %s blocked on an input dialog (AskUserQuestion?); "
@@ -6553,6 +6560,7 @@ def tick(workflow_path: str | Path) -> dict:
                                 "UPDATE runs SET status='failed', ended_at=?, last_error=? WHERE task_id=?",
                                 (_now(), "agent idle at empty prompt after re-nudge", row["task_id"]),
                             )
+                            conn.commit()
                             summary["reconciled_failed"] += 1
                             log.warning("Task %s failed (idle at empty prompt after re-nudge)", row["task_id"])
                             continue
@@ -6578,6 +6586,7 @@ def tick(workflow_path: str | Path) -> dict:
                                 "WHERE task_id=?",
                                 (_now(), f"template render error: {e}", row["task_id"]),
                             )
+                            conn.commit()
                             summary["reconciled_failed"] += 1
                         log.warning("Task %s: %s", row["task_id"], e)
                         continue
@@ -6588,6 +6597,7 @@ def tick(workflow_path: str | Path) -> dict:
                         "UPDATE runs SET idle_nudged_at=? WHERE task_id=?",
                         (_now(), row["task_id"]),
                     )
+                    conn.commit()
                     summary["watchdog_renudged"] += 1
                     log.warning(
                         "Task %s idle at empty prompt; re-sent prompt to %s",
