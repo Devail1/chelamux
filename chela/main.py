@@ -2780,6 +2780,19 @@ def _task_finished_sweep(task_id: str, notes: list[str]) -> list[dict]:
     return equivalents
 
 
+def cmd_task(args) -> None:
+    """🧵 CMX-287 — ``chela task show [<id>]``: print a run's Linear issue (read-only)."""
+    from chela import task_show
+
+    if args.task_cmd != "show":
+        print("usage: chela task show [<id>]")
+        sys.exit(2)
+    code, text = task_show.show(args.task_id)
+    print(text)
+    if code:
+        sys.exit(code)
+
+
 def cmd_request_push(args) -> None:
     """Request that the dispatcher push this run's branch (and, on a first dispatch, open
     its PR) — issue #502 B2. Done Criteria step 5 used to run `git push` then `gh pr
@@ -4774,6 +4787,14 @@ def main() -> None:
              "and on the Dispatch board. Informational only — never a gate.",
     )
 
+    # task show — a dispatched agent reads its own Linear issue (CMX-287)
+    p_task = sub.add_parser("task", help="Read a run's tracker issue (read-only)")
+    task_sub = p_task.add_subparsers(dest="task_cmd")
+    p_tshow = task_sub.add_parser(
+        "show", help="Print the issue's current title, description and trusted comments "
+                     "(oldest first) — default: this worktree's / $CHELA_WID's own run")
+    p_tshow.add_argument("task_id", nargs="?", default=None)
+
     # request-push — commit locally, then ask the DAEMON to push + open the PR
     # (issue #502 B2)
     p_rp = sub.add_parser(
@@ -4901,6 +4922,8 @@ def main() -> None:
         cmd_shares(args)
     elif args.command == "task-finished":
         cmd_task_finished(args)
+    elif args.command == "task":
+        cmd_task(args)
     elif args.command == "request-push":
         cmd_request_push(args)
     elif args.command == "rework-disputed":
