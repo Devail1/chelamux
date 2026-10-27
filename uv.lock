@@ -254,15 +254,13 @@ version = "0.18.1"
 source = { editable = "." }
 dependencies = [
     { name = "croniter" },
+    { name = "cryptography" },
+    { name = "flask" },
+    { name = "flask-sock" },
     { name = "pyyaml" },
 ]
 
 [package.optional-dependencies]
-dashboard = [
-    { name = "cryptography" },
-    { name = "flask" },
-    { name = "flask-sock" },
-]
 dev = [
     { name = "fonttools", extra = ["woff"] },
     { name = "pytest" },
@@ -280,9 +278,9 @@ telegram = [
 [package.metadata]
 requires-dist = [
     { name = "croniter", specifier = ">=2.0.0" },
-    { name = "cryptography", marker = "extra == 'dashboard'", specifier = ">=42" },
-    { name = "flask", marker = "extra == 'dashboard'", specifier = ">=3.0" },
-    { name = "flask-sock", marker = "extra == 'dashboard'", specifier = ">=0.7" },
+    { name = "cryptography", specifier = ">=42" },
+    { name = "flask", specifier = ">=3.0" },
+    { name = "flask-sock", specifier = ">=0.7" },
     { name = "fonttools", marker = "extra == 'telegram'", specifier = ">=4.0" },
     { name = "fonttools", extras = ["woff"], marker = "extra == 'dev'", specifier = ">=4.0" },
     { name = "pillow", marker = "extra == 'telegram'", specifier = ">=10.0" },

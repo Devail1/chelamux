@@ -10,17 +10,17 @@ keywords = ["claude-code", "tmux", "agent-orchestration", "ai-agents", "develope
 dependencies = [
     "croniter>=2.0.0",   # cron expression parsing for the scheduler
     "pyyaml>=6.0",       # WORKFLOW.md front-matter parsing for the dispatcher
-]
-
-# The dashboard is an OPTIONAL flourish. The core (status/run/dispatch/msg)
-# installs and runs without Flask. Install with `pip install chelamux[dashboard]`
-# (or `uv sync --extra dashboard`) to enable `chela dashboard`.
-[project.optional-dependencies]
-dashboard = [
+    # CMX-363: the dashboard is in the core install, so `uvx chelamux dashboard` works
+    # with no extra to name (a bare `uvx chelamux` cannot pick one up).
     "flask>=3.0",        # dashboard web app (agent wall + dispatch Kanban)
     "flask-sock>=0.7",   # same-origin /term/<wid> ttyd reverse proxy (WebSocket)
     "cryptography>=42",  # E2E terminal-share crypto (HKDF-SHA256 + AES-256-GCM); interops with browser WebCrypto
 ]
+
+[project.optional-dependencies]
+# Kept, empty, so every existing `chelamux[dashboard]` install line and `uv sync --extra
+# dashboard` still resolves. Its packages moved into the core dependencies (CMX-363).
+dashboard = []
 
 # The Telegram bridge is an OPTIONAL extra. The core installs and runs without
 # it. Install with `pip install chelamux[telegram]` (or `uv sync --extra
@@ -42,6 +42,8 @@ dev = [
 
 [project.scripts]
 chela = "chela.main:main"
+# CMX-363: named after the PyPI package, so `uvx chelamux …` runs without `--from`.
+chelamux = "chela.main:main"
 
 [build-system]
 requires = ["hatchling"]
@@ -49,6 +51,20 @@ build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["chela"]
+# The React source and its node_modules: the built bundle (chela/dashboard/static/app) is
+# committed, so an installed chela never needs either.
+exclude = ["chela/dashboard/frontend"]
+
+# The statusLine hook lives in scripts/ (its tests and the PM2 setup run it from there);
+# `chela install-statusline` finds this copy when chela runs from an installed wheel.
+[tool.hatch.build.targets.wheel.force-include]
+"scripts/cache-statusline.sh" = "chela/scripts/cache-statusline.sh"
+
+# What a wheel is built from, and nothing else: a dev checkout's node_modules (symlinked in
+# by pnpm) would otherwise land in the sdist. tests/test_packaging.py checks both artifacts.
+[tool.hatch.build.targets.sdist]
+only-include = ["chela", "scripts/cache-statusline.sh", "README.md", "LICENSE", "NOTICE", "CHANGELOG.md"]
+exclude = ["node_modules"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

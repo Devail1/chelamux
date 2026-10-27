@@ -85,7 +85,7 @@ def test_install_copy_button_degrades_without_js():
        "or the dead button shows with JS off"
     # the command itself is real text in a <pre>, not injected by script
     pre = re.search(r'<pre id="install-cmd">(.*?)</pre>', html, flags=re.S)
-    assert pre and "uv sync --all-extras" in _prose(pre.group(1))
+    assert pre and "uvx chelamux dashboard" in _prose(pre.group(1))
 
 
 # A colour emoji (📥) or a ``FE0F`` emoji-presentation selector (⚖️) renders in the OS's
