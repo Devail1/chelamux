@@ -1,4 +1,4 @@
-## 348. A new daemon-loop step ships without a loop wiring test, and the shared harness parks its argument at the value a mutation substitutes
+## 348b. A new daemon-loop step ships without a loop wiring test, and the shared harness parks its argument at the value a mutation substitutes
 
 **Assertion form:** `keeper_schedule.Scheduler.tick(workflows)` was covered by unit tests of the
 seam itself: hold, in-flight, activity check, state file, spawn argv. Every sibling step in

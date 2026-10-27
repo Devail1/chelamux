@@ -437,7 +437,7 @@ def test_the_daemon_loop_ticks_the_keeper_schedule_with_the_dispatch_workflows(m
     """🔴 WIRING — drives ONE real pass of ``cmd_run``'s loop. The shared harness parks
     ``DISPATCH_WORKFLOWS`` at ``[]``, which is exactly what ``keeper_sched.tick([])`` passes,
     so this re-points it at a NON-empty list and checks both identity and contents
-    (defeat shape 348)."""
+    (defeat shape 348b)."""
     from tests.test_context import _run_one_daemon_tick
 
     _run_one_daemon_tick(monkeypatch)
