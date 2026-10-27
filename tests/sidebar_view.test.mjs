@@ -8,7 +8,7 @@
 // own click handler) and read the result back off the DOM.
 //
 // Run: pnpm exec vitest run tests/sidebar_view.test.mjs  (pytest runs it via tests/test_js_suites.py)
-import { beforeAll, beforeEach, test } from 'vitest';
+import { beforeAll, beforeEach, test, vi } from 'vitest';
 import assert from 'node:assert/strict';
 import { bootDashboardDom, flush, ORCHESTRATOR, SIDEBAR, AGENTS_STORE, VIEW_STORE, NAV } from './js_helpers/dashboard_dom.mjs';
 import { clickMenu, closeMenu, menu, menuItems, openMenu, rightClick } from './js_helpers/side_menu.mjs';
@@ -344,26 +344,67 @@ test('Last activity NEVER hides a running or a waiting session, however old its 
 
 // --- Group by -----------------------------------------------------------------------------
 
-function localMidnight() { const d = new Date(); return new Date(d.getFullYear(), d.getMonth(), d.getDate()).getTime(); }
+// CMX-358: the Date grouping reads the clock, so these tests PIN it — never the real one.
+// The fixture built its rows from one reading and the dashboard rendered from another; a
+// run straddling midnight (CI, 2026-10-27, a Tuesday) put "today" under Yesterday. The
+// instants sit at day edges: the first second of a day, midnight itself, the last second.
+// "This week" is the six days before today, not a calendar week, so the weekday must not
+// matter; a Monday, a Tuesday and a Sunday pin that. (The exact bucket edges, to the ms,
+// are the dateBucket model test's.)
+const PINNED = [
+    ['Monday 00:00:30', new Date(2026, 9, 26, 0, 0, 30)],
+    ['Tuesday 00:00:30', new Date(2026, 9, 27, 0, 0, 30)],
+    ['Sunday 00:00:30', new Date(2026, 9, 25, 0, 0, 30)],
+    ['midnight 00:00:00.000', new Date(2026, 9, 27)],
+    ['23:59:59', new Date(2026, 9, 27, 23, 59, 59)],
+];
+const midnightOf = at => new Date(at.getFullYear(), at.getMonth(), at.getDate()).getTime();
+// One row per bucket, each well inside it, plus a busy row whose last activity is Older.
+function dateRows(at) {
+    const t0 = midnightOf(at);
+    const iso = ms => new Date(ms).toISOString();
+    return [
+        win('today', { last_activity: iso(at.getTime()) }),
+        win('yesterday', { last_activity: iso(t0 - DAY / 2) }),
+        win('thisweek', { last_activity: iso(t0 - 4 * DAY) }),
+        win('older', { last_activity: iso(t0 - 20 * DAY) }),
+        win('busy-old', { session_status: 'busy', last_activity: iso(t0 - 20 * DAY) }),
+    ];
+}
+// Freeze Date (only Date: the real timers keep the React island flushing) at `at`, until
+// `fn` (sync or async) has finished.
+async function atInstant(at, fn) {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(at);
+    try { return await fn(); } finally { vi.useRealTimers(); }
+}
 
-test('Group by Date: Today / Yesterday / This week / Older', () => {
-    const t0 = localMidnight();
-    render([
-        win('today', { last_activity: new Date(Date.now() - 1000).toISOString() }),
-        win('yesterday', { last_activity: new Date(t0 - DAY / 2).toISOString() }),
-        win('thisweek', { last_activity: new Date(t0 - 4 * DAY).toISOString() }),
-        win('older', { last_activity: new Date(t0 - 20 * DAY).toISOString() }),
-        win('busy-old', { session_status: 'busy', last_activity: new Date(t0 - 20 * DAY).toISOString() }),
-    ]);
-    view('activity:all');
-    view('group:date');
-    assert.deepEqual(groupLabels(), ['Today', 'Yesterday', 'This week', 'Older']);
-    assert.deepEqual(rowsUnder('Today').sort(), ['busy-old', 'today'], 'a working row is active today');
-    assert.deepEqual(rowsUnder('Yesterday'), ['yesterday']);
-    assert.deepEqual(rowsUnder('This week'), ['thisweek']);
-    assert.deepEqual(rowsUnder('Older'), ['older']);
-    assert.equal(dateBucket(null, Date.now()), '~date:older');
-});
+for (const [when, at] of PINNED) {
+    test(`Group by Date: Today / Yesterday / This week / Older — at ${when}`, () => atInstant(at, () => {
+        render(dateRows(at));
+        view('activity:all');
+        view('group:date');
+        assert.deepEqual(groupLabels(), ['Today', 'Yesterday', 'This week', 'Older']);
+        assert.deepEqual(rowsUnder('Today').sort(), ['busy-old', 'today'], 'a working row is active today');
+        assert.deepEqual(rowsUnder('Yesterday'), ['yesterday']);
+        assert.deepEqual(rowsUnder('This week'), ['thisweek']);
+        assert.deepEqual(rowsUnder('Older'), ['older']);
+        assert.equal(dateBucket(null, at.getTime()), '~date:older');
+    }));
+
+    // The model buckets by the `now` it is GIVEN, never the clock: with the clock frozen
+    // years away, every row still lands where the injected instant puts it.
+    test(`model: the Date grouping's day and week edges come from the injected now — at ${when}`, () => atInstant(new Date(2031, 0, 15, 12), () => {
+        const m = groupSidebar(dateRows(at), { wants, mode: 'date', now: at.getTime() });
+        const under = Object.fromEntries(m.groups.map(g => [g.key, g.items.map(it => it.windows[0].name).sort()]));
+        assert.deepEqual(under, {
+            '~date:today': ['busy-old', 'today'],
+            '~date:yesterday': ['yesterday'],
+            '~date:week': ['thisweek'],
+            '~date:older': ['older'],
+        });
+    }));
+}
 
 test('Group by Folder is the default (part 1\'s groups)', () => {
     render([win('a1'), win('b1', { cwd: '/srv/code/beta' })]);
