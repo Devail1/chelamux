@@ -325,6 +325,12 @@ mutation SetState($id: String!, $stateId: String!) {
 }
 """
 
+COMMENT_MUTATION = """
+mutation Comment($input: CommentCreateInput!) {
+  commentCreate(input: $input) { success }
+}
+"""
+
 ARCHIVE_MUTATION = """
 mutation Archive($id: String!) {
   issueArchive(id: $id) { success }
@@ -968,6 +974,28 @@ class LinearSource:
         log.info("linear: %s → %s (requeued)", task_id, target.get("name"))
         return "set"
 
+    def comment(self, task_id: str, body: str) -> str:
+        """CMX-347 — add a comment to one issue of this team. ``set`` when Linear took it,
+        ``skipped`` for an id of another team or an empty body, ``missing`` for no such
+        issue, ``failed`` otherwise. Never
+        raises: the caller (``chela keeper``) reports each write's outcome."""
+        if self._number_of(task_id) is None or not str(body or "").strip():
+            return "skipped"
+        found = self._nodes_by_id([task_id])
+        if found is None:
+            return "failed"
+        node = next((n for n in found if isinstance(n, dict) and n.get("id")
+                     and str(n.get("identifier") or "").upper() == str(task_id).upper()), None)
+        if node is None:
+            return "missing"
+        try:
+            data = self._call(COMMENT_MUTATION, {"input": {"issueId": node["id"], "body": body}},
+                              cache=False)
+        except LinearError as e:
+            log.warning("linear: could not comment on %s: %s", task_id, e)
+            return "failed"
+        return "set" if (data.get("commentCreate") or {}).get("success") else "failed"
+
     def superseding_issue(self, reason: str, own_id: str) -> str | None:
         """The identifier of this team's issue a close ``reason`` says supersedes ``own_id``
         — only when the reason also says so (:data:`_SUPERSEDED_RE`); else None."""
@@ -1100,7 +1128,8 @@ class LinearSource:
         return archived
 
     def create_issue(self, title: str, description: str = "", priority: int = 0,
-                     blocked_by=(), parent: str | None = None, labels=()) -> dict:
+                     blocked_by=(), parent: str | None = None, labels=(),
+                     state_names=None) -> dict:
         """📐 CMX-6 — create one issue in this team, in its first configured READY state,
         and a ``blocks`` relation from each of ``blocked_by`` (identifiers of this team).
         🗂️ CMX-326: a project-scoped workflow puts it in its project, and its blockers and
@@ -1113,7 +1142,9 @@ class LinearSource:
         📏 CMX-126: ``parent`` (an identifier of this team) makes it a sub-issue of that
         issue, inheriting its labels (so its risk) — a size-gate split's slice.
         🧹 CMX-305: ``labels`` are label NAMES, added to a parent's inherited ones; one that
-        can be neither found nor created is a warning, never a lost issue."""
+        can be neither found nor created is a warning, never a lost issue.
+        CMX-347: ``state_names`` (first match wins) replaces the READY states — chela
+        keeper files its new issues in Backlog, where the dispatcher does not claim them."""
         title = (title or "").strip()
         if not title:
             raise LinearError("input", "a title is required")
@@ -1143,11 +1174,11 @@ class LinearSource:
             raise LinearError("network", f"could not read team {self.team}")
         team_id, states = team
         ready = {str(s.get("name", "")).lower(): s["id"] for s in states}
-        state_id = next((ready[n.lower()] for n in self.ready_states if n.lower() in ready),
-                        None)
+        wanted = tuple(state_names or self.ready_states)
+        state_id = next((ready[n.lower()] for n in wanted if n.lower() in ready), None)
         if state_id is None:
             raise LinearError("config", f"team {self.team} has no state named "
-                                        f"{' / '.join(self.ready_states)}")
+                                        f"{' / '.join(wanted)}")
         fields = {"teamId": team_id, "title": title, "description": description or "",
                   "priority": priority, "stateId": state_id}
         project_id = self._project_id()
