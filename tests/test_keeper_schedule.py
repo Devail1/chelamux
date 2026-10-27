@@ -296,11 +296,14 @@ def test_an_unreadable_schedule_runs_nothing(sched, state, why, caplog):
     assert why in caplog.records[0].getMessage()
 
 
-def test_a_garbled_last_run_runs_nothing(sched):
+def test_a_garbled_last_run_runs_nothing(sched, caplog):
     s, path, calls = sched
     keeper_schedule.state_path().parent.mkdir(parents=True, exist_ok=True)
     keeper_schedule.state_path().write_text(json.dumps({str(path): "yesterday"}))
-    assert s.tick([path]) == [] and calls["spawned"] == []
+    with caplog.at_level("WARNING", logger="chela.keeper_schedule"):
+        assert s.tick([path]) == [] and calls["spawned"] == []
+    assert [r.levelname for r in caplog.records] == ["WARNING"]
+    assert "holds 'yesterday'" in caplog.records[0].getMessage()
 
 
 def test_spawn_runs_keeper_run_detached(tmp_path, monkeypatch):
