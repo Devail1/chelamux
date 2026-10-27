@@ -269,3 +269,37 @@ def test_a_missing_key_is_a_failed_fetch(tmp_path, monkeypatch):
     _run(tmp_path, "CMX-7")
     code, text = task_show.show("CMX-7")
     assert code == 1 and "could not fetch CMX-7" in text and "LINEAR_API_KEY" in text
+
+
+def test_an_unknown_task_id_exits_nonzero(tmp_path):
+    _run(tmp_path, "CMX-7")
+    assert task_show.show("CMX-99") == (1, "task show: no run CMX-99.")
+
+
+def test_the_url_and_an_empty_thread_are_printed(tmp_path):
+    _, text = _show(tmp_path, FakeThread())
+    assert text.splitlines()[1] == "https://linear.app/x/issue/CMX-7"
+    assert "## Comments (0, oldest first" in text and "\n(none)" in text
+
+
+def test_a_thread_with_comments_does_not_say_none(tmp_path):
+    _, text = _show(tmp_path, FakeThread([comment("x", VIEWER, "2026-10-20T00:00Z")]))
+    assert "(none)" not in text
+
+
+def test_bare_chela_task_prints_usage_and_exits_2(monkeypatch, capsys):
+    from chela import main
+    monkeypatch.setattr("sys.argv", ["chela", "task"])
+    with pytest.raises(SystemExit) as e:
+        main.main()
+    assert e.value.code == 2 and "usage: chela task show" in capsys.readouterr().out
+
+
+def test_the_task_route_does_not_swallow_the_next_command(monkeypatch, capsys):
+    from chela import main
+    seen = []
+    monkeypatch.setattr(main.dispatcher, "request_push",
+                        lambda tid, **kw: seen.append(tid) or {"ok": True, "task_id": tid})
+    monkeypatch.setattr("sys.argv", ["chela", "request-push", "CMX-7"])
+    main.main()
+    assert seen == ["CMX-7"] and "push requested" in capsys.readouterr().out
