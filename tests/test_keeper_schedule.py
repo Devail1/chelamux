@@ -249,6 +249,17 @@ def test_a_workflow_without_keeper_is_never_run(sched, tmp_path):
     assert s.tick([plain]) == [] and calls["asked"] == []
 
 
+def test_a_workflow_without_keeper_is_skipped_quietly(sched, tmp_path, caplog):
+    """Not an error path: nothing is logged for a workflow that never opted in."""
+    s, _, calls = sched
+    (tmp_path / "plain").mkdir()
+    plain = tmp_path / "plain" / "WORKFLOW.md"
+    plain.write_text(f"{HEAD}---\nbody\n")
+    with caplog.at_level("INFO", logger="chela.keeper_schedule"):
+        s.tick([plain], now=10_000.0)
+    assert caplog.records == []
+
+
 def test_one_workflow_raising_does_not_stop_the_next(sched, tmp_path):
     s, path, calls = sched
     (tmp_path / "b").mkdir()
@@ -273,12 +284,16 @@ def test_a_spawn_that_fails_is_not_recorded_as_run(sched):
     assert not keeper_schedule.state_path().exists()      # still owed on the next pass
 
 
-@pytest.mark.parametrize("state", ["{not json", "[1, 2]"])
-def test_an_unreadable_schedule_runs_nothing(sched, state):
+@pytest.mark.parametrize("state, why", [("{not json", "is unreadable"),
+                                        ("[1, 2]", "is not a JSON object")])
+def test_an_unreadable_schedule_runs_nothing(sched, state, why, caplog):
     s, path, calls = sched
     keeper_schedule.state_path().parent.mkdir(parents=True, exist_ok=True)
     keeper_schedule.state_path().write_text(state)
-    assert s.tick([path]) == [] and calls["spawned"] == []
+    with caplog.at_level("WARNING", logger="chela.keeper_schedule"):
+        assert s.tick([path]) == [] and calls["spawned"] == []
+    assert [r.levelname for r in caplog.records] == ["WARNING"]
+    assert why in caplog.records[0].getMessage()
 
 
 def test_a_garbled_last_run_runs_nothing(sched):
@@ -356,6 +371,7 @@ def test_stats_flags_a_rate_under_the_70_percent_kill_line():
     text = keeper_run.render_stats(keeper_run.stats())
     assert "acceptance rate: 69% (69 approved of 100 decided)" in text
     assert "below the 70% kill line" in text
+    assert "  by action:\n    done: accepted 69, rejected 31\n" in text
 
 
 def test_stats_with_nothing_decided_has_no_rate():
