@@ -2,6 +2,7 @@
 `chela keeper stats` — the trial's kill metric."""
 from __future__ import annotations
 
+import argparse
 import json
 import subprocess
 import sys
@@ -428,3 +429,30 @@ def test_load_workflow_reads_both_keys(tmp_path):
                     "  every: 45m\n---\nbody\n")
     wf = load_workflow(path)
     assert dispatch_enabled(wf) is False and keeper_every_seconds(wf) == 2700
+
+
+# --- the daemon wiring -----------------------------------------------------------------
+
+def test_the_daemon_loop_ticks_the_keeper_schedule_with_the_dispatch_workflows(monkeypatch):
+    """🔴 WIRING — drives ONE real pass of ``cmd_run``'s loop. The shared harness parks
+    ``DISPATCH_WORKFLOWS`` at ``[]``, which is exactly what ``keeper_sched.tick([])`` passes,
+    so this re-points it at a NON-empty list and checks both identity and contents
+    (defeat shape 348)."""
+    from tests.test_context import _run_one_daemon_tick
+
+    _run_one_daemon_tick(monkeypatch)
+    monkeypatch.setattr(main.ops, "spawn", lambda child: child)
+    monkeypatch.setattr(main.sweep_nightly, "daemon_tick", lambda workflows, prev: prev)
+    monkeypatch.setattr(main.dispatcher, "poll_interval", lambda path: float("inf"))
+    workflows = [Path("/nowhere/a/WORKFLOW.md"), Path("/nowhere/b/WORKFLOW.md")]
+    monkeypatch.setattr(main, "DISPATCH_WORKFLOWS", workflows)
+    ticks = []
+
+    class FakeScheduler:
+        def tick(self, paths):
+            ticks.append(paths)
+
+    monkeypatch.setattr(main.keeper_schedule, "Scheduler", FakeScheduler)
+    main.cmd_run(argparse.Namespace())
+    assert len(ticks) == 1, "the daemon loop never ticked the keeper schedule"
+    assert ticks[0] is workflows and list(ticks[0]) == workflows
