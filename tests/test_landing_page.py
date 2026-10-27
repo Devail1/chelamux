@@ -123,8 +123,9 @@ def test_install_copy_button_degrades_without_js():
 def test_install_is_one_uvx_line():
     pre = re.search(r'<pre id="install-cmd">(.*?)</pre>', _html(), flags=re.S)
     assert pre
-    text = re.sub(r"<[^>]+>", "", pre.group(1)).strip()
-    assert text == "uvx --from git+https://github.com/Devail1/chelamux chela dashboard"
+    text = re.sub(r"<[^>]+>", "", pre.group(1)).strip().replace("&#39;", "'")
+    # the [dashboard] extra carries Flask: without it `chela dashboard` exits asking for it
+    assert text == "uvx --from 'chelamux[dashboard] @ git+https://github.com/Devail1/chelamux' chela dashboard"
     assert "\n" not in text
 
 

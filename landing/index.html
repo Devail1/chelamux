@@ -244,18 +244,18 @@
     <video class="demo-mobile" src="chela-demo-mobile.mp4" poster="img/poster-mobile.jpg" width="390" height="844" autoplay loop muted playsinline preload="metadata" aria-label="Demo on a phone: a single pane, switching sessions from the sidebar drawer, the New session menu and the keybar"></video>
     <figcaption>Recorded from a synthetic demo fleet.</figcaption>
   </figure>
-  <p class="share-line">Share any live terminal with a link and a pairing code, end-to-end
+  <p class="share-line" id="collab">Share any live terminal with a link and a pairing code, end-to-end
     encrypted. <a href="docs.html#collab">How sharing works</a></p>
 </header>
 
 <section id="install" class="wrap">
   <div class="section-head">
     <h2>Install</h2>
-    <p>One line. It opens the wall in your browser.</p>
+    <p>One line, then open <code>http://127.0.0.1:5001</code> to see the wall.</p>
   </div>
   <div class="install">
     <div class="codebox">
-      <pre id="install-cmd"><code>uvx --from git+https://github.com/Devail1/chelamux chela dashboard</code></pre>
+      <pre id="install-cmd"><code>uvx --from 'chelamux[dashboard] @ git+https://github.com/Devail1/chelamux' chela dashboard</code></pre>
       <button class="copy" type="button" data-copy="install-cmd" hidden aria-label="Copy the install command">
         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect width="14" height="14" x="8" y="8" rx="2"/><path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2"/></svg>
         <span>Copy</span>
@@ -268,6 +268,7 @@
 </section>
 
 <section id="wall" class="wrap">
+  <span id="features"></span>
   <div class="section-head">
     <h2>What the wall shows you</h2>
     <p>Every session you already run in <code>tmux</code>, as one live grid you can type into.</p>
@@ -303,7 +304,7 @@
 </section>
 
 <section id="gate" class="how">
-  <div class="wrap">
+  <div class="wrap" id="how">
     <div class="section-head">
       <h2>And when agents open PRs…</h2>
       <p>chelamux can also hand tasks from your tracker to agents, and it only merges a PR once
