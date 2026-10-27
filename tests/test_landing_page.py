@@ -1,8 +1,9 @@
 """CMX-99 — the landing page keeps the dev-tool conventions it adopted.
 
-* the hero H1 is the README's gate-first pitch, word for word (CMX-91 owns the line;
-  the landing reuses it, so the two cannot drift apart);
-* exactly one H1;
+* the hero is the dashboard wall (CMX-362): exactly one H1, about seeing every session,
+  with no insider term in the hero, the wall demo right under the headline, and ONE
+  primary call to action, Install;
+* install is ONE line (CMX-362);
 * no release-pinned "New in X.Y" heading — the page links GitHub Releases instead, so it
   does not go stale every release;
 * the install copy button ships ``hidden`` and the stylesheet re-hides ``.copy[hidden]``
@@ -57,13 +58,44 @@ def _prose(fragment: str) -> str:
     return " ".join(re.sub(r"<[^>]+>", " ", fragment).split())
 
 
-def test_landing_h1_is_the_readme_pitch_verbatim():
-    readme = (ROOT / "README.md").read_text(encoding="utf-8")
-    pitch = re.search(r"^# chelamux\n\n\*\*(.+?)\*\*", readme, flags=re.S | re.M)
-    assert pitch, "README lost its bold pitch line under the title"
+def _hero() -> str:
+    hero = re.search(r'<header class="hero[^"]*">(.*?)</header>', _html(), flags=re.S)
+    assert hero, "the hero <header> is gone"
+    return hero.group(1)
+
+
+def test_landing_h1_is_the_wall_pitch():
     h1 = re.findall(r"<h1\b[^>]*>(.*?)</h1>", _html(), flags=re.S)
     assert len(h1) == 1, f"the landing must have exactly one <h1>, found {len(h1)}"
-    assert _prose(h1[0]) == " ".join(pitch.group(1).split())
+    assert _prose(h1[0]) == "Every Claude Code session, live on one screen."
+
+
+# CMX-362: the hero speaks to the problem, not to how the merge machinery works.
+_INSIDER = ["worktree", "mutation", "head commit", "judge", "merge gate"]
+
+
+@pytest.mark.parametrize("term", _INSIDER)
+def test_hero_carries_no_insider_term(term):
+    prose = _prose(re.sub(r'<(video|figure)\b.*?</\1>', " ", _hero(), flags=re.S))
+    assert "every session" in prose.lower(), "the hero prose scan is not reading the hero"
+    assert term not in prose.lower(), f"the hero says {term!r}"
+
+
+def test_hero_has_one_primary_cta_and_it_is_install():
+    primaries = re.findall(r'<a\b[^>]*class="btn btn-primary"[^>]*>(.*?)</a>', _html(), flags=re.S)
+    assert len(primaries) == 1, primaries
+    assert _prose(primaries[0]) == "Install"
+    assert re.search(r'<a\b[^>]*class="btn btn-primary"[^>]*href="#install"|'
+                     r'<a\b[^>]*href="#install"[^>]*class="btn btn-primary"', _hero())
+    assert re.search(r'<section id="install"', _html())
+
+
+def test_wall_demo_sits_right_under_the_headline():
+    """The wall clip is inside the hero, after the H1 and before any other section."""
+    hero = _hero()
+    h1, video = hero.find("<h1"), hero.find('<video class="demo-desktop"')
+    assert h1 >= 0 and video > h1, "the wall demo must follow the headline inside the hero"
+    assert 'src="chela-demo-desktop.mp4"' in hero
 
 
 def test_landing_has_no_release_pinned_heading_and_links_releases():
@@ -85,7 +117,15 @@ def test_install_copy_button_degrades_without_js():
        "or the dead button shows with JS off"
     # the command itself is real text in a <pre>, not injected by script
     pre = re.search(r'<pre id="install-cmd">(.*?)</pre>', html, flags=re.S)
-    assert pre and "uv sync --all-extras" in _prose(pre.group(1))
+    assert pre, "the install command <pre> is gone"
+
+
+def test_install_is_one_uvx_line():
+    pre = re.search(r'<pre id="install-cmd">(.*?)</pre>', _html(), flags=re.S)
+    assert pre
+    text = re.sub(r"<[^>]+>", "", pre.group(1)).strip()
+    assert text == "uvx --from git+https://github.com/Devail1/chelamux chela dashboard"
+    assert "\n" not in text
 
 
 # A colour emoji (📥) or a ``FE0F`` emoji-presentation selector (⚖️) renders in the OS's
@@ -149,8 +189,8 @@ def test_every_ic_icon_is_an_inline_svg_not_a_glyph(page):
 
 
 def test_feature_cards_each_carry_an_svg_icon():
-    features = re.search(r'<section id="features".*?</section>', _html(), flags=re.S)
-    assert features, "the #features section is gone"
+    features = re.search(r'<section id="wall".*?</section>', _html(), flags=re.S)
+    assert features, "the #wall section is gone"
     icons = _icons_in(features.group(0))
     assert len(icons) == 4 and all(ic["svg"] and not ic["text"].strip() for ic in icons), icons
 
@@ -181,14 +221,13 @@ def test_lucide_isc_notice_is_shipped():
         assert re.search(r'<a\b[^>]*href="[^"]*/NOTICE"[^>]*>[^<]*Lucide', _html(page)), page.name
 
 
-def test_hero_demo_column_is_wider_than_the_pitch_and_not_height_pinned():
-    """CMX-159: the 16:10 demo grows to span the pitch column by width (the split + a wider
-    hero band), never by a fixed height that would stretch or crop the clip."""
+def test_hero_demo_is_full_width_and_not_height_pinned():
+    """CMX-159/CMX-362: the hero is one column, so the 16:10 demo spans the (wider) hero band
+    under the headline, never by a fixed height that would stretch or crop the clip."""
     css = _top_level_css()
-    m = re.search(r"(?:^|[};])\s*\.hero\s*\{[^}]*grid-template-columns\s*:\s*"
-                  r"minmax\(0,\s*([\d.]+)fr\)\s+minmax\(0,\s*([\d.]+)fr\)", css)
-    assert m, "the desktop hero is no longer a two-column fr split"
-    assert float(m.group(2)) / float(m.group(1)) >= 1.3, m.group(0)
+    m = re.search(r"(?:^|[};])\s*\.hero\s*\{([^}]*)\}", css)
+    assert m and re.search(r"flex-direction\s*:\s*column", m.group(1)), "the hero must stack"
+    assert "grid-template-columns" not in m.group(1), "the hero is back to a side-by-side split"
     band = re.search(r"(?:^|[};])\s*nav\s*,\s*\.hero\s*\{[^}]*max-width\s*:\s*(\d+)px", css)
     assert band and int(band.group(1)) > 1080, "the hero band must run wider than the 1080px sections"
     video = re.search(r"\.demo video\s*\{([^}]*)\}", css)
