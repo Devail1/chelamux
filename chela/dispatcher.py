@@ -6456,6 +6456,10 @@ def tick(workflow_path: str | Path) -> dict:
                         "UPDATE runs SET idle_clock_at=?, idle_nudged_at=NULL WHERE task_id=?",
                         (_now(), row["task_id"]),
                     )
+                    # Commit now: an open write here holds the WAL write lock for the rest
+                    # of the tick, and mark_awaiting_review (its own connection) then
+                    # failed every tick with "database is locked" (10-27, CMX-341's hand-in).
+                    conn.commit()
                     summary["watchdog_parked"] += 1
                     continue
                 started = _parse_ts(row["started_at"])
