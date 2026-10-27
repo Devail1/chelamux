@@ -331,6 +331,22 @@ mutation Comment($input: CommentCreateInput!) {
 }
 """
 
+# 🧵 CMX-287 — `chela task show`: one issue's current text and comments, plus the key's own
+# user (`viewer`) — the trust filter's anchor. Read-only; there is no write behind it.
+COMMENT_PAGE_SIZE = 100
+ISSUE_THREAD_QUERY = """
+query IssueThread($id: String!) {
+  viewer { id }
+  issue(id: $id) {
+    identifier title description url
+    comments(first: %d) {
+      nodes { body createdAt user { id name displayName email } botActor { id } }
+      pageInfo { hasNextPage }
+    }
+  }
+}
+""" % COMMENT_PAGE_SIZE
+
 ARCHIVE_MUTATION = """
 mutation Archive($id: String!) {
   issueArchive(id: $id) { success }
@@ -995,6 +1011,38 @@ class LinearSource:
             log.warning("linear: could not comment on %s: %s", task_id, e)
             return "failed"
         return "set" if (data.get("commentCreate") or {}).get("success") else "failed"
+
+    def issue_thread(self, task_id: str, trusted: frozenset[str] = frozenset()) -> dict:
+        """🧵 CMX-287 — one issue of this team, read FRESH: ``{"identifier", "title",
+        "description", "url", "comments", "dropped", "truncated"}``. ``comments`` holds only
+        those written by the key's own user (``viewer``) or a user ``trusted`` names (id,
+        name, display name or email, any case), oldest first; never one a bot or integration
+        posted. ``dropped`` counts the rest; ``truncated`` is True when the page came back
+        full. Raises :class:`LinearError` on any failed read or a missing issue — unknown
+        never reads as an empty thread."""
+        if self._number_of(task_id) is None:
+            raise LinearError("config", f"{task_id!r} is not an issue of team {self.team}")
+        data = self._call(ISSUE_THREAD_QUERY, {"id": str(task_id).strip().upper()}, cache=False)
+        node, viewer = data.get("issue"), (data.get("viewer") or {}).get("id")
+        if not isinstance(node, dict) or not viewer:
+            raise LinearError("malformed", f"no issue {task_id} (or no viewer) in the response")
+        conn = node.get("comments") or {}
+        raw = conn.get("nodes") if isinstance(conn.get("nodes"), list) else []
+        allowed = {str(t).strip().lower() for t in trusted if str(t).strip()}
+        kept = []
+        for c in raw:
+            user = c.get("user") if isinstance(c, dict) else None
+            if not isinstance(user, dict) or c.get("botActor"):
+                continue
+            names = {str(user.get(k) or "").lower() for k in ("id", "name", "displayName", "email")}
+            if user.get("id") == viewer or names & allowed:
+                kept.append(c)
+        kept.sort(key=lambda c: str(c.get("createdAt") or ""))
+        return {"identifier": node.get("identifier") or task_id, "title": node.get("title") or "",
+                "description": node.get("description") or "", "url": node.get("url") or "",
+                "comments": kept, "dropped": len(raw) - len(kept),
+                "truncated": bool((conn.get("pageInfo") or {}).get("hasNextPage"))
+                or len(raw) >= COMMENT_PAGE_SIZE}
 
     def superseding_issue(self, reason: str, own_id: str) -> str | None:
         """The identifier of this team's issue a close ``reason`` says supersedes ``own_id``

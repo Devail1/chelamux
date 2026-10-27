@@ -67,6 +67,27 @@ reconciliation does not treat absent issues as finished. A 429 or a `RATELIMITED
 backs off per team, starting at 60 seconds and doubling up to 15 minutes (or using
 `Retry-After` when given). Reads are cached for one tick only.
 
+## Steering a run with comments (`chela task show`)
+
+A dispatched agent runs `chela task show` at the start of every attempt (a Linear workflow's
+dispatch and rework prompts both say to). It prints the issue's current title, description
+and comments, oldest first, with author and timestamp, so a comment on the issue reaches the
+next attempt even though the brief was saved at claim time. With no id it reads the run whose
+worktree holds the current directory, else the run on `$CHELA_WID`.
+
+The command reads the key from `chela.env` in its own process; the agent's environment never
+holds it, and the command writes nothing. It shows only comments by the key's own user and by
+the users listed in the workflow:
+
+```yaml
+linear:
+  comment_authors: [teammate@example.com]   # user id, name, display name or email
+```
+
+Comments from anyone else, and any comment a bot or integration posted, are dropped, and the
+output says how many. A full page of comments (100) prints a TRUNCATED line. A failed read
+prints "could not fetch" and exits non-zero.
+
 ## What chela writes back, and the dashboard
 
 chela drives the issue's state as the run moves: a claim or a rework round → *In Progress*,
