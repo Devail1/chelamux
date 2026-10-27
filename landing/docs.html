@@ -162,7 +162,7 @@
   <span class="spacer"></span>
   <span class="links">
     <a href="index.html">Home</a>
-    <a href="index.html#features">Features</a>
+    <a href="index.html#wall">The wall</a>
     <a href="https://github.com/Devail1/chelamux">GitHub</a>
   </span>
 </nav>
@@ -208,9 +208,6 @@
     <p>chela uses <a href="https://docs.astral.sh/uv/">uv</a>. You also need Python ≥ 3.11,
     <code>tmux</code>, <code>git</code>, the <code>claude</code> CLI on <code>PATH</code>, and
     <code>gh</code> (the daemon pushes branches and opens PRs with it).</p>
-    <pre>uvx chelamux dashboard        <span class="c"># a first look, straight from PyPI: http://127.0.0.1:5001</span>
-uv tool install chelamux      <span class="c"># or keep it installed (the daemon needs that): chela run</span></pre>
-    <p>To work on chela itself, run it from a checkout:</p>
     <pre>git clone https://github.com/Devail1/chelamux && cd chelamux
 uv sync --all-extras          <span class="c"># core + dashboard + Telegram bridge, in one command</span>
 uv run chela status

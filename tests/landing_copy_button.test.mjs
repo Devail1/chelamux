@@ -17,7 +17,7 @@ const HTML = readFileSync(new URL('../landing/index.html', import.meta.url), 'ut
 const INLINE = [...HTML.matchAll(/<script>([\s\S]*?)<\/script>/g)].map((m) => m[1]);
 const COMMAND = (() => {
     const pre = HTML.match(/<pre id="install-cmd">([\s\S]*?)<\/pre>/)[1];
-    return pre.replace(/<[^>]+>/g, '').replace(/&amp;/g, '&').trim();
+    return pre.replace(/<[^>]+>/g, '').replace(/&amp;/g, '&').replace(/&#39;/g, "'").trim();
 })();
 
 // Build the page and run its inline scripts the way a browser with JS on would.
@@ -51,7 +51,7 @@ function recorder({ reject = false } = {}) {
 
 test('the page has the inline copy script and a command to copy', () => {
     assert.ok(INLINE.some((s) => s.includes('button.copy')), 'the copy script is gone');
-    assert.match(COMMAND, /uvx chelamux dashboard/);
+    assert.match(COMMAND, /^uvx --from 'chelamux\[dashboard\] @ git\+https:\/\/github\.com\/Devail1\/chelamux' chela dashboard$/);
 });
 
 test('with JS off the button is hidden and the command is plain text in the page', () => {

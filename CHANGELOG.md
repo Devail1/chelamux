@@ -10,6 +10,121 @@ history lives in `git log`.
 
 ## [Unreleased]
 
+## [0.18.2] — 2026-10-28
+
+### Added
+
+- **`chela task show`: a dispatched agent reads its own Linear issue.** It prints the issue's
+  current title, description and comments (oldest first, author and timestamp), so a comment
+  on the issue now steers the next attempt. Only comments by the API key's own user and the
+  workflow's `linear.comment_authors` are shown; bot and integration comments are dropped and
+  counted. A full page says TRUNCATED, and a failed read says "could not fetch" and exits
+  non-zero. It is read-only, and the key stays in chela's process, never in the agent's
+  environment. A Linear workflow's dispatch and rework prompts tell the agent to run it at the
+  start of every attempt. (CMX-287)
+
+- **A notification digest with interrupt rules.** Set `digest.enabled` in
+  `~/.chela/config.json` and only needs-you events (a run that needs a human, an override or
+  release waiting for approval, a failed run/merge/release, CI still red on known flakes
+  after its re-runs, a low-memory kill, a refused permission) are pushed to the orchestrator
+  at once. Everything else is held for a digest sent at `digest.times` (default 09:00 and
+  16:00) and on demand with `chela digest`: needs you (at most 3), waiting on others, done
+  since last, changed — at most 150 words, a link on every line. Held events are still in
+  `chela events` and the dashboard. Off by default; `digest.interrupt` replaces the default
+  list of kinds that interrupt. (CMX-320)
+
+- **`chela keeper run <WORKFLOW.md>` proposes board changes from the digest, and a person
+  approves them.** It builds the keeper digest, asks one headless `claude -p` call (no
+  tools) for proposals, and checks each one in code: a proposal must cite evidence that is
+  in the digest and quote it, and each item it cites must be about that issue (it names
+  the id or quotes a word of the title), or it is dropped as `evidence_unrelated`. It must
+  also use an allowed action: `in_progress` only from Todo or Backlog, `comment`,
+  `new_backlog_issue`, `flag_stale` only for an In Progress issue that nothing in the
+  window names, and `done` only when it cites a merged PR that names the issue. The survivors go to the inbox as ONE item.
+  `chela keeper approve <batch> [--only 1,3]` applies them to the tracker, each with a
+  "chela keeper" attribution comment naming the approver and the evidence;
+  `chela keeper dismiss <batch>` writes nothing. Every proposal and its outcome is a row in
+  `$CHELA_DIR/keeper/log.jsonl`. The Linear source can now add comments. (CMX-347)
+
+- **A daily worktree GC.** A worktree whose run closed without removing it, or whose run row
+  was pruned or requeued, used to stay on disk for good (26 worktrees, 1.9 GB, 21 of them
+  orphaned). The daemon now runs `chela ops worktrees --gc` once a day. It removes each
+  worktree under a workflow's `workspace.root` that no run owns, or whose run has been `done`
+  or `closed` for at least 3 days, and keeps the branch. A worktree with uncommitted changes is
+  first saved to `$CHELA_DIR/worktree-salvage/<name>-<date>.tar.gz` (the diff plus its untracked
+  files, without venvs, `node_modules` or caches). A worktree with a live run or a process
+  running in it is never touched, and neither is one the pass cannot read. `chela ops
+  worktrees` reports the count and size of orphaned worktrees without removing anything.
+  (CMX-357)
+
+### Changed
+
+- **A spent rework cap re-queues the task instead of waiting on a person.** The first time a
+  run hits its rework cap with the PR still blocked, chela closes the PR (the branch is kept),
+  comments every round's survivors grouped by mutation shape, and re-queues the task as a
+  fresh attempt on a new branch. The new attempt's prompt gets an addendum: what the earlier
+  rounds tried, every surviving group, and an instruction to start fresh from the base and
+  read the old branch for reference. Only a second exhaustion of the same task goes to
+  `needs_human`, and the notice says it is the second. (CMX-290)
+
+- **The public landing page, docs page and README now name the project chelamux, at
+  chelamux.com.** Page titles, Open Graph and Twitter meta, canonical links, the nav
+  wordmark and the hero copy say chelamux; the command-line tool is still `chela`, and
+  absolute `chela.pages.dev` links now point to `https://chelamux.com`. The package name,
+  CLI entry point, `~/.chela` and `CHELA_*` settings are unchanged. (CMX-361)
+- **The landing site serves a `robots.txt` and a `sitemap.xml`** for chelamux.com, so
+  `/robots.txt` no longer falls back to the home page. (CMX-361)
+- **The GitHub Action's display name is now "chelamux judge"** (was "chela judge sweep"). The
+  `uses: Devail1/chelamux@v0` reference, inputs and outputs are unchanged. (CMX-361)
+
+- **The landing page leads with the dashboard wall.** One hero (every Claude Code session live
+  on one screen, on desktop or phone, with recaps and a flag on the ones that need you), the
+  wall demo right under the headline, and one primary call to action, Install. (CMX-362)
+- **Install on the landing is one line:**
+  `uvx --from 'chelamux[dashboard] @ git+https://github.com/Devail1/chelamux' chela dashboard`, with the prerequisites
+  on one small line under it. (CMX-362)
+- **The merge gate and judge move to a section lower down** ("And when agents open PRs…"),
+  with a short mention of the GitHub Action. The early / single-user status note moves into
+  the FAQ, and encrypted terminal sharing is cut to one line under the wall. (CMX-362)
+
+- Hotfix: a parked run's idle-clock write is committed at once, so the dispatch tick no longer locks itself out (`database is locked` on every tick, which stalled hand-ins and claims).
+
+### Fixed
+
+- **A parked run is no longer re-nudged and then failed by the idle watchdog.** `chela park`
+  kept a run out of the inbox's STUCK notice, but the dispatcher's idle-at-empty-prompt
+  watchdog never checked it: an agent parked and told to wait was re-sent its task prompt,
+  then failed "idle at empty prompt after re-nudge" about an hour later. The watchdog now
+  stands down for a parked run (a manual park, or the automatic park of a suite-slot wait)
+  and restarts its idle clock on every parked tick, so after `chela unpark`, a reached
+  `--until` or the park max, the agent gets the full idle budget again. (CMX-339)
+
+- **A red nightly-sweep baseline now names its failing tests and keeps its evidence.** The
+  notice and `nightly.log` used to say only "1 failed, 11024 passed", and the JUnit report
+  went with the checkout. A red baseline now lists each failing test id (the first five, plus
+  a count) with the first line of its failure, says what re-running them alone showed, and
+  keeps the JUnit report and the output tail in
+  `$CHELA_DIR/sweep-nightly/<date>/<project>/` (the newest 14 dates are kept). A failing test
+  that passes when re-run alone is reported as `baseline flake: <ids>` and is deselected
+  from every mutation run, so the battery still runs that night. The isolated re-run now
+  also finds failing test ids in the JUnit report when the output tail no longer holds
+  pytest's `FAILED` lines. (CMX-341)
+
+- **A changelog fragment named after a reused issue number no longer turns the suite red
+  late.** Issue numbering restarted, so a new task often shares its number with an old one
+  that already shipped, and its bare `changelog.d/CMX-<id>.md` read as an already-released
+  fragment. Fragments are now named `CMX-<id>-<slug>.md` (slug from the branch), and
+  `chela task-finished` refuses a bare name that collides before any suite runs, with a
+  rename hint. A fragment whose text already shipped (bare or slugged) is told to go
+  instead: renaming it would only hide it until it republishes. (CMX-356)
+
+- **A watchdog write no longer locks out a later run's hand-in in the same tick.** The
+  dispatcher's reconcile loop left several watchdog writes uncommitted (a parked run's idle
+  clock, a window-gone or idle failure, a nudge stamp), so the tick held the database write
+  lock while a later run's `chela task-finished` request was applied on its own connection,
+  which then failed with "database is locked" and stalled the queue. Each of those writes
+  now commits before the loop moves on, with a two-run regression test per write. (CMX-359)
+
 ## [0.18.1] — 2026-10-27
 
 ### Added
