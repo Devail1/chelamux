@@ -57,7 +57,8 @@ DEFAULT_INTERRUPT = (
     "release_*",                  # same, for a release
     "*_failed",                   # a failed run, merge, release or deploy
     "run_ci_known_flake",         # CI still red after its 2nd re-run, only on known flakes
-    "*oom*",                      # a low-memory kill
+    "*oom_kill*",                 # a low-memory kill (not `*oom*`: that is every room_* too)
+    "*_oom",
     "run_permission_denied",      # an agent is blocked on a permission it was refused
     "keeper_proposals",           # board changes waiting for an approval
     "orchestrator.moved",         # the inbox now delivers to a different window
@@ -90,8 +91,6 @@ REOPENS_RUN = "run_reopened"
 DONE_TYPES = {
     "orchestrator.merge": "merged",
     "orchestrator.release_pushed": "released",
-    "override_approved": "override merged",
-    "release_approved": "released",
 }
 # Needs you: what to call an interrupt kind in one line, first matching pattern wins.
 NEEDS_NAMES = (
@@ -104,10 +103,25 @@ NEEDS_NAMES = (
     ("orchestrator.moved", "inbox now delivers to a new window"),
     ("*_failed", "failed"),
 )
+# Changed: new and reopened issues, plus every other kind the default rules hold back, so a
+# held notice is never only in `chela events`.
 CHANGED_TYPES = {
     "task.created": "new issue",
     "run_reopened": "reopened",
+    "run_ci_red": "CI red, sent back",
+    "run_pr_conflicting": "PR conflicts with its base",
+    "run_stuck": "agent looks stuck",
+    "run_marker_unread": "agent marker unread",
+    "run_park_overdue": "park overdue",
+    "run_base_merge_infra": "base merge could not run tests",
+    "split_filed": "split",
+    "ops_findings": "ops scan findings",
+    "nightly_sweep": "nightly sweep",
 }
+# What resolves a needs-you event on the same subject: the run moved forward, ended, or the
+# request it was waiting on was carried out. Any other later event leaves it standing.
+RESOLVES = (*WAITING_TYPES, *ENDS_RUN, "run_reopened", "run_unparked", "run_changes_requested",
+            "orchestrator.release_pushed", "orchestrator.merge_override")
 
 
 # --- rules -----------------------------------------------------------------------------
@@ -133,7 +147,10 @@ def rules(raw: dict | None = None) -> dict:
     if not (isinstance(interrupt, list) and all(isinstance(p, str) for p in interrupt)):
         interrupt = list(DEFAULT_INTERRUPT)
     times = raw.get("times")
-    if not (isinstance(times, list) and all(_parse_hhmm(t) for t in times)):
+    if not (isinstance(times, list) and times and all(_parse_hhmm(t) for t in times)):
+        if times is not None:
+            log.warning("digest: times %r is not a non-empty list of HH:MM; using %s",
+                        times, list(DEFAULT_TIMES))
         times = list(DEFAULT_TIMES)
     tz = raw.get("tz") if isinstance(raw.get("tz"), str) and raw.get("tz") else None
     return {"enabled": raw.get("enabled") is True, "interrupt": interrupt,
@@ -208,12 +225,12 @@ def build(events: list[dict], since: float, rule: dict | None = None) -> dict:
     def is_loud(e: dict) -> bool:
         return e.get("type") != DIGEST_KIND and route(e.get("type"), loud) == INTERRUPT
 
-    # Still needs you: nothing quieter has happened to the same subject since (a release
-    # that was pushed, an override that merged, a run back in review after needs_human).
+    # Still needs you: nothing has resolved the same subject since (a release that was
+    # pushed, an override that merged, a run back in review after needs_human).
     moved_on: dict[str, float] = {}
     for e in ordered:
         key = _subject(e)
-        if key and not is_loud(e):
+        if key and e.get("type") in RESOLVES:
             moved_on[key] = e.get("ts") or 0
     needs = [e for e in recent if is_loud(e)
              and not moved_on.get(_subject(e) or "", 0) > (e.get("ts") or 0)]
@@ -396,10 +413,12 @@ def send(now: float | None = None, rule: dict | None = None) -> dict:
     from chela import inbox, notify
     now = time.time() if now is None else now
     text, payload = compose(now=now, rule=rule)
+    # Marked BEFORE delivering: a send that raises must not leave the slot owed, or every
+    # daemon tick would queue the same digest again.
+    mark_sent(now)
     queued = inbox.enqueue(DIGEST_KIND, " | ".join(text.splitlines()), payload)
     pushed = notify.send(text, title="chela digest") if notify.enabled() else False
     event_log.append(DIGEST_KIND, text.splitlines()[0], {**payload, "text": text})
-    mark_sent(now)
     return {"text": text, "queued": queued, "pushed": pushed, **payload}
 
 

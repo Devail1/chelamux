@@ -53,7 +53,7 @@ ON = {"enabled": True, "interrupt": list(digest.DEFAULT_INTERRUPT), "times": ["0
     "override_approved", "override_failed", "release_denied",
     "run_failed", "orchestrator.merge_failed", "release_major_tag_failed",
     "run_ci_known_flake",
-    "suite_oom_kill",
+    "suite_oom_kill", "judge_oom",
     "run_permission_denied",
     "keeper_proposals",
     "orchestrator.moved",
@@ -69,7 +69,8 @@ def test_needs_you_kinds_interrupt_by_default(kind):
     "run_review", "run_judge_clean", "run_judge_not_started", "run_ci_flake", "run_ci_red",
     "run_pr_conflicting", "run_stuck", "run_changes_requested", "run_selfcheck_long",
     "run_parked", "run_park_overdue", "run_reopened", "ops_findings", "nightly_sweep",
-    "split_filed", "run_base_merge_infra", "finished", "", None,
+    "split_filed", "run_base_merge_infra", "finished", "room_delivery", "room_receipt",
+    "", None,
 ])
 def test_everything_else_waits_for_the_digest_by_default(kind):
     assert digest.route(kind, digest.rules({"enabled": True})) == "digest"
@@ -105,6 +106,9 @@ def test_a_pattern_matches_the_whole_kind_not_a_prefix():
      {"enabled": True, "interrupt": ["a"], "times": ["07:30"], "tz": "UTC"}),
     ({"enabled": 1, "interrupt": "run_review", "times": ["25:00"], "tz": 3},
      {"enabled": False, "interrupt": list(digest.DEFAULT_INTERRUPT),
+      "times": ["09:00", "16:00"], "tz": None}),
+    ({"enabled": True, "times": []},
+     {"enabled": True, "interrupt": list(digest.DEFAULT_INTERRUPT),
       "times": ["09:00", "16:00"], "tz": None}),
     ({"enabled": True, "interrupt": ["a", 2], "times": ["9:5"]},
      {"enabled": True, "interrupt": list(digest.DEFAULT_INTERRUPT),
@@ -274,6 +278,31 @@ def test_the_digest_renders_four_parts_from_a_fixture_event_log(sandbox):
                                                "changed": 2}}
 
 
+def test_a_needs_you_event_stays_until_something_resolves_it():
+    events = [_ev(1, 0, "run_needs_human", task_id="CMX-1", pr_url=PR + "1"),
+              _ev(2, 1, "run_stuck", task_id="CMX-1"),
+              _ev(3, 2, "room_delivery", task_id="CMX-1"),
+              _ev(4, 3, "daemon_start", task_id="CMX-1")]
+    assert [e["seq"] for e in digest.build(events, T0 - 1, digest.rules({}))["needs_you"]] == [1]
+    events.append(_ev(5, 4, "run_review", task_id="CMX-1"))
+    assert digest.build(events, T0 - 1, digest.rules({}))["needs_you"] == []
+
+
+def test_a_release_request_is_resolved_by_its_push():
+    events = [_ev(1, 0, "orchestrator.release_requested", tag="v2.0.0"),
+              _ev(2, 1, "orchestrator.release_pushed", tag="v2.0.0")]
+    parts = digest.build(events, T0 - 1, digest.rules({}))
+    assert parts["needs_you"] == [] and [e["seq"] for e in parts["done"]] == [2]
+
+
+def test_held_notices_are_listed_under_changed():
+    events = [_ev(1, 0, "run_ci_red", task_id="CMX-1", pr_url=PR + "1"),
+              _ev(2, 1, "ops_findings", "2 findings")]
+    lines = digest.render_lines(digest.build(events, T0 - 1, digest.rules({})), "x")
+    assert f"• CMX-1 CI red, sent back {PR}1" in lines
+    assert f"• ops_findings ops scan findings {DASH}/" in lines
+
+
 def test_a_reopened_run_can_be_waiting_again():
     events = [_ev(1, 0, "orchestrator.merge", task_id="CMX-1"),
               _ev(2, 1, "run_reopened", task_id="CMX-1"),
@@ -372,6 +401,23 @@ def test_daemon_tick_starts_the_clock_then_sends_at_the_next_slot(sandbox, monke
     assert digest.last_sent() == _at(9, 0)
     assert digest.daemon_tick(now=_at(9, 5)) is None             # not twice per slot
     assert [e["type"] for e in event_log.read(types=["digest"])["events"]] == ["digest"]
+
+
+def test_a_failed_delivery_still_spends_the_slot(sandbox, monkeypatch):
+    _config(sandbox, **ON)
+    queued = []
+    monkeypatch.setattr(inbox, "enqueue", lambda k, s, p: (queued.append(k), True)[1])
+    monkeypatch.setattr(notify, "enabled", lambda: True)
+
+    def down(text, title=None):
+        raise OSError("network down")
+    monkeypatch.setattr(notify, "send", down)
+    digest.mark_sent(_at(8, 0))
+    with pytest.raises(OSError):
+        digest.daemon_tick(now=_at(9, 0))
+    assert digest.last_sent() == _at(9, 0)
+    assert digest.daemon_tick(now=_at(9, 1)) is None
+    assert queued == ["digest"]                                   # once, not every tick
 
 
 def test_daemon_tick_does_nothing_with_the_feature_off(sandbox):
