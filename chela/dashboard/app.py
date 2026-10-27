@@ -5457,7 +5457,8 @@ def api_dispatcher_linear_issue():
         return jsonify({"ok": False,
                         "error": _scrub_linear_key(f"{type(e).__name__}: {e}")}), 500
     event_log.append("task.created", f"created {created['identifier']}: {created['title']}",
-                     {"identifier": created["identifier"], "workflow": str(wf_resolved)})
+                     {"identifier": created["identifier"], "url": created.get("url"),
+                      "workflow": str(wf_resolved)})
     warnings = [_scrub_linear_key(w) for w in created.get("warnings") or []]
     return jsonify({"ok": True,
                     "issue": {k: created[k] for k in ("identifier", "url", "title")},
