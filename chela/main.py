@@ -30,6 +30,7 @@ from chela import (
     config,
     context,
     contract,
+    digest,
     discovery,
     dispatcher,
     doctor,
@@ -494,6 +495,13 @@ def cmd_run(args) -> None:
                     autolaunch.maybe_teardown(inbox.load(), inbox_statuses)
                 except Exception:
                     log.exception("Orchestrator teardown check failed")
+
+            # 📰 CMX-320: the scheduled digest of what the interrupt rules held back. Off
+            # unless `digest.enabled` is set in config.json; cheap when nothing is owed.
+            try:
+                digest.daemon_tick()
+            except Exception:
+                log.exception("Digest tick failed")
 
             # Agent rooms: a targeted handoff/question/blocker whose recipient was sitting
             # at a gate is PARKED, never pasted (that paste would answer the gate). This is
@@ -973,6 +981,24 @@ def cmd_events(args) -> None:
         if batch["corrupt_lines"]:
             print(f"note: skipped {batch['corrupt_lines']} unparseable line(s)",
                   file=sys.stderr)
+
+
+def cmd_digest(args) -> None:
+    """Print the digest now (CMX-320): needs you, waiting on others, done since last, changed.
+
+    Covers from the last digest sent (or the last 24 hours) unless ``--since-hours`` says
+    otherwise. ``--send`` delivers it like a scheduled one (inbox, phone, event log) and
+    restarts the "since last" clock; a plain print leaves the clock alone.
+    """
+    if args.send:
+        out = digest.send()
+        print(out["text"])
+        print(f"\nqueued for the orchestrator: {out['queued']} · pushed: {out['pushed']}",
+              file=sys.stderr)
+        return
+    since = time.time() - args.since_hours * 3600 if args.since_hours is not None else None
+    text, payload = digest.compose(since=since)
+    print(json.dumps({"text": text, **payload}) if args.json else text)
 
 
 def cmd_events_emit(args) -> None:
@@ -4023,6 +4049,14 @@ def main() -> None:
     p_rdigest.add_argument("--limit", type=int, default=50, metavar="N",
                            help="Show the last N events (default: 50)")
 
+    p_digest = sub.add_parser("digest", help="The brief of what waited: needs you, waiting, "
+                                             "done, changed")
+    p_digest.add_argument("--since-hours", type=float, default=None, metavar="H",
+                          help="Cover the last H hours (default: since the last digest sent)")
+    p_digest.add_argument("--send", action="store_true",
+                          help="Deliver it now (inbox + phone) and restart the clock")
+    p_digest.add_argument("--json", action="store_true", help="Emit {text, since, counts}")
+
     # events — the durable log: replay from a cursor, filter, tail. `emit` is the
     # programmatic append, exposed to the shell (and to N concurrent writers).
     p_ev = sub.add_parser("events", help="Replay / filter / follow the event log")
@@ -4798,6 +4832,8 @@ def main() -> None:
             room_cmds[args.room_cmd](args)
         else:
             p_room.print_help()
+    elif args.command == "digest":
+        cmd_digest(args)
     elif args.command == "events":
         if args.events_cmd == "emit":
             cmd_events_emit(args)
