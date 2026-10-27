@@ -42,6 +42,7 @@ from chela import (
     judge,
     keeper,
     keeper_run,
+    keeper_schedule,
     launcher,
     malloc_arenas,
     messenger,
@@ -264,6 +265,7 @@ def cmd_run(args) -> None:
     last_ops_scan = 0.0
     ops_child = None
     nightly_child = None      # CMX-303: the nightly sweep — one detached child at a time
+    keeper_sched = keeper_schedule.Scheduler()   # CMX-348: `chela keeper run` per keeper workflow
     # Held in memory, exactly like `waiting_seen`: it is the PREVIOUS status snapshot
     # the inbox edge-triggers against. Starting empty means a fresh daemon baselines
     # silently on its first tick instead of announcing every already-idle agent. (A
@@ -445,6 +447,13 @@ def cmd_run(args) -> None:
                 nightly_child = sweep_nightly.daemon_tick(DISPATCH_WORKFLOWS, nightly_child)
             except Exception:
                 log.exception("Nightly sweep spawn failed")
+
+            # 🗂️ CMX-348: keeper runs, each workflow at its `keeper.every` — detached, never
+            # waited on; skipped while held, while one is in flight, or with no activity.
+            try:
+                keeper_sched.tick(DISPATCH_WORKFLOWS)
+            except Exception:
+                log.exception("Keeper schedule failed")
 
             # Self-update: informs by default (CMX-142 part 1) — `chela update` is a
             # human-run act, and `update.check_and_notify` never pulls. `CHELA_AUTO_UPDATE`
@@ -3268,6 +3277,21 @@ def cmd_keeper_run(args) -> None:
         print(f"  {i}. {p['action']} {p['issue'] or p.get('title')}")
 
 
+def cmd_keeper_stats(args) -> None:
+    """CMX-348: the trial's kill metric — proposals made, accepted, rejected and dropped,
+    the acceptance rate and a by-action breakdown. Exit 1 when the log cannot be read."""
+    try:
+        since = keeper.parse_since(args.since) if args.since else None
+    except ValueError as e:
+        print(f"keeper stats: {e}", file=sys.stderr)
+        sys.exit(2)
+    out = keeper_run.stats(since)
+    if out.get("error"):
+        print(f"keeper stats: {out['error']}", file=sys.stderr)
+        sys.exit(1)
+    print(json.dumps(out, indent=2) if args.json else keeper_run.render_stats(out).rstrip())
+
+
 def cmd_keeper_decide(args) -> None:
     """CMX-347: approve (all, or `--only 1,3`) or dismiss a pending keeper batch."""
     try:
@@ -4344,6 +4368,12 @@ def main() -> None:
     p_krun.add_argument("--since", metavar="DURATION", help="As for `keeper digest`")
     p_krun.add_argument("--model", help="Model for the proposal call "
                                         "(default: the workflow's keeper.model, else sonnet)")
+    p_kstats = keeper_sub.add_parser(
+        "stats", help="The trial's numbers: proposals made, accepted, rejected and dropped, "
+                      "the acceptance rate (under 70%% ⇒ kill) and a by-action breakdown")
+    p_kstats.add_argument("--since", metavar="DURATION",
+                          help="Only the last DURATION (7d, 24h); default: all time")
+    p_kstats.add_argument("--json", action="store_true", help="Machine-readable output")
     for verb, text in (("approve", "Apply a pending batch's proposals to the tracker"),
                        ("dismiss", "Drop a pending batch; nothing is written")):
         p_kdecide = keeper_sub.add_parser(verb, help=text)
@@ -4865,7 +4895,7 @@ def main() -> None:
     elif args.command == "ops":
         cmd_ops_scan(args)
     elif args.command == "keeper":
-        {"digest": cmd_keeper_digest, "run": cmd_keeper_run}.get(
+        {"digest": cmd_keeper_digest, "run": cmd_keeper_run, "stats": cmd_keeper_stats}.get(
             args.keeper_cmd, cmd_keeper_decide)(args)
     elif args.command == "adopt":
         cmd_adopt(args)

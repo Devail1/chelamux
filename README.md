@@ -144,6 +144,16 @@ To dispatch work, follow [**docs/GETTING_STARTED.md**](docs/GETTING_STARTED.md) 
 [`skills/chela-setup`](skills/chela-setup/SKILL.md) into `~/.claude/skills/`. Hacking on chela
 itself? Clone it and `uv sync --all-extras` ([CONTRIBUTING.md](CONTRIBUTING.md)).
 
+## Keeper mode
+
+A repo you work in by hand can still keep its board honest. Add `keeper: {enabled: true,
+every: 45m}` to its WORKFLOW.md (and `dispatch: {enabled: false}` if chela should never
+claim work there): the daemon then reads what your sessions, commits and PRs did, a model
+proposes board changes that each cite that evidence, and one inbox item asks you to
+`chela keeper approve` or `dismiss` them. Nothing reaches the tracker without your OK.
+`chela keeper stats --since 7d` reports how many proposals you accepted. The keys are in
+[examples/WORKFLOW.md](examples/WORKFLOW.md).
+
 ## What's new in 0.16
 
 - **`chela judge sweep`** mutates every conditional, comparison and return code a branch

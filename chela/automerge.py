@@ -29,6 +29,7 @@ import logging
 
 from chela import config, contract, dispatcher
 from chela.judge import MERGE_READY
+from chela.workflow import dispatch_enabled, load_workflow_cached
 
 log = logging.getLogger("chela.automerge")
 
@@ -72,8 +73,17 @@ def candidates() -> list[dict]:
     return [
         run for run in dispatcher.list_runs()
         if run.get("status") == "awaiting_review" and run.get("judge_state") in MERGE_READY
-        and not _judge_verdict_is_stale(run)
+        and not _judge_verdict_is_stale(run) and _dispatched(run)
     ]
+
+
+def _dispatched(run: dict) -> bool:
+    """CMX-348: a run of a keeper-only workflow (``dispatch: false``, on its last good
+    parse) is never auto-merged. One that has never parsed is left to ``contract.merge``,
+    which reads the workflow itself and refuses on its own terms."""
+    path = run.get("workflow_path")
+    wf = load_workflow_cached(path).workflow if path else None
+    return wf is None or dispatch_enabled(wf)
 
 
 def sweep(reason: str = "") -> list[dict]:

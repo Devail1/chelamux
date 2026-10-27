@@ -41,6 +41,7 @@ from chela.tui_text import sanitize as tui_sanitize
 from chela.workflow import (
     TemplateRenderError,
     WorkflowDef,
+    dispatch_enabled,
     load_workflow,
     load_workflow_cached,
     poll_interval_seconds,
@@ -5693,6 +5694,16 @@ def _refused(error: str | None, refused: bool = False) -> dict:
     }
 
 
+def _dispatch_off(wf: WorkflowDef) -> dict:
+    """🗂️ CMX-348: a keeper-only workflow (``dispatch: {enabled: false}``) does nothing at
+    the tick: no claim, no reconcile, no judge, no tracker write. Its merge-gate entry is
+    REMOVED, so its sessions may push to its base as that repo wants; keeper runs are
+    scheduled by the daemon (:mod:`chela.keeper_schedule`), not here."""
+    if mergegate.unregister(wf.path, env={"CHELA_DIR": str(CHELA_DIR)}):
+        log.info("%s: dispatch is off — dropped from the merge gate's registry", wf.path)
+    return {**_refused(None), "blocked": False, "dispatch_off": True}
+
+
 # Workflows currently refused by the workspace fence — so the ERROR is logged on the
 # EDGE, not once per tick forever (a 60s drumbeat is how an operator learns to skip logs).
 _escaped: set[str] = set()
@@ -5818,6 +5829,8 @@ def tick(workflow_path: str | Path) -> dict:
             log.error("Dispatch REFUSED — %s", escape)
         return _refused(escape, refused=True)
     _escaped.discard(str(workflow_path))
+    if not dispatch_enabled(wf):
+        return _dispatch_off(wf)
     # ⚖️🔒 CMX-389: keep the merge gate's registry current — the `PreToolUse` hook
     # (chela.mergegate) decides from this file alone, so it must know every repo chela
     # dispatches, its GitHub slug and its base branch without asking a running daemon.
@@ -9548,6 +9561,8 @@ def dry_run(workflow_path: str | Path) -> list[dict]:
     the dry-run preview reflects what live dispatch would produce.
     """
     wf = load_workflow(workflow_path)
+    if not dispatch_enabled(wf):
+        return []                     # CMX-348: a keeper-only workflow claims nothing
     source = get_source(wf)
     open_tasks = source.list_open_tasks()
 

@@ -85,7 +85,49 @@ def parse_workflow(p: Path, text: str) -> WorkflowDef:
             f"(must match {PROJECT_KEY_RE.pattern!r}, e.g. `project_key: PROJ`); got {pk!r}"
         )
 
+    _check_modes(p, config)
     return WorkflowDef(path=p, config=config, prompt_template=body.strip())
+
+
+def _check_modes(p: Path, config: dict) -> None:
+    """``dispatch`` and ``keeper`` (CMX-348) are checked at parse time: a typo there must not
+    quietly turn dispatch on, or off. A bad value fails the parse, so the last good config
+    stays in force (:func:`load_workflow_cached`)."""
+    dispatch = config.get("dispatch")
+    if dispatch is not None and not isinstance(dispatch, bool) and not (
+            isinstance(dispatch, dict) and isinstance(dispatch.get("enabled", True), bool)):
+        raise ValueError(f"{p}: `dispatch` must be `false` or `{{enabled: true|false}}`; "
+                         f"got {dispatch!r}")
+    keeper = config.get("keeper")
+    if keeper is None:
+        return
+    if not isinstance(keeper, dict) or not isinstance(keeper.get("enabled", False), bool):
+        raise ValueError(f"{p}: `keeper` must be `{{enabled: true|false, every: 45m}}`; "
+                         f"got {keeper!r}")
+    if keeper.get("enabled"):
+        from chela.keeper import parse_since
+        parse_since(keeper.get("every", DEFAULT_KEEPER_EVERY))
+
+
+DEFAULT_KEEPER_EVERY = "45m"
+
+
+def dispatch_enabled(wf: WorkflowDef) -> bool:
+    """False for a keeper-only workflow (``dispatch: {enabled: false}``, or ``dispatch:
+    false``): it never claims, judges, auto-merges, nightly-sweeps or registers a merge gate."""
+    dispatch = wf.get("dispatch")
+    if isinstance(dispatch, dict):
+        return dispatch.get("enabled", True) is not False
+    return dispatch is not False
+
+
+def keeper_every_seconds(wf: WorkflowDef) -> int | None:
+    """How often the daemon runs ``chela keeper run`` for ``wf``, or None when keeper mode
+    is off."""
+    if wf.get("keeper", "enabled", default=False) is not True:
+        return None
+    from chela.keeper import parse_since
+    return parse_since(wf.get("keeper", "every", default=DEFAULT_KEEPER_EVERY))
 
 
 @dataclass

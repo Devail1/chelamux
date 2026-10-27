@@ -263,6 +263,25 @@ def register(workflow_path: str | Path, bases, env=None) -> bool:
         return False
 
 
+def unregister(workflow_path: str | Path, env=None) -> bool:
+    """Drop one workflow from the registry — a keeper-only workflow (``dispatch: false``,
+    CMX-348) is not gated, so its sessions may push to its base. Writes only when an entry
+    was there; never raises."""
+    try:
+        wf = str(Path(workflow_path).expanduser())
+        repos = load_registry(env)
+        if not repos or not any(r.get("workflow") == wf for r in repos):
+            return False
+        path = registry_path(env)
+        tmp = path.with_suffix(f".{os.getpid()}.tmp")
+        kept = [r for r in repos if r.get("workflow") != wf]
+        tmp.write_text(json.dumps({"repos": kept}, indent=2) + "\n", encoding="utf-8")
+        os.replace(tmp, path)
+        return True
+    except OSError:
+        return False
+
+
 def _match_slug(registry: list[dict], slug: str) -> dict | None:
     want = slug.strip().lower()
     for entry in registry:
