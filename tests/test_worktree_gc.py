@@ -533,3 +533,30 @@ def test_a_worktree_sitting_at_the_root_itself_is_not_a_candidate(env):
     _git(env.repo, "worktree", "add", "-q", "-b", "br-root", str(env.root), "dev")
     assert worktree_gc.registered(env.repo, env.root) == []
     assert worktree_gc.registered(env.repo, env.root.parent) == [env.root.resolve()]
+
+
+def test_a_clean_worktree_whose_head_is_on_no_branch_is_kept(env):
+    wt = add_wt(env, "judge-T-5")
+    _git(wt, "checkout", "-q", "--detach")
+    (wt / "app.py").write_text("x = 3\n")
+    _git(wt, "commit", "-qam", "local only")
+    age(wt, 10)
+    result = collect(env)
+    assert result["removed"] == []
+    assert result["kept"] == [{"name": "judge-T-5",
+                               "why": "HEAD has commits on no branch or remote"}]
+    _git(wt, "branch", "keep-it")
+    assert collect(env)["removed"] == ["judge-T-5"]
+
+
+def test_a_pass_that_crashes_is_still_stamped_so_the_daemon_does_not_respawn_it(env, monkeypatch):
+    monkeypatch.setattr(config, "CHELA_DIR", env.chela_dir)
+    (env.repo / "WORKFLOW.md").write_text(WORKFLOW.format(root=env.root))
+
+    def boom(*a, **kw):
+        raise RuntimeError("unexpected")
+
+    monkeypatch.setattr(worktree_gc, "collect", boom)
+    with pytest.raises(RuntimeError):
+        worktree_gc.run([env.repo / "WORKFLOW.md"], dry_run=False, chela_dir=env.chela_dir)
+    assert not worktree_gc.due(env.chela_dir)

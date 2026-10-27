@@ -175,6 +175,13 @@ def verdict(path: Path, root: Path, rows: list[dict], now: float,
     return True, why
 
 
+def unpushed(path: Path) -> bool:
+    """Does HEAD carry a commit no local branch and no remote-tracking ref holds? A detached
+    checkout's commits would be lost with it, and they are not in ``git diff``."""
+    return bool(_git(path, "rev-list", "--max-count=1", "HEAD", "--not", "--branches",
+                     "--remotes").stdout.strip())
+
+
 def dirty(path: Path) -> bool:
     return bool(_git(path, "--no-optional-locks", "status", "--porcelain",
                      "--untracked-files=all").stdout.strip())
@@ -244,6 +251,10 @@ def collect(repo: Path, root: Path, *, db_path: Path, chela_dir: Path,
             if not ok:
                 result["kept"].append({"name": path.name, "why": why})
                 continue
+            if unpushed(path):
+                result["kept"].append({"name": path.name,
+                                       "why": "HEAD has commits on no branch or remote"})
+                continue
             is_dirty = dirty(path)
         except Unknown as e:
             result["errors"].append(f"{path.name}: {e}")
@@ -299,15 +310,20 @@ def _targets(workflow_paths) -> list[tuple[Path, Path]]:
 def run(workflow_paths, *, dry_run: bool, chela_dir: Path | None = None,
         db_path: Path | None = None) -> list[dict]:
     """``chela ops worktrees [--gc]``: one :func:`collect` per workflow root. A real pass
-    stamps :data:`STATE_FILE` so the daemon's next spawn waits :data:`INTERVAL_S`."""
+    stamps :data:`STATE_FILE` BEFORE it starts, so a pass that crashes is retried in
+    :data:`INTERVAL_S`, not respawned by the daemon on every tick; it rewrites it with the
+    results when it ends."""
     chela_dir = chela_dir or config.CHELA_DIR
     db_path = db_path or chela_dir / "scheduler.db"
+    state = chela_dir / "ops" / STATE_FILE
+    started = time.time()
+    if not dry_run:
+        state.parent.mkdir(parents=True, exist_ok=True)
+        state.write_text(json.dumps({"ts": started, "results": None}))
     results = [collect(repo, root, db_path=db_path, chela_dir=chela_dir, dry_run=dry_run)
                for repo, root in _targets(workflow_paths)]
     if not dry_run:
-        state = chela_dir / "ops" / STATE_FILE
-        state.parent.mkdir(parents=True, exist_ok=True)
-        state.write_text(json.dumps({"ts": time.time(), "results": results}))
+        state.write_text(json.dumps({"ts": started, "results": results}))
     return results
 
 
