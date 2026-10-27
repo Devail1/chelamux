@@ -25,7 +25,7 @@ ids don't. Address siblings by `@N`, and re-derive them from `chela status` afte
 | `chela msg <wid> "…"` / `chela drive <wid> "…"` | Message a sibling. `drive --wait done` blocks until it finishes. |
 | `chela watch <wid> --note "…"` / `chela watching` | Wake the orchestrator when that window finishes/blocks (run it right after you dispatch); show the inbox and its address. Claims the orchestrator role only if no live session holds it; from a side session the watch is routed to the live holder; `--take-over` takes the role explicitly. |
 | `chela dispatch-runs --awaiting` | Every run parked in the review loop. |
-| `chela park <run> --reason "…" [--until 2h\|<ISO time>\|run:<ID>]` / `chela unpark <run>` | Hold a running agent on purpose (waiting on another run, on memory): no STUCK notice while parked, ONE notice once it outlives `--until` or 6h. It keeps its slot and window. An agent cannot park itself. A run waiting for a suite slot is parked automatically. `chela dispatch-runs` shows each park. |
+| `chela park <run> --reason "…" [--until 2h\|<ISO time>\|run:<ID>]` / `chela unpark <run>` | Hold a running agent on purpose (waiting on another run, on memory): no STUCK notice and no idle nudge or fail while parked, ONE notice once it outlives `--until` or 6h. It keeps its slot and window. An agent cannot park itself. A run waiting for a suite slot is parked automatically. `chela dispatch-runs` shows each park. |
 | `chela wait <task-id> --until done` | Block until a dispatched task reaches a state you must act on. |
 | `chela judge show <run>` | Rounds-to-clean and survival rates for a run's judge rounds. |
 | `chela events --type T --tail N` | The durable event log, i.e. the record of what actually happened. |

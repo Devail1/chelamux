@@ -13,7 +13,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path, PurePosixPath
 from typing import NamedTuple
 
-from chela import basesync, concurrency, critic, envutil, epoch, event_log, fleet, flaky, generated, handinmove, hold, judge, memcap, mergegate, release_notes, reviewgate, risktier, sizegate, sweep, verdictcarry
+from chela import basesync, concurrency, critic, envutil, epoch, event_log, fleet, flaky, generated, handinmove, hold, judge, memcap, mergegate, park, release_notes, reviewgate, risktier, sizegate, sweep, verdictcarry
 from chela.config import (
     CHELA_DIR,
     TMUX_SESSION,
@@ -1571,6 +1571,12 @@ def ensure_schema(conn: sqlite3.Connection) -> sqlite3.Connection:
         # `-r2` keeps `-r2`). Without `--requeue`, `closed` stays terminal (CMX-265).
         ("requeue_pending", "ALTER TABLE runs ADD COLUMN requeue_pending INTEGER DEFAULT 0"),
         ("requeue_count", "ALTER TABLE runs ADD COLUMN requeue_count INTEGER DEFAULT 0"),
+        # ♻️ CMX-290. A run that spends its rework cap is closed and re-queued ONCE as a fresh
+        # attempt (`_cap_requeue`); `cap_requeues` counts those, so the SAME task exhausting
+        # again goes to `needs_human`. `requeue_addendum` is what the fresh attempt's prompt
+        # is told about the earlier rounds. Both survive the claim (`_REQUEUE_KEEP`).
+        ("cap_requeues", "ALTER TABLE runs ADD COLUMN cap_requeues INTEGER DEFAULT 0"),
+        ("requeue_addendum", "ALTER TABLE runs ADD COLUMN requeue_addendum TEXT"),
         # 📝 CMX-52. The agent's own handoff note — what it wants the reviewer to know —
         # passed as `chela task-finished --handoff` and written here by the daemon when it
         # applies the completion marker (`mark_awaiting_review`). NULL ⇒ no handoff was
@@ -1606,6 +1612,10 @@ def ensure_schema(conn: sqlite3.Connection) -> sqlite3.Connection:
         ("parked_reason", "ALTER TABLE runs ADD COLUMN parked_reason TEXT"),
         ("parked_until", "ALTER TABLE runs ADD COLUMN parked_until TEXT"),
         ("parked_by", "ALTER TABLE runs ADD COLUMN parked_by TEXT"),
+        # ⏸️ CMX-339. Where the watchdog's idle clock restarts: stamped on every tick the run
+        # is parked, so an unparked agent gets the full idle budget again, not an instant
+        # nudge measured from `started_at`.
+        ("idle_clock_at", "ALTER TABLE runs ADD COLUMN idle_clock_at TEXT"),
     ):
         if _column in existing_columns:
             continue  # already migrated — no DDL attempted, nothing to fail
@@ -1662,6 +1672,27 @@ def _db():
 
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def _watchdog_park(conn, row) -> dict | None:
+    """⏸️ CMX-339: the park that holds ``row`` off the idle watchdog — or None.
+
+    A manual park counts until it outlives itself (:func:`chela.park.overdue`: past its
+    ``--until``, its ``run:<ID>`` ended, or past :func:`chela.config.park_max_s`) — the same
+    rule that ends its shield from the stuck notice. Else an open suite-slot wait in the
+    run's worktree (CMX-119): an agent queued behind another suite sits at an empty prompt
+    while its background ``task-finished`` waits."""
+    from chela import config, suite_guard
+    run = dict(row)
+    parked = park.manual(run)
+    if parked is not None:
+        runs_by_id = {r["task_id"]: dict(r)
+                      for r in conn.execute("SELECT task_id, status FROM runs")}
+        if park.overdue(parked, time.time(), runs_by_id, config.park_max_s()) is None:
+            return parked
+    if not run.get("worktree_path"):
+        return None
+    return park.slot(run, suite_guard.waits_in(run["worktree_path"]), [])
 
 
 def _parse_ts(ts: str | None) -> datetime | None:
@@ -5104,7 +5135,7 @@ def requeue_hint(task_id: str) -> str:
 
 def close_run(ident: str, reason: str, *, force: bool = False, close_pr: bool = False,
               remove_worktree: bool = False, by: str | None = None,
-              requeue: bool = False) -> dict:
+              requeue: bool = False, comment: str | None = None) -> dict:
     """🗂️✖️ Mark an abandoned or superseded run ``closed``, with a reason a human can read.
 
     Before this, the one path to ``status='closed'`` was reconcile's closed-PR branch in
@@ -5228,7 +5259,7 @@ def close_run(ident: str, reason: str, *, force: bool = False, close_pr: bool = 
     pr_closed = False
     comment_posted, comment_detail = False, "no open PR"
     if pr_open:
-        body = f"🗂️✖️ Run closed by chela: {reason}"
+        body = comment or f"🗂️✖️ Run closed by chela: {reason}"
         if close_pr:
             pr_closed, comment_detail = _gh_pr_close(run.get("pr_url"), repo_dir, body)
             comment_posted = pr_closed
@@ -5480,7 +5511,8 @@ def park_run(ident: str, reason: str, until: str | None = None, by: str = "") ->
 
 def unpark_run(ident: str, by: str = "") -> dict:
     """⏸️ CMX-318: clear a park. The stuck clock restarts from now (the inbox kept the run
-    active while parked), so an unparked agent gets the full quiet budget again."""
+    active while parked), so an unparked agent gets the full quiet budget again — and so does
+    the watchdog's idle clock (CMX-339), even for a park no dispatcher tick ever saw."""
     run = resolve_run(ident)
     if run is None:
         return {"ok": False, "error": f"no run matches {ident!r} (task id, branch, or window name)"}
@@ -5488,7 +5520,8 @@ def unpark_run(ident: str, by: str = "") -> dict:
     with _db() as conn:
         cur = conn.execute(
             "UPDATE runs SET parked_at=NULL, parked_reason=NULL, parked_until=NULL, "
-            "parked_by=NULL WHERE task_id=? AND parked_at IS NOT NULL", (task_id,))
+            "parked_by=NULL, idle_clock_at=?, idle_nudged_at=NULL "
+            "WHERE task_id=? AND parked_at IS NOT NULL", (_now(), task_id))
         conn.commit()
     if cur.rowcount == 0:
         return {"ok": False, "task_id": task_id, "error": f"{task_id} is not parked"}
@@ -5685,7 +5718,7 @@ def _refused(error: str | None, refused: bool = False) -> dict:
         "open": 0, "reconciled_done": 0, "reconciled_closed": 0, "reconciled_failed": 0,
         "dispatched": 0,
         "pr_state_refreshed": 0, "watchdog_renudged": 0, "tracker_struck": 0,
-        "reworked": 0, "escalated": 0, "ci_failed": 0, "ci_infra_failed": 0,
+        "reworked": 0, "escalated": 0, "cap_requeued": 0, "ci_failed": 0, "ci_infra_failed": 0,
         "ci_rerun": 0, "ci_flake": 0, "ci_known_flake": 0, "base_merged": 0, "base_conflict": 0,
         "base_infra": 0, "judged": 0, "judge_cancelled": 0, "judge_lost": 0, "judge_stranded": 0,
         "trial_ledger": 0, "disk_budget_exceeded": False, "window_reaped": 0,
@@ -5887,10 +5920,12 @@ def tick(workflow_path: str | Path) -> dict:
         "pr_state_refreshed": 0,
         "watchdog_renudged": 0,
         "watchdog_unblocked": 0,
+        "watchdog_parked": 0,
         "tracker_struck": 0,
         "tracker_transitions": 0,
         "reworked": 0,
         "escalated": 0,
+        "cap_requeued": 0,
         "ci_failed": 0,
         "ci_infra_failed": 0,
         "ci_rerun": 0,
@@ -6445,7 +6480,20 @@ def tick(workflow_path: str | Path) -> dict:
                 and row["window_name"]
                 and row["window_name"] in live_windows
             ):
+                # ⏸️ CMX-339: a parked agent is idle ON PURPOSE — never nudged back toward
+                # its task, never failed. Each parked tick restarts the idle clock and drops
+                # any nudge, so once the park ends the full budget applies from zero.
+                if _watchdog_park(conn, row) is not None:
+                    conn.execute(
+                        "UPDATE runs SET idle_clock_at=?, idle_nudged_at=NULL WHERE task_id=?",
+                        (_now(), row["task_id"]),
+                    )
+                    summary["watchdog_parked"] += 1
+                    continue
                 started = _parse_ts(row["started_at"])
+                clock = _parse_ts(row["idle_clock_at"])
+                if started is not None and clock is not None:
+                    started = max(started, clock)
                 idle_age_ok = (
                     started is not None
                     and (datetime.now(timezone.utc) - started).total_seconds()
@@ -6928,13 +6976,18 @@ def tick(workflow_path: str | Path) -> dict:
                     ],
                 )
                 summary["escalated"] += 1
+            elif review_cap_reached(row) and not (row["cap_requeues"] or 0):
+                # ♻️ CMX-290: nobody reviews tasks, so a FIRST exhaustion is re-queued as a
+                # fresh, narrower attempt instead of waiting on a person.
+                summary["cap_requeued"] += _cap_requeue(conn, wf, row)
             elif review_cap_reached(row):
                 _escalate(
                     conn, row,
-                    f"rework cap reached ({review_reworks(row)}/{effective_cap}; infra "
-                    f"restarts: {infra_restarts(row)}) — the PR still fails review. Branch, "
-                    "worktree and PR are preserved; every verdict is on the run row "
-                    "(review_history).",
+                    f"second exhaustion: rework cap reached ({review_reworks(row)}/"
+                    f"{effective_cap}; infra restarts: {infra_restarts(row)}) again — the "
+                    "first was closed and re-queued as a fresh attempt; the PR still fails "
+                    "review. Branch, worktree and PR are preserved; every verdict is on the "
+                    "run row (review_history).",
                     recommendation="Fix it yourself on the branch and `chela reopen` — read "
                                     "the review history on the run first for what every rework "
                                     "round already tried, then push the fix and reopen to put "
@@ -7211,11 +7264,13 @@ def tick(workflow_path: str | Path) -> dict:
                 log.exception("Dispatch failed for task %s", task.id)
                 conn.execute(
                     """INSERT INTO runs (task_id, workflow_path, title, status, attempt, last_error, started_at, brief)
-                       VALUES (?, ?, ?, 'failed', ?, ?, ?, ?)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                        ON CONFLICT(task_id) DO UPDATE SET
-                         status='failed', attempt=excluded.attempt, last_error=excluded.last_error,
-                         brief=excluded.brief""",
-                    (task.id, str(wf.path), task.title, attempt, str(e), _now(), _task_brief(task)),
+                         status=excluded.status, attempt=excluded.attempt,
+                         last_error=excluded.last_error, brief=excluded.brief""",
+                    (task.id, str(wf.path), task.title,
+                     "needs_human" if isinstance(e, BranchNamesExhausted) else "failed",
+                     attempt, str(e), _now(), _task_brief(task)),
                 )
                 if requeue:
                     # The requeued attempt failed before it owned anything: drop the CLOSED
@@ -7465,16 +7520,27 @@ def _remote_branch_exists(repo_path: Path, branch: str) -> bool:
     return local.returncode == 0
 
 
+# ♻️ CMX-290: how many names `_unused_remote_branch` tries before it gives up. An unbounded
+# loop over `ls-remote` spins forever on a remote (or a stub) that answers "exists" to all.
+MAX_BRANCH_CANDIDATES = 50
+
+
+class BranchNamesExhausted(RuntimeError):
+    """No free branch name within :data:`MAX_BRANCH_CANDIDATES` — the claim goes to
+    ``needs_human`` (a retry would ask the same remote the same question)."""
+
+
 def _unused_remote_branch(repo_path: Path, branch: str) -> str:
     """``branch``, or ``branch-2``, ``branch-3``, … — the first name ``origin`` does not
     already have. 📐🔗 CMX-432: a Linear branch name is the tracker's, so it can collide
     with a branch a previous run left on the remote; that branch is never reused."""
-    if not _remote_branch_exists(repo_path, branch):
-        return branch
-    n = 2
-    while _remote_branch_exists(repo_path, f"{branch}-{n}"):
-        n += 1
-    return f"{branch}-{n}"
+    for n in range(1, MAX_BRANCH_CANDIDATES + 1):
+        name = branch if n == 1 else f"{branch}-{n}"
+        if not _remote_branch_exists(repo_path, name):
+            return name
+    raise BranchNamesExhausted(
+        f"no free branch name: origin reports {branch!r} and {branch}-2..-"
+        f"{MAX_BRANCH_CANDIDATES} all taken — check `git ls-remote origin` by hand")
 
 
 def _task_brief(task: Task) -> str | None:
@@ -7596,7 +7662,7 @@ def rework_cap_reached(row) -> bool:
 _REQUEUE_KEEP = frozenset({
     "task_id", "workflow_path", "title", "status", "attempt", "started_at", "task_number",
     "brief", "risk", "risk_reason", "tracker_url", "review_history", "requeue_count",
-    "last_error",
+    "last_error", "cap_requeues", "requeue_addendum",
 })
 
 
@@ -7700,7 +7766,7 @@ def _spawn(wf: WorkflowDef, task: Task, attempt: int, conn: sqlite3.Connection, 
              window_epoch=NULL, brief=excluded.brief, risk=excluded.risk,
              risk_reason=excluded.risk_reason, tracker_url=excluded.tracker_url,
              tracker_edge=NULL, parked_at=NULL, parked_reason=NULL, parked_until=NULL,
-             parked_by=NULL""",
+             parked_by=NULL, idle_clock_at=NULL""",
         (task.id, str(wf.path), task.title, window_name, str(worktree), branch, _now(), attempt,
          task_number, _task_brief(task), run_risk(task.risk), task.risk_reason, task.url),
     )
@@ -7715,6 +7781,10 @@ def _spawn(wf: WorkflowDef, task: Task, attempt: int, conn: sqlite3.Connection, 
     conn.commit()
 
     prompt = render_prompt(wf.prompt_template, hook_vars)
+    if requeue:
+        addendum = conn.execute("SELECT requeue_addendum FROM runs WHERE task_id=?",
+                                (task.id,)).fetchone()["requeue_addendum"]
+        prompt += f"\n\n{addendum}" if addendum else ""
     _launch_agent(
         wf, task.id, window_name, worktree, prompt, conn,
         hook_vars=hook_vars, fresh_worktree=created,
@@ -8170,6 +8240,62 @@ def _format_escalation(reason: str, recommendation: str = "", options: list[str]
     return body
 
 
+def _survivor_rounds(reviews: list[dict]) -> str:
+    """♻️ CMX-290. Every review round's survivors, one section per round — grouped by mutation
+    shape (CMX-289/335's ``shape_sites.shape``), or the verdict's first line when it carried
+    no structured mutations (a human's review, a CI send-back)."""
+    from chela import shape_sites
+    out = []
+    for r in reviews:
+        if r.get("verdict") != "changes_requested":
+            continue
+        groups: dict[tuple[str, str], list[str]] = {}
+        for m in r.get("mutations") or []:
+            key = shape_sites.shape(str(m.get("before", "")), str(m.get("after", "")))
+            groups.setdefault(key, []).append(f"{m.get('guard', '?')} ({m.get('file', '?')})")
+        lines = [f"- `{k}` on `{t}` — {'; '.join(g)}" for (k, t), g in groups.items()]
+        first = next(iter(str(r.get("body") or "").strip().splitlines()), "")[:300]
+        out.append(f"**Round {r.get('round', '?')}**\n" + ("\n".join(lines) or f"- {first}"))
+    return "\n\n".join(out) or "(no review round recorded a verdict)"
+
+
+def _cap_requeue(conn: sqlite3.Connection, wf: WorkflowDef, row: sqlite3.Row) -> int:
+    """♻️ CMX-290. A FIRST rework-cap exhaustion: close the PR (branch kept) with every round's
+    survivors as its comment, and re-queue the task as a fresh attempt whose prompt carries
+    them (``requeue_addendum``). The fresh attempt STARTS FRESH from the base — the old branch
+    is where the cap was already spent, and the CMX-65 requeue gives it a new ``-r<N>`` branch
+    — but is pointed at the old branch to read. Returns 1 when the run was re-queued; 0 (the
+    row is left for the next tick, which re-tries) when ``close_run`` refused."""
+    summary = _survivor_rounds(reviews_of(dict(row)))
+    rounds = review_reworks(row)
+    base = wf.get("workspace", "base_branch", default="master")
+    addendum = (
+        "## ♻️ Re-queued after the rework cap\n\n"
+        f"An earlier attempt at this task (branch `{row['branch_name']}`) spent its whole "
+        f"rework budget ({rounds} review round(s)) and still failed review; its PR is closed "
+        f"and its branch is kept. **Start fresh** from `{base}` on your own branch — do not "
+        f"build on `{row['branch_name']}`, but read it (`git diff origin/{base}..."
+        f"origin/{row['branch_name']}`) for what was tried. Take the narrowest change that "
+        "meets the brief, and guard every group below from your first commit.\n\n"
+        f"### What the earlier rounds tried, and what survived\n\n{summary}")
+    comment = ("♻️ Rework cap reached — chela closes this PR (the branch is kept) and "
+               "re-queues the task as a fresh attempt with every round's survivors in its "
+               f"brief.\n\n{summary}")
+    conn.commit()
+    got = close_run(row["task_id"], f"rework cap reached ({rounds} review rounds) — re-queued "
+                    "as a fresh attempt", force=True, by="dispatcher", requeue=True,
+                    comment=comment)
+    if not got.get("ok"):
+        log.warning("Task %s: rework-cap requeue refused: %s", row["task_id"], got.get("error"))
+        return 0
+    conn.execute("UPDATE runs SET cap_requeues=COALESCE(cap_requeues, 0) + 1, "
+                 "requeue_addendum=? WHERE task_id=?", (addendum, row["task_id"]))
+    conn.commit()
+    log.warning("Task %s: rework cap reached — PR closed, re-queued as a fresh attempt",
+                row["task_id"])
+    return 1
+
+
 def _escalate(conn: sqlite3.Connection, row: sqlite3.Row, reason: str, *,
               recommendation: str = "", options: list[str] | None = None) -> None:
     """Stop the loop and hand the run to a human — keeping EVERYTHING.
@@ -8390,7 +8516,7 @@ def _respawn_rework(
         "UPDATE runs SET status='running', rework_count=?, started_at=?, ended_at=NULL, "
         "last_error=NULL, idle_nudged_at=NULL, window_id=NULL, window_epoch=NULL, "
         "parked_at=NULL, parked_reason=NULL, parked_until=NULL, parked_by=NULL, "
-        "worktree_path=?, review_reworks=? "
+        "idle_clock_at=NULL, worktree_path=?, review_reworks=? "
         "WHERE task_id=?",
         (rework_round, _now(), str(worktree), review_round, task_id),
     )

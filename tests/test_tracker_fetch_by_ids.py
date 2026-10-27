@@ -1081,7 +1081,9 @@ def _ev_rework_cap_spent():
     def check(summary, killed, spies, wt):
         assert _run_of(TID)["status"] == "needs_human"
         assert summary["escalated"] >= 1
-    return dict(seed=dict(rework_count=99, pr_url=PR_URL, pr_state="open"), check=check)
+    return dict(seed=dict(rework_count=99, pr_url=PR_URL, pr_state="open",
+                              cap_requeues=1),  # CMX-290: past its one requeue
+                check=check)
 
 
 def _ev_rework_respawn():
