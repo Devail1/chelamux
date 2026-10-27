@@ -49,7 +49,7 @@ class FakeThread:
         return {"viewer": {"id": VIEWER}, "issue": {
             "identifier": "CMX-7", "title": "the title", "description": "the brief",
             "url": "https://linear.app/x/issue/CMX-7",
-            "comments": {"nodes": self.comments, "pageInfo": {"hasNextPage": self.more}}}}
+            "comments": {"nodes": self.comments, "pageInfo": {"hasPreviousPage": self.more}}}}
 
 
 def _workflow(tmp_path: Path, extra: str = "") -> Path:
@@ -92,8 +92,8 @@ def test_only_the_viewers_comments_are_shown_and_the_dropped_count_is_stated(tmp
     assert fake.calls == [(linear.ISSUE_THREAD_QUERY, {"id": "CMX-7"})]
 
 
-@pytest.mark.parametrize("entry", ["user-other", "Alice", "ALICE@EXAMPLE.COM"])
-def test_the_workflow_allowlist_admits_a_user_by_id_name_or_email(tmp_path, entry):
+@pytest.mark.parametrize("entry", ["user-other", "ALICE@EXAMPLE.COM"])
+def test_the_workflow_allowlist_admits_a_user_by_id_or_email(tmp_path, entry):
     fake = FakeThread([comment("ALLOWED-TEXT", "user-other", "2026-10-20T11:00Z",
                                name="alice", email="alice@example.com")])
     code, text = _show(tmp_path, fake, extra=f"linear:\n  comment_authors: ['{entry}']\n")
@@ -153,9 +153,28 @@ def test_one_short_of_a_page_is_not_truncated(tmp_path):
     assert "TRUNCATED" not in _show(tmp_path, FakeThread(comments))[1]
 
 
-def test_the_page_size_is_100():
+def test_the_page_is_the_newest_100():
     assert linear.COMMENT_PAGE_SIZE == 100
-    assert "comments(first: 100)" in linear.ISSUE_THREAD_QUERY
+    assert "comments(last: 100, orderBy: createdAt)" in linear.ISSUE_THREAD_QUERY
+    assert "hasPreviousPage" in linear.ISSUE_THREAD_QUERY
+
+
+@pytest.mark.parametrize("entry", ["alice", "Alice Display"])
+def test_a_name_in_the_allowlist_admits_nobody(tmp_path, entry):
+    """Any member can rename themselves; only an id or an email is an identity."""
+    fake = FakeThread([comment("IMPOSTOR", "user-other", "2026-10-20T11:00Z",
+                               name="alice", email="alice@example.com")])
+    fake.comments[0]["user"]["displayName"] = "Alice Display"
+    _, text = _show(tmp_path, fake, extra=f"linear:\n  comment_authors: ['{entry}']\n")
+    assert "IMPOSTOR" not in text and "(1 comment(s) dropped:" in text
+
+
+def test_a_lowercase_id_finds_the_run(tmp_path):
+    fake = FakeThread([comment("STEER", VIEWER, "2026-10-20T00:00Z")])
+    path = _workflow(tmp_path)
+    _run(tmp_path, "CMX-7")
+    code, text = task_show.show("cmx-7", source=LinearSource(load_workflow(path), transport=fake))
+    assert code == 0 and "STEER" in text and fake.calls[0][1] == {"id": "CMX-7"}
 
 
 def test_a_non_linear_tracker_exits_nonzero(tmp_path):

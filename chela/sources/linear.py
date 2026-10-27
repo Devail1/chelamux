@@ -339,9 +339,9 @@ query IssueThread($id: String!) {
   viewer { id }
   issue(id: $id) {
     identifier title description url
-    comments(first: %d) {
+    comments(last: %d, orderBy: createdAt) {
       nodes { body createdAt user { id name displayName email } botActor { id } }
-      pageInfo { hasNextPage }
+      pageInfo { hasPreviousPage }
     }
   }
 }
@@ -1015,11 +1015,12 @@ class LinearSource:
     def issue_thread(self, task_id: str, trusted: frozenset[str] = frozenset()) -> dict:
         """🧵 CMX-287 — one issue of this team, read FRESH: ``{"identifier", "title",
         "description", "url", "comments", "dropped", "truncated"}``. ``comments`` holds only
-        those written by the key's own user (``viewer``) or a user ``trusted`` names (id,
-        name, display name or email, any case), oldest first; never one a bot or integration
-        posted. ``dropped`` counts the rest; ``truncated`` is True when the page came back
-        full. Raises :class:`LinearError` on any failed read or a missing issue — unknown
-        never reads as an empty thread."""
+        those written by the key's own user (``viewer``) or a user ``trusted`` names (user
+        id or email, any case — never a name, which any member can change), oldest first;
+        never one a bot or integration posted. ``dropped`` counts the rest. The page is the
+        NEWEST comments (``last``), so a truncated read loses the oldest, never the latest
+        steer; ``truncated`` is True when it came back full.
+        Raises :class:`LinearError` on any failed read or a missing issue — unknown never reads as an empty thread."""
         if self._number_of(task_id) is None:
             raise LinearError("config", f"{task_id!r} is not an issue of team {self.team}")
         data = self._call(ISSUE_THREAD_QUERY, {"id": str(task_id).strip().upper()}, cache=False)
@@ -1034,14 +1035,14 @@ class LinearSource:
             user = c.get("user") if isinstance(c, dict) else None
             if not isinstance(user, dict) or c.get("botActor"):
                 continue
-            names = {str(user.get(k) or "").lower() for k in ("id", "name", "displayName", "email")}
+            names = {str(user.get(k) or "").lower() for k in ("id", "email")}
             if user.get("id") == viewer or names & allowed:
                 kept.append(c)
         kept.sort(key=lambda c: str(c.get("createdAt") or ""))
         return {"identifier": node.get("identifier") or task_id, "title": node.get("title") or "",
                 "description": node.get("description") or "", "url": node.get("url") or "",
                 "comments": kept, "dropped": len(raw) - len(kept),
-                "truncated": bool((conn.get("pageInfo") or {}).get("hasNextPage"))
+                "truncated": bool((conn.get("pageInfo") or {}).get("hasPreviousPage"))
                 or len(raw) >= COMMENT_PAGE_SIZE}
 
     def superseding_issue(self, reason: str, own_id: str) -> str | None:

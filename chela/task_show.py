@@ -56,7 +56,7 @@ def render(thread: dict) -> str:
 
 def show(task_id: str | None, *, cwd: Path | None = None, wid: str | None = None,
          source=None) -> tuple[int, str]:
-    """``(exit code, text)`` for ``chela task show``. Never raises."""
+    """``(exit code, text)`` for ``chela task show``; every failed read is exit 1."""
     from chela import dispatcher
     from chela.sources.linear import LinearError, LinearSource
     from chela.workflow import load_workflow
@@ -65,15 +65,16 @@ def show(task_id: str | None, *, cwd: Path | None = None, wid: str | None = None
         with dispatcher._db() as conn:
             if not task_id:
                 task_id = own_task_id(conn, cwd or Path.cwd(), wid or os.environ.get("CHELA_WID"))
-            row = conn.execute("SELECT workflow_path FROM runs WHERE task_id=?",
-                               (task_id,)).fetchone() if task_id else None
-    except sqlite3.Error as e:
+            row = conn.execute("SELECT task_id, workflow_path FROM runs WHERE task_id=? "
+                               "COLLATE NOCASE", (task_id.strip(),)).fetchone() if task_id else None
+    except (sqlite3.Error, OSError) as e:
         return 1, f"task show: could not read the runs table: {e}"
     if not task_id:
         return 1, ("task show: no run owns this directory or $CHELA_WID — pass the task id "
                    "(`chela task show CMX-N`).")
     if row is None:
         return 1, f"task show: no run {task_id}."
+    task_id = row["task_id"]
     try:
         wf = load_workflow(row["workflow_path"])
     except Exception as e:                   # an unreadable workflow is a failed read too
