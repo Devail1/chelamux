@@ -5,3 +5,5 @@
   wordmark and the hero copy say chelamux; the command-line tool is still `chela`, and
   absolute `chela.pages.dev` links now point to `https://chelamux.com`. The package name,
   CLI entry point, `~/.chela` and `CHELA_*` settings are unchanged. (CMX-361)
+- **The landing site serves a `robots.txt` and a `sitemap.xml`** for chelamux.com, so
+  `/robots.txt` no longer falls back to the home page. (CMX-361)
