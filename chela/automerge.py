@@ -79,8 +79,9 @@ def candidates() -> list[dict]:
 
 def _dispatched(run: dict) -> bool:
     """CMX-348: a run of a keeper-only workflow (``dispatch: false``, on its last good
-    parse) is never auto-merged. One that has never parsed is left to ``contract.merge``,
-    which reads the workflow itself and refuses on its own terms."""
+    parse) is never auto-merged. A run whose workflow has never parsed keeps the behaviour
+    it had before CMX-348: this filter does not decide it, ``contract.merge``'s own checks
+    do (none of them reads ``dispatch``)."""
     path = run.get("workflow_path")
     wf = load_workflow_cached(path).workflow if path else None
     return wf is None or dispatch_enabled(wf)

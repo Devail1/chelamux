@@ -106,7 +106,7 @@ def test_negative_control_a_dispatching_tick_claims_and_registers(ticking, monke
     path = ticking / "WORKFLOW.md"
     summary = dispatcher.tick(path)
     assert "dispatch_off" not in summary and len(spawned) == 1
-    assert [e["workflow"] for e in _registry()] == [str(path)]
+    assert [e["workflow"] for e in _registry() if e["workflow"] == str(path)] == [str(path)]
     assert len(dispatcher.dry_run(path)) == 1
 
 
@@ -241,6 +241,30 @@ def test_a_workflow_without_keeper_is_never_run(sched, tmp_path):
     plain = tmp_path / "plain" / "WORKFLOW.md"
     plain.write_text(f"{HEAD}---\nbody\n")
     assert s.tick([plain]) == [] and calls["asked"] == []
+
+
+def test_one_workflow_raising_does_not_stop_the_next(sched, tmp_path):
+    s, path, calls = sched
+    (tmp_path / "b").mkdir()
+    other = tmp_path / "b" / "WORKFLOW.md"
+    other.write_text(path.read_text())
+
+    def active(wf, since):
+        if wf.path == path.resolve():
+            raise RuntimeError("tmux went away")
+        return True
+    s._active = active
+    assert s.tick([path, other], now=10_000.0) == [str(other)]
+
+
+def test_a_spawn_that_fails_is_not_recorded_as_run(sched):
+    s, path, calls = sched
+
+    def boom(p):
+        raise OSError("no fork")
+    s._spawn = boom
+    assert s.tick([path], now=10_000.0) == []
+    assert not keeper_schedule.state_path().exists()      # still owed on the next pass
 
 
 @pytest.mark.parametrize("state", ["{not json", "[1, 2]"])

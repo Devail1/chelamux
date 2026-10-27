@@ -82,6 +82,10 @@ def spawn(wf_path: Path) -> subprocess.Popen:
                                 close_fds=True)
 
 
+class _Unreadable(Exception):
+    """The schedule state cannot be read: run nothing anywhere this pass."""
+
+
 class Scheduler:
     """The daemon loop's keeper half. One instance per daemon; ``tick`` once per pass."""
 
@@ -97,34 +101,45 @@ class Scheduler:
             return []
         started = []
         for wf_path in workflows:
-            key = str(wf_path)
-            wf = load_workflow_cached(wf_path).workflow
-            every = keeper_every_seconds(wf) if wf is not None else None
-            if every is None:
-                continue
-            child = self.children.get(key)
-            if child is not None and child.poll() is None:
-                continue
-            if now < self.next_check.get(key, 0.0):
-                continue
             try:
-                last = _read_state().get(key)
-            except ValueError as e:
+                if self._tick_one(wf_path, now):
+                    started.append(str(wf_path))
+            except _Unreadable as e:
                 log.warning("keeper schedule: %s — no keeper run until it is fixed", e)
                 return started
-            if last is not None and not isinstance(last, (int, float)):
-                log.warning("keeper schedule: %s holds %r for %s — not running it",
-                            state_path(), last, key)
-                continue
-            if last is not None and now - last < every:
-                continue
-            since = now - every if last is None else last
-            if not self._active(wf, since):
-                self.next_check[key] = now + ACTIVITY_RECHECK_SECONDS
-                continue
-            self.next_check.pop(key, None)
-            _mark_ran(key, now)
-            log.info("keeper: starting a run for %s", key)
-            self.children[key] = self._spawn(Path(wf_path))
-            started.append(key)
+            except Exception:                 # noqa: BLE001 — one workflow never stops the rest
+                log.exception("keeper schedule: %s failed this pass", wf_path)
         return started
+
+    def _tick_one(self, wf_path, now: float) -> bool:
+        key = str(wf_path)
+        wf = load_workflow_cached(wf_path).workflow
+        every = keeper_every_seconds(wf) if wf is not None else None
+        if every is None:
+            return False
+        child = self.children.get(key)
+        if child is not None and child.poll() is None:
+            return False
+        if now < self.next_check.get(key, 0.0):
+            return False
+        try:
+            last = _read_state().get(key)
+        except ValueError as e:
+            raise _Unreadable(str(e)) from e
+        if last is not None and not isinstance(last, (int, float)):
+            log.warning("keeper schedule: %s holds %r for %s — not running it",
+                        state_path(), last, key)
+            return False
+        if last is not None and now - last < every:
+            return False
+        since = now - every if last is None else last
+        if not self._active(wf, since):
+            self.next_check[key] = now + ACTIVITY_RECHECK_SECONDS
+            return False
+        self.next_check.pop(key, None)
+        log.info("keeper: starting a run for %s", key)
+        # Spawn first: a run that failed to start is not recorded as run. The child
+        # handle then guards a second start even if the state write fails.
+        self.children[key] = self._spawn(Path(wf_path))
+        _mark_ran(key, now)
+        return True
