@@ -59,7 +59,7 @@ import time
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
 
-from chela import generated, judge, suite_guard
+from chela import generated, judge, judge_select, suite_guard
 
 RECOVERY_MARKER = ".chela-sweep-recovery.json"
 PY_SUFFIXES = (".py",)
@@ -109,6 +109,12 @@ UNSUPPORTED_SUFFIXES = frozenset({
     ".bash",
 })
 SUPPORTED_NOTE = "only Python (and .js/.mjs/.ts/.tsx, line-based) is mutated"
+# ⚖️🧹 CMX-341: failing baseline tests a red-baseline message names (the rest are counted), and
+# how much of the red run's output is kept beside its JUnit report.
+NAMED_BASELINE_FAILURES = 5
+KEPT_OUTPUT_CHARS = 50_000
+KEPT_JUNIT = "baseline-junit.xml"
+KEPT_OUTPUT = "baseline-output.txt"
 
 # Verdicts, in the order they win. The exit code of `chela judge sweep` is EXIT_CODES[verdict].
 V_CLEAN, V_SURVIVORS, V_UNKNOWN = "clean", "survivors", "unknown"
@@ -202,6 +208,13 @@ class SweepReport:
     budget: SweepBudget = field(default_factory=SweepBudget)
     # Why the budget stopped the sweep ("" when every mutation was reached).
     exhausted: str = ""
+    # ⚖️🧹 CMX-341: a baseline that was not green on its first run — "<id> — <first line>" per
+    # failing test, the ids green on their isolated re-run (deselected from every mutation run),
+    # what that re-run said, and the directory its evidence was kept in.
+    baseline_failures: list[str] = field(default_factory=list)
+    baseline_flakes: list[str] = field(default_factory=list)
+    baseline_rerun: str = ""
+    kept: str = ""
 
     def _with(self, status: str) -> list[SweepResult]:
         return [r for r in self.results if r.status == status]
@@ -230,6 +243,9 @@ class SweepReport:
             "full_suite": [r.as_dict() for r in self.results if r.full_suite],
             "seconds": round(self.seconds, 1),
             "unsupported": list(self.unsupported), "base": self.base, "test_cmd": self.test_cmd,
+            "baseline_failures": list(self.baseline_failures),
+            "baseline_flakes": list(self.baseline_flakes),
+            "baseline_rerun": self.baseline_rerun, "kept": self.kept,
         }
         d["verdict"] = verdict(d)
         return d
@@ -927,11 +943,13 @@ def sweep(
     worktree: str | Path, base: str, test_cmd: str, *,
     timeout: float = judge.SUITE_TIMEOUT_SECONDS, select_tests: bool = True, progress=None,
     provision: bool = True, budget: SweepBudget | None = None,
-    lines: dict[str, set[int]] | None = None,
+    lines: dict[str, set[int]] | None = None, keep: Path | None = None,
 ) -> SweepReport:
     """``provision=False`` standalone: the repo's env is its owner's (no ``uv sync``).
     ``lines`` (CMX-303, the nightly sweep): mutate exactly these lines of the checkout instead
-    of the branch's diff vs ``base`` — ``base`` is then only the report's label."""
+    of the branch's diff vs ``base`` — ``base`` is then only the report's label.
+    ``keep`` (CMX-341): the directory a baseline that was not green on its first run leaves
+    its JUnit report and output tail in — they outlive the checkout."""
     worktree = Path(worktree).resolve()
     budget = budget if budget is not None else SweepBudget()
     started = _now()
@@ -939,7 +957,7 @@ def sweep(
     try:
         report = _sweep(worktree, base, test_cmd, timeout=timeout, select_tests=select_tests,
                         progress=progress, provision=provision, budget=budget,
-                        started=started, lines=lines)
+                        started=started, lines=lines, keep=keep)
     except _Interrupted as e:
         # The mutation's own `finally` has already restored the file by the time this runs.
         report = SweepReport(cannot_verify=f"interrupted by signal {e.args[0]} — the sweep "
@@ -954,7 +972,8 @@ def sweep(
 
 def _sweep(worktree: Path, base: str, test_cmd: str, *, timeout: float, select_tests: bool,
            progress, budget: SweepBudget, started: float,
-           provision: bool = True, lines: dict[str, set[int]] | None = None) -> SweepReport:
+           provision: bool = True, lines: dict[str, set[int]] | None = None,
+           keep: Path | None = None) -> SweepReport:
     report = SweepReport(budget=budget)
     report.recovered, err = recover(worktree)
     if err:
@@ -993,16 +1012,28 @@ def _sweep(worktree: Path, base: str, test_cmd: str, *, timeout: float, select_t
     if env_problem:
         report.cannot_verify = f"the worktree could not be PROVISIONED to run the suite: {env_problem}"
         return report
+    failures: list[judge.SuiteResult] = []
+    reruns: list[judge.SuiteResult] = []
     with tempfile.TemporaryDirectory(prefix="chela-sweep-select-") as scratch:
         baseline, selector, report.selection = judge.run_baseline(
-            worktree, test_cmd, timeout, Path(scratch), select_tests=select_tests)
+            worktree, test_cmd, timeout, Path(scratch), select_tests=select_tests,
+            failures=failures, flakes=report.baseline_flakes, reruns=reruns)
+        if not baseline.green or report.baseline_flakes:
+            _read_red_baseline(report, worktree, baseline, failures, reruns,
+                               Path(scratch) / KEPT_JUNIT, keep)
     if not baseline.green:
         why = baseline.detail or judge._last_meaningful_line(baseline.tail)
         report.cannot_verify = (
             f"the suite is NOT GREEN before any mutation (`{test_cmd}` exited "
-            f"{baseline.exit_code}{': ' + why if why else ''}) — a red baseline measures "
-            "nothing. Fix the suite first.")
+            f"{baseline.exit_code}{': ' + why if why else ''})"
+            f"{_failing_phrase(report)} — a red baseline measures nothing. Fix the suite first.")
         return report
+    if report.baseline_flakes:
+        # ⚖️🧹 CMX-341: one flaky test must not cost the battery, nor decide a mutation.
+        report.notes.append(f"baseline flake: {', '.join(report.baseline_flakes)} — red once, "
+                            "green alone; deselected from every mutation run")
+        test_cmd = judge_select.extend(
+            test_cmd, [a for node in report.baseline_flakes for a in ("--deselect", node)])
 
     muts = prioritise(muts)
     chosen = muts[:budget.max_mutations]
@@ -1033,6 +1064,58 @@ def _sweep(worktree: Path, base: str, test_cmd: str, *, timeout: float, select_t
         report.exhausted = report.exhausted or why
         _mark_unrun(report, muts[len(chosen):], why)
     return report
+
+
+def _read_red_baseline(report: SweepReport, worktree: Path, baseline, failures: list,
+                       reruns: list, junit: Path, keep: Path | None) -> None:
+    """⚖️🧹 CMX-341: a baseline not green on its first run, read while its JUnit report still
+    exists — WHICH tests failed (with the first line of each), what re-running them alone said,
+    and (with ``keep``) the report and the output tail copied where they outlive the checkout."""
+    red = baseline if not baseline.green else (failures[-1] if failures else baseline)
+    cases = judge_select.failed_cases(worktree, junit)
+    if cases:
+        report.baseline_failures = [f"{node} — {line}" if line else node for node, line in cases]
+    else:
+        report.baseline_failures = judge._failing_test_names(red.tail, limit=10 ** 6)
+    if report.baseline_flakes:
+        report.baseline_rerun = "green when re-run alone — a flake"
+    elif reruns:
+        report.baseline_rerun = "still red when re-run alone"
+    else:
+        named = judge._failing_test_names(red.tail) or [
+            node for node, _ in (cases or [])][:judge.MAX_NAMED_FAILURES]
+        skip = judge.rerun_skip_reason(red, named) if not red.timed_out else "it timed out"
+        report.baseline_rerun = ("not re-run alone: " + (
+            skip or "only one pytest invocation with `judge.select_tests` on is re-run"))
+    if keep is None:
+        return
+    try:
+        keep.mkdir(parents=True, exist_ok=True)
+        if junit.is_file():
+            shutil.copyfile(junit, keep / KEPT_JUNIT)
+        parts = [((red.run or {}).get("output") or red.tail)[-KEPT_OUTPUT_CHARS:]]
+        parts += [f"\n=== re-run alone: {(r.run or {}).get('cmd', '')} ===\n"
+                  + ((r.run or {}).get("output") or r.tail)[-KEPT_OUTPUT_CHARS:] for r in reruns]
+        (keep / KEPT_OUTPUT).write_text("".join(parts), encoding="utf-8")
+    except OSError as e:
+        report.notes.append(f"the red baseline's evidence could NOT be kept in {keep}: {e}")
+        return
+    report.kept = str(keep)
+
+
+def _failing_phrase(report: SweepReport) -> str:
+    """`` — N failing: <id> — <first line>; …`` for a red-baseline message, or ``""``."""
+    named = report.baseline_failures
+    out = ""
+    if named:
+        more = len(named) - NAMED_BASELINE_FAILURES
+        out = (f" — {len(named)} failing: {'; '.join(named[:NAMED_BASELINE_FAILURES])}"
+               + (f" (+{more} more)" if more > 0 else ""))
+    if report.baseline_rerun:
+        out += f" — {report.baseline_rerun}"
+    if report.kept:
+        out += f" — JUnit + output kept in {report.kept}"
+    return out
 
 
 def _mark_unrun(report: SweepReport, muts: list[Mutation], why: str) -> None:

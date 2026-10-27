@@ -41,6 +41,11 @@ every same-shape site; slice 3/3 (CMX-305) files them in the tracker and tells t
   have filed.
 * **Told.** ONE inbox notice per run (:func:`summary`): what was filed, clean, or skipped and
   why, and the UNRUN / UNKNOWN counts. A run that filed nothing says so in that line.
+* **A red baseline** (CMX-341) names every failing test (the first few, plus a count) with the
+  first line of each, and keeps its JUnit report and output tail in
+  ``$CHELA_DIR/sweep-nightly/<date>/<project>/`` (the newest :data:`KEEP_DAYS` dates) — the
+  checkout is gone by morning. Its failing tests are re-run ONCE alone: green there is a
+  ``baseline flake``, deselected from every mutation run, and the battery goes on.
 * **Skipped** while a fleet pause (``chela dispatch --pause --all``) is active.
 """
 from __future__ import annotations
@@ -76,6 +81,7 @@ STATE_DIR_NAME = "sweep-nightly"
 FLEET_PAUSE_FILE = "fleet-pause.json"      # chela.fleet.STATE_FILE_NAME (CMX-214)
 GIT_TIMEOUT = 120
 EMPTY_TREE = "4b825dc642cb6eb9a060e54bf8d69288fbee4904"
+KEEP_DAYS = 14            # dated red-baseline evidence dirs kept; older ones are pruned
 
 SURVIVORS, CLEAN, SKIPPED, CANNOT_VERIFY = "survivors", "clean", "skipped", "cannot_verify"
 # No survivor, but not clean either: the budget left mutations UNRUN, or a merged file is not
@@ -84,6 +90,7 @@ UNRUN, UNKNOWN = "unrun", "unknown"
 
 _RE_AT = re.compile(r"^([01]?\d|2[0-3]):([0-5]\d)$")
 _RE_BLAME = re.compile(r"^([0-9a-f]{40}) \d+ (\d+)(?: \d+)?\Z")
+_RE_DAY = re.compile(r"^\d{4}-\d{2}-\d{2}\Z")
 
 
 class _Git(Exception):
@@ -165,6 +172,33 @@ def mark_started(wf, now: datetime, chela_dir: Path | None = None) -> None:
         last = {}
     last[str(wf.path)] = now.date().isoformat()
     _write_json(path, last)
+
+
+def evidence_dir(wf, now: float, chela_dir: Path | None = None) -> Path:
+    """Where tonight's red-baseline evidence for ``wf`` goes: ``<state>/<date>/<project>``."""
+    day = datetime.fromtimestamp(now).date().isoformat()
+    return state_dir(chela_dir) / day / (Path(wf.path).parent.name or "workflow")
+
+
+def prune_evidence(chela_dir: Path | None = None, keep: int = KEEP_DAYS) -> list[str]:
+    """Remove all but the newest ``keep`` dated evidence dirs; returns what went. A dir that
+    cannot be removed is logged and left — pruning never fails a night."""
+    import shutil
+
+    try:
+        days = sorted((d for d in state_dir(chela_dir).iterdir()
+                       if d.is_dir() and _RE_DAY.match(d.name)), key=lambda d: d.name)
+    except OSError:
+        return []
+    gone = []
+    for d in days[:max(len(days) - keep, 0)]:
+        try:
+            shutil.rmtree(d)
+        except OSError as e:
+            log.warning("nightly sweep: could not prune %s: %s", d, e)
+            continue
+        gone.append(d.name)
+    return gone
 
 
 def _covered_path(chela_dir: Path | None) -> Path:
@@ -606,10 +640,14 @@ def _sweep_and_file(wf, worktree: Path, head: str, ref: str, standard: list[dict
     report = sweep.sweep(worktree, f"{ref}@{head[:12]} (standard-tier lines)",
                          cfg.test_cmd, timeout=cfg.suite_timeout_seconds,
                          select_tests=cfg.select_tests, provision=False, budget=budget,
-                         lines=lines)
+                         lines=lines, keep=evidence_dir(wf, result["at"], chela_dir))
+    prune_evidence(chela_dir)
     unrun = [r.mutation.key for r in report._with(sweep.UNRUN)]
     result.update(mutations=len(report.results), unrun=len(unrun),
-                  unrun_sites=sorted(set(unrun)), unsupported=list(report.unsupported))
+                  unrun_sites=sorted(set(unrun)), unsupported=list(report.unsupported),
+                  baseline_failures=list(report.baseline_failures),
+                  baseline_flakes=list(report.baseline_flakes),
+                  baseline_rerun=report.baseline_rerun, kept=report.kept)
     if report.cannot_verify:
         result.update(status=CANNOT_VERIFY, why=report.cannot_verify)
         return
@@ -713,6 +751,10 @@ def summary(result: dict) -> str:
                  f"mutation(s), {result.get('unrun', 0)} UNRUN")
         if result.get("unsupported"):
             line += f", {len(result['unsupported'])} file(s) UNKNOWN (no mutator)"
+    if result.get("baseline_flakes"):
+        line += (f" — ⚠️ baseline flake: {', '.join(result['baseline_flakes'])} (red once, green "
+                 "alone; deselected from the battery)"
+                 + (f" — evidence in {result['kept']}" if result.get("kept") else ""))
     if result["warnings"]:
         line += f" — ⚠️ {len(result['warnings'])} warning(s): {result['warnings'][0]}"
     return line
