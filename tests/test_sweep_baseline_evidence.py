@@ -170,6 +170,16 @@ def test_the_kept_output_is_the_runs_output_tail_then_each_re_run(tmp_path):
     assert report.kept == str(keep)
 
 
+def test_a_run_without_a_report_drops_an_earlier_runs_report_from_the_same_dir(tmp_path):
+    keep = tmp_path / "keep"
+    keep.mkdir()
+    (keep / "baseline-junit.xml").write_text("<stale/>")
+    sweep._read_red_baseline(sweep.SweepReport(), tmp_path, _red(output="now"), [], [],
+                             tmp_path / "no.xml", keep)
+    assert not (keep / "baseline-junit.xml").exists()
+    assert (keep / "baseline-output.txt").read_text() == "now"
+
+
 def test_evidence_that_cannot_be_kept_is_said_and_never_claimed(tmp_path):
     blocker = tmp_path / "file"
     blocker.write_text("")

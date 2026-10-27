@@ -1093,6 +1093,8 @@ def _read_red_baseline(report: SweepReport, worktree: Path, baseline, failures: 
         keep.mkdir(parents=True, exist_ok=True)
         if junit.is_file():
             shutil.copyfile(junit, keep / KEPT_JUNIT)
+        else:       # an earlier run's report that day is not this run's evidence
+            (keep / KEPT_JUNIT).unlink(missing_ok=True)
         parts = [((red.run or {}).get("output") or red.tail)[-KEPT_OUTPUT_CHARS:]]
         parts += [f"\n=== re-run alone: {(r.run or {}).get('cmd', '')} ===\n"
                   + ((r.run or {}).get("output") or r.tail)[-KEPT_OUTPUT_CHARS:] for r in reruns]

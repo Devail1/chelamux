@@ -57,6 +57,7 @@ import logging
 import os
 import re
 import shlex
+import shutil
 import subprocess
 import sys
 import time
@@ -183,8 +184,6 @@ def evidence_dir(wf, now: float, chela_dir: Path | None = None) -> Path:
 def prune_evidence(chela_dir: Path | None = None, keep: int = KEEP_DAYS) -> list[str]:
     """Remove all but the newest ``keep`` dated evidence dirs; returns what went. A dir that
     cannot be removed is logged and left — pruning never fails a night."""
-    import shutil
-
     try:
         days = sorted((d for d in state_dir(chela_dir).iterdir()
                        if d.is_dir() and _RE_DAY.match(d.name)), key=lambda d: d.name)
@@ -634,6 +633,7 @@ def _sweep_and_file(wf, worktree: Path, head: str, ref: str, standard: list[dict
         result.update(status=CANNOT_VERIFY,
                       why=f"the nightly worktree could not be PROVISIONED: {env_problem}")
         return
+    prune_evidence(chela_dir)
     cfg = judge.judge_suite_config(wf)
     budget = sweep.resolve_budget(wf, seconds=wf.get("sweep", "budget_seconds"),
                                   max_mutations=wf.get("sweep", "max_mutations"))
@@ -641,7 +641,6 @@ def _sweep_and_file(wf, worktree: Path, head: str, ref: str, standard: list[dict
                          cfg.test_cmd, timeout=cfg.suite_timeout_seconds,
                          select_tests=cfg.select_tests, provision=False, budget=budget,
                          lines=lines, keep=evidence_dir(wf, result["at"], chela_dir))
-    prune_evidence(chela_dir)
     unrun = [r.mutation.key for r in report._with(sweep.UNRUN)]
     result.update(mutations=len(report.results), unrun=len(unrun),
                   unrun_sites=sorted(set(unrun)), unsupported=list(report.unsupported),
