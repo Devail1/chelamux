@@ -10,6 +10,65 @@ history lives in `git log`.
 
 ## [Unreleased]
 
+## [0.18.1] — 2026-10-27
+
+### Added
+
+- **`chela keeper digest <WORKFLOW.md>` prints what happened in a workflow's repo since the
+  last digest.** For each live session launched in the repo or one of its worktrees it lists
+  the window, its live session id, busy/idle, the latest recap, the prompts typed and the
+  files edited. It also lists the commits on any branch, the PRs opened or merged, the issue
+  ids mentioned anywhere, and every open issue on the workflow's tracker. It uses no LLM and
+  never writes to the tracker. Each section is capped and says how many rows it dropped. A
+  git, `gh` or tracker read that fails is shown as unreadable, never as empty. A cursor in
+  `$CHELA_DIR/keeper/` makes the next run start where this one ended; `--since 90m`
+  overrides it, and `--json` is the input for the next keeper slice. (CMX-346)
+
+- **An agent's own pytest run is memory-capped per test process.** A suite started by
+  `chela task-finished` or the judge runs in a memory-capped `chela-suite-*` scope; an
+  agent's own `pytest` did not, and one runaway xdist worker reached 11 GB and got other
+  agents' suites reaped. `tests/conftest.py` now sets a soft `RLIMIT_AS` of 3 GiB on each
+  process that runs tests, unless a `chela-suite-*` or `memcap` cgroup already caps it, so
+  a runaway test fails with `MemoryError` in its own worker. Subprocesses (node, vitest,
+  Chromium) are exempt. `CHELA_TEST_MEMORY_CAP=6G` raises it; `0` turns it off. The
+  standing rules now say never to run a full suite yourself. (CMX-354)
+
+- Tests no longer inherit the live `CHELA_*` environment (e.g. `CHELA_AUTO_MERGE=true` from chela.env), which turned every nightly-sweep and agent-sweep baseline red (CMX-355).
+
+### Changed
+
+- **A blocking verdict lists every same-shape site, not only the one the judge named.** Each
+  surviving mutation is grouped by its shape (a dropped or swapped call, a flipped comparison,
+  or the exact line) and its target symbol, and the verdict lists every line of the PR's diff
+  with that shape, found from the diff rather than recalled by the model. The rework is asked
+  to fix the whole group and to corrupt each site by hand before hand-in. Held-out survivors
+  are never grouped or named. (CMX-335)
+
+### Fixed
+
+- **A Telegram photo is no longer reported "not submitted" when the agent got it.** The
+  bridge now confirms the submit from the agent's own `UserPromptSubmit` hook, which fires
+  when Claude Code takes the turn; the pane read is only the fallback. When neither confirms
+  it, the reply says the submit is unconfirmed and asks you to check `/screenshot` before
+  pressing Enter, since an Enter on an already-submitted prompt sends an empty or duplicate
+  turn. (CMX-344)
+
+- **The frontend gate test no longer runs the whole Vitest suite a second time.**
+  `test_each_ci_gate_passes_the_committed_tree[test]` was `vitest run` again, beside
+  `test_frontend_vitest_suite`, with a 180 s budget; it timed out twice in CI while xdist
+  shared the runner. That case is gone, and the remaining full Vitest run over the fixture
+  copy gets the 300 s budget the main suite already had (the suite's measured p95 is 112 s
+  on an idle runner). (CMX-352)
+
+- **`chela ops scan` no longer reports a live suite's test PM2 daemon as leaked.** It
+  decided liveness by matching `PM2_HOME` in other processes' `/proc` environ, which an
+  xdist worker never shows (conftest sets it after start-up), so a running suite's daemon
+  was flagged, killed, and the suite hung to its timeout. A `/tmp/chela-tests-pm2-*` God
+  Daemon is now spared while any suite of its run is live: a process in its
+  `chela-suite-*` scope, one of the run's worktree in such a scope, or a test run of that
+  worktree. Once no suite is live it is reported only on its second scan in a row, and the
+  finding says "do not kill while a suite runs". (CMX-353)
+
 ## [0.18.0] — 2026-10-26
 
 ### Added
