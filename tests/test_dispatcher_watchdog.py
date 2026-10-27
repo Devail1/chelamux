@@ -388,3 +388,219 @@ def test_capture_pane_ansi_adds_dash_e(monkeypatch):
     assert "-e" in run.call_args.args[0]
     dispatcher._capture_pane("cmx-1")
     assert "-e" not in run.call_args.args[0]
+
+
+# ---- ⏸️ CMX-339: a parked run is idle on purpose ----------------------------
+#
+# 2026-10-25: CMX-318's park shielded a run from the inbox's stuck notice, but not from
+# this watchdog — an agent parked and told to wait was re-nudged, then failed "idle at
+# empty prompt after re-nudge" about an hour later.
+
+def _row(task_id: str) -> dict:
+    with dispatcher._db() as conn:
+        return dict(conn.execute("SELECT * FROM runs WHERE task_id=?", (task_id,)).fetchone())
+
+
+def _set(task_id: str, **cols) -> None:
+    with dispatcher._db() as conn:
+        conn.execute(
+            "UPDATE runs SET " + ", ".join(f"{k}=?" for k in cols) + " WHERE task_id=?",
+            (*cols.values(), task_id),
+        )
+        conn.commit()
+
+
+@pytest.fixture
+def idle_pane(monkeypatch):
+    """A bare empty prompt, affirmatively idle; every re-sent seed recorded."""
+    monkeypatch.setattr(dispatcher, "_capture_pane", lambda w, **_: _BARE_IDLE)
+    monkeypatch.setattr(dispatcher, "_agent_status", lambda w, **_: "idle")
+    monkeypatch.setattr("chela.suite_guard.waits_in", lambda wt: None)
+    seeds = []
+    monkeypatch.setattr(dispatcher, "_send_seed", lambda *a, **kw: seeds.append(a) or True)
+    return seeds
+
+
+def test_parked_run_idle_past_the_fail_step_is_neither_failed_nor_nudged(ticking, idle_pane):
+    """The 10-25 incident: parked, nudged an hour ago, affirmatively idle — the exact state
+    that failed CMX-334. Drop the park check → failed → RED."""
+    task_id = _seed_running(ticking, nudged=_OLD)
+    assert dispatcher.park_run(task_id, reason="wait for the other run", by="orch")["ok"]
+
+    summary = dispatcher.tick(ticking / "WORKFLOW.md")
+
+    assert summary["reconciled_failed"] == 0
+    assert summary["watchdog_renudged"] == 0
+    assert summary["watchdog_parked"] == 1
+    assert idle_pane == []
+    row = _row(task_id)
+    assert row["status"] == "running"
+    assert row["idle_nudged_at"] is None       # the stale nudge is dropped
+    assert row["idle_clock_at"] is not None    # the idle clock restarts here
+
+
+def test_parked_run_at_the_first_nudge_step_is_not_nudged(ticking, idle_pane):
+    """A parked agent is never nudged back toward its task (the 18:23 re-send)."""
+    task_id = _seed_running(ticking, nudged=None)
+    assert dispatcher.park_run(task_id, reason="hold", by="orch")["ok"]
+
+    summary = dispatcher.tick(ticking / "WORKFLOW.md")
+
+    assert summary["watchdog_renudged"] == 0
+    assert idle_pane == []
+    assert _row(task_id)["idle_nudged_at"] is None
+
+
+def test_parked_run_on_an_input_dialog_is_not_escaped(ticking, monkeypatch):
+    """The whole watchdog stands down for a parked run, the dialog arm included."""
+    task_id = _seed_running(ticking, nudged=None)
+    assert dispatcher.park_run(task_id, reason="hold", by="orch")["ok"]
+    monkeypatch.setattr(dispatcher, "_capture_pane", lambda w, **_: _QUESTION)
+    monkeypatch.setattr(dispatcher, "_agent_status", lambda w, **_: "waiting")
+    escaped = []
+    monkeypatch.setattr(dispatcher, "_dismiss_input_block", escaped.append)
+
+    summary = dispatcher.tick(ticking / "WORKFLOW.md")
+
+    assert summary["watchdog_unblocked"] == 0
+    assert escaped == []
+
+
+def test_after_unpark_the_full_idle_budget_applies_again(ticking, idle_pane):
+    """Unparked: no instant nudge measured from `started_at` (an hour ago) — the clock runs
+    from the last parked tick. Once that clock is a full window old the watchdog nudges, and
+    a full window after the nudge it fails, exactly as for an agent never parked."""
+    task_id = _seed_running(ticking, nudged=_OLD)
+    assert dispatcher.park_run(task_id, reason="hold", by="orch")["ok"]
+    dispatcher.tick(ticking / "WORKFLOW.md")
+    assert dispatcher.unpark_run(task_id, by="orch")["ok"]
+
+    summary = dispatcher.tick(ticking / "WORKFLOW.md")
+    assert summary["watchdog_renudged"] == 0
+    assert summary["reconciled_failed"] == 0
+    assert idle_pane == []
+
+    _set(task_id, idle_clock_at=_OLD)          # a full idle window has passed since
+    summary = dispatcher.tick(ticking / "WORKFLOW.md")
+    assert summary["watchdog_renudged"] == 1
+    assert summary["reconciled_failed"] == 0
+    assert len(idle_pane) == 1
+
+    _set(task_id, idle_nudged_at=_OLD)         # …and a full window since the nudge
+    summary = dispatcher.tick(ticking / "WORKFLOW.md")
+    assert summary["reconciled_failed"] == 1
+    assert _status_of(task_id)[0] == "failed"
+
+
+def test_unpark_clock_inside_the_window_holds_the_nudge(ticking, idle_pane):
+    """The idle clock is a real lower bound, not just "was ever parked": stamped 4 minutes
+    ago (inside the 5-minute window) it still holds the nudge."""
+    task_id = _seed_running(ticking, nudged=None)
+    recent = (datetime.now(timezone.utc) - timedelta(minutes=4)).isoformat()
+    _set(task_id, idle_clock_at=recent)
+
+    summary = dispatcher.tick(ticking / "WORKFLOW.md")
+
+    assert summary["watchdog_renudged"] == 0
+    assert idle_pane == []
+
+
+def _past(**kw) -> str:
+    return (datetime.now(timezone.utc) - timedelta(**kw)).isoformat()
+
+
+def _future(**kw) -> str:
+    return (datetime.now(timezone.utc) + timedelta(**kw)).isoformat()
+
+
+@pytest.mark.parametrize(
+    "until, other_status, max_s, shielded",
+    [
+        (None, None, None, True),                       # no --until, inside the max
+        ("FUTURE", None, None, True),                   # --until not reached yet
+        ("PAST", None, None, False),                    # --until reached ⇒ the park ended
+        ("run:CMX-OTHER", "running", None, True),       # its run is still going
+        ("run:CMX-OTHER", "done", None, False),         # its run ended ⇒ the park ended
+        ("run:CMX-OTHER", None, None, False),           # unknown run ⇒ never trusted
+        (None, None, "60", False),                      # past the park max
+    ],
+)
+def test_a_park_shields_only_until_it_ends(ticking, idle_pane, monkeypatch,
+                                           until, other_status, max_s, shielded):
+    """`--until` reached (a time, or its `run:<ID>` ended) or the park max outlived: the park
+    no longer holds the watchdog off — the same rule that ends its stuck-notice shield."""
+    task_id = _seed_running(ticking, nudged=_OLD)
+    if max_s:
+        monkeypatch.setenv("CHELA_PARK_MAX_S", max_s)
+    if other_status:
+        with dispatcher._db() as conn:
+            conn.execute(
+                "INSERT INTO runs (task_id, workflow_path, title, status, started_at, attempt) "
+                "VALUES ('CMX-OTHER', 'elsewhere/WORKFLOW.md', 'other', ?, ?, 1)",
+                (other_status, _OLD))
+            conn.commit()
+    stored = {"FUTURE": _future(hours=1), "PAST": _past(minutes=1)}.get(until, until)
+    _set(task_id, parked_at=_past(minutes=10), parked_reason="hold", parked_until=stored,
+         parked_by="orch")
+
+    summary = dispatcher.tick(ticking / "WORKFLOW.md")
+
+    assert (_status_of(task_id)[0] == "running") is shielded
+    assert summary["watchdog_parked"] == (1 if shielded else 0)
+
+
+@pytest.mark.parametrize("worktree", ["wt", None])
+def test_a_suite_slot_wait_parks_the_run(ticking, idle_pane, monkeypatch, tmp_path, worktree):
+    """The automatic park: an open suite-slot wait in the run's worktree holds the watchdog
+    off; no wait (or no worktree to look in) ⇒ the run fails as usual."""
+    task_id = _seed_running(ticking, nudged=_OLD)
+    wt = str(tmp_path / "wt") if worktree else None
+    _set(task_id, worktree_path=wt)
+    asked = []
+
+    def waits_in(path):
+        asked.append(path)
+        return {"waiting_since": 1.0, "waited": 0.0}
+    monkeypatch.setattr("chela.suite_guard.waits_in", waits_in)
+
+    summary = dispatcher.tick(ticking / "WORKFLOW.md")
+
+    if worktree:
+        assert asked == [wt]
+        assert summary["watchdog_parked"] == 1
+        assert summary["reconciled_failed"] == 0
+        assert _status_of(task_id)[0] == "running"
+    else:
+        assert asked == []
+        assert summary["reconciled_failed"] == 1
+
+
+def test_a_closed_suite_slot_wait_does_not_park(ticking, idle_pane, monkeypatch, tmp_path):
+    """A ledger record with no open wait (`waiting_since` None: it holds the slot now, or
+    waited earlier) is not a park."""
+    task_id = _seed_running(ticking, nudged=_OLD)
+    _set(task_id, worktree_path=str(tmp_path / "wt"))
+    monkeypatch.setattr("chela.suite_guard.waits_in",
+                        lambda wt: {"waiting_since": None, "waited": 30.0})
+
+    summary = dispatcher.tick(ticking / "WORKFLOW.md")
+
+    assert summary["reconciled_failed"] == 1
+
+
+def test_unpark_restarts_the_idle_clock_even_for_a_park_no_tick_saw(ticking, idle_pane):
+    """Parked and unparked between two ticks: no parked tick stamped the clock, so
+    `unpark_run` must — else the next tick measures from `started_at` (an hour ago) and
+    fails the agent at once."""
+    task_id = _seed_running(ticking, nudged=_OLD)
+    assert dispatcher.park_run(task_id, reason="hold", by="orch")["ok"]
+    assert dispatcher.unpark_run(task_id, by="orch")["ok"]
+    row = _row(task_id)
+    assert row["idle_clock_at"] is not None
+    assert row["idle_nudged_at"] is None
+
+    summary = dispatcher.tick(ticking / "WORKFLOW.md")
+
+    assert summary["reconciled_failed"] == 0
+    assert summary["watchdog_renudged"] == 0
+    assert idle_pane == []
