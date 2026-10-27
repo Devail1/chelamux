@@ -318,6 +318,17 @@ def test_route_creates_the_issue_through_the_server_side_key(client, team, wf_pa
     assert team.seen_keys == [SECRET]
 
 
+def test_route_logs_task_created_with_the_issue_link(client, team, wf_path, tmp_path,
+                                                    monkeypatch):
+    """CMX-320: the digest's "changed" line links to the new issue, read off this record."""
+    from chela import event_log
+    monkeypatch.setenv("CHELA_EVENTS_FILE", str(tmp_path / "events.jsonl"))
+    assert _post(client, wf_path).status_code == 200
+    [rec] = event_log.read(types=["task.created"])["events"]
+    assert rec["payload"]["identifier"] == "CMX-100"
+    assert rec["payload"]["url"] == "https://linear.app/acme/issue/CMX-100"
+
+
 def test_route_blocked_by_creates_the_relation(client, team, wf_path):
     resp = _post(client, wf_path, blocked_by=["CMX-1"])
     assert resp.get_json()["ok"] is True
