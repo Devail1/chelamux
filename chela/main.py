@@ -65,6 +65,7 @@ from chela import (
     userconfig,
     wait,
     workflow,
+    worktree_gc,
 )
 from chela.personas import autolaunch, lease
 from chela.config import (
@@ -265,6 +266,7 @@ def cmd_run(args) -> None:
     last_ops_scan = 0.0
     ops_child = None
     nightly_child = None      # CMX-303: the nightly sweep — one detached child at a time
+    gc_child = None           # CMX-357: the daily worktree GC — same shape
     # Held in memory, exactly like `waiting_seen`: it is the PREVIOUS status snapshot
     # the inbox edge-triggers against. Starting empty means a fresh daemon baselines
     # silently on its first tick instead of announcing every already-idle agent. (A
@@ -439,6 +441,14 @@ def cmd_run(args) -> None:
                 except Exception:
                     log.exception("Ops scan spawn failed")
                 last_ops_scan = now
+
+            # 🧹 CMX-357: the daily worktree GC — due by its own stamp on disk (a daemon restart
+            # does not re-run it), spawned niced and detached, never waited on.
+            try:
+                if worktree_gc.due():
+                    gc_child = worktree_gc.spawn(gc_child)
+            except Exception:
+                log.exception("Worktree GC spawn failed")
 
             # ⚖️🧹🌙 CMX-303: the nightly sweep of what the standard tier merged unjudged —
             # spawned detached at `sweep.nightly_at`, one at a time, never waited on.
@@ -3266,6 +3276,14 @@ def cmd_ops_scan(args) -> None:
     print(json.dumps(result, indent=2) if args.json else ops.render(result))
 
 
+def cmd_ops_worktrees(args) -> None:
+    """``chela ops worktrees`` (CMX-357): the orphan worktrees under each dispatched
+    workflow's root, with count and size. ``--gc`` collects them (what the daemon runs)."""
+    results = worktree_gc.run(args.workflow or config.DISPATCH_WORKFLOWS, dry_run=not args.gc)
+    print(json.dumps(results, indent=2) if args.json
+          else worktree_gc.render(results, dry_run=not args.gc))
+
+
 def cmd_keeper_digest(args) -> None:
     """CMX-346: what happened in a workflow's repo since the last digest (no LLM, no writes
     to the tracker). Exit 2 on an unreadable workflow or a bad `--since`."""
@@ -4370,6 +4388,15 @@ def main() -> None:
         "--notify", action="store_true",
         help="What the daemon runs: also append to $CHELA_DIR/ops/findings.jsonl and queue "
              "ONE inbox notice for new findings")
+    p_owt = ops_sub.add_parser(
+        "worktrees", help="Orphan worktrees (no live run, or a run done/closed ≥3 days): count "
+                          "and size per workflow root")
+    p_owt.add_argument("--gc", action="store_true",
+                       help="What the daemon runs daily: remove them (keeping the branch), "
+                            "salvaging a dirty one to $CHELA_DIR/worktree-salvage/ first")
+    p_owt.add_argument("--workflow", action="append", default=[],
+                       help="A WORKFLOW.md to scan (repeatable; default: the dispatched ones)")
+    p_owt.add_argument("--json", action="store_true", help="Machine-readable output")
     p_keeper = sub.add_parser("keeper", help="Keeper mode: keep a workflow's board aligned")
     keeper_sub = p_keeper.add_subparsers(dest="keeper_cmd", required=True)
     p_kdigest = keeper_sub.add_parser(
@@ -4909,7 +4936,10 @@ def main() -> None:
         else:
             p_judge.print_help()
     elif args.command == "ops":
-        cmd_ops_scan(args)
+        if args.ops_cmd == "worktrees":
+            cmd_ops_worktrees(args)
+        else:
+            cmd_ops_scan(args)
     elif args.command == "keeper":
         {"digest": cmd_keeper_digest, "run": cmd_keeper_run}.get(
             args.keeper_cmd, cmd_keeper_decide)(args)
