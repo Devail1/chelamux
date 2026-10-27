@@ -16,7 +16,7 @@ from unittest.mock import patch
 
 import pytest
 
-from chela import dispatcher, sweep
+from chela import dispatcher, judge, sweep
 
 TEST_CMD = f'"{sys.executable}" -m pytest -q -p no:cacheprovider tests'
 
@@ -1571,13 +1571,11 @@ def test_run_sweep_with_an_unreadable_workflow_is_an_error_not_a_default(tmp_pat
 def _stub_baseline(monkeypatch) -> list:
     """Spy on judge.run_baseline (the call the sweep MEASURES with) and return a red baseline,
     so the sweep stops right after it."""
-    from types import SimpleNamespace
-
     seen: list = []
 
-    def fake(worktree, test_cmd, timeout, scratch, *, select_tests=True):
+    def fake(worktree, test_cmd, timeout, scratch, *, select_tests=True, **_):
         seen.append({"cmd": test_cmd, "timeout": timeout, "select_tests": select_tests})
-        return (SimpleNamespace(green=False, detail="stub", tail="", exit_code=1), None, "")
+        return (judge.SuiteResult(True, 1, 0, 0, 0, "", "stub"), None, "")
 
     monkeypatch.setattr(sweep.judge, "run_baseline", fake)
     return seen
