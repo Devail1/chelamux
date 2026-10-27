@@ -444,6 +444,7 @@ def test_the_daemon_loop_ticks_the_keeper_schedule_with_the_dispatch_workflows(m
     monkeypatch.setattr(main.ops, "spawn", lambda child: child)
     monkeypatch.setattr(main.sweep_nightly, "daemon_tick", lambda workflows, prev: prev)
     monkeypatch.setattr(main.dispatcher, "poll_interval", lambda path: float("inf"))
+    monkeypatch.setattr(main.worktree_gc, "spawn", lambda prev: prev)
     workflows = [Path("/nowhere/a/WORKFLOW.md"), Path("/nowhere/b/WORKFLOW.md")]
     monkeypatch.setattr(main, "DISPATCH_WORKFLOWS", workflows)
     ticks = []
