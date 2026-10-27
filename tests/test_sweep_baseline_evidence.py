@@ -90,6 +90,20 @@ def test_a_baseline_flake_is_reported_and_the_battery_runs_without_it(tmp_path, 
     assert 'name="test_flaky"' in (kept / "baseline-junit.xml").read_text()
 
 
+def test_a_night_prunes_dated_evidence_beyond_keep_days(tmp_path):
+    """The prune is driven through the real night, not only as a bare helper: a state dir
+    seeded with ``KEEP_DAYS + 2`` old dates loses exactly the two oldest."""
+    state = sweep_nightly.state_dir(tmp_path / "chela")
+    old = [f"2020-01-{d:02d}" for d in range(1, sweep_nightly.KEEP_DAYS + 3)]
+    for name in old:
+        (state / name).mkdir(parents=True)
+    res, chela = _night(tmp_path, "tests/test_red.py", RED)
+    assert res["status"] == "cannot_verify"
+    left = sorted(p.name for p in state.iterdir())
+    assert old[0] not in left and old[1] not in left
+    assert set(old[2:]) <= set(left) and _kept(chela, res).parent.name in left
+
+
 def test_a_green_baseline_keeps_nothing_and_says_no_flake(tmp_path, notices):
     res, chela = _night(tmp_path, "tests/test_ok.py", "def test_ok():\n    assert True\n")
     assert res["status"] == "survivors" and res["kept"] == "" and res["baseline_flakes"] == []
