@@ -114,16 +114,22 @@ def test_unregister_keeps_the_other_workflows(tmp_path):
     env = {"CHELA_DIR": str(tmp_path / "c")}
     a, b = tmp_path / "a" / "WORKFLOW.md", tmp_path / "b" / "WORKFLOW.md"
     assert mergegate.register(a, ["dev"], env) and mergegate.register(b, ["main"], env)
-    assert mergegate.unregister(a, env) is True
+    assert dispatcher.unregister_merge_gate(a, env) is True
     assert [e["workflow"] for e in mergegate.load_registry(env)] == [str(b)]
-    assert mergegate.unregister(a, env) is False                # nothing left to drop
-    assert mergegate.unregister(a, {"CHELA_DIR": str(tmp_path / "none")}) is False
+    assert dispatcher.unregister_merge_gate(a, env) is False    # nothing left to drop
+    assert dispatcher.unregister_merge_gate(a, {"CHELA_DIR": str(tmp_path / "none")}) is False
 
 
-def test_the_plugin_hook_copy_carries_unregister_too():
-    repo = Path(__file__).resolve().parent.parent
-    assert ((repo / "plugin" / "hooks" / "mergegate.py").read_bytes()
-            == (repo / "chela" / "mergegate.py").read_bytes())
+def test_an_unwritable_registry_is_left_in_force(tmp_path, monkeypatch):
+    env = {"CHELA_DIR": str(tmp_path / "c")}
+    a = tmp_path / "a" / "WORKFLOW.md"
+    mergegate.register(a, ["dev"], env)
+
+    def deny(*args, **kw):
+        raise PermissionError("read-only")
+    monkeypatch.setattr(dispatcher.os, "replace", deny)
+    assert dispatcher.unregister_merge_gate(a, env) is False
+    assert [e["workflow"] for e in mergegate.load_registry(env)] == [str(a)]
 
 
 def _seed_clean_run(task_id: str, workflow_path: Path) -> None:

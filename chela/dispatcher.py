@@ -5699,9 +5699,28 @@ def _dispatch_off(wf: WorkflowDef) -> dict:
     the tick: no claim, no reconcile, no judge, no tracker write. Its merge-gate entry is
     REMOVED, so its sessions may push to its base as that repo wants; keeper runs are
     scheduled by the daemon (:mod:`chela.keeper_schedule`), not here."""
-    if mergegate.unregister(wf.path, env={"CHELA_DIR": str(CHELA_DIR)}):
+    if unregister_merge_gate(wf.path, env={"CHELA_DIR": str(CHELA_DIR)}):
         log.info("%s: dispatch is off — dropped from the merge gate's registry", wf.path)
     return {**_refused(None), "blocked": False, "dispatch_off": True}
+
+
+def unregister_merge_gate(workflow_path: str | Path, env=None) -> bool:
+    """Drop one workflow from the merge gate's registry (the writer's half; it lives here,
+    not in :mod:`chela.mergegate`, whose bytes the plugin ships and fingerprints). Writes
+    only when an entry was there; never raises."""
+    try:
+        wf = str(Path(workflow_path).expanduser())
+        repos = mergegate.load_registry(env)
+        if not repos or not any(r.get("workflow") == wf for r in repos):
+            return False
+        path = mergegate.registry_path(env)
+        tmp = path.with_suffix(f".{os.getpid()}.tmp")
+        kept = [r for r in repos if r.get("workflow") != wf]
+        tmp.write_text(json.dumps({"repos": kept}, indent=2) + "\n", encoding="utf-8")
+        os.replace(tmp, path)
+        return True
+    except OSError:
+        return False
 
 
 # Workflows currently refused by the workspace fence — so the ERROR is logged on the
