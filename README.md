@@ -109,6 +109,9 @@ Requires Linux, WSL or macOS · `git` · `tmux` · [`uv`](https://docs.astral.sh
 Python ≥ 3.11 itself if you have none) · the `claude` CLI. That is all a first run needs:
 `gh`, Telegram, Linear and pm2 are follow-ups, not prerequisites.
 
+Just want to see the wall? `uvx chelamux dashboard` runs it straight from PyPI, nothing
+to clone or install. To keep chela around (the daemon needs that), install it:
+
 ```bash
 uv tool install "chelamux[dashboard] @ git+https://github.com/Devail1/chelamux"
 tmux new-session -d -s chela -n researcher     # a window = an agent

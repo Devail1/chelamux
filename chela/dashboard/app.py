@@ -6,8 +6,8 @@ network is remote code execution. For remote access, put it behind a tailnet
 (`tailscale serve`), an SSH tunnel, or a reverse proxy that adds your own auth.
 The tailnet is the trust boundary; there is intentionally no password here.
 
-This is an OPTIONAL component: Flask is an extra (`chelamux[dashboard]`). The
-core CLI never imports this module at top level.
+Flask is a core dependency (CMX-363, so `uvx chelamux dashboard` works), but the core
+CLI still never imports this module at top level.
 """
 from __future__ import annotations
 
@@ -55,9 +55,9 @@ app = Flask(
 # {agent: ttyd_port} map written by scripts/agent-terminals.sh on each poll.
 TERMINALS_MAP = CHELA_DIR / "agent_terminals.json"
 
-# WebSocket support for the embedded terminal wall. flask-sock is in the
-# [dashboard] extra; guard the import so a dashboard install missing it still
-# serves everything else (the wall iframes just won't connect).
+# WebSocket support for the embedded terminal wall. flask-sock is a core dependency;
+# the import stays guarded so an old environment missing it still serves everything
+# else (the wall iframes just won't connect).
 try:
     from flask_sock import Sock
     # ttyd's browser client opens its WebSocket requesting the `tty`

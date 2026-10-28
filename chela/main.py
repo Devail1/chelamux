@@ -15,6 +15,7 @@ import json
 import logging
 import os
 import re
+import shutil
 import signal
 import sys
 import threading
@@ -1691,6 +1692,15 @@ def cmd_knowledge_export(args) -> None:
         print(f"  (runs filtered since {summary['since']})")
 
 
+def statusline_script() -> Path:
+    """The statusLine hook to wire in: the copy packaged inside an installed wheel
+    (``chela/scripts/``, pyproject's ``force-include``), else the checkout's ``scripts/``."""
+    packaged = Path(__file__).resolve().parent / "scripts" / "cache-statusline.sh"
+    if packaged.is_file():
+        return packaged
+    return Path(__file__).resolve().parent.parent / "scripts" / "cache-statusline.sh"
+
+
 def cmd_install_statusline(args) -> None:
     """Print (or write) the Claude Code statusLine hook that feeds the context bar.
 
@@ -1702,7 +1712,16 @@ def cmd_install_statusline(args) -> None:
     """
     import json as _json
 
-    script = Path(__file__).resolve().parent.parent / "scripts" / "cache-statusline.sh"
+    script = statusline_script()
+    if args.write and script.parent == Path(__file__).resolve().parent / "scripts":
+        # The packaged copy lives in the install, and a `uvx` install is a uv CACHE entry
+        # that `uv cache prune` deletes; a settings.json pointing there goes dead without a
+        # word. Wire a copy under $CHELA_DIR instead (re-running this refreshes it).
+        stable = config.CHELA_DIR / "cache-statusline.sh"
+        stable.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(script, stable)
+        stable.chmod(0o755)
+        script = stable
     snippet = {"type": "command", "command": str(script)}
     settings_path = Path(args.settings).expanduser() if args.settings else Path.home() / ".claude" / "settings.json"
 
@@ -2271,17 +2290,18 @@ def cmd_telegram(args) -> None:
 
 
 def cmd_dashboard(args) -> None:
-    """Launch the optional web dashboard (requires the 'dashboard' extra).
+    """Launch the web dashboard.
 
-    Imported lazily so the core CLI never depends on Flask: a plain
-    `chelamux` install runs status/run/dispatch/msg without it.
+    Imported lazily, so a command that never opens the dashboard never pays for Flask's
+    import. Flask is a core dependency since CMX-363 (`uvx chelamux dashboard`), so the
+    ImportError below means an environment built without it, e.g. an old checkout's venv.
     """
     try:
         from chela.dashboard import app as dashboard_app
     except ImportError as e:
-        print("The dashboard is an optional component and needs Flask.")
-        print("Install the extra:  uv sync --extra dashboard")
-        print("              (or:  pip install 'chelamux[dashboard]')")
+        print("The dashboard needs Flask, and this environment does not have it.")
+        print("Re-sync it:  uv sync")
+        print("      (or:  uv tool install --force chelamux)")
         print(f"  import error: {e}")
         sys.exit(1)
     # The env (i.e. $CHELA_DIR/chela.env) is the source of truth for the bind; these
@@ -4701,8 +4721,8 @@ def main() -> None:
              "exit — e.g. --sandbox-relay @7=off. Does not start the bridge.",
     )
 
-    # dashboard (optional component)
-    p_dash = sub.add_parser("dashboard", help="Launch the optional web dashboard (needs the 'dashboard' extra)")
+    # dashboard
+    p_dash = sub.add_parser("dashboard", help="Launch the web dashboard (the agent wall)")
     p_dash.add_argument("--host", default=None,
                         help="Bind host (default: $CHELA_DASH_HOST, else 127.0.0.1)")
     p_dash.add_argument("--port", type=int, default=None,

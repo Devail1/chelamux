@@ -682,10 +682,11 @@ def test_the_workflow_has_exactly_one_job(workflow):
     invisible addition three keys up from everything else this file checks.
 
     CMX-176 added `frontend`; `test_the_frontend_job_mapping_is_pinned_exactly` pins it whole.
+    CMX-363 added `package`; `test_the_package_job_mapping_is_pinned_exactly` pins it whole.
     """
-    assert set(workflow["jobs"]) == {"test", "frontend"}, (
+    assert set(workflow["jobs"]) == {"test", "package", "frontend"}, (
         f"the workflow defines jobs {sorted(workflow['jobs'])!r}, expected exactly "
-        "{'test', 'frontend'} — another job runs independently of the `test` job's steps and can "
+        "{'test', 'package', 'frontend'} — another job runs independently of the `test` job's steps and can "
         "carry its own gate (e.g. a branch-naming check) that fails the workflow run "
         "while jobs.test.steps stays completely untouched, invisible to every other "
         "assertion in this file"
@@ -881,6 +882,30 @@ _EXPECTED_FRONTEND_JOB: dict = {
 
 def test_the_frontend_job_mapping_is_pinned_exactly(workflow):
     assert workflow["jobs"]["frontend"] == _EXPECTED_FRONTEND_JOB
+
+
+# CMX-363: the `package` job builds the sdist + wheel and runs the wheel as `uvx chelamux`,
+# pinned whole for the same reason as the frontend job.
+# The wheel runs as an adopter runs it, and imports the dashboard (whose Flask import
+# `--help` never reaches).
+_SMOKE = (
+    "uvx --from dist/chelamux-*.whl chelamux --help\n"
+    "uvx --from dist/chelamux-*.whl python -c 'import chela.dashboard.app'\n"
+)
+
+_EXPECTED_PACKAGE_JOB: dict = {
+    "runs-on": "ubuntu-latest",
+    "steps": [
+        {"uses": "actions/checkout@v4"},
+        {"name": "Install uv", "uses": "astral-sh/setup-uv@v5"},
+        {"name": "Build sdist + wheel", "run": "uv build"},
+        {"name": "Smoke-test the built wheel", "run": _SMOKE},
+    ],
+}
+
+
+def test_the_package_job_mapping_is_pinned_exactly(workflow):
+    assert workflow["jobs"]["package"] == _EXPECTED_PACKAGE_JOB
 
 
 # The workflow's trigger block, as PyYAML actually parses it. The bare `on:` key is a YAML
