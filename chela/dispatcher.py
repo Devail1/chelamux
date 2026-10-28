@@ -2449,17 +2449,15 @@ def _inbox_forget_ci_edge(task_id: str) -> None:
         log.warning("CI: could not retract the inbox edge for %s", task_id, exc_info=True)
 
 
-# pytest's short-summary line names the test: `FAILED tests/x.py::test_y - AssertionError`.
-_FAILED_TEST_RE = re.compile(r"^(?:FAILED|ERROR) (\S+)")
-
-
-def _ci_failed_test(log_tail: str) -> str:
-    """🔁 CMX-255. The id of the test a red CI failed on — pytest's node id off the first
-    failing line when there is one, else that line itself, else ``?``."""
-    from chela.inbox import first_failure_line
-    line = first_failure_line(log_tail)
-    m = _FAILED_TEST_RE.match(line)
-    return m.group(1) if m else (line or "?")
+def _ci_rerun_note(jobs: str, ci_log: str) -> str:
+    """🔁 CMX-255 / 🔎 CMX-351. What the re-run note (and so the flake notice) says failed:
+    the test id :func:`flaky.failing_test` reads off the WHOLE log, or "failing test not
+    identified" with the job. Never some other line that says "failed" — the notice is the
+    only record of which test flaked, and :func:`_record_ci_flake` counts it by that id."""
+    test = flaky.failing_test(ci_log)
+    if test:
+        return f"CI re-run once: {jobs} failed on {test}"
+    return f"CI re-run once: {jobs} failed — failing test not identified"
 
 
 def _rerun_failed_jobs(repo_dir: str | None, run_ids: tuple[str, ...]) -> bool:
@@ -2492,7 +2490,8 @@ def _record_ci_flake(conn: sqlite3.Connection, row, sha: str) -> None:
     except (json.JSONDecodeError, TypeError):
         flakes = []
     note = row["ci_rerun_note"] or ""
-    flakes.append({"sha": sha, "test": note.rpartition(" failed on ")[2] or "?",
+    _, said, test = note.partition(" failed on ")
+    flakes.append({"sha": sha, "test": test if said and flaky.is_test_id(test) else None,
                    "note": note, "at": _now()})
     conn.execute(
         "UPDATE runs SET ci_rerun_state='green', ci_flakes=? WHERE task_id=?",
@@ -2639,8 +2638,11 @@ def _base_merge_infra(conn: sqlite3.Connection, row, res: dict, base: str, head:
     return "escalated"
 
 
-def _failing_log_tail(repo_dir: str | None, run_ids: tuple[str, ...]) -> str:
-    """The tail of the failing CI log — fetched ONCE, on the transition into red.
+def _failing_log(repo_dir: str | None, run_ids: tuple[str, ...]) -> str:
+    """The failing CI log — fetched ONCE, on the transition into red. Only its
+    :func:`_log_tail` reaches a prompt or a comment; 🔎 CMX-351: the failing test's id is read
+    off the whole of it, because pytest's `FAILED` line carries the assertion message and a
+    long one pushes the line itself out of the tail.
 
     ⛔ Not per tick: `gh run view --log-failed` downloads the whole log archive, and a poll
     that does that every 60s for every open PR is a bad neighbour. The once-per-sha guard in
@@ -2673,7 +2675,11 @@ def _failing_log_tail(repo_dir: str | None, run_ids: tuple[str, ...]) -> str:
         return f"(could not fetch the CI log: {e})"
     if out.returncode != 0:
         return f"(could not fetch the CI log: {(out.stderr or out.stdout or '').strip()[:200]})"
-    text = tui_sanitize(out.stdout or "")
+    return tui_sanitize(out.stdout or "")
+
+
+def _log_tail(text: str) -> str:
+    """The last :data:`CI_LOG_TAIL_CHARS` of a :func:`_failing_log`, marked when cut."""
     if len(text) <= CI_LOG_TAIL_CHARS:
         return text
     return "… (log truncated — this is the tail)\n" + text[-CI_LOG_TAIL_CHARS:]
@@ -2827,7 +2833,7 @@ def _ci_infra_by_steps(ci: CIStatus, repo_dir: str | None) -> CIStatus:
     """Reclassification of a plain `FAILURE` red, decided by the job's own STEPS instead of
     its conclusion alone. Called ONLY at the once-per-sha transition into a new red (never
     on the poll — :func:`_fetch_ci_jobs` is a `gh run view` call per candidate, the same
-    "not per tick" rule :func:`_failing_log_tail` already follows).
+    "not per tick" rule :func:`_failing_log` already follows).
 
     A no-op unless every failing job is a plain-FAILURE candidate (``ci.plain_failures``
     covers all of ``ci.failing``) — a red mixed with a TIMED_OUT/CANCELLED/StatusContext
@@ -2855,7 +2861,7 @@ def _ci_verdict_body(ci: CIStatus, log_tail: str, pr_url: str | None) -> str:
     is not a risk here the way it would be for a judge.
 
     The body is BOTH a PR comment and (through the rework prompt) something pasted into an
-    agent's terminal. `_failing_log_tail` already stripped the escapes for the terminal; the
+    agent's terminal. `_failing_log` already stripped the escapes for the terminal; the
     fence below is widened past the longest backtick run in the log for the markdown — a CI
     log that prints ``` would otherwise close the block early and spill the rest of itself
     into the comment as prose.
@@ -2899,7 +2905,7 @@ def _ci_infra_verdict_body(ci: CIStatus, log_tail: str, pr_url: str | None,
     Unlike :func:`_ci_verdict_body`, this is information for a human, not a rework seed: it
     is never pasted into an agent's terminal, because no agent is spawned over it (see the
     1c infra branch in `tick`) — a coding agent cannot fix a job whose steps never executed.
-    Still sanitised the same way (`log_tail` already went through `_failing_log_tail`) since
+    Still sanitised the same way (`log_tail` already went through `_failing_log`) since
     it is still a PR comment, and the fence is still widened past the log's own backtick runs
     for the same reason `_ci_verdict_body`'s is.
     """
@@ -6742,7 +6748,8 @@ def tick(workflow_path: str | Path) -> dict:
             # FETCHING the log (and the fetch is a subprocess reading a stranger's bytes)
             # took the verdict with it — the red was marked delivered and never fired again,
             # and the run sat red in awaiting_review until a human happened to look.
-            log_tail = _failing_log_tail(wf_dir, ci.run_ids)
+            ci_log = _failing_log(wf_dir, ci.run_ids)
+            log_tail = _log_tail(ci_log)
             # 🚦🏗️ CMX-245 (re-scope of CMX-243). Same "once, on the transition" rule as the
             # log fetch above: a plain FAILURE is only reclassified as infra here, by its
             # job's own steps — never on the poll that produced `ci_now`.
@@ -6800,7 +6807,7 @@ def tick(workflow_path: str | Path) -> dict:
             # `ci_failed_sha` is NOT burned here, so the re-run's own red can still fire.
             if row["ci_rerun_sha"] != sha:
                 jobs = ", ".join(ci.failing) if ci and ci.failing else "?"
-                note = f"CI re-run once: {jobs} failed on {_ci_failed_test(log_tail)}"
+                note = _ci_rerun_note(jobs, ci_log)
                 if _rerun_failed_jobs(wf_dir, ci.run_ids if ci else ()):
                     conn.execute(
                         "UPDATE runs SET ci_rerun_sha=?, ci_rerun_state='pending', "
@@ -7023,7 +7030,9 @@ def tick(workflow_path: str | Path) -> dict:
         # was, and a human is told why.
         # ⏹️⚖️ CMX-286: FIRST, stop a judge whose run was sent back (1c above, or a human)
         # or whose head moved — else the watchdog below holds its slot up to its wall.
-        summary["judge_cancelled"] = _cancel_moot_judges(conn, wf, live_windows)
+        # CMX-336: and one whose run left review (merged in 1 above, override or not, or
+        # closed), window and all.
+        summary["judge_cancelled"] = _cancel_moot_judges(conn, wf)
         summary["judge_lost"] = _judge_watchdog(conn, wf, live_windows)
 
         # 1e′. ⚖️🧊 CMX-253: a `cannot_verify` that SPENT its retry budget on the CURRENT
@@ -9273,17 +9282,19 @@ JUDGE_RETRY_MESSAGE = ("resume: a fleet pause froze you mid-call, so your last m
                        "call failed. Retry it once and continue; it is not a verdict.")
 
 
-def _cancel_moot_judges(conn: sqlite3.Connection, wf: WorkflowDef,
-                        live_windows: set[str] | frozenset[str] = frozenset()) -> int:
+def _cancel_moot_judges(conn: sqlite3.Connection, wf: WorkflowDef) -> int:
     """⏹️⚖️ CMX-286: stop every live judge whose round can no longer produce a usable verdict.
 
     Seen twice on 10-19/20: CMX-264's conflict handling sent a PR back while its judge kept
     running on the obsolete head — the watchdog's "still alive — holding" kept one of the
     judge slots for up to an hour, and the first ended ``cannot_verify … run already moved
     to running``. A round is moot once its run is in :data:`SENT_BACK_STATUSES`, or is still
-    under review on a head other than the one judged (both shas known), or (CMX-340) has left
-    review for good (:data:`TERMINAL_STATUSES`) and its judge is gone: no live run, and no
-    judge window in ``live_windows`` (an agent not yet at ``--detach``). The row is CAS'd
+    under review on a head other than the one judged (both shas known), or has left review
+    for good (:data:`TERMINAL_STATUSES`: merged, override-merged, closed, failed). ⏹️⚖️
+    CMX-336: that last one is stopped live or dead, exactly like a send-back — adopt-2 was
+    override-merged mid-round on 10-25 and its judge window (a bare ``-bash`` by then) outlived
+    the run by 48 minutes, mirrored into every webterm session, because a live window was
+    read as a judge still at work. The row is CAS'd
     to ``cancelled`` on THIS round first (a verdict that landed meanwhile is left alone),
     which frees the slot and announces nothing, and its ``judge_window_id`` (and epoch) is
     cleared: tmux may give that id to another window (CMX-340). Then the round-end reaper the
@@ -9299,12 +9310,8 @@ def _cancel_moot_judges(conn: sqlite3.Connection, wf: WorkflowDef,
         judged, head = row["judge_sha"], row["pr_head_sha"]
         if status in SENT_BACK_STATUSES:
             reason = f"its run was sent back (now {status!r})"
-        elif (status in TERMINAL_STATUSES
-              and judge.judge_window_name(row["branch_name"] or "") not in live_windows
-              and judge.live_judge_run(task_id, judge.judge_worktree_path(wf, task_id)) is None):
-            # A LIVE judge here is left to finish: on a merged PR it may still record a
-            # CMX-239 blocked-race verdict. A dead one only leaves a stale row behind.
-            reason = f"its run left review (now {status!r}) and its judge is gone"
+        elif status in TERMINAL_STATUSES:
+            reason = f"its run left review (now {status!r})"
         elif status == "awaiting_review" and judged and head and judged != head:
             reason = f"its PR head moved ({judged[:12]} → {head[:12]})"
         else:

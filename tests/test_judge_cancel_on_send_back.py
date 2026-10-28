@@ -67,7 +67,7 @@ def _slots() -> int:
                             (judge.J_RUNNING,)).fetchone()[0]
 
 
-def _cancel(wf, conn=None, live_windows=frozenset()):
+def _cancel(wf, conn=None):
     events: list[tuple] = []
     with patch.object(dispatcher, "_kill_windows_named") as killed, \
          patch.object(dispatcher, "remove_worktree", return_value=True) as removed, \
@@ -75,9 +75,9 @@ def _cancel(wf, conn=None, live_windows=frozenset()):
                       side_effect=lambda *a, **k: events.append((a, k))):
         if conn is None:
             with dispatcher._db() as conn:
-                n = dispatcher._cancel_moot_judges(conn, wf, live_windows)
+                n = dispatcher._cancel_moot_judges(conn, wf)
         else:
-            n = dispatcher._cancel_moot_judges(conn, wf, live_windows)
+            n = dispatcher._cancel_moot_judges(conn, wf)
     return n, events, killed, removed
 
 
@@ -114,7 +114,6 @@ def test_a_moved_head_under_review_cancels_the_round(tmp_path, kills):
     {},                                                    # under review, same head
     {"judge_sha": None, "pr_head_sha": "beef5678"},        # judged sha unknown
     {"pr_head_sha": None},                                 # live head unknown
-    {"status": "done"},                                    # merged: CMX-239's race verdict
     {"status": "needs_human"},
     {"judge_state": judge.J_CLEAN, "status": "changes_requested"},   # not a live round
 ])
@@ -348,29 +347,38 @@ def test_a_finished_runs_dead_judge_is_cancelled_and_its_window_id_cleared(tmp_p
     kept `running` + `@261` until a fleet pause resolved that id to another agent."""
     monkeypatch.setattr(judge, "live_judge_run", lambda task, wt=None: None)
     wf = _judging(tmp_path, status=status, judge_window_id="@261", judge_window_epoch="e0")
-    n, events, killed, removed = _cancel(wf, live_windows={"test-1", "judge-other"})
+    n, events, killed, removed = _cancel(wf)
     assert n == 1
     run = dispatcher.resolve_run("abc123")
     assert (run["judge_state"], run["judge_window_id"], run["judge_window_epoch"]) == (
         "cancelled", None, None)
-    assert run["judge_detail"] == (f"judge cancelled: its run left review (now {status!r}) "
-                                   "and its judge is gone")
-    assert (killed.call_count, removed.call_count) == (1, 1)
+    assert run["judge_detail"] == f"judge cancelled: its run left review (now {status!r})"
+    killed.assert_called_once_with("judge-test-1")
+    assert removed.call_count == 1
     assert events[0][0][0] == "judge_cancelled"
     assert kills == []                                  # nothing was alive to signal
 
 
+# --- ⏹️⚖️ CMX-336: a run that left review stops its judge LIVE or dead, window and all ----
+
 @pytest.mark.parametrize("status", ["done", "closed", "failed"])
-def test_a_finished_runs_live_judge_is_left_to_record_its_verdict(tmp_path, kills, status):
-    """CMX-239: a judge still running on a merged PR may yet record a blocked-race verdict."""
-    wf = _judging(tmp_path, status=status, judge_window_id="@261")
-    assert _cancel(wf)[0] == 0
+def test_a_finished_runs_live_judge_is_stopped_like_a_send_back(tmp_path, kills, status):
+    """adopt-2, 10-25: override-merged mid-round, its judge window outlived the run 48min."""
+    wf = _judging(tmp_path, status=status, judge_window_id="@261", judge_window_epoch="e0")
+    n, events, killed, removed = _cancel(wf)
+    assert n == 1
+    assert kills == [(JUDGE_PID, signal.SIGTERM), (SUITE_PID, signal.SIGTERM)]
     run = dispatcher.resolve_run("abc123")
-    assert (run["judge_state"], run["judge_window_id"]) == (judge.J_RUNNING, "@261")
-    assert kills == []
+    assert (run["judge_state"], run["judge_window_id"], run["judge_window_epoch"]) == (
+        "cancelled", None, None)
+    assert run["judge_detail"] == f"judge cancelled: its run left review (now {status!r})"
+    killed.assert_called_once_with("judge-test-1")
+    assert removed.call_args.args[1] == judge.judge_worktree_path(wf, "abc123")
+    [(args, kwargs)] = events
+    assert (args[0], kwargs["payload"]["status"]) == ("judge_cancelled", status)
 
 
-def test_the_live_check_asks_this_runs_judge_worktree(tmp_path, kills, monkeypatch):
+def test_the_cancel_asks_this_runs_judge_worktree_for_its_run(tmp_path, kills, monkeypatch):
     asked: list[tuple] = []
     monkeypatch.setattr(judge, "live_judge_run",
                         lambda task, wt=None: asked.append((task, wt)) or None)
@@ -385,17 +393,37 @@ def test_a_sent_back_cancel_clears_the_judge_window_id_too(tmp_path, kills):
     assert dispatcher.resolve_run("abc123")["judge_window_id"] is None
 
 
-def test_a_finished_runs_judge_agent_still_in_its_window_is_left_alone(tmp_path, kills,
-                                                                      monkeypatch):
-    """Before `--detach` there is no run record: the live judge window is the only sign."""
+def _override_merge_tick(tmp_path, monkeypatch, cancel=True):
+    """An operator-approved override merged the PR while its judge ran; then one daemon tick.
+    Returns the judge windows still open in the fake tmux after it."""
     monkeypatch.setattr(judge, "live_judge_run", lambda task, wt=None: None)
-    wf = _judging(tmp_path, status="done", judge_window_id="@261")
-    assert _cancel(wf, live_windows={"judge-test-1"})[0] == 0
-    assert dispatcher.resolve_run("abc123")["judge_state"] == judge.J_RUNNING
+    wf = _judging(tmp_path, judge_window_id="@261", judge_window_epoch="e0",
+                  judge_started_at=dispatcher._now())     # well inside the watchdog's wall
+    assert dispatcher.record_merge_override("abc123", {"approved_by": "operator",
+                                                       "head_sha": "cafe1234",
+                                                       "reason": "ship it"})
+    windows = {"judge-test-1"}
+    monkeypatch.setattr(dispatcher, "_tmux_windows", lambda: set(windows))
+    monkeypatch.setattr(dispatcher, "_kill_windows_named", windows.discard)
+    monkeypatch.setattr(dispatcher, "_read_pr_status", lambda url, d: ("merged", None))
+    if not cancel:
+        monkeypatch.setattr(dispatcher, "_cancel_moot_judges", lambda conn, wf: 0)
+    _tick(wf, lambda *a, **k: False)
+    return windows
 
 
-def test_the_tick_hands_the_cancel_its_live_windows(tmp_path, kills, monkeypatch):
-    monkeypatch.setattr(judge, "live_judge_run", lambda task, wt=None: None)
-    monkeypatch.setattr(dispatcher, "_tmux_windows", lambda: {"judge-test-1"})
-    wf = _judging(tmp_path, status="done")
-    assert _tick(wf, lambda *a, **k: False)["judge_cancelled"] == 0
+def test_an_override_merged_runs_judge_is_stopped_and_its_window_is_gone(tmp_path, kills,
+                                                                         monkeypatch):
+    """The tick that reconciles the merge to `done` closes the judge's window — a bare shell
+    by then (adopt-2's @261), which no judge run would ever close."""
+    assert _override_merge_tick(tmp_path, monkeypatch) == set()
+    run = dispatcher.resolve_run("abc123")
+    assert (run["status"], run["judge_state"], run["judge_window_id"]) == (
+        "done", "cancelled", None)
+
+
+def test_negative_control_without_the_stop_the_judge_window_outlives_the_merge(
+        tmp_path, kills, monkeypatch):
+    assert _override_merge_tick(tmp_path, monkeypatch, cancel=False) == {"judge-test-1"}
+    run = dispatcher.resolve_run("abc123")
+    assert (run["status"], run["judge_state"]) == ("done", judge.J_RUNNING)

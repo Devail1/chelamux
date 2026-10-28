@@ -1,0 +1,144 @@
+test (3.13)	Pytest	2026-10-26T09:15:14.8215391Z =================================== FAILURES ===================================
+test (3.13)	Pytest	2026-10-26T09:15:14.8216981Z _______________ test_js_suite[tests/diff_modal_wiring.test.mjs] ________________
+test (3.13)	Pytest	2026-10-26T09:15:14.8218662Z [gw0] linux -- Python 3.13.17 /home/runner/work/chelamux/chelamux/.venv/bin/python
+test (3.13)	Pytest	2026-10-26T09:15:14.8219231Z 
+test (3.13)	Pytest	2026-10-26T09:15:14.8219714Z suite = PosixPath('/home/runner/work/chelamux/chelamux/tests/diff_modal_wiring.test.mjs')
+test (3.13)	Pytest	2026-10-26T09:15:14.8220174Z 
+test (3.13)	Pytest	2026-10-26T09:15:14.8220409Z     @pytest.mark.parametrize("suite", _SUITES, ids=_IDS)
+test (3.13)	Pytest	2026-10-26T09:15:14.8220849Z     def test_js_suite(suite: Path):
+test (3.13)	Pytest	2026-10-26T09:15:14.8221237Z         node = _node_or_skip([suite])
+test (3.13)	Pytest	2026-10-26T09:15:14.8221598Z         if runs_under_vitest(suite):
+test (3.13)	Pytest	2026-10-26T09:15:14.8221954Z             _vitest_or_skip(suite)
+test (3.13)	Pytest	2026-10-26T09:15:14.8222273Z         _jsdom_or_skip(suite)
+test (3.13)	Pytest	2026-10-26T09:15:14.8223105Z         # CMX-151: contained — node's per-file children (Vitest's forks) die with this run, even
+test (3.13)	Pytest	2026-10-26T09:15:14.8223946Z         # if pytest is SIGKILLed; a plain subprocess.run left 8 of them holding ~4 GB for 3.5 hours.
+test (3.13)	Pytest	2026-10-26T09:15:14.8224510Z         proc = run_contained(
+test (3.13)	Pytest	2026-10-26T09:15:14.8224977Z             _argv(node, suite), timeout=120, cwd=str(ROOT), env=_clean_env(),
+test (3.13)	Pytest	2026-10-26T09:15:14.8225463Z             watch=_xdist_master(),
+test (3.13)	Pytest	2026-10-26T09:15:14.8225762Z         )
+test (3.13)	Pytest	2026-10-26T09:15:14.8226034Z         if proc.returncode != 0:
+test (3.13)	Pytest	2026-10-26T09:15:14.8226364Z >           pytest.fail(
+test (3.13)	Pytest	2026-10-26T09:15:14.8226728Z                 f"{suite.relative_to(ROOT)} failed:\n"
+test (3.13)	Pytest	2026-10-26T09:15:14.8227533Z                 f"{_shown(proc.stdout, 4000)}\n{_shown(proc.stderr, 1000)}"
+test (3.13)	Pytest	2026-10-26T09:15:14.8228018Z             )
+test (3.13)	Pytest	2026-10-26T09:15:14.8228414Z E           Failed: tests/diff_modal_wiring.test.mjs failed:
+test (3.13)	Pytest	2026-10-26T09:15:14.8228803Z E           
+test (3.13)	Pytest	2026-10-26T09:15:14.8229511Z E           [1m[30m[46m RUN [49m[39m[22m [36mv4.1.11 [39m[90m/home/runner/work/chelamux/chelamux[39m
+test (3.13)	Pytest	2026-10-26T09:15:14.8230021Z E           
+test (3.13)	Pytest	2026-10-26T09:15:14.8230869Z E            [31m❯[39m tests/diff_modal_wiring.test.mjs [2m([22m[2m4 tests[22m[2m | [22m[31m1 failed[39m[2m)[22m[33m 11653[2mms[22m[39m
+test (3.13)	Pytest	2026-10-26T09:15:14.8232030Z E           [31m   [31m×[31m a real click on the wall tile's "Files" chip opens the diff modal island on THAT session's diff[39m[33m 678[2mms[22m[39m
+test (3.13)	Pytest	2026-10-26T09:15:14.8233095Z E              [33m[2m✓[22m[39m a real click on the Files chip opens the modal on the exact wid "@2'x" [33m 406[2mms[22m[39m
+test (3.13)	Pytest	2026-10-26T09:15:14.8234066Z E              [33m[2m✓[22m[39m a real click on the Files chip opens the modal on the exact wid "@3&amp;" [33m 349[2mms[22m[39m
+test (3.13)	Pytest	2026-10-26T09:15:14.8235683Z E              [33m[2m✓[22m[39m the Files chip is also emitted (and wired end to end) in single-pane / mobile mode, not just the wall tile — at both desktop and phone widths, and it tracks the live selection rather than any fixed position [33m 2660[2mms[22m[39m
+test (3.13)	Pytest	2026-10-26T09:15:14.8237044Z E           
+test (3.13)	Pytest	2026-10-26T09:15:14.8237794Z E           [2m Test Files [22m [1m[31m1 failed[39m[22m[90m (1)[39m
+test (3.13)	Pytest	2026-10-26T09:15:14.8238513Z E           [2m      Tests [22m [1m[31m1 failed[39m[22m[2m | [22m[1m[32m3 passed[39m[22m[90m (4)[39m
+test (3.13)	Pytest	2026-10-26T09:15:14.8239051Z E           [2m   Start at [22m 09:06:35
+test (3.13)	Pytest	2026-10-26T09:15:14.8239765Z E           [2m   Duration [22m 15.24s[2m (transform 4.92s, setup 0ms, import 2.96s, tests 11.65s, environment 0ms)[22m
+test (3.13)	Pytest	2026-10-26T09:15:14.8240253Z E           
+test (3.13)	Pytest	2026-10-26T09:15:14.8240449Z E           
+test (3.13)	Pytest	2026-10-26T09:15:14.8243162Z E           ::error file=/home/runner/work/chelamux/chelamux/tests/diff_modal_wiring.test.mjs,title=tests/diff_modal_wiring.test.mjs > a real click on the wall tile's "Files" chip opens the diff modal island on THAT session's diff,line=130,column=12::AssertionError: the diff modal did not render the fetched file list%0A+ actual - expected%0A%0A+ []%0A- [%0A-   'a.py',%0A-   'b.py'%0A- ]%0A%0A- Expected%0A+ Received%0A%0A- [%0A-   "a.py",%0A-   "b.py",%0A- ]%0A+ []%0A%0A ❯ tests/diff_modal_wiring.test.mjs:130:12%0A%0A
+test (3.13)	Pytest	2026-10-26T09:15:14.8244861Z E           
+test (3.13)	Pytest	2026-10-26T09:15:14.8245179Z E           s 1 [49m[22m[31m⎯⎯⎯⎯⎯⎯⎯[39m
+test (3.13)	Pytest	2026-10-26T09:15:14.8245447Z E           
+test (3.13)	Pytest	2026-10-26T09:15:14.8246319Z E           [41m[1m FAIL [22m[49m tests/diff_modal_wiring.test.mjs[2m > [22ma real click on the wall tile's "Files" chip opens the diff modal island on THAT session's diff
+test (3.13)	Pytest	2026-10-26T09:15:14.8247428Z E           [31m[1mAssertionError[22m: the diff modal did not render the fetched file list
+test (3.13)	Pytest	2026-10-26T09:15:14.8247917Z E           + actual - expected
+test (3.13)	Pytest	2026-10-26T09:15:14.8248167Z E           
+test (3.13)	Pytest	2026-10-26T09:15:14.8248358Z E           + []
+test (3.13)	Pytest	2026-10-26T09:15:14.8248563Z E           - [
+test (3.13)	Pytest	2026-10-26T09:15:14.8248781Z E           -   'a.py',
+test (3.13)	Pytest	2026-10-26T09:15:14.8249023Z E           -   'b.py'
+test (3.13)	Pytest	2026-10-26T09:15:14.8249284Z E           - ][39m
+test (3.13)	Pytest	2026-10-26T09:15:14.8249497Z E           
+test (3.13)	Pytest	2026-10-26T09:15:14.8249769Z E           [32m- Expected[39m
+test (3.13)	Pytest	2026-10-26T09:15:14.8250105Z E           [31m+ Received[39m
+test (3.13)	Pytest	2026-10-26T09:15:14.8250340Z E           
+test (3.13)	Pytest	2026-10-26T09:15:14.8250574Z E           [32m- [[39m
+test (3.13)	Pytest	2026-10-26T09:15:14.8250885Z E           [32m-   "a.py",[39m
+test (3.13)	Pytest	2026-10-26T09:15:14.8251207Z E           [32m-   "b.py",[39m
+test (3.13)	Pytest	2026-10-26T09:15:14.8251499Z E           [32m- ][39m
+test (3.13)	Pytest	2026-10-26T09:15:14.8251773Z E           [31m+ [][39m
+test (3.13)	Pytest	2026-10-26T09:15:14.8251998Z E           
+test (3.13)	Pytest	2026-10-26T09:15:14.8252446Z E           [36m [2m❯[22m tests/diff_modal_wiring.test.mjs:[2m130:12[22m[39m
+test (3.13)	Pytest	2026-10-26T09:15:14.8253159Z E               [90m128|[39m     assert.deepEqual(diffReads, ['/api/agents/%401/diff'], 'the modal …
+test (3.13)	Pytest	2026-10-26T09:15:14.8253985Z E               [90m129|[39m     [35mawait[39m [34mflush[39m()[33m;[39m
+test (3.13)	Pytest	2026-10-26T09:15:14.8254691Z E               [90m130|[39m     assert.deepEqual([...document.querySelectorAll('.modal-diff .diff-…
+test (3.13)	Pytest	2026-10-26T09:15:14.8255482Z E               [90m   |[39m            [31m^[39m
+test (3.13)	Pytest	2026-10-26T09:15:14.8256136Z E               [90m131|[39m         ['a.py', 'b.py'], 'the diff modal did not render the fetched f…
+test (3.13)	Pytest	2026-10-26T09:15:14.8256605Z E               [90m132|[39m
+test (3.13)	Pytest	2026-10-26T09:15:14.8256840Z E           
+test (3.13)	Pytest	2026-10-26T09:15:14.8259021Z E           [31m[2m⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[1/1]⎯[22m[39m
+test (3.13)	Pytest	2026-10-26T09:15:14.8259414Z 
+test (3.13)	Pytest	2026-10-26T09:15:14.8259685Z tests/test_js_suites.py:174: Failed
+test (3.13)	Pytest	2026-10-26T09:15:14.8260369Z =========================== short test summary info ============================
+test (3.13)	Pytest	2026-10-26T09:15:14.8261747Z FAILED tests/test_js_suites.py::test_js_suite[tests/diff_modal_wiring.test.mjs] - Failed: tests/diff_modal_wiring.test.mjs failed:
+test (3.13)	Pytest	2026-10-26T09:15:14.8262676Z 
+test (3.13)	Pytest	2026-10-26T09:15:14.8263537Z [1m[30m[46m RUN [49m[39m[22m [36mv4.1.11 [39m[90m/home/runner/work/chelamux/chelamux[39m
+test (3.13)	Pytest	2026-10-26T09:15:14.8264158Z 
+test (3.13)	Pytest	2026-10-26T09:15:14.8265123Z  [31m❯[39m tests/diff_modal_wiring.test.mjs [2m([22m[2m4 tests[22m[2m | [22m[31m1 failed[39m[2m)[22m[33m 11653[2mms[22m[39m
+test (3.13)	Pytest	2026-10-26T09:15:14.8267626Z [31m   [31m×[31m a real click on the wall tile's "Files" chip opens the diff modal island on THAT session's diff[39m[33m 678[2mms[22m[39m
+test (3.13)	Pytest	2026-10-26T09:15:14.8269367Z    [33m[2m✓[22m[39m a real click on the Files chip opens the modal on the exact wid "@2'x" [33m 406[2mms[22m[39m
+test (3.13)	Pytest	2026-10-26T09:15:14.8270929Z    [33m[2m✓[22m[39m a real click on the Files chip opens the modal on the exact wid "@3&amp;" [33m 349[2mms[22m[39m
+test (3.13)	Pytest	2026-10-26T09:15:14.8273688Z    [33m[2m✓[22m[39m the Files chip is also emitted (and wired end to end) in single-pane / mobile mode, not just the wall tile — at both desktop and phone widths, and it tracks the live selection rather than any fixed position [33m 2660[2mms[22m[39m
+test (3.13)	Pytest	2026-10-26T09:15:14.8275032Z 
+test (3.13)	Pytest	2026-10-26T09:15:14.8275397Z [2m Test Files [22m [1m[31m1 failed[39m[22m[90m (1)[39m
+test (3.13)	Pytest	2026-10-26T09:15:14.8276820Z [2m      Tests [22m [1m[31m1 failed[39m[22m[2m | [22m[1m[32m3 passed[39m[22m[90m (4)[39m
+test (3.13)	Pytest	2026-10-26T09:15:14.8278052Z [2m   Start at [22m 09:06:35
+test (3.13)	Pytest	2026-10-26T09:15:14.8278732Z [2m   Duration [22m 15.24s[2m (transform 4.92s, setup 0ms, import 2.96s, tests 11.65s, environment 0ms)[22m
+test (3.13)	Pytest	2026-10-26T09:15:14.8279136Z 
+test (3.13)	Pytest	2026-10-26T09:15:14.8279144Z 
+test (3.13)	Pytest	2026-10-26T09:15:14.8302385Z ##[error]AssertionError: the diff modal did not render the fetched file list
+test (3.13)	Pytest	+ actual - expected
+test (3.13)	Pytest	
+test (3.13)	Pytest	+ []
+test (3.13)	Pytest	- [
+test (3.13)	Pytest	-   'a.py',
+test (3.13)	Pytest	-   'b.py'
+test (3.13)	Pytest	- ]
+test (3.13)	Pytest	
+test (3.13)	Pytest	- Expected
+test (3.13)	Pytest	+ Received
+test (3.13)	Pytest	
+test (3.13)	Pytest	- [
+test (3.13)	Pytest	-   "a.py",
+test (3.13)	Pytest	-   "b.py",
+test (3.13)	Pytest	- ]
+test (3.13)	Pytest	+ []
+test (3.13)	Pytest	
+test (3.13)	Pytest	 ❯ tests/diff_modal_wiring.test.mjs:130:12
+test (3.13)	Pytest	
+test (3.13)	Pytest	
+test (3.13)	Pytest	2026-10-26T09:15:14.8310433Z 
+test (3.13)	Pytest	2026-10-26T09:15:14.8310777Z s 1 [49m[22m[31m⎯⎯⎯⎯⎯⎯⎯[39m
+test (3.13)	Pytest	2026-10-26T09:15:14.8310985Z 
+test (3.13)	Pytest	2026-10-26T09:15:14.8311745Z [41m[1m FAIL [22m[49m tests/diff_modal_wiring.test.mjs[2m > [22ma real click on the wall tile's "Files" chip opens the diff modal island on THAT session's diff
+test (3.13)	Pytest	2026-10-26T09:15:14.8312694Z [31m[1mAssertionError[22m: the diff modal did not render the fetched file list
+test (3.13)	Pytest	2026-10-26T09:15:14.8313132Z + actual - expected
+test (3.13)	Pytest	2026-10-26T09:15:14.8313284Z 
+test (3.13)	Pytest	2026-10-26T09:15:14.8313371Z + []
+test (3.13)	Pytest	2026-10-26T09:15:14.8313554Z - [
+test (3.13)	Pytest	2026-10-26T09:15:14.8313735Z -   'a.py',
+test (3.13)	Pytest	2026-10-26T09:15:14.8313926Z -   'b.py'
+test (3.13)	Pytest	2026-10-26T09:15:14.8314139Z - ][39m
+test (3.13)	Pytest	2026-10-26T09:15:14.8314250Z 
+test (3.13)	Pytest	2026-10-26T09:15:14.8314378Z [32m- Expected[39m
+test (3.13)	Pytest	2026-10-26T09:15:14.8314643Z [31m+ Received[39m
+test (3.13)	Pytest	2026-10-26T09:15:14.8314773Z 
+test (3.13)	Pytest	2026-10-26T09:15:14.8314874Z [32m- [[39m
+test (3.13)	Pytest	2026-10-26T09:15:14.8315117Z [32m-   "a.py",[39m
+test (3.13)	Pytest	2026-10-26T09:15:14.8315365Z [32m-   "b.py",[39m
+test (3.13)	Pytest	2026-10-26T09:15:14.8315595Z [32m- ][39m
+test (3.13)	Pytest	2026-10-26T09:15:14.8315805Z [31m+ [][39m
+test (3.13)	Pytest	2026-10-26T09:15:14.8315934Z 
+test (3.13)	Pytest	2026-10-26T09:15:14.8316266Z [36m [2m❯[22m tests/diff_modal_wiring.test.mjs:[2m130:12[22m[39m
+test (3.13)	Pytest	2026-10-26T09:15:14.8316894Z     [90m128|[39m     assert.deepEqual(diffReads, ['/api/agents/%401/diff'], 'the modal …
+test (3.13)	Pytest	2026-10-26T09:15:14.8317820Z     [90m129|[39m     [35mawait[39m [34mflush[39m()[33m;[39m
+test (3.13)	Pytest	2026-10-26T09:15:14.8318421Z     [90m130|[39m     assert.deepEqual([...document.querySelectorAll('.modal-diff .diff-…
+test (3.13)	Pytest	2026-10-26T09:15:14.8318950Z     [90m   |[39m            [31m^[39m
+test (3.13)	Pytest	2026-10-26T09:15:14.8319435Z     [90m131|[39m         ['a.py', 'b.py'], 'the diff modal did not render the fetched f…
+test (3.13)	Pytest	2026-10-26T09:15:14.8319833Z     [90m132|[39m
+test (3.13)	Pytest	2026-10-26T09:15:14.8319964Z 
+test (3.13)	Pytest	2026-10-26T09:15:14.8320201Z [31m[2m⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[1/1]⎯[22m[39m
+test (3.13)	Pytest	2026-10-26T09:15:14.8320656Z 1 failed, 11010 passed, 39 skipped, 1 xfailed in 938.71s (0:15:38)
+test (3.13)	Pytest	2026-10-26T09:15:15.0814780Z ##[error]Process completed with exit code 1.

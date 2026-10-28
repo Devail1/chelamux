@@ -30,6 +30,18 @@ _ISSUE_RE = re.compile(r"^[A-Z][A-Z0-9]*-\d+$")
 _FAILED_RE = re.compile(r"^(?:FAILED|ERROR) (\S+)")
 # `gh run view --log-failed` prefixes each line `<job>\t<step>\t<timestamp> `.
 _LINE_RE = re.compile(r"^(?:([^\t]*\t[^\t]*)\t﻿?(?:\d{4}-\d\d-\d\dT[\d:.]+Z ?)?)?(.*)$")
+# 🔎 CMX-351: the only lines that NAME a failing test. pytest's short summary
+# (`FAILED <nodeid> - why`; `ERROR <file>.py` for a collection error) and Vitest's failure
+# header (`FAIL  <spec> > <suite> > <test>`, also inside a pytest `E` block when a JS suite
+# runs under pytest). Never a line that merely says "failed" (`Test Files  1 failed (1)`, a
+# test's own stderr): a flake has to be countable by name.
+# A parametrize id's brackets may hold " - " (`t[a - b]`), so they are matched whole.
+_PYTEST_ID = r"\S+\.py(?:::[^\s\[]+(?:\[[^\]\n]*\])?)?"
+_VITEST_ID = r"\S+\.(?:test|spec)\.[cm]?[jt]sx?(?: > .+?)?"
+_PYTEST_ID_RE = re.compile(rf"^(?:FAILED|ERROR) ({_PYTEST_ID})(?: - .*)?$")
+_VITEST_ID_RE = re.compile(rf"^(?:E\s+)?FAIL\s+({_VITEST_ID})(?:\s+\[ .+ \])?$")
+_TEST_ID_RE = re.compile(rf"{_PYTEST_ID}|{_VITEST_ID}")
+_ANSI_RE = re.compile(r"\x1b\[[0-9;?]*[ -/]*[@-~]")
 
 
 def load(repo: Path) -> list[dict]:
@@ -97,6 +109,30 @@ def failed_tests(log_text: str) -> list[str] | None:
     if not steps or not all(steps.values()):
         return None
     return sorted(set().union(*steps.values()))
+
+
+def failing_test(log_text: str) -> str | None:
+    """🔎 CMX-351. The id of the first failing test a CI log names, or None when no line
+    names one. A Vitest id wins over pytest's: when a JS suite runs under pytest, pytest's
+    node id is the wrapper (`test_js_suite[<spec>]`) and Vitest's names the test inside it."""
+    pytest_id = None
+    for raw in (log_text or "").splitlines():
+        line = _ANSI_RE.sub("", _LINE_RE.match(raw).group(2)).strip()
+        if m := _VITEST_ID_RE.match(line):
+            return m.group(1)
+        if pytest_id is None and (m := _PYTEST_ID_RE.match(line)):
+            pytest_id = m.group(1)
+    return pytest_id
+
+
+def is_test_id(value: object) -> bool:
+    """True for an id :func:`failing_test` can return — what a flake is counted by."""
+    return isinstance(value, str) and _TEST_ID_RE.fullmatch(value) is not None
+
+
+def file_of(test_id: str) -> str:
+    """The file half of a pytest node id or a Vitest id."""
+    return re.split(r"::| > ", test_id, maxsplit=1)[0]
 
 
 def known(ids: list[str] | None, entries: list[dict], today: dt.date) -> list[dict] | None:
