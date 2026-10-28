@@ -42,6 +42,7 @@ from chela import (
     hooks,
     inbox,
     judge,
+    judge_timing,
     keeper,
     keeper_run,
     keeper_schedule,
@@ -3283,6 +3284,8 @@ def cmd_judge_show(args) -> None:
               f"{vis.get('total', 0)} survived · held-out {held.get('survived', 0)}/"
               f"{held.get('total', 0)} (quota {held.get('quota', 0)}) · flips "
               f"{cons.get('flipped', 0)}/{cons.get('sampled', 0)}")
+        for line in judge_timing.round_lines(rec.get("timings")):
+            print(f"           {line}")
         for path in rec.get("suite_logs") or []:
             print(f"           📄 suite output: {path}")
         for flip in cons.get("flips") or []:
@@ -3384,6 +3387,22 @@ def cmd_keeper_decide(args) -> None:
         sys.exit(1)
     for i, result in enumerate(out["results"], 1):
         print(f"  {i}. {result}")
+
+
+def cmd_judge_timings(args) -> None:
+    """⏱️ CMX-196: median / p90 per judge phase across every task's private round records —
+    the table the next judge-speed optimisation is chosen from."""
+    try:
+        since = keeper.parse_since(args.since) if args.since else None
+    except ValueError as e:
+        print(f"judge timings: {e}", file=sys.stderr)
+        sys.exit(2)
+    summary = judge_timing.summarize(judge.load_all_private(), since)
+    if args.json:
+        print(json.dumps(summary, indent=2))
+        return
+    label = f"over the last {args.since}" if args.since else "over all recorded rounds"
+    print("\n".join(judge_timing.summary_lines(summary, label)))
 
 
 def cmd_judge_ack_blocked_race(args) -> None:
@@ -4425,6 +4444,15 @@ def main() -> None:
         help="Also print every held-out experiment in full (operator-only — never paste "
              "this into a PR or a rework prompt)",
     )
+    p_jtimings = judge_sub.add_parser(
+        "timings",
+        help="⏱️ Median / p90 wall-clock per judge phase (setup, baseline, experiments, "
+             "consistency, slot wait…) across every task's recorded rounds",
+    )
+    p_jtimings.add_argument("--since", metavar="DURATION",
+                            help="Only rounds recorded in the last DURATION (7d, 24h); "
+                                 "default: all time")
+    p_jtimings.add_argument("--json", action="store_true", help="Machine-readable output")
     p_ops = sub.add_parser("ops", help="🔎 Fleet operations checks")
     ops_sub = p_ops.add_subparsers(dest="ops_cmd", required=True)
     p_oscan = ops_sub.add_parser(
@@ -4996,6 +5024,8 @@ def main() -> None:
             judge_eval_cli.main(args)
         elif args.judge_cmd == "show":
             cmd_judge_show(args)
+        elif args.judge_cmd == "timings":
+            cmd_judge_timings(args)
         else:
             p_judge.print_help()
     elif args.command == "ops":
