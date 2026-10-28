@@ -220,7 +220,7 @@ def round_lines(timings: dict | None) -> list[str]:
     load = timings.get("load")
     if isinstance(load, dict):
         lines.append(f"   load at start: {load.get('judges', '?')} judge(s) · "
-                     f"{load.get('agents', '?')} agent(s) running")
+                     f"{load.get('agents', '?')} agent(s) running (this judge included)")
     for n, e in enumerate(timings.get("experiments") or [], 1):
         if not isinstance(e, dict):
             continue

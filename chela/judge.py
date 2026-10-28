@@ -793,6 +793,8 @@ def run_suite(
                            "its process tree was killed", run, timed_out=True)
     except OSError as e:
         run["ended"] = _iso_now()
+        if timer is not None and isinstance(e, suite_guard.SlotTimeout):
+            timer.slot_wait(timer.now() - queued)     # ⏱️ the whole run was the wait
         return SuiteResult(False, -1, 0, 0, 0, "", f"the suite could not be run: {e}", run)
     text = (out.stdout or "") + (out.stderr or "")
     passed, failed, errors = _counts(text)

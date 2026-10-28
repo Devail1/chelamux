@@ -287,7 +287,7 @@ def test_judge_show_renders_an_old_row_without_timings_and_a_new_one_with_them(
     assert ("⏱️ total 17m 35s · provision 30s · baseline 10m 05s (5s slot wait) · "
             "visible 2× 3m 30s (10s slot wait) · held-out 1× 1m 45s (5s slot wait) · "
             "consistency 1× 1m 45s (5s slot wait) · slot wait 25s") in out
-    assert "load at start: 2 judge(s) · 3 agent(s) running" in out
+    assert "load at start: 2 judge(s) · 3 agent(s) running (this judge included)" in out
     assert "exp  2 visible          SURVIVED  full suite, 1m 45s (5s slot wait)" in out
     assert "exp  3 held-out         KILLED    full suite" in out
     assert "exp  4 visible re-run   SURVIVED" in out
@@ -402,3 +402,30 @@ def test_duration_formats_unknown_seconds_minutes_and_hours():
 def test_round_lines_skip_a_malformed_experiment_row():
     lines = judge_timing.round_lines({"total": None, "experiments": ["junk"]})
     assert lines == ["⏱️ total ? · slot wait ?"]
+
+
+@pytest.mark.parametrize("raised, credited", [
+    (suite_guard.SlotTimeout("no suite slot came free in 50s"), 50.0),   # the run WAS the wait
+    (PermissionError("the slot dir could not be made"), 0.0),          # never queued at all
+])
+def test_a_slot_wait_that_times_out_is_still_credited(tmp_path, monkeypatch, raised, credited):
+    clock = FakeClock()
+
+    @contextmanager
+    def slot(cwd, on_wait=None, max_wait=None):
+        clock.t += 50.0             # both fail 50s in; only a SlotTimeout spent it queued
+        raise raised
+        yield
+
+    monkeypatch.setattr(suite_guard, "slot", slot)
+    timer = judge_timing.RoundTimer(clock=clock)
+    judge._run_ctx["timer"] = timer
+    try:
+        with timer.phase("baseline"):
+            result = judge.run_suite("pytest -q", tmp_path, 60)
+    finally:
+        judge._run_ctx.pop("timer", None)
+    assert not result.ok and "could not be run" in result.detail
+    t = timer.as_dict()
+    assert t["slot_wait"] == credited
+    assert t["phases"]["baseline"] == {"seconds": 50.0, "slot_wait": credited}
