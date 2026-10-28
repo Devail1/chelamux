@@ -109,6 +109,9 @@ Requires Linux, WSL or macOS · `git` · `tmux` · [`uv`](https://docs.astral.sh
 Python ≥ 3.11 itself if you have none) · the `claude` CLI. That is all a first run needs:
 `gh`, Telegram, Linear and pm2 are follow-ups, not prerequisites.
 
+Just want to see the wall? `uvx chelamux dashboard` runs it straight from PyPI, nothing
+to clone or install. To keep chela around (the daemon needs that), install it:
+
 ```bash
 uv tool install "chelamux[dashboard] @ git+https://github.com/Devail1/chelamux"
 tmux new-session -d -s chela -n researcher     # a window = an agent
@@ -145,6 +148,16 @@ To dispatch work, follow [**docs/GETTING_STARTED.md**](docs/GETTING_STARTED.md) 
 10 minutes, install to a first agent-opened PR). Prefer an agent to set it up? Copy
 [`skills/chela-setup`](skills/chela-setup/SKILL.md) into `~/.claude/skills/`. Hacking on chela
 itself? Clone it and `uv sync --all-extras` ([CONTRIBUTING.md](CONTRIBUTING.md)).
+
+## Keeper mode
+
+A repo you work in by hand can still keep its board honest. Add `keeper: {enabled: true,
+every: 45m}` to its WORKFLOW.md (and `dispatch: {enabled: false}` if chela should never
+claim work there): the daemon then reads what your sessions, commits and PRs did, a model
+proposes board changes that each cite that evidence, and one inbox item asks you to
+`chela keeper approve` or `dismiss` them. Nothing reaches the tracker without your OK.
+`chela keeper stats --since 7d` reports how many proposals you accepted. The keys are in
+[examples/WORKFLOW.md](examples/WORKFLOW.md).
 
 ## What's new in 0.16
 

@@ -34,6 +34,10 @@ block on a clean Ubuntu container (only the prerequisites above, a stub `claude`
 checks that the dashboard answers and `chela doctor` passes; a test keeps the two in sync.
 If your shell does not find `chela`, run `uv tool update-shell` and open a new shell.
 
+For a first look without installing anything, `uvx chelamux dashboard` runs the wall from
+PyPI (every `chela …` command works as `uvx chelamux …`). Install as above once you want
+the daemon running.
+
 - **tmux windows are agents.** The window name is the agent's short, stable key, which
   `chela peek`/`msg` and the Telegram bindings use. The session is named `chela` by
   default (override with `CHELA_TMUX_SESSION`). Windows chela opens for you (the

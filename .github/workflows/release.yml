@@ -15,6 +15,12 @@ name: Release
 # (dry_run=false, CHANGELOG section promoted, tag not yet pushed) — exactly the
 # "CI never tags" boundary this header claims. `tests/test_release_workflow.py`
 # guards every invariant in this file; corrupt one and it goes red.
+#
+# CMX-363: the `pypi` job then publishes the same tag to PyPI (`uvx chelamux dashboard`),
+# with Trusted Publishing — PyPI trusts this workflow's OIDC token, so no API token exists
+# anywhere to leak. It runs only on a tag push, from the tag's own checkout, after the
+# GitHub Release succeeded, and refuses a tag that disagrees with pyproject's version
+# (a PyPI version can never be re-uploaded, so a mismatch must stop before the upload).
 on:
   push:
     tags:
@@ -74,3 +80,42 @@ jobs:
             --verify-tag \
             --title "v${{ steps.version.outputs.value }}" \
             --notes-file notes.md
+
+  pypi:
+    needs: release
+    runs-on: ubuntu-latest
+    # Only a pushed tag publishes: a `workflow_dispatch` run checks out the default branch,
+    # not the tag, so its build would not be the code the version names.
+    if: github.repository == 'Devail1/chelamux' && github.event_name == 'push'
+    # The environment PyPI's trusted publisher is registered for (owner Devail1, repo
+    # chelamux, workflow release.yml, environment pypi).
+    environment:
+      name: pypi
+      url: https://pypi.org/project/chelamux/
+    permissions:
+      contents: read
+      id-token: write   # Trusted Publishing: the OIDC token PyPI exchanges for an upload
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+
+      - name: Check the tag matches pyproject's version
+        run: |
+          version="$(python3 -c 'import tomllib; print(tomllib.load(open("pyproject.toml", "rb"))["project"]["version"])')"
+          if [ "v$version" != "$GITHUB_REF_NAME" ]; then
+            echo "tag $GITHUB_REF_NAME does not match pyproject.toml version $version" >&2
+            exit 1
+          fi
+
+      - name: Build sdist + wheel
+        run: uv build
+
+      - name: Smoke-test the built wheel
+        run: |
+          uvx --from dist/chelamux-*.whl chelamux --help
+          uvx --from dist/chelamux-*.whl python -c 'import chela.dashboard.app'
+
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
