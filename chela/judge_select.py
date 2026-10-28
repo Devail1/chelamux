@@ -182,6 +182,28 @@ def parse_junit(root: Path, junit_path: Path) -> list[Case] | None:
     return cases or None
 
 
+def failed_cases(root: Path, junit_path: Path) -> list[tuple[str, str]] | None:
+    """⚖️🧹 CMX-341: ``(node id, first line of its failure)`` for every case the JUnit report
+    marks failed or errored, in report order; ``None`` if the report cannot be read. A case
+    :func:`parse_junit` cannot place is named ``classname::name`` — a name, never dropped."""
+    try:
+        tree = ET.parse(junit_path)
+    except (OSError, ET.ParseError):
+        return None
+    out: list[tuple[str, str]] = []
+    for el in tree.iter("testcase"):
+        bad = next((c for c in el if c.tag in ("failure", "error")), None)
+        if bad is None:
+            continue
+        name = el.get("name") or ""
+        where = _case_file(root, el)
+        node = ("::".join([where[0], *where[1], name]) if where is not None and name
+                else "::".join(p for p in (el.get("classname") or "", name) if p))
+        text = (bad.get("message") or bad.text or "").strip()
+        out.append((node, text.splitlines()[0][:300] if text else ""))
+    return out
+
+
 def parse_vitest_json(root: Path, report: Path) -> list[Case] | None:
     """One :class:`Case` per test in a Vitest JSON report, its ``node`` and ``js`` the test
     FILE (what a filter selects); ``None`` when it cannot be read or a file is outside ``root``."""
