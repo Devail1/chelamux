@@ -7030,7 +7030,9 @@ def tick(workflow_path: str | Path) -> dict:
         # was, and a human is told why.
         # ⏹️⚖️ CMX-286: FIRST, stop a judge whose run was sent back (1c above, or a human)
         # or whose head moved — else the watchdog below holds its slot up to its wall.
-        summary["judge_cancelled"] = _cancel_moot_judges(conn, wf, live_windows)
+        # CMX-336: and one whose run left review (merged in 1 above, override or not, or
+        # closed), window and all.
+        summary["judge_cancelled"] = _cancel_moot_judges(conn, wf)
         summary["judge_lost"] = _judge_watchdog(conn, wf, live_windows)
 
         # 1e′. ⚖️🧊 CMX-253: a `cannot_verify` that SPENT its retry budget on the CURRENT
@@ -9280,17 +9282,19 @@ JUDGE_RETRY_MESSAGE = ("resume: a fleet pause froze you mid-call, so your last m
                        "call failed. Retry it once and continue; it is not a verdict.")
 
 
-def _cancel_moot_judges(conn: sqlite3.Connection, wf: WorkflowDef,
-                        live_windows: set[str] | frozenset[str] = frozenset()) -> int:
+def _cancel_moot_judges(conn: sqlite3.Connection, wf: WorkflowDef) -> int:
     """⏹️⚖️ CMX-286: stop every live judge whose round can no longer produce a usable verdict.
 
     Seen twice on 10-19/20: CMX-264's conflict handling sent a PR back while its judge kept
     running on the obsolete head — the watchdog's "still alive — holding" kept one of the
     judge slots for up to an hour, and the first ended ``cannot_verify … run already moved
     to running``. A round is moot once its run is in :data:`SENT_BACK_STATUSES`, or is still
-    under review on a head other than the one judged (both shas known), or (CMX-340) has left
-    review for good (:data:`TERMINAL_STATUSES`) and its judge is gone: no live run, and no
-    judge window in ``live_windows`` (an agent not yet at ``--detach``). The row is CAS'd
+    under review on a head other than the one judged (both shas known), or has left review
+    for good (:data:`TERMINAL_STATUSES`: merged, override-merged, closed, failed). ⏹️⚖️
+    CMX-336: that last one is stopped live or dead, exactly like a send-back — adopt-2 was
+    override-merged mid-round on 10-25 and its judge window (a bare ``-bash`` by then) outlived
+    the run by 48 minutes, mirrored into every webterm session, because a live window was
+    read as a judge still at work. The row is CAS'd
     to ``cancelled`` on THIS round first (a verdict that landed meanwhile is left alone),
     which frees the slot and announces nothing, and its ``judge_window_id`` (and epoch) is
     cleared: tmux may give that id to another window (CMX-340). Then the round-end reaper the
@@ -9306,12 +9310,8 @@ def _cancel_moot_judges(conn: sqlite3.Connection, wf: WorkflowDef,
         judged, head = row["judge_sha"], row["pr_head_sha"]
         if status in SENT_BACK_STATUSES:
             reason = f"its run was sent back (now {status!r})"
-        elif (status in TERMINAL_STATUSES
-              and judge.judge_window_name(row["branch_name"] or "") not in live_windows
-              and judge.live_judge_run(task_id, judge.judge_worktree_path(wf, task_id)) is None):
-            # A LIVE judge here is left to finish: on a merged PR it may still record a
-            # CMX-239 blocked-race verdict. A dead one only leaves a stale row behind.
-            reason = f"its run left review (now {status!r}) and its judge is gone"
+        elif status in TERMINAL_STATUSES:
+            reason = f"its run left review (now {status!r})"
         elif status == "awaiting_review" and judged and head and judged != head:
             reason = f"its PR head moved ({judged[:12]} → {head[:12]})"
         else:
