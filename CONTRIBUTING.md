@@ -143,6 +143,20 @@ removed. A push to `dev` after the request expires it — cut the release again.
 is human-only: an agent's process is refused and the merge-gate hook denies a session's
 `merge-approve`.
 
+### PyPI (CMX-363)
+
+Pushing the `vX.Y.Z` tag also publishes it to [PyPI](https://pypi.org/project/chelamux/):
+the Release workflow's `pypi` job checks the tag against `pyproject.toml`'s version, runs
+`uv build`, smoke-tests the wheel (`uvx --from dist/chelamux-*.whl chelamux --help`) and
+uploads with **Trusted Publishing**, so there is no API token to store or leak. It runs
+after the GitHub Release succeeds, and only on a tag push. A PyPI version can never be
+re-uploaded: a failed publish is retried by re-running the job, not by moving the tag.
+
+One-time setup, done once by the maintainer: on pypi.org, Your projects → Publishing → add
+a pending trusted publisher with owner `Devail1`, repository `chelamux`, workflow
+`release.yml`, environment `pypi`. GitHub creates the `pypi` environment on the first run;
+adding required reviewers to it there makes every upload wait for a click.
+
 ### By hand (the fallback)
 
 On `main`, after a `dev → main` promotion:
