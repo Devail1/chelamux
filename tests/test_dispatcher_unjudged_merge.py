@@ -174,7 +174,10 @@ def test_merge_reconcile_does_not_overwrite_a_running_judge(ticking, monkeypatch
 
     row = _row(alpha)
     assert row["status"] == "done"
-    assert row["judge_state"] == judge.J_RUNNING
+    # ⏹️⚖️ CMX-336: the same tick then stops that judge (its run left review) — a
+    # `cancelled` round, never the `unjudged_merged` this reconcile branch must not stamp.
+    assert row["judge_state"] == judge.J_CANCELLED
+    assert row["judge_detail"] == "judge cancelled: its run left review (now 'done')"
 
 
 def test_merge_reconcile_changelog_note_fires_for_a_non_docs_diff_without_a_fragment(
