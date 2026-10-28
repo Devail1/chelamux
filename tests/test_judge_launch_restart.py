@@ -159,7 +159,7 @@ def _tick_raw(wf):
          patch.object(dispatcher.subprocess, "run", return_value=R()), \
          patch.object(dispatcher, "_spawn_judge", return_value=False), \
          patch.object(dispatcher, "remove_worktree", return_value=True), \
-         patch.object(dispatcher, "_failing_log_tail", return_value=""):
+         patch.object(dispatcher, "_failing_log", return_value=""):
         return dispatcher.tick(wf.path)
 
 

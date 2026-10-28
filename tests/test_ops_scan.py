@@ -871,6 +871,49 @@ def test_a_fix_git_cannot_prove_leaves_the_flakes_counted(env, repo, break_it):
         assert src(env).predates_fix({"test": T, "sha": heads[0], "workflow": wf}) is False
 
 
+V = "tests/x.test.mjs > a click opens the modal"
+
+
+def _vitest_flakes(env, rows):
+    """rows: (task, sha, workflow_path, test) — CMX-351's ids, not only pytest's."""
+    import sqlite3
+    from datetime import datetime, timezone
+
+    at = datetime.fromtimestamp(NOW - 3600, timezone.utc).isoformat()
+    conn = sqlite3.connect(env.dir / "scheduler.db")
+    conn.execute("CREATE TABLE runs (task_id TEXT, status TEXT, started_at TEXT, "
+                 "ci_flakes TEXT, workflow_path TEXT)")
+    conn.executemany("INSERT INTO runs VALUES (?, 'done', '', ?, ?)",
+                     [(t, json.dumps([{"test": tid, "sha": sha, "at": at}]), wf)
+                      for t, sha, wf, tid in rows])
+    conn.commit()
+    conn.close()
+
+
+def test_a_repeat_vitest_flaker_is_a_quarantine_candidate_and_unnamed_ones_never_are(env):
+    """🔎 CMX-351: a Vitest id counts like a pytest node id; a flake whose test was not
+    identified (None, the old "?", or a whole log line) is counted under no name at all."""
+    _vitest_flakes(env, [("CMX-1", "", None, V), ("CMX-2", "", None, V),
+                         ("CMX-3", "", None, None), ("CMX-4", "", None, None),
+                         ("CMX-5", "", None, "re-register failed nope"),
+                         ("CMX-6", "", None, "re-register failed nope")])
+    assert [(f["subject"], sorted(f["evidence"]["tasks"]))
+            for f in ops.rule_repeat_flake(src(env), {})] == [(f"ci:{V}", ["CMX-1", "CMX-2"])]
+
+
+@pytest.mark.parametrize("touch, counted", [
+    ("tests/x.test.mjs", False),          # the spec itself was fixed after these heads
+    ("tests/unrelated.py", True),         # NEGATIVE: not the spec — the flakes stand
+])
+def test_a_vitest_flake_from_before_its_spec_was_fixed_does_not_count(env, repo, touch,
+                                                                     counted):
+    heads = [repo.commit(base=repo.c0) for _ in range(2)]
+    repo.publish(repo.commit(touch=touch, base=repo.c0))
+    _vitest_flakes(env, [(f"CMX-{i}", h, repo.workflow, V) for i, h in enumerate(heads)])
+    got = [f["subject"] for f in ops.rule_repeat_flake(src(env), {})]
+    assert got == ([f"ci:{V}"] if counted else [])
+
+
 def test_runs_without_a_workflow_path_column_still_count(env):
     import sqlite3
     from datetime import datetime, timezone
