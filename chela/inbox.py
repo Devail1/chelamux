@@ -2421,10 +2421,30 @@ def stuck_probes(runs: list[dict]) -> dict[str, dict]:
                    if (m := _mtime(Path(worktree) / name)) is not None}
         if procs is None:
             procs = _selfcheck_scan()
+        selfcheck = _selfcheck_for(worktree, procs)
         out[task] = {"activity": max(stamps) if stamps else None, "markers": markers,
-                     "selfcheck": _selfcheck_for(worktree, procs),
+                     "selfcheck": selfcheck,
+                     "selfcheck_budget": selfcheck_budget_s(worktree) if selfcheck else None,
                      "slot_wait": suite_guard.waits_in(worktree)}
     return out
+
+
+def selfcheck_budget_s(worktree) -> float | None:
+    """CMX-365: how long a normal hand-in self-check in ``worktree`` may take, from its own
+    WORKFLOW.md: the larger of ``judge.self_check_budget_seconds`` and
+    ``judge.sweep_budget_seconds`` (each wall-clock, defaults applied) plus
+    ``judge.suite_timeout_seconds`` for the hand-in's own suite. None when the workflow
+    cannot be read — the ceiling then falls back to ``config.SELFCHECK_ALERT_FALLBACK_S``."""
+    from chela import sweep, workflow
+    try:
+        wf = workflow.load_workflow(Path(worktree) / "WORKFLOW.md")
+        check = sweep.resolve_budget(
+            wf, keys=("self_check_budget_seconds", "self_check_max_experiments"),
+            defaults=(judge.SELF_CHECK_BUDGET_SECONDS, judge.SELF_CHECK_MAX_EXPERIMENTS))
+        return (max(check.seconds, sweep.resolve_budget(wf).seconds)
+                + judge.judge_suite_timeout(wf))
+    except Exception:  # noqa: BLE001 — unreadable/unparseable: unknown, never a guess
+        return None
 
 
 def daemon_state(now: float) -> tuple[str, float | None]:
@@ -2589,7 +2609,8 @@ def stuck_events(runs: list[dict], store: dict, probes: dict[str, dict], now: fl
             entry.pop("selfcheck", None)    # the self-check ended: the next one is news
         if selfcheck:
             entry["active_at"] = now
-            since, ceiling = selfcheck.get("since"), config.selfcheck_alert_s()
+            since = selfcheck.get("since")
+            ceiling = config.selfcheck_alert_s(probe.get("selfcheck_budget"))
             running = now - since if since is not None else None
             if running is not None:
                 running -= float(slot_wait.get("waited") or 0.0) + (
