@@ -390,3 +390,15 @@ def test_the_timings_subcommand_is_wired(monkeypatch):
     monkeypatch.setattr("sys.argv", ["chela", "judge", "timings", "--since", "7d"])
     chela_main.main()
     assert seen and seen[0].since == "7d" and seen[0].json is False
+
+
+def test_duration_formats_unknown_seconds_minutes_and_hours():
+    assert judge_timing.duration(None) == "?"
+    assert judge_timing.duration(42.4) == "42s"
+    assert judge_timing.duration(125) == "2m 05s"
+    assert judge_timing.duration(3725) == "1h 02m"
+
+
+def test_round_lines_skip_a_malformed_experiment_row():
+    lines = judge_timing.round_lines({"total": None, "experiments": ["junk"]})
+    assert lines == ["⏱️ total ? · slot wait ?"]
