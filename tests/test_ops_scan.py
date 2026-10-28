@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import subprocess
 import sys
 import threading
@@ -54,6 +55,15 @@ def write_events(env, events):
     (env.dir / "events-core.jsonl").write_text("".join(json.dumps(e) + "\n" for e in events))
 
 
+def leaked(env, state=None):
+    """``rule_leaked_proc`` on a scan whose previous scan saw the same processes: an orphan
+    is reported only on its 2nd scan in a row (CMX-332)."""
+    first = src(env)
+    ops.rule_leaked_proc(first, state or {})
+    return ops.rule_leaked_proc(src(env), dict(state or {},
+                                               orphans=sorted(first.orphan_suspects)))
+
+
 def set_runs(env, rows):
     import sqlite3
     conn = sqlite3.connect(env.dir / "scheduler.db")
@@ -61,6 +71,14 @@ def set_runs(env, rows):
     conn.executemany("INSERT INTO runs VALUES (?, ?, ?)", rows)
     conn.commit()
     conn.close()
+
+
+GOD = "PM2 v7.0.4: God Daemon (/tmp/chela-tests-pm2-x)"
+SCOPE = "chela-suite-1f78a0debe9e"
+
+
+def cg(unit):
+    return f"0::/user.slice/user-1000.slice/user@1000.service/app.slice/{unit}.scope\n"
 
 
 # --- rule 1: hung test run (CMX-205) -------------------------------------------------------
@@ -107,7 +125,7 @@ def test_hung_test_measures_since_the_previous_sample(env):
 def test_leaked_proc_rule(env, where, status, ppid, extra, hit):
     set_runs(env, [("CMX-1", "running", "2026-01-01"), ("CMX-1", status, "2026-01-02")])
     add_proc(env, 42, ["python3", "x", *extra], env.wt / where, ppid=ppid)
-    got = ops.rule_leaked_proc(src(env), {})
+    got = leaked(env)
     assert [(f["subject"], f["evidence"]["task"]) for f in got] == (
         [("pid:42", "CMX-1")] if hit else [])
 
@@ -133,7 +151,7 @@ def test_leaked_proc_flags_a_test_run_under_a_running_agent_past_the_suite_timeo
     if workflow:
         (env.wt / where / "WORKFLOW.md").write_text(f"---\nproject_key: CMX\n{workflow}---\n")
     add_proc(env, 42, argv, env.wt / where, age=age)
-    got = ops.rule_leaked_proc(src(env), {})
+    got = leaked(env)
     assert [f["summary"] for f in got] == (
         [f"pid 42 under run CMX-1 is alive but a test run {age / 60:.0f}m old, past the "
          "suite timeout"] if hit else [])
@@ -148,7 +166,7 @@ def test_leaked_proc_reads_argv_paths_and_skips_unreadable_procs(env):
     add_proc(env, 45, [], env.wt / "CMX-2", ppid=1)               # a kernel thread: no argv
     add_proc(env, 99, ["x"], env.wt / "CMX-2")
     os.rename(env.proc / "99", env.proc / "self")                # /proc/self is not a pid
-    assert [f["subject"] for f in ops.rule_leaked_proc(src(env), {})] == ["pid:42", "pid:45"]
+    assert [f["subject"] for f in leaked(env)] == ["pid:42", "pid:45"]
     assert [f["subject"] for f in ops.rule_hung_test(src(env), {})] == ["pid:42"]
 
 
@@ -162,24 +180,123 @@ def test_procs_come_back_in_pid_order_whatever_the_listing_order(env, monkeypatc
     monkeypatch.setattr(type(env.proc), "iterdir",
                         lambda self: iter(listing) if self == env.proc else real(self))
     want = ["pid:9", "pid:10", "pid:11"]
-    assert [f["subject"] for f in ops.rule_leaked_proc(src(env), {})] == want
+    assert [f["subject"] for f in leaked(env)] == want
     assert [f["subject"] for f in ops.rule_hung_test(src(env), {})] == want
+
+
+# CMX-332: an orphan is a finding only on its 2nd scan in a row ----------------------------
+
+def orphan_scans(env, n, between=lambda: None):
+    """The leaked subjects of each of ``n`` scans, fed forward as the daemon feeds them."""
+    state, out = {}, []
+    for i in range(n):
+        if i:
+            between()
+        s = src(env)
+        out.append([f["subject"] for f in ops.rule_leaked_proc(s, state)])
+        state = {"daemons": sorted(s.daemon_suspects), "orphans": sorted(s.orphan_suspects)}
+    return out
+
+
+def test_an_orphan_gone_by_the_next_scan_is_never_a_finding(env):
+    """The 10-24..10-27 shape: a test child re-parented to 1, reaped a minute later."""
+    add_proc(env, 42, ["node", "hang.test.mjs"], env.wt / "CMX-1", ppid=1, age=5)
+    assert orphan_scans(env, 3, lambda: shutil.rmtree(env.proc / "42", True)) == [[], [], []]
+
+
+def test_a_persistent_orphan_is_one_finding_from_its_second_scan(env):
+    """The 10-22 leak: hang.test.mjs, 2 days old, ppid 1. Negative control: the first
+    sighting alone fires nothing."""
+    add_proc(env, 42, ["node", "hang.test.mjs"], env.wt / "CMX-1", ppid=1, age=2 * 86400)
+    assert orphan_scans(env, 1) == [[]]
+    assert orphan_scans(env, 3) == [[], ["pid:42"], ["pid:42"]]
+
+
+def test_an_orphan_that_is_reparented_back_starts_over(env):
+    add_proc(env, 42, ["sleep"], env.wt / "CMX-1", ppid=1)
+
+    def adopt():
+        shutil.rmtree(env.proc / "42")
+        add_proc(env, 42, ["sleep"], env.wt / "CMX-1", ppid=500)
+
+    assert orphan_scans(env, 2, adopt) == [[], []]
+
+
+def test_a_reused_pid_is_not_the_previous_scans_orphan(env):
+    add_proc(env, 42, ["sleep"], env.wt / "CMX-1", ppid=1, age=120)
+    s = src(env)
+    ops.rule_leaked_proc(s, {})
+    assert s.orphan_suspects == {f"42:{int((UPTIME - 120) * HZ)}"}
+    prev = {"orphans": [f"42:{int((UPTIME - 120) * HZ) - 1}"]}
+    assert ops.rule_leaked_proc(src(env), prev) == []
+
+
+@pytest.mark.parametrize("ppid, where, status", [
+    (500, "CMX-1", "running"),                                  # not orphaned
+    (1, "CMX-1", "awaiting_review"),                            # spared by the live scope
+])
+def test_a_spared_process_is_no_suspect(env, ppid, where, status):
+    set_runs(env, [("CMX-1", status, "2026-01-01")])
+    add_proc(env, 42, ["sleep"], env.wt / where, ppid=ppid, cgroup=cg(SCOPE), age=120)
+    add_proc(env, 50, ["sh"], env.dir / "elsewhere", cgroup=cg(SCOPE))
+    s = src(env)
+    assert ops.rule_leaked_proc(s, {}) == [] and s.orphan_suspects == set()
+
+
+def test_an_over_runs_orphan_is_still_found_on_the_first_scan(env):
+    """Only the orphan reason waits a scan; a finished run's process never did."""
+    set_runs(env, [("CMX-1", "done", "2026-01-01")])
+    add_proc(env, 42, ["sleep"], env.wt / "CMX-1", ppid=1)
+    assert [f["summary"] for f in ops.rule_leaked_proc(src(env), {})] == [
+        "pid 42 under run CMX-1 is alive but its run is done"]
+
+
+@pytest.mark.parametrize("sharer, age, hit", [
+    (dict(cgroup=cg(SCOPE)), 120, False),                      # 10-27: its suite still runs
+    (dict(cgroup=cg(SCOPE)), 900, False),                      # the 900 s default, exactly
+    (dict(cgroup=cg(SCOPE)), 901, True),                       # past it: no suite excuses it
+    (dict(cgroup=cg(SCOPE), ppid=1), 120, True),               # an orphan shares nothing
+    (dict(cgroup=cg(SCOPE), ppid=42), 120, True),              # nor its own child
+    (dict(cgroup=cg(SCOPE), argv=[GOD]), 120, True),           # nor a daemon
+    (dict(cgroup=cg("chela-suite-abc")), 120, True),           # another suite's scope
+    (dict(cgroup=cg("app.slice/other")), 120, True),           # no suite scope at all
+    (dict(), 120, True),                                       # the sharer has no scope
+])
+def test_an_orphan_in_a_live_suites_scope_is_spared(env, sharer, age, hit):
+    """CMX-332 (the 10-27 case): ``tmux new-session … sleep 60`` from a test with its own
+    TMUX_TMPDIR, in the hand-in suite's scope — no -L socket names its owner test."""
+    add_proc(env, 42, ["tmux", "new-session", "-d", "-s", "cmx340"], env.wt / "CMX-1",
+             ppid=1, age=age, cgroup=cg(SCOPE))
+    add_proc(env, 50, sharer.get("argv", ["sh", "-c", "x"]), env.dir / "elsewhere",
+             ppid=sharer.get("ppid", 500), cgroup=sharer.get("cgroup"))
+    assert orphan_scans(env, 2)[-1] == (["pid:42"] if hit else [])
+
+
+@pytest.mark.parametrize("argv", [
+    ["/usr/bin/tmux", "-L", "chelatest-77-ab12cd", "new-session", "-d"],   # its test is gone
+    ["/usr/bin/tmux", "-Lchelatest-77-ab12cd", "new-session", "-d"],
+    ["/v/bin/pytest", "-q"],                                   # an orphaned test run
+    ["python3", "-m", "pytest"],
+])
+def test_a_live_scope_never_spares_an_orphan_with_its_own_verdict(env, argv):
+    """CMX-279's definitive leaks stay leaks inside a live suite's scope."""
+    add_proc(env, 42, argv, env.wt / "CMX-1", ppid=1, age=120, cgroup=cg(SCOPE))
+    add_proc(env, 50, ["sh", "-c", "x"], env.dir / "elsewhere", cgroup=cg(SCOPE))
+    assert orphan_scans(env, 2)[-1] == ["pid:42"]
+
+
+def test_an_orphan_without_a_scope_is_not_spared_by_a_scoped_stranger(env):
+    add_proc(env, 42, ["sleep"], env.wt / "CMX-1", ppid=1)
+    add_proc(env, 50, ["sh"], env.dir / "elsewhere", cgroup=cg(SCOPE))
+    assert orphan_scans(env, 2)[-1] == ["pid:42"]
 
 
 def test_without_a_runs_db_an_orphan_is_still_found(env):
     add_proc(env, 42, ["sleep"], env.wt / "CMX-1", ppid=1)
-    assert [f["evidence"]["run_status"] for f in ops.rule_leaked_proc(src(env), {})] == [None]
+    assert [f["evidence"]["run_status"] for f in leaked(env)] == [None]
 
 
 # --- rule 2b: a self-daemonizing PM2 God Daemon is ppid 1 by design (CMX-273/353) ---------
-
-GOD = "PM2 v7.0.4: God Daemon (/tmp/chela-tests-pm2-x)"
-SCOPE = "chela-suite-1f78a0debe9e"
-
-
-def cg(unit):
-    return f"0::/user.slice/user-1000.slice/user@1000.service/app.slice/{unit}.scope\n"
-
 
 @pytest.fixture
 def pm2(env, tmp_path):
@@ -196,16 +313,16 @@ def god(env, home, *, pid=42, argv=None, where="CMX-1", age=120, environ=None, p
 
 def leaks(env, state=None):
     return sorted((f["subject"], f["summary"])
-                  for f in ops.rule_leaked_proc(src(env), state or {}))
+                  for f in leaked(env, state))
 
 
 def scans(env, n=2):
-    """``n`` scans in a row, each fed the previous one's daemon suspects; the last's leaks."""
+    """``n`` scans in a row, each fed the previous one's suspects; the last's leaks."""
     state, got = {}, []
     for _ in range(n):
         s = src(env)
         got = sorted((f["subject"], f["summary"]) for f in ops.rule_leaked_proc(s, state))
-        state = {"daemons": sorted(s.daemon_suspects)}
+        state = {"daemons": sorted(s.daemon_suspects), "orphans": sorted(s.orphan_suspects)}
     return got
 
 
@@ -361,9 +478,10 @@ def test_a_live_suite_spares_even_a_daemon_older_than_the_suite_timeout(env, pm2
     (["PM2 v7.0.4: God Daemon"], True),                        # no " (" — not the title
 ])
 def test_only_a_god_daemon_title_takes_the_pm2_rule(env, pm2, argv, hit):
-    """A live suite process in its scope that is no test run: it spares a God Daemon, while
-    any other orphan stays a helper with no live test run of its worktree (CMX-279)."""
-    god(env, pm2, argv=argv, cgroup=cg(SCOPE))
+    """A live suite process in its scope that is no test run: it spares a God Daemon at any
+    age, while any other orphan is a helper the scope spares only within the suite timeout
+    (CMX-279/332)."""
+    god(env, pm2, argv=argv, cgroup=cg(SCOPE), age=9000)
     add_proc(env, 50, ["sh", "-c", "x"], env.dir / "elsewhere", cgroup=cg(SCOPE))
     assert [s for s, _ in scans(env)] == (["pid:42"] if hit else [])
 
@@ -1098,19 +1216,41 @@ def test_scheduled_notifies_a_leaked_daemon_once_on_its_second_scan(env, leaky, 
     assert "do not kill while a suite runs" in leaky.sent[0][1]
 
 
+@pytest.mark.parametrize("kind", ["daemons", "orphans"])
 @pytest.mark.parametrize("done, errors, kept", [
     (["leaked_proc"], {"leaked_proc": "OSError: x"}, True),    # it raised: proves nothing
     ([], {}, True),                                             # the budget never reached it
     (["leaked_proc"], {}, False),                               # it ran clean: replaced
 ])
-def test_daemon_suspects_are_replaced_only_by_a_clean_leaked_proc(env, done, errors, kept):
+def test_suspects_are_replaced_only_by_a_clean_leaked_proc(env, done, errors, kept, kind):
     s = src(env)
-    s.daemon_suspects.add("7:7")
-    old = {"daemons": ["42:1"]}
+    getattr(s, f"{kind[:-1]}_suspects").add("7:7")
+    old = {kind: ["42:1"]}
     result = {"ts": NOW, "findings": [], "rules_done": done, "errors": errors}
     ops.record(env.dir, result, old, s)
-    got = json.loads((env.dir / "ops" / "state.json").read_text())["daemons"]
-    assert got == (["42:1"] if kept else ["7:7"])
+    got = json.loads((env.dir / "ops" / "state.json").read_text())
+    assert got[kind] == (["42:1"] if kept else ["7:7"])
+    assert got["daemons" if kind == "orphans" else "orphans"] == []
+
+
+def test_scheduled_notifies_a_persistent_orphan_once_and_a_transient_one_never(env, leaky):
+    """CMX-332 end to end: the 10-22 leak (2 days old) is one notice on the 2nd scan; a test
+    child re-parented to 1 for a moment, gone by the next scan, is never one."""
+    os.unlink(env.proc / "42" / "stat")
+    add_proc(env, 43, ["node", "hang.test.mjs"], env.wt / "CMX-2", ppid=1,
+             age=2 * 86400)
+    add_proc(env, 44, ["tmux", "new-session", "-d", "-s", "cmx340", "sleep", "60"],
+             env.wt / "CMX-3", ppid=1, age=5)
+    leaky.run()
+    assert leaky.sent == []
+    state = json.loads((env.dir / "ops" / "state.json").read_text())
+    assert state["orphans"] == [f"43:{int((UPTIME - 2 * 86400) * HZ)}",
+                                f"44:{int((UPTIME - 5) * HZ)}"]
+    shutil.rmtree(env.proc / "44")                              # reaped by its test
+    for _ in range(2):
+        leaky.clock[0] += 60
+        leaky.run()
+    assert [[f["subject"] for f in p["findings"]] for _, _, p in leaky.sent] == [["pid:43"]]
 
 
 def test_scheduled_is_read_only_outside_the_ops_dir(env, leaky, monkeypatch):
