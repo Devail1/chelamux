@@ -320,3 +320,73 @@ def decide(batch: str, *, approve: bool, only: set[int] | None = None, by: str =
         log(batch, "accepted" if ok else "failed", p, by=by, result=result)
         results.append(result)
     return {"batch": batch, "results": results}
+
+
+KILL_RATE = 0.70          # the trial's kill line: under it, keeper mode is switched off
+OUTCOMES = ("proposed", "dropped", "accepted", "rejected", "failed")
+
+
+def stats(since: int | None = None, now: float | None = None) -> dict:
+    """The trial's numbers from :func:`log_path`, over the last ``since`` seconds (all time
+    when None). ``made`` is every proposal the model returned (``proposed`` + ``dropped``);
+    the acceptance rate is ``approved / decided``, where a person approving a proposal whose
+    write then ``failed`` still counts as approved. ``rate`` is None with nothing decided.
+
+    A log that cannot be read is ``{"error"}``; a line that does not parse is counted in
+    ``bad``, never skipped silently. A missing log is a trial with nothing in it yet."""
+    now = time.time() if now is None else now
+    try:
+        lines = log_path().read_text(encoding="utf-8").splitlines()
+    except FileNotFoundError:
+        lines = []
+    except (OSError, UnicodeDecodeError) as exc:
+        return {"error": f"{log_path()} could not be read: {exc}"}
+    counts = dict.fromkeys(OUTCOMES, 0)
+    by_action: dict[str, dict[str, int]] = {}
+    bad = 0
+    for line in lines:
+        if not line.strip():
+            continue
+        try:
+            row = json.loads(line)
+            ts, outcome = float(row["ts"]), row["outcome"]
+        except (ValueError, TypeError, KeyError):
+            bad += 1
+            continue
+        if outcome not in counts:
+            bad += 1
+            continue
+        if since is not None and ts < now - since:
+            continue
+        proposal = row.get("proposal")
+        action = str(proposal.get("action") if isinstance(proposal, dict) else None)
+        counts[outcome] += 1
+        by_action.setdefault(action, dict.fromkeys(OUTCOMES, 0))[outcome] += 1
+    approved = counts["accepted"] + counts["failed"]
+    decided = approved + counts["rejected"]
+    return {**counts, "made": counts["proposed"] + counts["dropped"], "approved": approved,
+            "decided": decided, "rate": approved / decided if decided else None,
+            "by_action": dict(sorted(by_action.items())), "bad": bad, "since": since}
+
+
+def render_stats(s: dict) -> str:
+    from chela.hold import human_duration
+    days, rest = divmod(s["since"] or 0, 86400)
+    span = ("all time" if not s["since"] else f"the last {days}d" if days and not rest
+            else f"the last {human_duration(s['since'])}")
+    rate = "n/a (nothing decided)" if s["rate"] is None else f"{s['rate']:.0%}"
+    out = [f"keeper stats — {span}",
+           f"  proposals made: {s['made']} ({s['proposed']} reached a person, "
+           f"{s['dropped']} dropped by validation)",
+           f"  accepted: {s['accepted']}  rejected: {s['rejected']}  "
+           f"approved but the write failed: {s['failed']}",
+           f"  acceptance rate: {rate} ({s['approved']} approved of {s['decided']} decided)"]
+    if s["rate"] is not None and s["rate"] < KILL_RATE:
+        out.append(f"  ⚠ below the {KILL_RATE:.0%} kill line")
+    if s["by_action"]:
+        out.append("  by action:")
+        out += [f"    {a}: " + ", ".join(f"{k} {v}" for k, v in c.items() if v)
+                for a, c in s["by_action"].items()]
+    if s["bad"]:
+        out.append(f"  ⚠ {s['bad']} log line(s) could not be read and are not counted")
+    return "\n".join(out) + "\n"

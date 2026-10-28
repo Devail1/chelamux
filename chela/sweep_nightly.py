@@ -67,6 +67,7 @@ from pathlib import Path
 from typing import Protocol
 
 from chela import config, judge, risktier, sweep
+from chela.workflow import dispatch_enabled
 
 log = logging.getLogger(__name__)
 
@@ -154,6 +155,8 @@ def _last_path(chela_dir: Path | None) -> Path:
 def due(wf, now: datetime, chela_dir: Path | None = None) -> bool:
     """Is today's sweep of ``wf`` due at ``now`` (local)? Past ``nightly_at`` and not yet
     started today. An unreadable day record is NOT due — never a second sweep on a guess."""
+    if not dispatch_enabled(wf):
+        return False                  # CMX-348: a keeper-only workflow merged nothing
     at = nightly_at(wf)
     if at is None or (now.hour, now.minute) < at:
         return False

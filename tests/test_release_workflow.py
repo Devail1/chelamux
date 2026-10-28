@@ -138,3 +138,100 @@ def test_the_workflow_reacts_to_tags_it_did_not_create(workflow):
     triggers = workflow[True] if True in workflow else workflow["on"]
     assert triggers["push"]["tags"] == ["v*"]
     assert "workflow_dispatch" in triggers
+
+
+# --- CMX-363: the `pypi` job -------------------------------------------------------------
+#
+# A PyPI version can be uploaded once, ever, and this job only runs when a release is
+# already happening. So its whole mapping is pinned (an unpinned key is a place a mutation
+# hides), and the one step with logic in it, the tag/version check, is executed for real.
+
+# The wheel runs as an adopter runs it, and imports the dashboard (whose Flask import
+# `--help` never reaches).
+_SMOKE = (
+    "uvx --from dist/chelamux-*.whl chelamux --help\n"
+    "uvx --from dist/chelamux-*.whl python -c 'import chela.dashboard.app'\n"
+)
+
+_PYPI_VERSION_CHECK = """version="$(python3 -c 'import tomllib; print(tomllib.load(open("pyproject.toml", "rb"))["project"]["version"])')"
+if [ "v$version" != "$GITHUB_REF_NAME" ]; then
+  echo "tag $GITHUB_REF_NAME does not match pyproject.toml version $version" >&2
+  exit 1
+fi
+"""
+
+_EXPECTED_PYPI_JOB: dict = {
+    "needs": "release",
+    "runs-on": "ubuntu-latest",
+    "if": "github.repository == 'Devail1/chelamux' && github.event_name == 'push'",
+    "environment": {"name": "pypi", "url": "https://pypi.org/project/chelamux/"},
+    "permissions": {"contents": "read", "id-token": "write"},
+    "steps": [
+        {"uses": "actions/checkout@v4"},
+        {"name": "Install uv", "uses": "astral-sh/setup-uv@v5"},
+        {"name": "Check the tag matches pyproject's version", "run": _PYPI_VERSION_CHECK},
+        {"name": "Build sdist + wheel", "run": "uv build"},
+        {"name": "Smoke-test the built wheel", "run": _SMOKE},
+        {"name": "Publish to PyPI", "uses": "pypa/gh-action-pypi-publish@release/v1"},
+    ],
+}
+
+
+@pytest.fixture(scope="module")
+def pypi_job(workflow) -> dict:
+    return workflow["jobs"]["pypi"]
+
+
+def test_the_workflow_has_exactly_the_release_and_pypi_jobs(workflow):
+    assert set(workflow["jobs"]) == {"release", "pypi"}
+
+
+def test_the_pypi_job_mapping_is_pinned_exactly(pypi_job):
+    assert pypi_job == _EXPECTED_PYPI_JOB
+
+
+def test_pypi_publishes_with_trusted_publishing_not_a_token(pypi_job):
+    """No `password:`/token input anywhere: the OIDC token (`id-token: write`) is the only
+    credential, scoped to the `pypi` environment PyPI's trusted publisher names."""
+    assert pypi_job["permissions"]["id-token"] == "write"
+    assert pypi_job["environment"]["name"] == "pypi"
+    publish = pypi_job["steps"][-1]
+    assert publish["uses"] == "pypa/gh-action-pypi-publish@release/v1"
+    assert "with" not in publish and "env" not in publish
+
+
+def test_pypi_publishes_only_on_a_tag_push_after_the_release(pypi_job):
+    """A dispatch run builds the default branch, not the tag; and a release whose notes
+    failed to extract must not reach PyPI either."""
+    assert pypi_job["needs"] == "release"
+    assert "github.event_name == 'push'" in pypi_job["if"]
+    assert "github.repository == 'Devail1/chelamux'" in pypi_job["if"]
+
+
+def test_pypi_smoke_tests_the_wheel_before_publishing_it(pypi_job):
+    names = [s.get("name") for s in pypi_job["steps"]]
+    assert names.index("Check the tag matches pyproject's version") < names.index("Build sdist + wheel")
+    assert names.index("Build sdist + wheel") < names.index("Smoke-test the built wheel")
+    assert names.index("Smoke-test the built wheel") < names.index("Publish to PyPI")
+
+
+def _run_version_check(pypi_job, tmp_path: Path, version: str, ref_name: str):
+    import subprocess
+
+    (tmp_path / "pyproject.toml").write_text(f'[project]\nname = "chelamux"\nversion = "{version}"\n')
+    step = next(s for s in pypi_job["steps"] if s.get("name") == "Check the tag matches pyproject's version")
+    # GitHub runs `run:` blocks with `bash -e {0}`.
+    return subprocess.run(["bash", "-e", "-c", step["run"]], cwd=tmp_path, capture_output=True,
+                          text=True, timeout=30, env={"PATH": "/usr/bin:/bin", "GITHUB_REF_NAME": ref_name})
+
+
+def test_the_version_check_passes_a_matching_tag(pypi_job, tmp_path):
+    result = _run_version_check(pypi_job, tmp_path, "0.19.0", "v0.19.0")
+    assert result.returncode == 0, result.stderr
+
+
+@pytest.mark.parametrize("ref_name", ["v0.19.1", "0.19.0", "v0.19.0rc1", "v0.19"])
+def test_the_version_check_refuses_a_mismatched_tag(pypi_job, tmp_path, ref_name):
+    result = _run_version_check(pypi_job, tmp_path, "0.19.0", ref_name)
+    assert result.returncode == 1
+    assert f"tag {ref_name} does not match pyproject.toml version 0.19.0" in result.stderr
