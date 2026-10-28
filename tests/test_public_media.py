@@ -226,12 +226,17 @@ class _ProbeEnviron(Mapping):
     — except the two the demo env is built on. Planting sentinels on names only covers
     the names someone thought of (shape 402d: git reads ``$EMAIL`` too); here any
     ``os.environ[...]`` / ``.get(name, default)`` read of any name carries a probe, so
-    no fallback default can mask an inheritance."""
+    no fallback default can mask an inheritance.
+
+    The two real names read exactly as ``os.environ`` does: one that is UNSET raises
+    KeyError, so ``.get(name, default)`` falls back to its default as in production. A
+    probe there would read "allowed but unset" as an inherited operator value — and
+    fail the guard on any machine without ``$LANG`` (the nightly sweep's)."""
 
     _REAL = ("PATH", "LANG")
 
     def __getitem__(self, k):
-        return os.environ[k] if k in self._REAL and k in os.environ else f"probe-{k}"
+        return os.environ[k] if k in self._REAL else f"probe-{k}"
 
     def __iter__(self):
         return iter(os.environ)
@@ -240,7 +245,13 @@ class _ProbeEnviron(Mapping):
         return len(os.environ)
 
 
-def test_demo_fleet_env_reads_no_operator_var_of_any_name(tmp_path, monkeypatch):
+@pytest.mark.parametrize("lang", ["en_US.UTF-8", None], ids=["LANG-set", "LANG-unset"])
+def test_demo_fleet_env_reads_no_operator_var_of_any_name(tmp_path, monkeypatch, lang):
+    # Both ways the allowed LANG can stand on the machine running the suite. Set it
+    # first either way, so "unset" is this test's doing, not the runner's environment.
+    monkeypatch.setenv("LANG", lang or "en_US.UTF-8")
+    if lang is None:
+        monkeypatch.delenv("LANG")
     fleet = _fleet()
     # Only fleet's view of `os` changes; the rest of the process keeps the real one.
     monkeypatch.setattr(fleet, "os", SimpleNamespace(
@@ -248,6 +259,8 @@ def test_demo_fleet_env_reads_no_operator_var_of_any_name(tmp_path, monkeypatch)
            "environ": _ProbeEnviron()}))
     env = fleet.demo_env(tmp_path, 5999, 6400)
     _assert_demo_env_is_from_scratch(tmp_path, env)
+    # The real LANG when set, the documented default when not — never a probe.
+    assert env["LANG"] == (lang or "C.UTF-8")
 
 
 def test_demo_fleet_env_inherits_no_var_unset_on_the_test_machine(tmp_path, monkeypatch):
