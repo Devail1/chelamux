@@ -57,6 +57,22 @@ agent:
   #                           # the prompt wherever {{standing_rules}} appears, and into
   #                           # the built-in rework prompt. Missing file → empty + a warning.
 
+# Optional — keeper mode. The daemon runs `chela keeper run` for this workflow every
+# `every` (skipped while the queue is held, while a run is in flight, or when no session
+# in the repo did anything since the last run): one model call proposes board changes,
+# each citing evidence, and ONE inbox item asks you to approve or dismiss them.
+# `chela keeper stats --since 7d` reports the acceptance rate.
+# keeper:
+#   enabled: true
+#   every: 45m              # 600, 90m, 2h, 1d
+#   model: sonnet
+#
+# Optional — `dispatch: {enabled: false}` (or `dispatch: false`) makes this a
+# keeper-only workflow: it never claims a task, judges, auto-merges, nightly-sweeps or
+# registers with the merge gate, so your own sessions may push to base_branch.
+# dispatch:
+#   enabled: false
+
 hooks:
   # Optional. Runs ONCE in a freshly-created worktree, before the agent starts.
   # The canonical use is seeding a least-privilege .claude/settings.local.json
