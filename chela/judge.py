@@ -82,11 +82,14 @@ import sys
 import tempfile
 import time
 from collections.abc import Mapping
+from contextlib import nullcontext
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
 from typing import NamedTuple
 
-from chela import envutil, generated, judge_select, procguard, risktier, suite_guard, toolconfig
+from chela import (
+    envutil, generated, judge_select, judge_timing, procguard, risktier, suite_guard, toolconfig,
+)
 
 log = logging.getLogger(__name__)
 
@@ -477,6 +480,8 @@ class Report:
     # ⚖️🧩 CMX-335: the visible survivors grouped by shape + target, each with EVERY same-shape
     # site in the PR's diff (:func:`chela.shape_sites.groups`). Rendered by ``block_body``.
     shape_groups: list[dict] = field(default_factory=list)
+    # ⏱️ CMX-196: per-phase wall-clock of this round — the private record's ``timings``.
+    timings: "judge_timing.RoundTimer | None" = field(default=None, repr=False, compare=False)
 
     @property
     def blocking(self) -> list[Outcome]:
@@ -762,11 +767,15 @@ def run_suite(
     """
     run = {"cmd": test_cmd, "cwd": str(cwd), "env_diff": {}, "started": _iso_now(),
            "output": ""}
+    timer = _run_ctx.get("timer")
+    queued = timer.now() if timer is not None else 0.0
     try:
         # 🧠 CMX-119: one of the box's K suite slots, then a memory-capped scope of its own.
         with (suite_guard.slot(cwd, on_wait=_run_ctx.get("on_slot_wait"),
                                max_wait=suite_guard.max_wait(timeout)),
               tempfile.TemporaryDirectory(prefix="chela-suite-") as scratch):
+            if timer is not None:     # ⏱️ CMX-196: queued for a slot, not running tests
+                timer.slot_wait(timer.now() - queued)
             env = _suite_env(Path(scratch))
             env.update(extra_env or {})
             run["env_diff"] = _env_diff(os.environ, env)
@@ -784,6 +793,8 @@ def run_suite(
                            "its process tree was killed", run, timed_out=True)
     except OSError as e:
         run["ended"] = _iso_now()
+        if timer is not None and isinstance(e, suite_guard.SlotTimeout):
+            timer.slot_wait(timer.now() - queued)     # ⏱️ the whole run was the wait
         return SuiteResult(False, -1, 0, 0, 0, "", f"the suite could not be run: {e}", run)
     text = (out.stdout or "") + (out.stderr or "")
     passed, failed, errors = _counts(text)
@@ -1584,6 +1595,7 @@ def run_experiments(
     progress=None,
     heartbeat=None,
     held_out: bool = True,
+    timer: "judge_timing.RoundTimer | None" = None,
 ) -> Report:
     """Execute every proposed experiment IN THIS WORKTREE and adjudicate each one.
 
@@ -1654,14 +1666,23 @@ def run_experiments(
 
     ⚖️🪜 CMX-288: ``held_out=False`` (a STANDARD-tier run) plans no held-out experiment —
     see :func:`plan_experiments`.
+
+    ⏱️ CMX-196: ``timer`` (a fresh :class:`~chela.judge_timing.RoundTimer` when omitted)
+    measures every phase, slot waits included, and lands on ``report.timings``. It observes.
     """
     started = time.monotonic()
-    report = _run_experiments(worktree, test_cmd, raw, timeout=timeout,
-                              base_branch=base_branch, select_tests=select_tests,
-                              consistency_sample=consistency_sample,
-                              max_experiments=max_experiments, risk=risk,
-                              tool_config=tool_config, progress=progress, heartbeat=heartbeat,
-                              held_out=held_out)
+    timer = timer if timer is not None else judge_timing.RoundTimer()
+    _run_ctx["timer"] = timer
+    try:
+        report = _run_experiments(worktree, test_cmd, raw, timeout=timeout,
+                                  base_branch=base_branch, select_tests=select_tests,
+                                  consistency_sample=consistency_sample,
+                                  max_experiments=max_experiments, risk=risk,
+                                  tool_config=tool_config, progress=progress,
+                                  heartbeat=heartbeat, held_out=held_out, timer=timer)
+    finally:
+        _run_ctx.pop("timer", None)
+    report.timings = timer
     report.battery_seconds = time.monotonic() - started
     log.info("judge: mutation battery took %s (%d experiment(s))",
              _duration(report.battery_seconds), len(report.outcomes))
@@ -1695,7 +1716,7 @@ def _run_experiments(
     worktree: Path, test_cmd: str, raw: dict, *, timeout: float, base_branch: str,
     select_tests: bool, consistency_sample: int, max_experiments: int, risk: str,
     tool_config: tuple[str, ...] = toolconfig.DEFAULT_GLOBS, progress=None, heartbeat=None,
-    held_out: bool = True,
+    held_out: bool = True, timer: "judge_timing.RoundTimer",
 ) -> Report:
     report = Report(risk=risk, cap=max(1, int(max_experiments)))
     items = raw.get("experiments") if isinstance(raw, dict) else None
@@ -1754,7 +1775,8 @@ def _run_experiments(
     # second — "the suite is NOT GREEN", on a PR whose code was fine. An environment the
     # judge could not build is an unknown ABOUT THE JUDGE, and it has to say so in those
     # words, naming the cwd, or the next reader debugs the PR instead of the box.
-    env_problem = provision_suite_env(worktree)
+    with timer.phase("provision"):
+        env_problem = provision_suite_env(worktree)
     if env_problem:
         report.cannot_verify = (
             f"the judge worktree could not be PROVISIONED to run the suite: {env_problem}. "
@@ -1771,7 +1793,8 @@ def _run_experiments(
 
     # THE BASELINE — the suite as the PR actually ships it, before anything is touched.
     baseline_started = time.monotonic()
-    with tempfile.TemporaryDirectory(prefix="chela-judge-select-") as scratch:
+    with (timer.phase("baseline"),
+          tempfile.TemporaryDirectory(prefix="chela-judge-select-") as scratch):
         baseline, selector, report.selection = run_baseline(
             worktree, test_cmd, timeout, Path(scratch), select_tests=select_tests,
             failures=report.suite_failures, flakes=report.baseline_flakes)
@@ -1813,10 +1836,11 @@ def _run_experiments(
         )
         return report
 
-    outcomes, contamination = _apply_experiments(
-        worktree, test_cmd, items, baseline, timeout, selector, progress=progress,
-        heartbeat=heartbeat,
-    )
+    with timer.phase("experiments"):
+        outcomes, contamination = _apply_experiments(
+            worktree, test_cmd, items, baseline, timeout, selector, progress=progress,
+            heartbeat=heartbeat,
+        )
     report.outcomes.extend(outcomes)
     if contamination:
         report.cannot_verify = contamination
@@ -1824,10 +1848,11 @@ def _run_experiments(
     toolconfig.classify(outcomes, worktree, base_branch, tool_config)
 
     if consistency_sample > 0:
-        contamination = _check_consistency(
-            worktree, test_cmd, items, outcomes, baseline, timeout, consistency_sample, report,
-            heartbeat=heartbeat,
-        )
+        with timer.phase("consistency"):
+            contamination = _check_consistency(
+                worktree, test_cmd, items, outcomes, baseline, timeout, consistency_sample,
+                report, heartbeat=heartbeat,
+            )
         if contamination:
             report.cannot_verify = contamination
             return report
@@ -2008,14 +2033,21 @@ def _apply_each(
         applied, reason, original = apply_mutation(path, exp.before, exp.after)
         try:
             started = time.monotonic()
-            parses, parse_detail = parse_check(path) if applied else (True, "")
-            if applied:
-                outcome = _measure(worktree, test_cmd, exp, reason, parses, parse_detail,
-                                   baseline, timeout, selector,
-                                   pinned[n] if pinned is not None else _SELECT,
-                                   heartbeat=heartbeat)
-            else:
-                outcome = adjudicate(exp, applied, reason, parses, parse_detail, baseline, None)
+            # ⏱️ CMX-196: this experiment's row in the round's timings (judge runs only).
+            timer = _run_ctx.get("timer")
+            with (timer.experiment(held_out=exp.held_out) if timer is not None
+                  else nullcontext({})) as timed:
+                parses, parse_detail = parse_check(path) if applied else (True, "")
+                if applied:
+                    outcome = _measure(worktree, test_cmd, exp, reason, parses, parse_detail,
+                                       baseline, timeout, selector,
+                                       pinned[n] if pinned is not None else _SELECT,
+                                       heartbeat=heartbeat)
+                else:
+                    outcome = adjudicate(exp, applied, reason, parses, parse_detail, baseline,
+                                         None)
+                timed.update(selected=outcome.selected, confirmed_full=outcome.confirmed_full,
+                             verdict=outcome.verdict)
             outcome.seconds = time.monotonic() - started
             # ⚖️🙈 CMX-395: a held-out experiment is never named, not even in the daemon log.
             log.info("judge: %s — %s (%s)",
@@ -2882,6 +2914,11 @@ def judge_run(
     # here, not from when the judge agent was spawned — its design time is not the run's.
     run_started = time.time()
     dispatcher.mark_judge_run_started(task_id)
+    # ⏱️ CMX-196: the round's per-phase clock. `setup` is everything before this process —
+    # the worktree checkout, its install hook and the judge agent designing experiments.
+    timer = judge_timing.RoundTimer()
+    timer.record("setup", _since(run.get("judge_started_at")))
+    timer.load = concurrent_load()
     # ⏳⚖️ CMX-431: `progress_at` is when the run last demonstrably MOVED, `phase` where it
     # is, `baseline_seconds`/`confirmations` what its wall must budget — the daemon's
     # watchdog (`dispatcher.judge_overdue`) reads all four, plus `suite_timeout_seconds`.
@@ -2945,7 +2982,9 @@ def judge_run(
                                           "suite to run a mutation against",
                             cannot_verify_final=True)
         elif not worktree.is_dir():
-            stale = _reprovision_worktree(wf, worktree, run.get("pr_head_sha") or "", base_branch)
+            with timer.phase("reprovision"):
+                stale = _reprovision_worktree(wf, worktree, run.get("pr_head_sha") or "",
+                                              base_branch)
             if stale:
                 report = Report(cannot_verify=stale)
             else:
@@ -2955,7 +2994,7 @@ def judge_run(
                     base_branch=base_branch, select_tests=judge_cfg.select_tests,
                     consistency_sample=judge_cfg.consistency_sample,
                     max_experiments=exp_cap, risk=risk, tool_config=judge_cfg.tool_config,
-                    progress=_progress, heartbeat=_heartbeat, held_out=held_out,
+                    progress=_progress, heartbeat=_heartbeat, held_out=held_out, timer=timer,
                 )
         else:
             report = run_experiments(
@@ -2963,9 +3002,10 @@ def judge_run(
                 base_branch=base_branch, select_tests=judge_cfg.select_tests,
                 consistency_sample=judge_cfg.consistency_sample,
                 max_experiments=exp_cap, risk=risk, tool_config=judge_cfg.tool_config,
-                progress=_progress, heartbeat=_heartbeat, held_out=held_out,
+                progress=_progress, heartbeat=_heartbeat, held_out=held_out, timer=timer,
             )
         report.risk, report.cap = risk, exp_cap
+        report.timings = timer       # a Report built above, with no battery, is still timed
         report.total_seconds = _since(run.get("judge_started_at"))
         # A worktree this call rebuilt was checked out at the run's CURRENT head — stamp
         # `judge_sha` to match so the DB record of what was judged is never stale, and the
@@ -3221,6 +3261,20 @@ def slot_wait_status(status: dict, since: float | None, now: float) -> None:
     status["slot_waiting_since"] = since
 
 
+def concurrent_load() -> dict | None:
+    """⏱️ CMX-196: how many coding agents and judges (this one included) are running as a
+    round starts, so contention is visible beside its timings. ``None`` when the runs
+    table cannot be read — an unknown load, never a zero one."""
+    from chela import dispatcher
+
+    try:
+        inflight = dispatcher.hold_inflight()
+    except Exception as e:  # noqa: BLE001 — a measurement never takes a judge round down
+        log.warning("judge: could not read the concurrent load: %s", e)
+        return None
+    return {"agents": len(inflight["agents"]), "judges": len(inflight["judges"])}
+
+
 def _blocked_detail(report: Report) -> str:
     """The run row's ``judge_detail`` for a block — visible guards by name, held-out by count."""
     parts = [f"{o.experiment.guard}: SURVIVED" for o in report.visible_blocking]
@@ -3293,6 +3347,9 @@ def _record_private(
             {"guard": o.experiment.guard, "held_out": o.held_out,
              "first": o.verdict, "rerun": o.rerun_verdict} for o in report.flaky
         ]),
+        # ⏱️ CMX-196: where this round's time went. Absent on older rows — readers cope.
+        "timings": (report.timings.as_dict(total=report.total_seconds)
+                    if report.timings is not None else None),
     }
     path = heldout_store_path(task_id)
     # No local except: record_private's single guard owns every failure (write or build).
@@ -3303,8 +3360,21 @@ def _record_private(
     return path
 
 
+def load_all_private() -> list[dict]:
+    """⏱️ CMX-196: every task's private round records — what ``chela judge timings`` reads."""
+    from chela import config
+
+    out: list[dict] = []
+    for path in sorted((config.CHELA_DIR / "judge-heldout").glob("*.jsonl")):
+        out.extend(_read_records(path))
+    return out
+
+
 def load_private(task_id: str) -> list[dict]:
-    path = heldout_store_path(task_id)
+    return _read_records(heldout_store_path(task_id))
+
+
+def _read_records(path: Path) -> list[dict]:
     try:
         lines = path.read_text().splitlines()
     except OSError:

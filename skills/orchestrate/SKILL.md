@@ -27,7 +27,8 @@ ids don't. Address siblings by `@N`, and re-derive them from `chela status` afte
 | `chela dispatch-runs --awaiting` | Every run parked in the review loop. |
 | `chela park <run> --reason "…" [--until 2h\|<ISO time>\|run:<ID>]` / `chela unpark <run>` | Hold a running agent on purpose (waiting on another run, on memory): no STUCK notice and no idle nudge or fail while parked, ONE notice once it outlives `--until` or 6h. It keeps its slot and window. An agent cannot park itself. A run waiting for a suite slot is parked automatically. `chela dispatch-runs` shows each park. |
 | `chela wait <task-id> --until done` | Block until a dispatched task reaches a state you must act on. |
-| `chela judge show <run>` | Rounds-to-clean and survival rates for a run's judge rounds. |
+| `chela judge show <run>` | Rounds-to-clean, survival rates and per-phase timings for a run's judge rounds. |
+| `chela judge timings --since 7d` | Median and p90 wall-clock per judge phase across all tasks, slot wait included. |
 | `chela events --type T --tail N` | The durable event log, i.e. the record of what actually happened. |
 | `chela escalate "…" --recommend "…"` | Hand a decision to the human, with your recommendation. |
 | `chela dispatch --pause` / `--resume` | **HOLD the queue** while you reorder the tracker: no new claims, judges or rework re-spawns until you release; running agents and judges finish. See the gotcha below. |
