@@ -1332,11 +1332,26 @@ def park_max_s() -> int:
     return int(os.environ.get("CHELA_PARK_MAX_S", "21600"))
 
 
-def selfcheck_alert_s() -> int:
+# CMX-365: the self-check ceiling's margin over the run's own budget, and the ceiling when
+# that budget is unknown (no readable WORKFLOW.md).
+SELFCHECK_ALERT_MARGIN = 1.5
+SELFCHECK_ALERT_FALLBACK_S = 5400
+
+
+def selfcheck_alert_s(budget_s: float | None = None) -> int:
     """A live ``chela task-finished`` / ``chela judge sweep`` / pytest in a running run's
     worktree is ACTIVITY, not a stuck agent (CMX-110) — until it has run this long; then
-    one notice that says exactly that ("task-finished self-check running for 62m")."""
-    return int(os.environ.get("CHELA_SELFCHECK_ALERT_S", "3600"))
+    one notice that says exactly that ("task-finished self-check running for 62m").
+
+    CMX-365: ``CHELA_SELFCHECK_ALERT_S`` when set; else ``budget_s`` (the run's own
+    self-check budget, see ``inbox.selfcheck_budget_s``) × ``SELFCHECK_ALERT_MARGIN``; else
+    ``SELFCHECK_ALERT_FALLBACK_S``. A fixed 1h fired on every normal 2400 s-budget run."""
+    raw = os.environ.get("CHELA_SELFCHECK_ALERT_S")
+    if raw:
+        return int(raw)
+    if budget_s is not None and budget_s > 0:
+        return int(budget_s * SELFCHECK_ALERT_MARGIN)
+    return SELFCHECK_ALERT_FALLBACK_S
 
 
 def marker_unread_alert_s() -> int:

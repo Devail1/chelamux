@@ -248,7 +248,7 @@ Status section already does for other facts), not a write control.
 | `CHELA_JUDGE_NOT_STARTED_ALERT_S` | `1200` | `hot` | How long a run may wait in review with no judge round started before one inbox notice (CMX-86) |
 | `CHELA_STUCK_AGENT_ALERT_S` | `1200` | `hot` | How long a running agent may go without a commit or transcript activity before one inbox notice (CMX-86) |
 | `CHELA_MARKER_UNREAD_ALERT_S` | `300` | `hot` | How long a task-finished/push-request marker may sit unapplied before one inbox notice (CMX-86) |
-| `CHELA_SELFCHECK_ALERT_S` | `3600` | `hot` | How long a `chela task-finished` / `chela judge sweep` / pytest may run in a running run's worktree (counted as activity, never "stuck") before one "self-check running for …" inbox notice (CMX-110) |
+| `CHELA_SELFCHECK_ALERT_S` | derived | `hot` | How long a `chela task-finished` / `chela judge sweep` / pytest may run in a running run's worktree (counted as activity, never "stuck") before one "self-check running for …" inbox notice (CMX-110). Unset: 1.5 × the run's own budget from its WORKFLOW.md (larger of `judge.self_check_budget_seconds` / `judge.sweep_budget_seconds`, plus `judge.suite_timeout_seconds`), else 5400 (CMX-365) |
 | `CHELA_PARK_MAX_S` | `21600` | `hot` | How long a run parked with `chela park` stays exempt from the stuck notice before one "parked … past the max" inbox notice (CMX-318) |
 | `CHELA_INBOX_FILE` | `$CHELA_DIR/inbox.json` | `internal-path` | |
 | `CHELA_ORCHESTRATOR_WID` | empty | `identity` | Pins the inbox target window; env pin carries no epoch/session (see `chela/inbox.py`) |
