@@ -208,14 +208,24 @@
     <p>chela uses <a href="https://docs.astral.sh/uv/">uv</a>. You also need Python ≥ 3.11,
     <code>tmux</code>, <code>git</code>, the <code>claude</code> CLI on <code>PATH</code>, and
     <code>gh</code> (the daemon pushes branches and opens PRs with it).</p>
+    <pre>uv tool install "chelamux[dashboard,telegram]"   <span class="c"># core + dashboard + Telegram bridge, from PyPI</span>
+chela status
+chela dashboard        <span class="c"># http://127.0.0.1:5001</span></pre>
+    <p>PyPI gets tagged releases only. To track the default branch instead, install
+    <code>"chelamux[dashboard,telegram] @ git+https://github.com/Devail1/chelamux"</code>.
+    Leave out <code>telegram</code> if you don't want the Telegram bridge. If your shell does not
+    find <code>chela</code>, run <code>uv tool update-shell</code>. Then, inside Claude Code, add the
+    <a href="#dashboard">hooks plugin</a>: <code>/plugin marketplace add Devail1/chelamux</code>.</p>
+    <p><strong>From source</strong> (to contribute, see
+    <a href="https://github.com/Devail1/chelamux/blob/main/CONTRIBUTING.md">CONTRIBUTING.md</a>):</p>
     <pre>git clone https://github.com/Devail1/chelamux && cd chelamux
 uv sync --all-extras          <span class="c"># core + dashboard + Telegram bridge, in one command</span>
 uv run chela status
-uv run chela dashboard        <span class="c"># http://127.0.0.1:5001</span></pre>
+uv run chela dashboard</pre>
     <p>Install every extra in one command: <code>uv sync --extra X</code> <em>replaces</em> the
     environment, so naming extras one at a time leaves only the last. A headless box can use plain
-    <code>uv sync</code> (core only). Then, inside Claude Code, add the
-    <a href="#dashboard">hooks plugin</a>: <code>/plugin marketplace add Devail1/chelamux</code>.</p>
+    <code>uv sync</code> (core only). In a source checkout, run every <code>chela …</code> command on
+    this page as <code>uv run chela …</code>.</p>
 
     <div class="note"><p><strong>Authenticate Claude once.</strong> chela never touches credentials;
     it drives the <code>claude</code> CLI inside your tmux windows. Log in once on the machine
@@ -229,18 +239,18 @@ uv run chela dashboard        <span class="c"># http://127.0.0.1:5001</span></pr
 tmux new-session -d -s chela -n researcher
 
 <span class="c"># see what chela can see</span>
-uv run chela status
+chela status
 
 <span class="c"># poke the agent every hour, then run the daemon</span>
-uv run chela schedule add researcher --every 1h --prompt <span class="g">"Run your research cycle."</span>
-uv run chela run</pre>
+chela schedule add researcher --every 1h --prompt <span class="g">"Run your research cycle."</span>
+chela run</pre>
 
     <h3>3. Dispatch a task queue into PRs</h3>
     <p>Drop a <code>WORKFLOW.md</code> + <code>TODO.md</code> into a repo (copy <code>examples/</code>),
     then point chela at it. Each open <code>- [ ]</code> becomes a worktree → an agent → a PR.
     The queue can also be a Linear team or GitHub issues. See <a href="#linear">the Linear tracker</a>.</p>
-    <pre>uv run chela dispatch /path/to/repo/WORKFLOW.md --once   <span class="c"># one pass</span>
-uv run chela dispatch /path/to/repo/WORKFLOW.md          <span class="c"># poll forever</span></pre>
+    <pre>chela dispatch /path/to/repo/WORKFLOW.md --once   <span class="c"># one pass</span>
+chela dispatch /path/to/repo/WORKFLOW.md          <span class="c"># poll forever</span></pre>
   </section>
 
   <!-- ───────── Concepts ───────── -->
@@ -580,8 +590,7 @@ Answer by posting back to the asker. This wakes them, with no human in the middl
   <!-- ───────── Dashboard ───────── -->
   <section class="doc-section" id="dashboard">
     <h2>Dashboard &amp; the wall</h2>
-    <pre>uv sync --all-extras
-uv run chela dashboard           <span class="c"># http://127.0.0.1:5001</span></pre>
+    <pre>chela dashboard           <span class="c"># http://127.0.0.1:5001</span></pre>
     <p>The web UI has two views. The <strong>Wall</strong> is every agent's live terminal, each pane
     marked <em>working</em>, <em>needs you</em>, <em>PR open</em> or <em>idle</em>; <strong>Work</strong>
     holds the dispatch <strong>board</strong> (a Kanban of runs), the per-workflow <strong>runs</strong>
@@ -612,9 +621,9 @@ uv run chela dashboard           <span class="c"># http://127.0.0.1:5001</span><
     <strong>on by default but loopback-guarded</strong>: it serves writable shells, so the dashboard
     only serves it on a <code>127.0.0.1</code> bind. On a non-loopback bind it's refused unless you
     opt in explicitly:</p>
-    <pre><span class="k">CHELA_TERMINALS_EXPOSE</span>=true uv run chela dashboard --host 0.0.0.0
+    <pre><span class="k">CHELA_TERMINALS_EXPOSE</span>=true chela dashboard --host 0.0.0.0
 <span class="c"># or turn the wall off entirely:</span>
-<span class="k">CHELA_TERMINALS_ENABLED</span>=false uv run chela dashboard</pre>
+<span class="k">CHELA_TERMINALS_ENABLED</span>=false chela dashboard</pre>
 
     <h3>The hooks plugin (recommended)</h3>
     <p>chela works without any Claude Code hooks; it scrapes each tmux pane as a fallback. But the
@@ -706,7 +715,7 @@ chela install-statusline --write   <span class="c"># writes it (won't clobber an
 cd chela/collab-relay && npx wrangler deploy
 
 <span class="c"># point chela at it, then start the dashboard</span>
-<span class="k">CHELA_COLLAB_RELAY</span>=wss://your-relay.workers.dev uv run chela dashboard</pre>
+<span class="k">CHELA_COLLAB_RELAY</span>=wss://your-relay.workers.dev chela dashboard</pre>
 
     <div class="note"><p><strong>The code is the access.</strong> Anyone holding the link and the code
     can watch. Typing is checked on your machine on every keystroke: the share must allow it, Settings →

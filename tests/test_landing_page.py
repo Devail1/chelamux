@@ -124,8 +124,9 @@ def test_install_is_one_uvx_line():
     pre = re.search(r'<pre id="install-cmd">(.*?)</pre>', _html(), flags=re.S)
     assert pre
     text = re.sub(r"<[^>]+>", "", pre.group(1)).strip().replace("&#39;", "'")
-    # the [dashboard] extra carries Flask: without it `chela dashboard` exits asking for it
-    assert text == "uvx --from 'chelamux[dashboard] @ git+https://github.com/Devail1/chelamux' chela dashboard"
+    # straight from PyPI: the dashboard packages are core dependencies (CMX-363), and the
+    # `chelamux` console script is what makes `uvx chelamux` resolve to the CLI
+    assert text == "uvx chelamux dashboard"
     assert "\n" not in text
 
 
