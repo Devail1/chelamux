@@ -51,7 +51,7 @@ function recorder({ reject = false } = {}) {
 
 test('the page has the inline copy script and a command to copy', () => {
     assert.ok(INLINE.some((s) => s.includes('button.copy')), 'the copy script is gone');
-    assert.match(COMMAND, /^uvx --from 'chelamux\[dashboard\] @ git\+https:\/\/github\.com\/Devail1\/chelamux' chela dashboard$/);
+    assert.match(COMMAND, /^uvx chelamux dashboard$/);
 });
 
 test('with JS off the button is hidden and the command is plain text in the page', () => {

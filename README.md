@@ -63,7 +63,7 @@ tests against each, restores the file, and fails on every mutation the tests did
 From your branch's checkout:
 
 ```bash
-uvx --with pytest --from git+https://github.com/Devail1/chelamux chela judge sweep --base origin/main
+uvx --with pytest --from chelamux chela judge sweep --base origin/main
 ```
 
 ```text
@@ -110,7 +110,9 @@ Python ≥ 3.11 itself if you have none) · the `claude` CLI. That is all a firs
 `gh`, Telegram, Linear and pm2 are follow-ups, not prerequisites.
 
 Just want to see the wall? `uvx chelamux dashboard` runs it straight from PyPI, nothing
-to clone or install. To keep chela around (the daemon needs that), install it:
+to clone or install. PyPI gets tagged releases only, while a `git+https://` install (as in
+the block below) tracks the default branch. To keep chela around (the daemon needs that),
+install it:
 
 ```bash
 uv tool install "chelamux[dashboard] @ git+https://github.com/Devail1/chelamux"

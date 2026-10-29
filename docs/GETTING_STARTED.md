@@ -49,6 +49,8 @@ the daemon running.
   under a process manager ([`examples/ecosystem.config.js`](../examples/ecosystem.config.js)
   is a pm2 example); for a first look, the background job above is fine.
 - **The Telegram bridge** is an extra: `uv tool install --force
+  "chelamux[dashboard,telegram]"` installs the latest tagged release from PyPI. To stay on
+  the default branch like the block above, use `uv tool install --force
   "chelamux[dashboard,telegram] @ git+https://github.com/Devail1/chelamux"`.
 
 Then, **inside Claude Code**, add the hooks plugin. It powers blocked-agent handling,
