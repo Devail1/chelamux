@@ -10,6 +10,93 @@ history lives in `git log`.
 
 ## [Unreleased]
 
+## [0.19.0] — 2026-10-29
+
+### Added
+
+- **Every judge round records where its time went.** Each round in the private judge
+  record (`$CHELA_DIR/judge-heldout/<task>.jsonl`) now has a `timings` object: wall-clock
+  for setup (worktree checkout and the judge agent, up to `chela judge run`), worktree
+  rebuild, provisioning, the baseline suite, each visible and held-out experiment (with
+  its selected test count and whether it was confirmed on the full suite), the
+  consistency re-runs and the whole round. Every phase also reports how much of it was
+  spent waiting for a suite slot, and the round records how many agents and judges were
+  running when it started. `chela judge show <run>` prints the breakdown under each
+  round; rounds recorded before this change print "no timings recorded".
+  `chela judge timings [--since 7d] [--json]` gives the median, p90 and max per phase
+  across every task, biggest phase first. Nothing about what the judge runs or decides
+  has changed. (CMX-196)
+
+- **Keeper mode runs on its own, and a workflow can be keeper-only.** A WORKFLOW.md with
+  `keeper: {enabled: true, every: 45m}` gets one `chela keeper run` every `every` from the
+  daemon. A run is skipped while the queue is held, while the previous one is still going,
+  and when no session in the repo typed a prompt or edited a file since the last run.
+  `dispatch: {enabled: false}` (or `dispatch: false`) makes the workflow keeper-only: the
+  dispatcher claims, reconciles and judges nothing for it, auto-merge and the nightly sweep
+  skip it, and it is removed from the merge gate's registry, so your own sessions can push
+  to its base. A bad value for either key fails the parse, so the last good config stays
+  in force. `chela keeper stats [--since 7d] [--json]` reports proposals made, accepted,
+  rejected and dropped, the acceptance rate, which is flagged under the 70% kill line, and
+  a by-action breakdown. (CMX-348)
+
+- **chelamux is on PyPI: `uvx chelamux dashboard` runs the wall with nothing to clone.** Each
+  release tag now builds the sdist and wheel, smoke-tests the wheel and publishes it with
+  Trusted Publishing (no API token). The package gains a `chelamux` command next to `chela`,
+  so `uvx chelamux …` needs no `--from`. CI builds and runs the wheel on every PR, and a test
+  checks the wheel carries the dashboard bundle, the ttyd shims, the templates, the plugin's
+  merge-gate script and the statusLine hook. (CMX-363)
+
+### Changed
+
+- **The dashboard's packages are core dependencies.** Flask, flask-sock and cryptography
+  install with chelamux itself, since a bare `uvx chelamux` cannot name an extra. The
+  `dashboard` extra still exists (empty), so `chelamux[dashboard]` install lines keep
+  working. `chela install-statusline` now finds the hook inside an installed wheel too, not
+  only in a checkout. (CMX-363)
+
+### Fixed
+
+- `chela ops scan` no longer reports a short-lived test child that was re-parented to init
+  for a moment (four false "orphaned (ppid 1)" notices between 2026-10-24 and 10-27, each
+  process gone a minute later). An orphan is now a finding only when the same process (pid
+  and start time) is still alive with ppid 1 on the next scan. An orphan with no named owner
+  is also never one while it shares a `chela-suite-*` scope with a live process of that
+  suite and is within the suite timeout. A real leak, like a test fixture left running for
+  two days, is still reported once. (CMX-332)
+
+- **A merged or closed run no longer leaves its judge behind.** When a PR merged (an
+  operator-approved `chela merge --override` included) or closed while its judge was still
+  running, the daemon left that judge alone as long as its tmux window existed. A window
+  holding only a bare shell counted too, so it stayed open long after the run was done and
+  was mirrored into every webterm session. Now the tick that reconciles the run to `done`,
+  `closed` or `failed` stops its judge the same way a send-back does: the round is
+  cancelled, the detached run is sent SIGTERM, the judge window is killed and its worktree
+  removed. A judge on a merged PR therefore no longer gets to record a blocked-race verdict
+  after the merge. (CMX-336)
+
+- **The "CI flake, re-run green" notice names the test that flaked.** It used to name the
+  first log line that said "failed" ("re-register failed nope", "Test Files 1 failed 1"),
+  because pytest's `FAILED <nodeid>` line can carry a long assertion message that pushes the
+  line out of the log tail chela read. The test id is now read from the whole failing log:
+  pytest's `FAILED`/`ERROR` lines, or Vitest's `FAIL <spec> > <suite> > <test>` header (which
+  wins when a JS suite ran under pytest). When no line names a test, the notice says "failing
+  test not identified" next to the failing job. Flakes are recorded under that id, and
+  `chela ops scan` now counts repeat Vitest flakers as well as pytest ones. (CMX-351)
+
+- **The demo-env leak guard no longer fails on a machine without `$LANG`.** Its probe
+  `os.environ` returned a sentinel for an allowed name that was unset, so `demo_env`'s
+  `os.environ.get("LANG", "C.UTF-8")` saw the sentinel instead of its default and the
+  nightly sweep (which runs with no `LANG`) went red. The probe now reads `PATH`/`LANG`
+  exactly as `os.environ` does, and the test runs with `LANG` both set and unset. (CMX-364)
+
+- **The "self-check still working" notice no longer fires on every normal hand-in.** Its
+  ceiling was a fixed 1h, but a normal self-check with a 2400 s budget routinely runs past
+  that. Unless `CHELA_SELFCHECK_ALERT_S` is set, the ceiling now comes from the run's own
+  WORKFLOW.md: the larger of `judge.self_check_budget_seconds` and
+  `judge.sweep_budget_seconds`, plus `judge.suite_timeout_seconds`, times 1.5. That is 2h with
+  the current budgets. When the workflow cannot be read, the ceiling is 90 minutes. The
+  re-notify interval is unchanged. (CMX-365)
+
 ## [0.18.2] — 2026-10-28
 
 ### Added
