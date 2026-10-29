@@ -22,6 +22,7 @@ The four:
 """
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 import pytest
@@ -136,8 +137,92 @@ def test_the_job_skips_cleanly_on_a_fork(job):
 def test_the_workflow_reacts_to_tags_it_did_not_create(workflow):
     """The trigger contract: a tag a human already pushed, plus the manual dry-run entry."""
     triggers = workflow[True] if True in workflow else workflow["on"]
-    assert triggers["push"]["tags"] == ["v*"]
+    assert triggers["push"]["tags"] == ["v[0-9]+.[0-9]+.[0-9]+"]
     assert "workflow_dispatch" in triggers
+
+
+# --- CMX-366: the moving major tag must not start a release ------------------------------
+#
+# A release force-moves `v0` after pushing `vX.Y.Z`. Under the old `v*` filter that push
+# ran this workflow again, which asked `chela.release_notes` for a `## [0]` section and
+# failed red on every release from 0.18.0 to 0.19.0. The filter is evaluated by GitHub,
+# so it is evaluated here the way GitHub documents it ("Filter pattern cheat sheet").
+
+
+def _github_filter_regex(pattern: str) -> re.Pattern[str]:
+    """GitHub Actions' ref filter syntax, as a full-match regex: `*` is any run of
+    characters except `/`, `**` any run at all, `?` and `+` make the PRECEDING character
+    optional / repeatable, `[...]` is a character class, and everything else (`.`
+    included) is literal."""
+    out: list[str] = []
+    i = 0
+    while i < len(pattern):
+        c = pattern[i]
+        if pattern.startswith("**", i):
+            out.append(".*")
+            i += 2
+            continue
+        if c == "*":
+            out.append("[^/]*")
+        elif c in "?+":
+            out.append(c)
+        elif c == "[":
+            end = pattern.index("]", i)
+            out.append(pattern[i:end + 1])
+            i = end
+        else:
+            out.append(re.escape(c))
+        i += 1
+    return re.compile("".join(out))
+
+
+def _starts_the_workflow(patterns: list[str], tag: str) -> bool:
+    return any(_github_filter_regex(p).fullmatch(tag) for p in patterns)
+
+
+@pytest.mark.parametrize(("pattern", "ref", "matches"), [
+    # Literal fixtures from GitHub's cheat sheet, both ways, so the matcher is not
+    # merely agreeing with itself.
+    ("v1*", "v1.10.1", True),
+    ("v1*", "v2", False),
+    ("v[12].[0-9]+.[0-9]+", "v1.10.1", True),
+    ("v[12].[0-9]+.[0-9]+", "v3.0.0", False),
+    ("v[12].[0-9]+.[0-9]+", "v1.10", False),
+    ("feature/*", "feature/a/b", False),
+    ("feature/**", "feature/a/b", True),
+    ("*.jsx?", "page.js", True),
+    ("*.jsx?", "page.jsx", True),
+    ("*.jsx?", "page.jsxx", False),
+    ("v1.0", "v1x0", False),  # `.` is literal
+])
+def test_the_filter_matcher_follows_githubs_syntax(pattern, ref, matches):
+    assert bool(_github_filter_regex(pattern).fullmatch(ref)) is matches
+
+
+@pytest.mark.parametrize("tag", ["v0", "v1", "v12"])
+def test_a_moving_major_tag_push_does_not_start_a_release(workflow, tag):
+    triggers = workflow[True] if True in workflow else workflow["on"]
+    assert not _starts_the_workflow(triggers["push"]["tags"], tag), (
+        f"pushing the major tag {tag} starts the Release workflow, which then fails "
+        "looking for a CHANGELOG section that cannot exist"
+    )
+
+
+@pytest.mark.parametrize("tag", ["v0.19.1", "v0.18.0", "v1.0.0", "v10.20.300"])
+def test_a_full_version_tag_push_starts_a_release(workflow, tag):
+    triggers = workflow[True] if True in workflow else workflow["on"]
+    assert _starts_the_workflow(triggers["push"]["tags"], tag)
+
+
+@pytest.mark.parametrize("tag", ["v0.19", "v0x19x1", "0.19.1", "v0.19.1-rc1"])
+def test_a_tag_that_is_not_a_full_version_does_not_start_a_release(workflow, tag):
+    triggers = workflow[True] if True in workflow else workflow["on"]
+    assert not _starts_the_workflow(triggers["push"]["tags"], tag)
+
+
+def test_the_old_v_star_filter_would_have_started_on_the_major_tag():
+    """Negative control: the matcher sees the bug the old filter had."""
+    assert _starts_the_workflow(["v*"], "v0")
 
 
 # --- CMX-363: the `pypi` job -------------------------------------------------------------

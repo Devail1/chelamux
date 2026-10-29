@@ -21,10 +21,14 @@ name: Release
 # anywhere to leak. It runs only on a tag push, from the tag's own checkout, after the
 # GitHub Release succeeded, and refuses a tag that disagrees with pyproject's version
 # (a PyPI version can never be re-uploaded, so a mismatch must stop before the upload).
+#
+# CMX-366: the trigger matches only a full `vX.Y.Z` tag. A release also force-moves the
+# major tag (`v0` for 0.y.z); under the old `v*` filter that push started this workflow
+# again, which asked `chela.release_notes` for a `## [0]` section and failed red.
 on:
   push:
     tags:
-      - 'v*'
+      - 'v[0-9]+.[0-9]+.[0-9]+'
   workflow_dispatch:
     inputs:
       version:
