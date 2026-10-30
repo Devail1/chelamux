@@ -17,7 +17,11 @@ newest dated release heading (bump one, forget the other, or vice versa).
 from __future__ import annotations
 
 import re
+import sys
+from importlib.metadata import PackageNotFoundError
 from pathlib import Path
+
+import pytest
 
 import chela
 from chela.release_notes import latest_released_version
@@ -56,3 +60,36 @@ def test_changelog_always_carries_an_unreleased_section():
         "CHANGELOG.md must always carry a `## [Unreleased]` heading — see "
         "CONTRIBUTING.md's 'Releasing' step 1"
     )
+
+
+def test_package_version_reads_installed_metadata(monkeypatch):
+    seen = []
+
+    def fake_version(dist):
+        seen.append(dist)
+        return "9.8.7"
+
+    monkeypatch.setattr(chela, "version", fake_version)
+    assert chela._package_version() == "9.8.7"
+    assert seen == ["chelamux"]
+
+
+def test_package_version_falls_back_without_installed_metadata(monkeypatch):
+    """A source tree with no installed dist-info still yields a version, never a crash."""
+    def missing(dist):
+        raise PackageNotFoundError(dist)
+
+    monkeypatch.setattr(chela, "version", missing)
+    assert chela._package_version() == "0.0.0+unknown"
+
+
+@pytest.mark.parametrize("prog", ["chela", "chelamux"])
+def test_cli_version_flag_prints_chela_and_the_release(monkeypatch, capsys, prog):
+    """CMX-368: `chela --version` / `chelamux --version` used to exit 2 (unrecognized)."""
+    from chela import main as chela_main
+
+    monkeypatch.setattr(sys, "argv", [prog, "--version"])
+    with pytest.raises(SystemExit) as exc:
+        chela_main.main()
+    assert exc.value.code == 0
+    assert capsys.readouterr().out == f"chela {_pyproject_version()}\n"

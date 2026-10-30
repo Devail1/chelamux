@@ -17,6 +17,7 @@ that is merely commented out does not still satisfy it.
 from __future__ import annotations
 
 import re
+from html import unescape
 from html.parser import HTMLParser
 from pathlib import Path
 
@@ -120,14 +121,69 @@ def test_install_copy_button_degrades_without_js():
     assert pre, "the install command <pre> is gone"
 
 
+README = ROOT / "README.md"
+
+
+def _install_cmd(html: str) -> str:
+    """The hero's install command as a reader copies it: tags stripped, entities decoded."""
+    pre = re.search(r'<pre id="install-cmd">(.*?)</pre>', html, flags=re.S)
+    assert pre, "the install command <pre> is gone"
+    cmd = unescape(re.sub(r"<[^>]+>", "", pre.group(1))).strip()
+    assert cmd, "the install command <pre> is empty"
+    return cmd
+
+
+def _readme_shows(readme: str, cmd: str) -> bool:
+    """``cmd`` is in the README as a whole inline code span or a whole code-block line.
+
+    A bare substring would accept ``uvx chelamux dashboard --port 1`` for
+    ``uvx chelamux dashboard``, which is a different command.
+    """
+    c = re.escape(cmd)
+    return re.search(rf"`{c}`|^[ \t]*(?:\$ )?{c}[ \t]*$", readme, flags=re.M) is not None
+
+
 def test_install_is_one_uvx_line():
-    pre = re.search(r'<pre id="install-cmd">(.*?)</pre>', _html(), flags=re.S)
-    assert pre
-    text = re.sub(r"<[^>]+>", "", pre.group(1)).strip().replace("&#39;", "'")
+    text = _install_cmd(_html())
     # straight from PyPI: the dashboard packages are core dependencies (CMX-363), and the
     # `chelamux` console script is what makes `uvx chelamux` resolve to the CLI
     assert text == "uvx chelamux dashboard"
     assert "\n" not in text
+
+
+def test_readme_shows_the_landing_install_command_verbatim():
+    """CMX-368: the hero's command, read out of the page, is the README's too — no drift."""
+    cmd = _install_cmd(_html())
+    assert _readme_shows(README.read_text(encoding="utf-8"), cmd), (
+        f"README.md must show the landing hero's install command `{cmd}` verbatim"
+    )
+
+
+@pytest.mark.parametrize("readme, shown", [
+    ("Just run `uvx chelamux dashboard` to see it.", True),
+    ("```bash\nuvx chelamux dashboard\n```\n", True),
+    ("```console\n$ uvx chelamux dashboard\n```\n", True),
+    # negative controls: a drifted README must fail the guard
+    ("Just run `uvx chelamux dash` to see it.", False),
+    ("Just run `uvx chelamux dashboard --port 1` to see it.", False),
+    ("```bash\nuv tool install chelamux && chela dashboard\n```\n", False),
+    ("```bash\nuvx chelamux dashboard --port 1\n```\n", False),
+    ("Run uvx chelamux dashboards.", False),
+    ("", False),
+])
+def test_readme_install_guard_rejects_a_mismatch(readme, shown):
+    assert _readme_shows(readme, "uvx chelamux dashboard") is shown
+
+
+def test_install_cmd_is_read_from_the_page_not_a_literal():
+    page = '<pre id="install-cmd"><code>uvx chelamux dashboard --fixture &amp;</code></pre>'
+    assert _install_cmd(page) == "uvx chelamux dashboard --fixture &"
+    # a README carrying the real command does not show this fixture's command
+    assert not _readme_shows(README.read_text(encoding="utf-8"), _install_cmd(page))
+    with pytest.raises(AssertionError):
+        _install_cmd("<pre id=\"install-cmd\"><code> </code></pre>")
+    with pytest.raises(AssertionError):
+        _install_cmd("<p>no install block</p>")
 
 
 # A colour emoji (📥) or a ``FE0F`` emoji-presentation selector (⚖️) renders in the OS's
