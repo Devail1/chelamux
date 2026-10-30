@@ -1,4 +1,4 @@
-"""``chela send-file`` (CMX-370): post a file from an agent into its Telegram topic.
+"""``chela telegram send-file`` (CMX-370): post a file from an agent into its Telegram topic.
 
 The Bot API is never reached: every test swaps :func:`chela.telegram.relay.
 _urllib_media_transport` (what :class:`BotSender` builds its multipart transport from)
@@ -22,9 +22,11 @@ class _Api:
 
     def __init__(self, *responses):
         self.calls: list[tuple[str, str, dict, list]] = []
+        self.timeouts: list[float] = []
         self.responses = list(responses) or [{"ok": True, "result": {"message_id": 777}}]
 
-    def factory(self, token):
+    def factory(self, token, timeout=60):
+        self.timeouts.append(timeout)
         def transport(method, fields, files):
             self.calls.append((token, method, dict(fields), list(files)))
             resp = self.responses.pop(0)
@@ -50,13 +52,14 @@ def tg(tmp_path, monkeypatch):
     monkeypatch.setenv("CHELA_WID", "@12")
     api = _Api()
     monkeypatch.setattr(relay, "_urllib_media_transport", api.factory)
+    monkeypatch.setattr(sendfile, "_ptb_installed", lambda: True)
     f = tmp_path / "bundle.zip"
     f.write_bytes(b"PK\x03\x04zipdata")
     return {"api": api, "file": f, "dir": chela_dir, "bindings": bindings, "tmp": tmp_path}
 
 
 def _run(monkeypatch, *argv):
-    monkeypatch.setattr(sys, "argv", ["chela", "send-file", *argv])
+    monkeypatch.setattr(sys, "argv", ["chela", "telegram", "send-file", *argv])
     main.main()
 
 
@@ -70,6 +73,7 @@ def test_defaults_to_own_window_and_prints_message_id_and_topic(tg, monkeypatch,
         {"chat_id": "-1009", "message_thread_id": "42", "caption": "the build"},
         [("document", "bundle.zip", b"PK\x03\x04zipdata")],
     )]
+    assert tg["api"].timeouts == [300.0]  # not the relay's 60 s screenshot budget
     assert capsys.readouterr().out == (
         "sent bundle.zip (11 B) to @12's topic 42, message_id 777\n"
     )
@@ -89,8 +93,10 @@ def test_missing_binding_exits_1_without_calling_telegram(tg, monkeypatch, capsy
         _run(monkeypatch, str(tg["file"]))
     assert exc.value.code == 1
     err = capsys.readouterr().err
-    assert err.startswith("chela send-file: no Telegram topic is bound to window @31 ")
+    assert err.startswith("chela telegram send-file: no Telegram topic is bound to window @31 ")
     assert str(tg["bindings"]) in err
+    assert err.endswith("setup: skills/telegram-setup/SKILL.md\n")
+    assert "Traceback" not in err
     assert tg["api"].calls == []
 
 
@@ -131,16 +137,82 @@ def test_chat_falls_back_to_the_bindings_file(tg):
 def test_no_chat_anywhere_fails(tg):
     (tg["dir"] / "secrets.env").write_text("TELEGRAM_BOT_TOKEN=tok-123\n")
     tg["bindings"].write_text(json.dumps({"bindings": {"@12": "42"}}))
-    with pytest.raises(sendfile.SendFileError, match="TELEGRAM_CHAT_ID is not set"):
+    with pytest.raises(sendfile.SendFileError, match=r"not configured \(no TELEGRAM_CHAT_ID, .*: see skills/telegram-setup/SKILL.md$"):
         sendfile.send_file(tg["file"], "@12")
     assert tg["api"].calls == []
 
 
-def test_no_token_fails(tg):
+# --- Telegram not set up: one actionable line, exit 1, no traceback --------------------
+
+
+def test_no_token_is_a_clean_not_configured_exit(tg, monkeypatch, capsys):
     (tg["dir"] / "secrets.env").write_text("TELEGRAM_CHAT_ID=-1009\n")
-    with pytest.raises(sendfile.SendFileError, match="TELEGRAM_BOT_TOKEN is not set"):
-        sendfile.send_file(tg["file"], "@12")
+    with pytest.raises(SystemExit) as exc:
+        _run(monkeypatch, str(tg["file"]))
+    assert exc.value.code == 1
+    assert capsys.readouterr().err == (
+        "chela telegram send-file: Telegram is not configured (no TELEGRAM_BOT_TOKEN in "
+        f"the environment, chela.env or {tg['dir'] / 'secrets.env'}): see "
+        "skills/telegram-setup/SKILL.md\n"
+    )
     assert tg["api"].calls == []
+
+
+def test_missing_extra_is_a_clean_not_installed_exit(tg, monkeypatch, capsys):
+    monkeypatch.setattr(sendfile, "_ptb_installed", lambda: False)
+    with pytest.raises(SystemExit) as exc:
+        _run(monkeypatch, str(tg["file"]))
+    assert exc.value.code == 1
+    assert capsys.readouterr().err == (
+        "chela telegram send-file: Telegram is not installed (the `telegram` extra is "
+        "missing: uv tool install 'chelamux[telegram]'): see skills/telegram-setup/SKILL.md\n"
+    )
+    assert tg["api"].calls == []
+
+
+def test_extra_detection_looks_for_python_telegram_bot(monkeypatch):
+    monkeypatch.setitem(sys.modules, "telegram", None)
+    assert sendfile._ptb_installed() is False
+
+
+def test_extra_detection_finds_an_installed_package(monkeypatch):
+    seen = []
+    monkeypatch.setattr(sendfile.importlib.util, "find_spec",
+                        lambda name: seen.append(name) or object())
+    assert sendfile._ptb_installed() is True
+    assert seen == ["telegram"]
+
+
+CORE_ONLY = """
+import sys
+sys.modules["telegram"] = None   # python-telegram-bot absent: a core-only install
+from chela import main
+for argv in (["chela", "--help"], ["chela", "telegram", "--help"]):
+    sys.argv = argv
+    try:
+        main.main()
+    except SystemExit as e:
+        assert e.code in (0, None), e.code
+sys.argv = ["chela", "telegram", "send-file", "--to", "@1", __file__]
+main.main()
+"""
+
+
+def test_core_only_install_runs_help_and_fails_send_file_cleanly(tmp_path):
+    import subprocess
+    script = tmp_path / "core_only.py"
+    script.write_text(CORE_ONLY)
+    r = subprocess.run(
+        [sys.executable, str(script)], capture_output=True, text=True, timeout=120,
+        env={**__import__("os").environ, "CHELA_DIR": str(tmp_path), "CHELA_ENV_FILE": "",
+             "TELEGRAM_BOT_TOKEN": "", "TELEGRAM_CHAT_ID": ""},
+    )
+    assert r.returncode == 1, r.stderr
+    assert "Outbound files: chela telegram send-file" in r.stdout
+    assert r.stderr == (
+        "chela telegram send-file: Telegram is not installed (the `telegram` extra is "
+        "missing: uv tool install 'chelamux[telegram]'): see skills/telegram-setup/SKILL.md\n"
+    )
 
 
 # --- the file ---------------------------------------------------------------------------
@@ -194,15 +266,16 @@ def test_api_error_exits_1_with_telegram_description(tg, monkeypatch, capsys):
         _run(monkeypatch, str(tg["file"]))
     assert exc.value.code == 1
     captured = capsys.readouterr()
-    assert captured.err == "chela send-file: Telegram refused the file: Bad Request: topic closed\n"
+    assert captured.err == "chela telegram send-file: Telegram refused the file: Bad Request: topic closed\n"
     assert captured.out == ""
 
 
 @pytest.mark.parametrize("error", [TimeoutError("read timed out"), ValueError("bad json")])
 def test_transport_exception_is_a_failed_send(tg, error):
     tg["api"].responses = [error]
-    with pytest.raises(sendfile.SendFileError, match="Telegram request failed: "):
+    with pytest.raises(sendfile.SendFileError, match="Telegram request failed: ") as exc:
         sendfile.send_file(tg["file"], "@12")
+    assert "may still have arrived" in str(exc.value)
 
 
 def test_unexpected_exception_is_not_swallowed(tg):
@@ -235,4 +308,37 @@ def test_telegram_help_names_send_file(monkeypatch, capsys):
     monkeypatch.setattr(sys, "argv", ["chela", "telegram", "--help"])
     with pytest.raises(SystemExit):
         main.main()
-    assert "Outbound files: chela send-file" in capsys.readouterr().out
+    assert "Outbound files: chela telegram send-file" in capsys.readouterr().out
+
+
+def test_core_help_does_not_advertise_send_file(monkeypatch, capsys):
+    monkeypatch.setattr(sys, "argv", ["chela", "--help"])
+    with pytest.raises(SystemExit):
+        main.main()
+    out = capsys.readouterr().out
+    assert "telegram" in out
+    assert "send-file" not in out
+
+
+def test_telegram_bridge_flags_still_parse_without_a_subcommand(monkeypatch):
+    seen = []
+    monkeypatch.setattr(main, "cmd_telegram", lambda args: seen.append(args))
+    monkeypatch.setattr(main, "cmd_telegram_send_file", lambda args: seen.append("send-file"))
+    monkeypatch.setattr(sys, "argv", ["chela", "telegram", "--no-inbound", "--bind", "@3:42"])
+    main.main()
+    (args,) = seen
+    assert args.tg_cmd is None and args.no_inbound and args.bind == ["@3:42"]
+
+
+def test_filename_cannot_break_the_multipart_header(tg):
+    odd = tg["tmp"] / 'a "b"\\c\r\nX-Evil: 1.zip'
+    odd.write_bytes(b"z")
+    sendfile.send_file(odd, "@12")
+    (_, _, _, files), = tg["api"].calls
+    assert files == [("document", "a bcX-Evil: 1.zip", b"z")]
+
+
+def test_a_name_of_only_unsafe_characters_falls_back(tg):
+    sender = relay.BotSender("t", "c", media_transport=tg["api"].factory("t"))
+    sender.send_document('"\n"', b"z")
+    assert tg["api"].calls[0][3] == [("document", "file", b"z")]

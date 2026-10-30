@@ -372,7 +372,7 @@ def _format_photo_size(num_bytes: int) -> str:
     return f"{size:.1f} GB"
 
 
-def _urllib_media_transport(token: str) -> MediaTransport:
+def _urllib_media_transport(token: str, timeout: float = 60) -> MediaTransport:
     """The default media transport: a hand-rolled ``multipart/form-data`` POST.
 
     ``sendPhoto``/``sendMediaGroup`` need raw file bytes on the wire, which
@@ -408,7 +408,7 @@ def _urllib_media_transport(token: str) -> MediaTransport:
             headers={"Content-Type": f"multipart/form-data; boundary={boundary}"},
         )
         try:
-            with urllib.request.urlopen(req, timeout=60) as r:
+            with urllib.request.urlopen(req, timeout=timeout) as r:
                 return json.load(r)
         except urllib.error.HTTPError as e:
             try:
@@ -759,7 +759,11 @@ class BotSender:
         bool: ``chela send-file`` prints the ``message_id`` on success and the
         ``description`` on failure, so the caller can confirm delivery either way.
         The size cap is the caller's to check — this posts whatever it is given.
+        ``filename`` lands in a hand-built multipart header, so a quote, backslash or
+        line break in it (all legal in a Linux name) is dropped rather than let it
+        end the header early or inject a part of its own.
         """
+        filename = "".join(c for c in filename if c not in '"\\\r\n') or "file"
         thread = message_thread_id if message_thread_id is not None else self._topic_id
         fields: dict = {"chat_id": self._chat_id}
         if thread:

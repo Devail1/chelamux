@@ -95,9 +95,9 @@ Or as a service: `examples/ecosystem.config.js` already defines `chela-telegram`
   `CHELA_TELEGRAM_BINDINGS`).
 - Manual mode: `chela telegram --bind @3:42` (window `@3` ↔ topic `42`, repeatable), or
   `--wid @3` with `TELEGRAM_TOPIC_ID` set. `--no-inbound` relays output only.
-- **Outbound files: `chela send-file`.** The bridge relays an agent's text and the images
+- **Outbound files: `chela telegram send-file`.** The bridge relays an agent's text and the images
   in its transcript, nothing else. To send a file of any type (a zip, a log, a PDF; up to
-  Telegram's 50 MB bot limit), the agent runs `chela send-file <path> [--caption TEXT]`,
+  Telegram's 50 MB bot limit), the agent runs `chela telegram send-file <path> [--caption TEXT]`,
   which posts it to its own topic, or `--to @N` for another window's. It prints the message
   id on success and exits 1 with the reason otherwise.
 - In a topic: `/new` starts a Claude session (browse to a folder), `/screenshot` snapshots

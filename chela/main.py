@@ -2003,12 +2003,14 @@ def _build_bindings_registry(args, chat: str):
     return registry
 
 
-def cmd_send_file(args) -> None:
-    """Send a file to an agent's Telegram topic (CMX-370): your own window by default.
+def cmd_telegram_send_file(args) -> None:
+    """``chela telegram send-file``: a file to an agent's topic, your own window by default.
 
     Resolves the topic from the bridge's bindings and the bot token the way
-    chela-telegram does, prints the message id on success, and exits 1 with the
-    reason on any failure (no binding, over 50 MB, a Telegram error).
+    chela-telegram does, prints the message id on success, and exits 1 with one
+    actionable line on any failure: Telegram not set up (extra missing, no token, no
+    topic for the window), over 50 MB, a Telegram error. Imported here, not at module
+    load, so a core-only install never pays for the telegram package (CMX-370).
     """
     from chela.telegram import sendfile
 
@@ -2016,7 +2018,7 @@ def cmd_send_file(args) -> None:
     try:
         sent = sendfile.send_file(args.path, window, args.caption)
     except sendfile.SendFileError as e:
-        print(f"chela send-file: {e}", file=sys.stderr)
+        print(f"chela telegram send-file: {e}", file=sys.stderr)
         sys.exit(1)
     print(sendfile.describe(sent))
 
@@ -4743,9 +4745,18 @@ def main() -> None:
     p_tg = sub.add_parser(
         "telegram",
         help="Bridge agent windows and their Telegram topics (outbound relay + inbound routing)",
-        epilog="Outbound files: chela send-file <path> posts a file (any type, up to 50 MB) "
-               "to your own window's topic; --to @N for another window's.",
+        epilog="Outbound files: chela telegram send-file <path> posts a file (any type, up "
+               "to 50 MB) to your own window's topic; --to @N for another window's.",
     )
+    tg_sub = p_tg.add_subparsers(dest="tg_cmd", metavar="{send-file}")
+    p_sf = tg_sub.add_parser(
+        "send-file",
+        help="Send a file (any type, up to 50 MB) to your own window's Telegram topic",
+    )
+    p_sf.add_argument("path", help="File to send")
+    p_sf.add_argument("--to", default=None, metavar="@N",
+                      help="Window whose topic gets the file (default: your own, $CHELA_WID)")
+    p_sf.add_argument("--caption", default=None, help="Caption shown under the file")
     p_tg.add_argument(
         "--wid",
         help="Single-window back-compat: bind this window (@N or N) to TELEGRAM_TOPIC_ID",
@@ -4772,16 +4783,6 @@ def main() -> None:
         help="Relay a sandboxed session's replies to its Telegram topic (default on), then "
              "exit — e.g. --sandbox-relay @7=off. Does not start the bridge.",
     )
-
-    # send-file — an agent posts a file into its own topic (CMX-370)
-    p_sf = sub.add_parser(
-        "send-file",
-        help="Send a file (any type, up to 50 MB) to your own window's Telegram topic",
-    )
-    p_sf.add_argument("path", help="File to send")
-    p_sf.add_argument("--to", default=None, metavar="@N",
-                      help="Window whose topic gets the file (default: your own, $CHELA_WID)")
-    p_sf.add_argument("--caption", default=None, help="Caption shown under the file")
 
     # dashboard
     p_dash = sub.add_parser("dashboard", help="Launch the web dashboard (the agent wall)")
@@ -5025,9 +5026,10 @@ def main() -> None:
     elif args.command == "install-statusline":
         cmd_install_statusline(args)
     elif args.command == "telegram":
-        cmd_telegram(args)
-    elif args.command == "send-file":
-        cmd_send_file(args)
+        if args.tg_cmd == "send-file":
+            cmd_telegram_send_file(args)
+        else:
+            cmd_telegram(args)
     elif args.command == "dashboard":
         cmd_dashboard(args)
     elif args.command == "collab":
