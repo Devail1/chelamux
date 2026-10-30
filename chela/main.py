@@ -25,6 +25,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from chela import (
+    __version__,
     agent_manager,
     automerge,
     capabilities,
@@ -3979,6 +3980,9 @@ def main() -> None:
         prog="chela",
         description="A tiny control plane for a fleet of Claude Code agents on tmux.",
     )
+    # CMX-368: `chela --version` and `chelamux --version` both print `chela <version>`.
+    parser.add_argument("--version", action="version",
+                        version=f"chela {__version__}")
     sub = parser.add_subparsers(dest="command")
 
     p_status = sub.add_parser("status", help="List discovered agent windows")
