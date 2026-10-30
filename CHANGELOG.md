@@ -10,6 +10,32 @@ history lives in `git log`.
 
 ## [Unreleased]
 
+## [0.19.1] — 2026-10-30
+
+### Fixed
+
+- **Moving the `v0` major tag no longer leaves a red Release run.** The Release workflow now
+  triggers only on a full `vX.Y.Z` tag (`v[0-9]+.[0-9]+.[0-9]+`) instead of `v*`, so the
+  major-tag force-move that follows every release no longer starts it and fails looking for a
+  `## [0]` CHANGELOG section. `tests/test_release_workflow.py` evaluates the filter with
+  GitHub's documented pattern syntax. (CMX-366)
+
+### Changed
+
+- **The install instructions now point at PyPI.** The landing hero is `uvx chelamux dashboard`,
+  the judge-sweep one-liner uses `--from chelamux`, and the docs quickstart leads with
+  `uv tool install "chelamux[dashboard,telegram]"`, keeping `git clone` + `uv sync --all-extras`
+  as the from-source path. PyPI gets tagged releases only; a `git+https://` install tracks the
+  default branch. The README and Getting Started install block stays on `git+https://`,
+  because the fresh-install check swaps that URL for the commit under review. (CMX-367)
+
+### Added
+
+- **`chela --version`** (and `chelamux --version`) prints `chela <version>` from the installed
+  package's metadata, or `chela 0.0.0+unknown` from a source tree with none. It used to fail
+  with `unrecognized arguments`. A test now also reads the landing hero's install command out
+  of the page and fails if README.md stops showing it verbatim. (CMX-368)
+
 ## [0.19.0] — 2026-10-29
 
 ### Added
