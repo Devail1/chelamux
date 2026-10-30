@@ -746,6 +746,28 @@ class BotSender:
         )
         return ok and sent
 
+    def send_document(
+        self,
+        filename: str,
+        data: bytes,
+        caption: str | None = None,
+        message_thread_id: str | int | None = None,
+    ) -> dict:
+        """``sendDocument`` one file of any type; returns the raw Bot API response.
+
+        Unlike the relay's sends this hands the whole response back instead of a
+        bool: ``chela send-file`` prints the ``message_id`` on success and the
+        ``description`` on failure, so the caller can confirm delivery either way.
+        The size cap is the caller's to check — this posts whatever it is given.
+        """
+        thread = message_thread_id if message_thread_id is not None else self._topic_id
+        fields: dict = {"chat_id": self._chat_id}
+        if thread:
+            fields["message_thread_id"] = thread
+        if caption:
+            fields["caption"] = caption
+        return self._call_media("sendDocument", fields, [("document", filename, data)])
+
     def _ext_for(self, media_type: str) -> str:
         """A plausible file extension for a base64 ``source.media_type``."""
         sub = media_type.rsplit("/", 1)[-1].lower()

@@ -9,6 +9,11 @@ Push a message or a file to Telegram from any agent (a result, a chart, a log ta
 heads-up) so the human gets it on their phone without watching the terminal. Composes with
 the `orchestrate` skill: the fleet can reach you proactively.
 
+**Sending a file to an agent's own topic? Use `chela send-file <path> [--caption TEXT]`**
+(`--to @N` for another window's topic). It finds the topic and the bot token itself, works
+from any directory, and prints the message id so you can confirm delivery. The script below
+is for a chat or topic outside the bridge, or a host without chela installed.
+
 Dependency-free (Python stdlib only). Configure via environment, using the same bot and chat as
 the `chela telegram` bridge ([`telegram-setup`](../telegram-setup/SKILL.md)):
 
@@ -40,7 +45,7 @@ from Python directly.
   through `chela telegram`. Use this for out-of-band pushes, not to duplicate the relay.
 - **A decision for the human**: prefer `chela escalate "…" --recommend "…"`: it records the
   decision in the event log and pushes it over `CHELA_NOTIFY_URL`.
-- To post into an agent's own topic, read its thread id from
-  `$CHELA_DIR/telegram-bindings.json` and set `TELEGRAM_TOPIC_ID` for the call.
+- To post a file into an agent's own topic, use `chela send-file` (above) instead of
+  looking the thread id up in `$CHELA_DIR/telegram-bindings.json` by hand.
 
 Keep the token out of source control; use `secrets.env` (`chmod 600`) only.
