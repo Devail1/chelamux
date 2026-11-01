@@ -821,13 +821,18 @@ def record_run(wf, result: dict, chela_dir: Path | None = None) -> None:
     tell quiet nights from a dead scheduler. Never raises: the record is not the work."""
     path = _runs_path(chela_dir)
     try:
-        try:
-            runs = _read_json(path)
-        except ValueError:
-            runs = {}
-        runs[str(wf.path)] = {"at": result["at"], "status": result["status"],
-                              "reason": result.get("reason")}
-        _write_json(path, runs)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        # Its own lock, not the sweep's: a run that skipped because another holds THAT one
+        # records too, and two writers must not drop each other's workflow.
+        with open(path.with_name("runs.lock"), "a") as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            try:
+                runs = _read_json(path)
+            except ValueError:
+                runs = {}
+            runs[str(wf.path)] = {"at": result["at"], "status": result["status"],
+                                  "reason": result.get("reason")}
+            _write_json(path, runs)
     except Exception:  # noqa: BLE001 — logged; doctor then reads the last run as stale
         log.exception("nightly sweep: could not record the run in %s", path)
 

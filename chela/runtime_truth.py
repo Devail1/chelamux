@@ -3408,7 +3408,8 @@ def _nightly_sweep_report(declared: dict[str, str], obs: Observation) -> list[Fi
             out.append(Finding(
                 ERROR, f"{name}: the nightly sweep last ran {age / 3600:.0f}h ago ({when})",
                 f"It is due daily at {at}; more than {stale_h}h without a recorded run means "
-                "the scheduler is not running it. A night with no standard-tier merge is "
+                "the scheduler is not starting it, or every run since died before it "
+                "finished (a run records itself at its end). A night with no standard-tier merge is "
                 "silent in the inbox, so nothing else says so. Check that the daemon is up, "
                 f"and {sweep_nightly.state_dir() / 'last.json'} / nightly.log there.",
             ))

@@ -1952,6 +1952,24 @@ def test_a_run_record_that_cannot_be_written_is_logged_never_raised(tmp_path, mo
         f"nightly sweep: could not record the run in {chela / 'sweep-nightly' / 'runs.json'}"]
 
 
+def test_the_run_record_waits_for_another_writers_lock(tmp_path):
+    import threading
+
+    chela = tmp_path / "chela"
+    wf = load_workflow(_repo(tmp_path, prs=[]) / "WORKFLOW.md")
+    lock_path = sweep_nightly.state_dir(chela) / "runs.lock"
+    lock_path.parent.mkdir(parents=True)
+    with open(lock_path, "a") as held:
+        fcntl.flock(held, fcntl.LOCK_EX)
+        t = threading.Thread(target=sweep_nightly.record_run,
+                             args=(wf, {"at": 1.0, "status": "clean"}, chela))
+        t.start()
+        t.join(0.5)
+        assert t.is_alive() and not (chela / "sweep-nightly" / "runs.json").exists()
+    t.join(5)
+    assert sweep_nightly.read_runs(chela)[str(wf.path)]["at"] == 1.0
+
+
 def test_read_runs_is_the_record_run_wrote(tmp_path):
     chela = tmp_path / "chela"
     assert sweep_nightly.read_runs(chela) == {}
