@@ -40,7 +40,13 @@ every same-shape site; slice 3/3 (CMX-305) files them in the tracker and tells t
   cannot create issues gets :class:`WouldFile`, which files nothing and records what it would
   have filed.
 * **Told.** ONE inbox notice per run (:func:`summary`): what was filed, clean, or skipped and
-  why, and the UNRUN / UNKNOWN counts. A run that filed nothing says so in that line.
+  why, and the UNRUN / UNKNOWN counts. A run that filed nothing says so in that line. A night
+  with no standard-tier merge (:data:`NO_MERGES`) is the one exception (CMX-371): nobody can
+  act on it, so it is logged and appended to the event log, never queued to the inbox.
+* **Recorded.** EVERY run — quiet or not — writes its time, status and reason to
+  ``$CHELA_DIR/sweep-nightly/runs.json`` (:func:`record_run`). ``chela doctor``'s
+  ``sweep.nightly_last_run`` reads it: a last run older than :data:`STALE_SECONDS` is red, so a
+  dead scheduler cannot hide behind quiet nights.
 * **A red baseline** (CMX-341) names every failing test (the first few, plus a count) with the
   first line of each, and keeps its JUnit report and output tail in
   ``$CHELA_DIR/sweep-nightly/<date>/<project>/`` (the newest :data:`KEEP_DAYS` dates) — the
@@ -89,6 +95,13 @@ SURVIVORS, CLEAN, SKIPPED, CANNOT_VERIFY = "survivors", "clean", "skipped", "can
 # No survivor, but not clean either: the budget left mutations UNRUN, or a merged file is not
 # mutatable (UNKNOWN). Neither is ever reported as clean.
 UNRUN, UNKNOWN = "unrun", "unknown"
+# CMX-371: why a run was SKIPPED, as a key — what the notice branches on, never the prose `why`.
+FLEET_PAUSED, JUDGE_OFF, ALREADY_RUNNING, NO_MERGES = (
+    "fleet_paused", "judge_off", "already_running", "no_merges")
+# A SKIPPED reason no human can act on: recorded and logged, never queued to the inbox.
+QUIET_REASONS = frozenset({NO_MERGES})
+# `chela doctor` reads a last recorded run older than this as a dead scheduler (a day plus slack).
+STALE_SECONDS = 36 * 3600
 
 _RE_AT = re.compile(r"^([01]?\d|2[0-3]):([0-5]\d)$")
 _RE_BLAME = re.compile(r"^([0-9a-f]{40}) \d+ (\d+)(?: \d+)?\Z")
@@ -547,11 +560,11 @@ def run(wf, *, now: float | None = None, chela_dir: Path | None = None,
               "already_filed": 0, "failed": [], "survivors": 0, "prs": [], "groups": [],
               "warnings": []}
     if paused(chela_dir):
-        result.update(status=SKIPPED, why="a fleet pause (`chela dispatch --pause --all`) "
-                                          "is active")
+        result.update(status=SKIPPED, reason=FLEET_PAUSED,
+                      why="a fleet pause (`chela dispatch --pause --all`) is active")
     elif not judge.judge_enabled(wf):
-        result.update(status=SKIPPED, why="the judge is off for this workflow — nothing to "
-                                          "mutate against")
+        result.update(status=SKIPPED, reason=JUDGE_OFF,
+                      why="the judge is off for this workflow — nothing to mutate against")
     else:
         lock_path = state_dir(chela_dir) / "lock"
         lock_path.parent.mkdir(parents=True, exist_ok=True)
@@ -559,7 +572,8 @@ def run(wf, *, now: float | None = None, chela_dir: Path | None = None,
             try:
                 fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
             except OSError:
-                result.update(status=SKIPPED, why="another nightly sweep is already running")
+                result.update(status=SKIPPED, reason=ALREADY_RUNNING,
+                              why="another nightly sweep is already running")
             else:
                 try:
                     _run(wf, now, chela_dir, filer, result)
@@ -575,7 +589,11 @@ def run(wf, *, now: float | None = None, chela_dir: Path | None = None,
                     _record_covered(wf, now, chela_dir)
     log.info("nightly sweep (%s): %s%s", wf.path, result["status"],
              f" — {result['why']}" if result.get("why") else "")
-    notify(result)
+    if quiet(result):
+        log_quiet(result)
+    else:
+        notify(result)
+    record_run(wf, result, chela_dir)
     return result
 
 
@@ -602,7 +620,8 @@ def _run(wf, now: float, chela_dir: Path, filer: Filer | None, result: dict) -> 
     result["not_swept"] = {t: sum(1 for c in commits if c["tier"] == t)
                            for t in (risktier.CORE, risktier.HUMAN, risktier.PROSE)}
     if not standard:
-        result.update(status=SKIPPED, why=f"no standard-tier PR merged to {ref} {window}")
+        result.update(status=SKIPPED, reason=NO_MERGES,
+                      why=f"no standard-tier PR merged to {ref} {window}")
         return
     root = resolve_workspace_root(wf)
     worktree = (root / "nightly-sweep").resolve()
@@ -762,17 +781,63 @@ def summary(result: dict) -> str:
     return line
 
 
-def notify(result: dict) -> None:
-    """Queue the run's ONE inbox notice. A failing inbox is logged: the notice is the report,
-    never the work."""
-    from chela import inbox
-
+def _render(result: dict) -> None:
     try:
         result["summary"] = summary(result)
     except Exception as e:  # noqa: BLE001 — run() never raises: a plain line instead
         log.exception("nightly sweep: the notice could not be rendered")
         result["summary"] = (f"🧹🌙 nightly sweep ({result.get('workflow')}): "
                              f"{result.get('status')} — the notice failed: {e!r}")
+
+
+def quiet(result: dict) -> bool:
+    """CMX-371: a run nobody needs to hear about — SKIPPED for a :data:`QUIET_REASONS` key."""
+    return result["status"] == SKIPPED and result.get("reason") in QUIET_REASONS
+
+
+def log_quiet(result: dict) -> None:
+    """A quiet run's record instead of a notice: the same line, logged and appended to the
+    event log (never raises), so the night stays auditable."""
+    from chela import event_log
+
+    _render(result)
+    log.info("%s (not sent to the inbox)", result["summary"])
+    event_log.append(INBOX_KIND, result["summary"],
+                     {k: v for k, v in result.items() if k != "summary"})
+
+
+def _runs_path(chela_dir: Path | None) -> Path:
+    return state_dir(chela_dir) / "runs.json"
+
+
+def read_runs(chela_dir: Path | None = None) -> dict:
+    """``{workflow path: {at, status, reason}}`` — each workflow's last recorded run. Raises
+    ``ValueError`` for a record that exists but cannot be read."""
+    return _read_json(_runs_path(chela_dir))
+
+
+def record_run(wf, result: dict, chela_dir: Path | None = None) -> None:
+    """Record ``result`` as ``wf``'s last run, quiet or not — what ``chela doctor`` reads to
+    tell quiet nights from a dead scheduler. Never raises: the record is not the work."""
+    path = _runs_path(chela_dir)
+    try:
+        try:
+            runs = _read_json(path)
+        except ValueError:
+            runs = {}
+        runs[str(wf.path)] = {"at": result["at"], "status": result["status"],
+                              "reason": result.get("reason")}
+        _write_json(path, runs)
+    except Exception:  # noqa: BLE001 — logged; doctor then reads the last run as stale
+        log.exception("nightly sweep: could not record the run in %s", path)
+
+
+def notify(result: dict) -> None:
+    """Queue the run's ONE inbox notice. A failing inbox is logged: the notice is the report,
+    never the work."""
+    from chela import inbox
+
+    _render(result)
     log.info("%s", result["summary"])
     try:
         inbox.enqueue(INBOX_KIND, result["summary"],
