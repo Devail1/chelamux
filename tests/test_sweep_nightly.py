@@ -1852,6 +1852,140 @@ def test_a_failing_inbox_never_fails_the_run(tmp_path, monkeypatch, caplog):
         "nightly sweep: the inbox notice failed"]
 
 
+# --- CMX-371: a no-merge night is recorded, never sent -------------------------------------
+
+
+@pytest.fixture
+def events(monkeypatch):
+    """Every event-log append a run makes, ``(type, summary, payload)``."""
+    got: list[tuple[str, str, dict]] = []
+    monkeypatch.setattr("chela.event_log.append",
+                        lambda type, summary="", payload=None, **kw: got.append(
+                            (type, summary, payload)))
+    return got
+
+
+def _runs(chela: Path) -> dict:
+    return json.loads((chela / "sweep-nightly" / "runs.json").read_text())
+
+
+def test_a_no_merge_night_sends_no_notice_but_records_the_run(tmp_path, notices, events):
+    repo = _repo(tmp_path, prs=[NOT_STANDARD_PRS["core"]])
+    chela = tmp_path / "chela"
+    res = _run(repo, chela, Filer(), now=1_900_000_000.0)
+    assert (res["status"], res["reason"]) == ("skipped", "no_merges")
+    assert notices == []
+    wf_key = str((repo / "WORKFLOW.md").resolve())
+    assert _runs(chela) == {wf_key: {"at": 1_900_000_000.0, "status": "skipped",
+                                     "reason": "no_merges"}}
+    assert [(k, t) for k, t, _ in events] == [(
+        "nightly_sweep", "🧹🌙 nightly sweep (repo): skipped — no standard-tier PR merged to "
+                         "origin/dev in the last 24h — nothing filed")]
+    assert events[0][2] == {k: v for k, v in res.items() if k != "summary"}
+
+
+@pytest.mark.parametrize("make, reason", [
+    ("paused", "fleet_paused"), ("judge_off", "judge_off"), ("locked", "already_running")])
+def test_every_other_skip_still_notifies_and_is_recorded(tmp_path, notices, events, make,
+                                                          reason):
+    repo = _repo(tmp_path, extra="  enabled: false\n" if make == "judge_off" else "")
+    chela = tmp_path / "chela"
+    sweep_nightly.state_dir(chela).mkdir(parents=True)
+    if make == "paused":
+        (chela / "fleet-pause.json").write_text("{}")
+    with open(sweep_nightly.state_dir(chela) / "lock", "a") as held:
+        if make == "locked":
+            fcntl.flock(held, fcntl.LOCK_EX)
+        res = _run(repo, chela, Filer(), now=1_900_000_000.0)
+    assert (res["status"], res["reason"]) == ("skipped", reason)
+    assert [(k, t) for k, t, _ in notices] == [("nightly_sweep", res["summary"])]
+    assert events == []
+    assert _runs(chela)[str((repo / "WORKFLOW.md").resolve())] == {
+        "at": 1_900_000_000.0, "status": "skipped", "reason": reason}
+
+
+def test_a_swept_night_notifies_and_records_no_reason(tmp_path, notices, events):
+    repo, chela = _repo(tmp_path), tmp_path / "chela"
+    res = _run(repo, chela, Filer(), now=datetime.now().timestamp())
+    assert len(notices) == 1 and events == []
+    assert _runs(chela)[str((repo / "WORKFLOW.md").resolve())] == {
+        "at": res["at"], "status": "survivors", "reason": None}
+
+
+@pytest.mark.parametrize("status, reason, is_quiet", [
+    ("skipped", "no_merges", True), ("skipped", "fleet_paused", False),
+    ("skipped", None, False), ("clean", "no_merges", False),
+    ("cannot_verify", None, False), ("unknown", None, False), ("unrun", None, False)])
+def test_only_a_no_merge_skip_is_quiet(status, reason, is_quiet):
+    assert sweep_nightly.quiet({"status": status, "reason": reason}) is is_quiet
+
+
+def test_the_run_record_keeps_other_workflows_and_replaces_a_torn_one(tmp_path):
+    repo, chela = _repo(tmp_path, prs=[]), tmp_path / "chela"
+    runs = chela / "sweep-nightly" / "runs.json"
+    runs.parent.mkdir(parents=True)
+    runs.write_text(json.dumps({"/other/WORKFLOW.md": {"at": 1.0}}))
+    _run(repo, chela, Filer(), now=5.0)
+    key = str((repo / "WORKFLOW.md").resolve())
+    assert _runs(chela) == {"/other/WORKFLOW.md": {"at": 1.0},
+                            key: {"at": 5.0, "status": "skipped", "reason": "no_merges"}}
+    runs.write_text("torn{")
+    _run(repo, chela, Filer(), now=6.0)
+    assert _runs(chela) == {key: {"at": 6.0, "status": "skipped", "reason": "no_merges"}}
+
+
+def test_a_run_record_that_cannot_be_written_is_logged_never_raised(tmp_path, monkeypatch,
+                                                                     caplog):
+    repo, chela = _repo(tmp_path, prs=[]), tmp_path / "chela"
+
+    real = sweep_nightly._write_json
+
+    def boom(path, data):
+        if path.name == "runs.json":
+            raise PermissionError("read-only")
+        real(path, data)
+    monkeypatch.setattr(sweep_nightly, "_write_json", boom)
+    with caplog.at_level("ERROR", logger="chela.sweep_nightly"):
+        res = _run(repo, chela, Filer())
+    assert res["status"] == "skipped"
+    assert [r.getMessage() for r in caplog.records] == [
+        f"nightly sweep: could not record the run in {chela / 'sweep-nightly' / 'runs.json'}"]
+
+
+def test_the_run_record_waits_for_another_writers_lock(tmp_path):
+    import threading
+
+    chela = tmp_path / "chela"
+    wf = load_workflow(_repo(tmp_path, prs=[]) / "WORKFLOW.md")
+    lock_path = sweep_nightly.state_dir(chela) / "runs.lock"
+    lock_path.parent.mkdir(parents=True)
+    with open(lock_path, "a") as held:
+        fcntl.flock(held, fcntl.LOCK_EX)
+        t = threading.Thread(target=sweep_nightly.record_run,
+                             args=(wf, {"at": 1.0, "status": "clean"}, chela))
+        t.start()
+        t.join(0.5)
+        assert t.is_alive() and not (chela / "sweep-nightly" / "runs.json").exists()
+    t.join(5)
+    assert sweep_nightly.read_runs(chela)[str(wf.path)]["at"] == 1.0
+
+
+def test_read_runs_is_the_record_run_wrote(tmp_path):
+    chela = tmp_path / "chela"
+    assert sweep_nightly.read_runs(chela) == {}
+    wf = load_workflow(_repo(tmp_path, prs=[]) / "WORKFLOW.md")
+    sweep_nightly.record_run(wf, {"at": 7.0, "status": "clean"}, chela)
+    assert sweep_nightly.read_runs(chela) == {
+        str(wf.path): {"at": 7.0, "status": "clean", "reason": None}}
+    (chela / "sweep-nightly" / "runs.json").write_text("[]")
+    with pytest.raises(ValueError):
+        sweep_nightly.read_runs(chela)
+
+
+def test_stale_is_thirty_six_hours():
+    assert sweep_nightly.STALE_SECONDS == 129600
+
+
 # --- CMX-305: Linear create_issue(labels=...) ------------------------------------------------
 
 

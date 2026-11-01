@@ -3344,6 +3344,82 @@ def _telegram_senders_report(_declared: None, obs: Observation) -> list[Finding]
     return out
 
 
+# --- fact: the nightly sweep's last recorded run (CMX-371) ---------------------------
+#
+# A night with no standard-tier merge sends no inbox notice — so silence is the normal
+# state, and a scheduler that stopped spawning the sweep (a daemon down, an unreadable day
+# record that `sweep_nightly.due` refuses to guess past) looks exactly like a run of quiet
+# nights. Every run, quiet or not, records itself; this reads that record.
+
+def _nightly_sweeps() -> dict[str, str]:
+    """``{workflow path: "HH:MM"}`` for each dispatched workflow whose nightly sweep is on —
+    the ones the daemon is supposed to sweep every day."""
+    from chela import sweep_nightly                 # lazy: it imports the judge
+    from chela.workflow import dispatch_enabled
+
+    out: dict[str, str] = {}
+    for path in dispatched_workflows():
+        try:
+            wf = load_workflow(path)
+        except Exception:
+            continue                                # reported by dispatch.workflows
+        at = sweep_nightly.nightly_at(wf)
+        if at is not None and dispatch_enabled(wf):
+            out[str(wf.path)] = "%02d:%02d" % at
+    return out
+
+
+def _nightly_sweep_read() -> Observation:
+    from chela import sweep_nightly
+
+    if not _nightly_sweeps():
+        return observed({})                         # no sweep is due anywhere
+    try:
+        runs = sweep_nightly.read_runs()
+    except ValueError as e:
+        return cannot_verify(str(e))
+    return observed({"now": time.time(), "runs": runs})
+
+
+def _nightly_sweep_report(declared: dict[str, str], obs: Observation) -> list[Finding]:
+    from chela import sweep_nightly
+
+    if not declared:
+        return []
+    now, runs = obs.value["now"], obs.value["runs"]
+    stale_h = sweep_nightly.STALE_SECONDS // 3600
+    out: list[Finding] = []
+    for path, at in sorted(declared.items()):
+        name = Path(path).parent.name or path
+        rec = runs.get(path)
+        ran = rec.get("at") if isinstance(rec, dict) else None
+        if not isinstance(ran, (int, float)) or isinstance(ran, bool):
+            out.append(Finding(
+                WARN, f"{name}: no nightly sweep run recorded yet",
+                f"The sweep is due daily at {at}, and every run records itself in "
+                f"{sweep_nightly.state_dir() / 'runs.json'} — a quiet night included. Before "
+                "the first one this is expected; after it, the daemon is not spawning the "
+                "sweep (check `chela judge nightly-sweep --workflow …` by hand).",
+            ))
+            continue
+        age = now - ran
+        when = datetime.fromtimestamp(ran).isoformat(timespec="minutes")
+        if age > sweep_nightly.STALE_SECONDS:
+            out.append(Finding(
+                ERROR, f"{name}: the nightly sweep last ran {age / 3600:.0f}h ago ({when})",
+                f"It is due daily at {at}; more than {stale_h}h without a recorded run means "
+                "the scheduler is not starting it, or every run since died before it "
+                "finished (a run records itself at its end). A night with no standard-tier merge is "
+                "silent in the inbox, so nothing else says so. Check that the daemon is up, "
+                f"and {sweep_nightly.state_dir() / 'last.json'} / nightly.log there.",
+            ))
+        else:
+            out.append(Finding(
+                OK, f"{name}: the nightly sweep last ran {when} "
+                    f"({rec.get('status')}{', ' + rec['reason'] if rec.get('reason') else ''})"))
+    return out
+
+
 # --- the registry ---------------------------------------------------------------------
 
 def facts() -> list[Fact]:
@@ -3599,6 +3675,15 @@ def facts() -> list[Fact]:
             read_back=_linear_issue_cap_read,
             report=_linear_issue_cap_report,
             required=False,
+        ),
+        Fact(
+            name="sweep.nightly_last_run",
+            declared_by="each dispatched workflow's `sweep.nightly_at` (default 02:00)",
+            owned_by="$CHELA_DIR/sweep-nightly/runs.json — the record every nightly sweep "
+                     "run writes, quiet or not",
+            declare=_nightly_sweeps,
+            read_back=_nightly_sweep_read,
+            report=_nightly_sweep_report,
         ),
         Fact(
             name="dispatch.hold",

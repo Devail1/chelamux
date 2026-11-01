@@ -241,11 +241,22 @@ def fleet(tmp_path, monkeypatch, request):
     peer_listener.listen(1)
     request.addfinalizer(peer_listener.close)
 
+    # sweep.nightly_last_run (CMX-371): the workflow's nightly sweep ran an hour ago.
+    _record_nightly_run(chela_dir, repo, time.time() - 3600)
+
     registry = bindings.BindingRegistry(chat_id="-100")
     registry.bind("@1", 42)
     registry.set_topic_name("@1", "cmx-66")
     registry.save(bindings.default_bindings_path())
     return tmp_path
+
+
+def _record_nightly_run(chela_dir: Path, repo: Path, at, status="skipped", reason="no_merges"):
+    """The record a nightly sweep run leaves behind, in its documented layout."""
+    runs = chela_dir / "sweep-nightly" / "runs.json"
+    runs.parent.mkdir(parents=True, exist_ok=True)
+    runs.write_text(json.dumps({str((repo / "WORKFLOW.md").resolve()):
+                                {"at": at, "status": status, "reason": reason}}))
 
 
 def install_plugin(spec: dict, version: str = "0.1.0") -> Path:
@@ -364,6 +375,12 @@ def _break_daemon_capabilities(tmp_path, monkeypatch):
 def _break_dispatch_workflows(tmp_path, monkeypatch):
     """The tracker the dispatcher reads its queue from is gone. No queue, and no word."""
     (tmp_path / "repo" / "TODO.md").unlink()
+    return doctor.ERROR
+
+
+def _break_nightly_last_run(tmp_path, monkeypatch):
+    """The scheduler died 40h ago: no run recorded since, and quiet nights send no notice."""
+    _record_nightly_run(config.CHELA_DIR, tmp_path / "repo", time.time() - 40 * 3600)
     return doctor.ERROR
 
 
@@ -709,6 +726,7 @@ CORRUPTIONS = {
     "dispatch.base_branch": _break_base_branch,
     "dispatch.base_write_remote": _break_base_write_remote,
     "dispatch.hold": _break_dispatch_hold,
+    "sweep.nightly_last_run": _break_nightly_last_run,
     "tracker.linear_issue_cap": _break_linear_issue_cap,
     "tmux.windows": _break_tmux_windows,
     "peer.transport": _break_peer_transport,
@@ -2376,3 +2394,75 @@ def test_live_sessions_unreadable_window_table_still_names_sessions(monkeypatch)
     _feed(monkeypatch, panes=broken)
     assert runtime_truth._live_sessions() == {
         "sid-in-window": "window ? cmx-66", "sid-rootless": "window ? pid 102"}
+
+
+# --- sweep.nightly_last_run (CMX-371) ---------------------------------------------------
+
+
+def _nightly(fleet):
+    return [f for f in doctor.check() if f.fact == "sweep.nightly_last_run"]
+
+
+@pytest.mark.parametrize("hours, level", [(35, doctor.OK), (37, doctor.ERROR)])
+def test_the_nightly_sweep_is_stale_past_36_hours(fleet, hours, level):
+    _record_nightly_run(config.CHELA_DIR, fleet / "repo", time.time() - hours * 3600)
+    found = _nightly(fleet)
+    assert [f.level for f in found] == [level]
+    if level == doctor.ERROR:
+        assert found[0].title.startswith(f"repo: the nightly sweep last ran {hours}h ago")
+    else:
+        assert found[0].title.endswith("(skipped, no_merges)")
+
+
+def test_a_workflow_with_no_recorded_nightly_run_is_never_green(fleet):
+    (config.CHELA_DIR / "sweep-nightly" / "runs.json").unlink()
+    found = _nightly(fleet)
+    assert [(f.level, f.title) for f in found] == [
+        (doctor.WARN, "repo: no nightly sweep run recorded yet")]
+
+
+@pytest.mark.parametrize("record", [{"at": True}, {"at": "yesterday"}, "not a dict"])
+def test_a_nightly_run_record_without_a_time_is_never_green(fleet, record):
+    runs = config.CHELA_DIR / "sweep-nightly" / "runs.json"
+    runs.write_text(json.dumps({str((fleet / "repo" / "WORKFLOW.md").resolve()): record}))
+    assert [f.level for f in _nightly(fleet)] == [doctor.WARN]
+
+
+def test_another_workflows_run_record_does_not_count(fleet):
+    runs = config.CHELA_DIR / "sweep-nightly" / "runs.json"
+    runs.write_text(json.dumps({"/elsewhere/WORKFLOW.md": {"at": time.time()}}))
+    assert [f.level for f in _nightly(fleet)] == [doctor.WARN]
+
+
+@pytest.mark.parametrize("content", ["not json", "[1, 2]"])
+def test_an_unreadable_nightly_run_record_cannot_verify(fleet, content):
+    (config.CHELA_DIR / "sweep-nightly" / "runs.json").write_text(content)
+    found = _nightly(fleet)
+    assert [f.level for f in found] == [doctor.ERROR]
+    assert found[0].title.startswith("CANNOT VERIFY sweep.nightly_last_run")
+
+
+@pytest.mark.parametrize("front", [
+    "sweep:\n  nightly_at: off\n", "sweep:\n  enabled: false\n", "dispatch: false\n"])
+def test_a_workflow_with_no_nightly_sweep_is_not_checked(fleet, front):
+    """Its sweep is off (or it is keeper-only): no run is owed, so a stale one is not red."""
+    (fleet / "repo" / "WORKFLOW.md").write_text(
+        f"---\nproject_key: CMX\ntracker:\n  kind: markdown\n  path: TODO.md\n{front}---\n"
+        "do it\n")
+    _record_nightly_run(config.CHELA_DIR, fleet / "repo", time.time() - 40 * 3600)
+    assert _nightly(fleet) == []
+
+
+def test_with_no_nightly_sweep_due_the_run_record_is_not_read(fleet):
+    """No workflow owes a sweep: a torn record of an old one is nobody's finding."""
+    (fleet / "repo" / "WORKFLOW.md").write_text(
+        "---\nproject_key: CMX\ntracker:\n  kind: markdown\n  path: TODO.md\nsweep:\n"
+        "  nightly_at: off\n---\ndo it\n")
+    (config.CHELA_DIR / "sweep-nightly" / "runs.json").write_text("torn{")
+    assert _nightly(fleet) == []
+
+
+def test_a_missing_dispatched_workflow_owes_no_nightly_run(fleet, monkeypatch):
+    monkeypatch.setattr(runtime_truth, "dispatched_workflows",
+                        lambda: [fleet / "gone" / "WORKFLOW.md"])
+    assert runtime_truth._nightly_sweeps() == {}
