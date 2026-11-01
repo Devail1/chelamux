@@ -3359,8 +3359,6 @@ def _nightly_sweeps() -> dict[str, str]:
 
     out: dict[str, str] = {}
     for path in dispatched_workflows():
-        if not path.exists():
-            continue
         try:
             wf = load_workflow(path)
         except Exception:

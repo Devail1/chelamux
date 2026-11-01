@@ -2451,3 +2451,18 @@ def test_a_workflow_with_no_nightly_sweep_is_not_checked(fleet, front):
         "do it\n")
     _record_nightly_run(config.CHELA_DIR, fleet / "repo", time.time() - 40 * 3600)
     assert _nightly(fleet) == []
+
+
+def test_with_no_nightly_sweep_due_the_run_record_is_not_read(fleet):
+    """No workflow owes a sweep: a torn record of an old one is nobody's finding."""
+    (fleet / "repo" / "WORKFLOW.md").write_text(
+        "---\nproject_key: CMX\ntracker:\n  kind: markdown\n  path: TODO.md\nsweep:\n"
+        "  nightly_at: off\n---\ndo it\n")
+    (config.CHELA_DIR / "sweep-nightly" / "runs.json").write_text("torn{")
+    assert _nightly(fleet) == []
+
+
+def test_a_missing_dispatched_workflow_owes_no_nightly_run(fleet, monkeypatch):
+    monkeypatch.setattr(runtime_truth, "dispatched_workflows",
+                        lambda: [fleet / "gone" / "WORKFLOW.md"])
+    assert runtime_truth._nightly_sweeps() == {}
