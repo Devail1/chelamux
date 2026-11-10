@@ -47,6 +47,7 @@ from chela import (
     keeper,
     keeper_run,
     keeper_schedule,
+    launch_settings,
     launcher,
     malloc_arenas,
     messenger,
@@ -1913,10 +1914,18 @@ def _reconcile_loop(registry, topic_api, interval: int, stop, ledger=None) -> No
             # The durable fleet snapshot (CMX-195): same live/agents/now_epoch this tick
             # already computed, no extra tmux call. Best-effort — a roster write failing
             # must never take down the reconcile loop it rides on.
+            snapshot = None
             try:
-                roster.record(live, agents, now_epoch, get_window_cwd_by_id)
+                snapshot = roster.record(live, agents, now_epoch, get_window_cwd_by_id)
             except Exception:
                 log.exception("chela roster: recording the fleet snapshot failed")
+            # CMX-372: the extra flags + allowlisted env each identified session runs with,
+            # so a restore brings it back with them. Same best-effort rule as the roster.
+            try:
+                if snapshot:
+                    launch_settings.record_windows(snapshot.get("windows") or {})
+            except Exception:
+                log.exception("chela launch settings: recording failed")
             dispatched = set() if BIND_DISPATCHED else tg.dispatched_window_ids(
                 live_windows=live, now_epoch=now_epoch)
             # CMX-75: a session the sidebar unarchived asks for its old topic back.

@@ -1136,7 +1136,7 @@ class _OneTick:
 
 
 def _run_one_tick(monkeypatch, *, live=None, dispatched=None, reconcile_returns=False,
-                  roster_raises=None, cwds=None, ledger=None):
+                  roster_raises=None, cwds=None, ledger=None, roster_returns=None):
     """Run ONE tick of the real ``chela.main._reconcile_loop``; return its kwargs."""
     from chela import discovery, main, roster
     from chela import telegram as tg
@@ -1170,7 +1170,7 @@ def _run_one_tick(monkeypatch, *, live=None, dispatched=None, reconcile_returns=
                                "extra_args": a, "extra_kwargs": kw}
         if roster_raises is not None:
             raise roster_raises
-        return None
+        return roster_returns
 
     monkeypatch.setattr(roster, "record", _fake_record)
     monkeypatch.setattr(tg, "live_agent_windows", lambda: (live, set(live)))

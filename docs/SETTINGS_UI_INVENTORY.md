@@ -20,7 +20,7 @@ grep -rhoE 'os\.environ(\.get)?\(["'"'"']CHELA_[A-Z0-9_]+["'"'"']|os\.environ\[[
   | grep -oE 'CHELA_[A-Z0-9_]+' | sort -u | wc -l
 ```
 
-**67** (was 58, then 49 after CMX-217 wired the 9-strong "Daemon loop intervals" group
+**68** (was 58, then 49 after CMX-217 wired the 9-strong "Daemon loop intervals" group
 below through `chela.config.dashboard_setting()`, its precedence layer — CMX-220 then
 wired the 9-strong "Dispatch / judge / critic policy" group the same way (CMX-264 then
 added a tenth member, `memory_slice_budget_bytes`, straight onto that same registry, so it
@@ -39,7 +39,8 @@ until CMX-26 added `CHELA_INBOX_HELD_ALERT_S` and `CHELA_CLEAN_UNMERGED_ALERT_S`
 until CMX-86 added the four orchestrator-inbox notice knobs, group 5 — then 66, until CMX-110
 added `CHELA_SELFCHECK_ALERT_S`, group 5 — then 67, until CMX-103 added `CHELA_DASHBOARD_URL`,
 group 7 — then 66, until CMX-266 retired `CHELA_TERMINAL_TIMESTAMPS`, group 8 — then 67, until
-CMX-318 added `CHELA_PARK_MAX_S`, group 5) — every literal `CHELA_*` name a Python module in
+CMX-318 added `CHELA_PARK_MAX_S`, group 5 — then 68, until CMX-372 added `CHELA_RESTORE_ENV`,
+group 4) — every literal `CHELA_*` name a Python module in
 `chela/` reads straight off `os.environ`.
 `tests/test_settings_inventory.py::test_inventory_matches_env_reads` re-runs this scan and
 diffs it against the table below on every `pytest` run, so the count can't go stale the way
@@ -223,6 +224,7 @@ read per call and take effect on the next tick/request.
 | `CHELA_AUTO_UPDATE` | `false` | Fully-unattended self-update sweep — opt-in risk, same doc |
 | `CHELA_ORCHESTRATOR` | `false` | Auto-launches the embedded orchestrator persona, which holds `chela merge` authority |
 | `CHELA_RESTORE_RESUME` | `false` | Gates `chela restore --resume` (CMX-350) — without it the flag falls back to the read-only report. Since CMX-125 it also gates the daemon's once-per-tmux-epoch boot pass, which relaunches the MANUAL rows the ended epoch left behind (off: report only, as an inbox notice) |
+| `CHELA_RESTORE_ENV` | (empty) | Extra env var NAMES (space- or comma-separated) a restored session gets back with the value it ran with, on top of the built-in `DISCORD_STATE_DIR` (CMX-372, `chela/launch_settings.py`). A secret-shaped name is refused even when listed. Env-only on purpose: it decides what chela reads out of a running agent's environment |
 | `CHELA_OVERRIDE_WAIT_S` | `86400` | The safety TTL of an override request (`chela merge --override` / `chela override request`): a request nobody decided expires after this many seconds, no merge (CMX-389; a TTL since CMX-79, when the request stopped blocking). Env-only on purpose: a dashboard-writable window on the one path past the judge is a process editing its own approval boundary |
 
 The first three are the ones `userconfig.py`'s doc-comment is warning about by name. A

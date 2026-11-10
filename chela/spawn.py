@@ -181,6 +181,19 @@ def _add_remote_control(command: str, name: str) -> str:
     return f"{command[:m.end()]} --remote-control {shlex.quote(name)}{rest}"
 
 
+def _env_prefix(env: dict[str, str] | None, path_prefix: list[str] | None) -> str:
+    """``env PATH=<prefix>:"$PATH" NAME=value `` for a launch that must carry its own env
+    (CMX-372), or ``""`` when there is none. ``env`` rather than bare assignments so the
+    variables reach ``claude`` itself; every value is ``shlex``-quoted, and ``"$PATH"`` is the
+    one thing left for the pane's shell to expand, so the entries go in as a plain prefix."""
+    parts = []
+    if path_prefix:
+        parts.append(f'PATH={shlex.quote(":".join(path_prefix))}:"$PATH"')
+    for k, v in (env or {}).items():
+        parts.append(f"{k}={shlex.quote(v)}")
+    return f"env {' '.join(parts)} " if parts else ""
+
+
 # CMX-84's ``claude`` wrapper, shipped as a file the fresh shell sources (CMX-269) — typed
 # inline it echoed ~400 chars into every new window, twice.
 RC_SHELL_FILE = Path(__file__).with_name("shell") / "claude-rc.sh"
@@ -216,7 +229,9 @@ def _clear_history(target: str) -> None:
 
 def spawn_window(cwd: str | os.PathLike, *, command: str | None = None,
                  name: str | None = None,
-                 remote_control_name: str | None = None) -> SpawnResult:
+                 remote_control_name: str | None = None,
+                 launch_env: dict[str, str] | None = None,
+                 path_prefix: list[str] | None = None) -> SpawnResult:
     """Open ONE tmux window in ``cwd`` and, if given, launch ``command`` in it.
 
     The single window-creation path both the dashboard launcher and the Telegram ``/new``
@@ -264,6 +279,12 @@ def spawn_window(cwd: str | os.PathLike, *, command: str | None = None,
     ``[A-Za-z0-9_-]`` charset falls back to the folder name), and ``remote_control_name``
     restores the session's Remote Control under the name it had — applied even when the
     setting is now off, because the session HAD it (the archive recorded that).
+
+    CMX-372 — a restored session's launch env: ``launch_env`` (names → values) and
+    ``path_prefix`` (directories) are put in front of the finished command as one
+    ``env PATH=…:"$PATH" NAME=value`` (:func:`_env_prefix`), after the session-id pin and the
+    ``--remote-control`` insertion, both of which need the command to start with ``claude``.
+    The caller has already allowlisted them (:mod:`chela.launch_settings`).
     """
     real = os.path.realpath(os.path.expanduser(str(cwd)))
     if not os.path.isdir(real):
@@ -333,7 +354,7 @@ def spawn_window(cwd: str | os.PathLike, *, command: str | None = None,
             if rc_sent != to_send:
                 rc_rename.mark_launched(wid if have_wid else target, rc)
             to_send = rc_sent
-        _send(target, to_send)
+        _send(target, _env_prefix(launch_env, path_prefix) + to_send)
 
     log.info("spawned window %s (%s) in %s%s", name, wid or "no-id", real,
              f" running {command!r}" if command else "")
