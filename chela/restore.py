@@ -107,12 +107,24 @@ import json
 import logging
 import os
 import re
+import shlex
 import subprocess
 import time
 from dataclasses import dataclass
 from pathlib import Path
 
-from chela import config, dispatcher, epoch, inbox, resume_state, roster, sessionids, sessions, spawn as spawn_mod
+from chela import (
+    config,
+    dispatcher,
+    epoch,
+    inbox,
+    launch_settings,
+    resume_state,
+    roster,
+    sessionids,
+    sessions,
+)
+from chela import spawn as spawn_mod
 
 
 @dataclass(frozen=True)
@@ -516,6 +528,8 @@ def resume(verdicts: list[Verdict], runs: list[dict] | None = None, *,
            clear_resume_failure=None,
            kill_window=None,
            closed=None,
+           launch_settings_for=None,
+           replay_settings=None,
            **apply_kwargs) -> list[ApplyResult]:
     """CMX-350/issue #468: actually relaunch a MANUAL row's dead agent — the one write path
     in this module that starts a NEW process rather than editing a JSON store.
@@ -597,9 +611,21 @@ def resume(verdicts: list[Verdict], runs: list[dict] | None = None, *,
     way ``tests/test_restore_cli.py``'s own ``live_stores`` fixture fakes every OTHER
     tmux-touching call, without also stubbing the pure store writers around it.
 
+    ♻️ **CMX-372 — the launch settings it ran with.** A session with a record in
+    :mod:`chela.launch_settings` (``launch_settings_for``, its extra flags + allowlisted env +
+    PATH prefix, filtered again by ``replay_settings``) is relaunched WITH them. When that
+    launch fails or never comes up alive — a flag Claude Code no longer knows makes it exit —
+    its window is closed, the reason is logged and carried in the result's detail, and the
+    session gets a plain ``claude --resume <sid>`` instead: the extras must never be what
+    keeps it down. A session with no record launches exactly as before.
+
     Returns one :class:`ApplyResult` per input verdict, same order, same contract as
     :func:`apply`/:func:`retire_empty`.
     """
+    if launch_settings_for is None:
+        launch_settings_for = launch_settings.for_session
+    if replay_settings is None:
+        replay_settings = launch_settings.replay
     if spawn_window is None:
         spawn_window = spawn_mod.spawn_window
     if register_orchestrator is None:
@@ -661,13 +687,41 @@ def resume(verdicts: list[Verdict], runs: list[dict] | None = None, *,
                             f"retrying: {blocked}")
             continue
 
-        result = spawn_window(v.cwd, command=f"claude --resume {v.session_id}")
-        if not result.ok:
+        plain = f"claude --resume {v.session_id}"
+        result, settings_note, replayed = None, "", False
+        settings = launch_settings_for(v.session_id)
+        flags, env, path_prefix, notes = (replay_settings(settings) if settings
+                                          else ([], {}, [], []))
+        for note in notes:
+            log.warning("restore: session %s: %s", v.session_id, note)
+        if flags or env or path_prefix:
+            command = " ".join([plain, *(shlex.quote(f) for f in flags)])
+            result = spawn_window(v.cwd, command=command, launch_env=env or None,
+                                  path_prefix=path_prefix or None)
+            replayed = result.ok and check_resumed(result.wid, v.session_id)
+            if replayed:
+                settings_note = " with its launch settings"
+            else:
+                why = (result.error or "spawn failed") if not result.ok else (
+                    f"window {result.wid or '?'} opened but never came up alive")
+                log.warning("restore: session %s did not come back with its launch settings "
+                            "(%s: %s) — falling back to a plain --resume",
+                            v.session_id, command, why)
+                if result.ok and result.wid:
+                    kill_window(result.wid)
+                settings_note = f", plain --resume: its launch settings failed ({why})"
+                result = None
+        elif notes:
+            settings_note = f", plain --resume: {'; '.join(notes)}"
+        if result is None:
+            result = spawn_window(v.cwd, command=plain)
+        if replayed:
+            pass                        # the replayed launch is already confirmed alive
+        elif not result.ok:
             record_resume_failure(v.session_id, result.error or "spawn failed")
             resumed_by_id[id(v)] = ApplyResult(v, RESUME_FAILED, result.error or "")
             continue
-
-        if not check_resumed(result.wid, v.session_id):
+        elif not check_resumed(result.wid, v.session_id):
             reason = (f"window {result.wid or '?'} opened but claude --resume "
                       f"{v.session_id} never came up alive")
             record_resume_failure(v.session_id, reason)
@@ -695,7 +749,7 @@ def resume(verdicts: list[Verdict], runs: list[dict] | None = None, *,
             ok = remove_session(v.wid, v.session_id, v.stamped_epoch)
             detail = f"resumed at {result.wid or '?'}" + (
                 "" if ok else " (row moved on before it could be removed)")
-        resumed_by_id[id(v)] = ApplyResult(v, RESUMED if ok else RACED, detail)
+        resumed_by_id[id(v)] = ApplyResult(v, RESUMED if ok else RACED, detail + settings_note)
 
     out: list[ApplyResult] = []
     for v in verdicts:
