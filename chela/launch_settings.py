@@ -220,9 +220,7 @@ def record_windows(windows: dict, *, path: Path | None = None,
 
 def for_session(session_id: str | None, *, path: Path | None = None) -> dict:
     """The recorded settings of ``session_id`` — ``{}`` when none (or unreadable)."""
-    if not session_id:
-        return {}
-    rec = _load(path).get(session_id)
+    rec = _load(path).get(session_id) if session_id else None
     return rec if isinstance(rec, dict) else {}
 
 

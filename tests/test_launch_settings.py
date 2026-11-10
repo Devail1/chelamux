@@ -493,6 +493,22 @@ def test_a_missing_plugin_resumes_plain_and_says_why(tmp_path, caplog):
     assert "is not installed" in caplog.text
 
 
+def test_a_replayed_launch_that_came_up_alive_is_not_checked_again(tmp_path):
+    """One liveness check per launch: a confirmed replay goes straight to the success path."""
+    checks = []
+
+    def check(wid, sid):
+        checks.append(wid)
+        return len(checks) == 1          # alive the first time it is asked, never again
+
+    [r] = _resume([_verdict(tmp_path)],
+                  spawn_window=lambda cwd, command, **kw: SimpleNamespace(
+                      ok=True, wid="@5", error=None),
+                  check_resumed=check, kill_window=lambda wid: None, **_replaying())
+    assert checks == ["@5"]
+    assert (r.action, r.detail) == (restore.RESUMED, "resumed at @5 with its launch settings")
+
+
 def test_resume_reads_the_recorded_settings_by_default(tmp_path, store, monkeypatch):
     store.write_text(json.dumps({SID: {"flags": ["--model", "opus"]}}))
     spawned = []
