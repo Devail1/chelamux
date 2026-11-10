@@ -172,7 +172,10 @@ def _save(data: dict, path: Path | None = None) -> None:
     store = path or _STORE
     store.parent.mkdir(parents=True, exist_ok=True)
     tmp = store.with_suffix(".json.tmp")
-    tmp.write_text(json.dumps(data, indent=2))
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w") as f:
+        f.write(json.dumps(data, indent=2))
+    os.chmod(tmp, 0o600)                 # an existing tmp keeps its old mode through O_CREAT
     os.replace(tmp, store)
 
 
@@ -183,6 +186,13 @@ def record_windows(windows: dict, *, path: Path | None = None,
     ``windows`` is :func:`chela.roster.record`'s ``rec["windows"]``: ``{wid: {session_id,
     pid, …}}``. ``argv_for``/``environ_for`` are DI seams for a pid's argv and environ.
     Writes only when something changed. Returns the store.
+
+    A process whose argv or environ cannot be read (it exited mid-read, no ``/proc``) is
+    skipped, never read as "relaunched without extras": a live process always has an
+    environment, so an empty one is unknown, and its record stays. Past
+    :data:`_MAX_ENTRIES` the oldest records go first, but never one of a session live in
+    this tick — ``seen`` only moves when a record changes, so a long-lived session has the
+    oldest stamp of all.
     """
     if argv_for is None:
         from chela import sessions
@@ -195,10 +205,10 @@ def record_windows(windows: dict, *, path: Path | None = None,
         sid, pid = w.get("session_id"), w.get("pid")
         if not sid or not pid:
             continue
-        argv = argv_for(pid)
-        if not argv:
+        argv, environ = argv_for(pid), environ_for(pid)
+        if not argv or not environ:
             continue
-        settings = capture(argv, environ_for(pid))
+        settings = capture(argv, environ)
         prev = data.get(sid)
         if not settings:
             if prev is not None:
@@ -209,8 +219,10 @@ def record_windows(windows: dict, *, path: Path | None = None,
             data[sid] = {**settings, "seen": stamp}
             changed = True
     if len(data) > _MAX_ENTRIES:
-        for sid, _ in sorted(data.items(), key=lambda kv: kv[1].get("seen", 0))[
-                :len(data) - _MAX_ENTRIES]:
+        live = {w.get("session_id") for w in (windows or {}).values()}
+        stale = sorted((kv for kv in data.items() if kv[0] not in live),
+                       key=lambda kv: kv[1].get("seen", 0))
+        for sid, _ in stale[:len(data) - _MAX_ENTRIES]:
             del data[sid]
         changed = True
     if changed:

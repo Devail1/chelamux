@@ -176,7 +176,7 @@ def test_record_windows_records_then_clears_when_the_session_runs_without_extras
         SID: {"flags": ["--channels", CHANNEL], "env": env, "seen": 1.0}}
     ls.record_windows({"@3": {"session_id": SID, "pid": 9}},
                       argv_for=lambda pid: ["claude", "--resume", SID],
-                      environ_for=lambda pid: {})
+                      environ_for=lambda pid: {"PATH": BASE_PATH})
     assert json.loads(store.read_text()) == {}
 
 
@@ -185,8 +185,8 @@ def test_record_windows_writes_only_when_something_changed(store, monkeypatch):
     real_save = ls._save
     monkeypatch.setattr(ls, "_save", lambda data, path=None: saves.append(1) or real_save(
         data, path))
-    kw = {"argv_for": lambda pid: _stopgap_argv(), "environ_for": lambda pid: {},
-          "now": 1.0}
+    kw = {"argv_for": lambda pid: _stopgap_argv(),
+          "environ_for": lambda pid: {"PATH": BASE_PATH}, "now": 1.0}
     ls.record_windows({"@3": {"session_id": SID, "pid": 7}}, **kw)
     ls.record_windows({"@3": {"session_id": SID, "pid": 7}}, **{**kw, "now": 2.0})
     assert saves == [1]
@@ -196,13 +196,43 @@ def test_record_windows_writes_only_when_something_changed(store, monkeypatch):
     assert json.loads(store.read_text())[SID]["flags"] == ["--model", "opus"]
 
 
+def test_an_unreadable_process_keeps_its_record(store):
+    """A process that exited mid-read (environ or argv unreadable) is unknown, not "no
+    extras" — its record must survive."""
+    store.write_text(json.dumps({SID: {"env": {"DISCORD_STATE_DIR": "/s"}, "seen": 1}}))
+    w = {"@3": {"session_id": SID, "pid": 7}}
+    ls.record_windows(w, argv_for=lambda pid: ["claude"], environ_for=lambda pid: {})
+    ls.record_windows(w, argv_for=lambda pid: [], environ_for=lambda pid: {"PATH": "/bin"})
+    assert json.loads(store.read_text())[SID]["env"] == {"DISCORD_STATE_DIR": "/s"}
+
+
+def test_the_cap_never_evicts_a_session_live_this_tick(store, monkeypatch):
+    monkeypatch.setattr(ls, "_MAX_ENTRIES", 2)
+    store.write_text(json.dumps({SID: {"flags": ["--model", "a"], "seen": 1},
+                                 "mid": {"flags": ["--model", "b"], "seen": 2},
+                                 "new": {"flags": ["--model", "c"], "seen": 3}}))
+    ls.record_windows({"@3": {"session_id": SID, "pid": 7}},
+                      argv_for=lambda pid: ["claude", "--model", "a"],
+                      environ_for=lambda pid: {"PATH": BASE_PATH})
+    assert set(json.loads(store.read_text())) == {SID, "new"}
+
+
+def test_the_store_is_private_to_its_owner(store):
+    store.write_text("{}")
+    store.chmod(0o644)
+    ls.record_windows({"@3": {"session_id": SID, "pid": 7}},
+                      argv_for=lambda pid: _stopgap_argv(),
+                      environ_for=lambda pid: {"PATH": BASE_PATH})
+    assert store.stat().st_mode & 0o777 == 0o600
+
+
 def test_record_windows_keeps_the_store_bounded_dropping_the_oldest(store, monkeypatch):
     monkeypatch.setattr(ls, "_MAX_ENTRIES", 2)
     store.write_text(json.dumps({"old": {"flags": ["--model", "a"], "seen": 1},
                                  "mid": {"flags": ["--model", "b"], "seen": 2}}))
     ls.record_windows({"@3": {"session_id": SID, "pid": 7}},
-                      argv_for=lambda pid: _stopgap_argv(), environ_for=lambda pid: {},
-                      now=3.0)
+                      argv_for=lambda pid: _stopgap_argv(),
+                      environ_for=lambda pid: {"PATH": BASE_PATH}, now=3.0)
     assert set(json.loads(store.read_text())) == {"mid", SID}
 
 
