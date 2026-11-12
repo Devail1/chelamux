@@ -248,6 +248,8 @@ def test_settle_by_status(tmp_path, status, kept, why):
     owed = sweep_nightly.read_owed(wf, chela)
     assert owed == ([{**e, "line": 2}] if kept else [])
     assert [d["why"] for d in _dropped_log(chela)] == ([] if kept else [why])
+    # Nothing dropped writes nothing — not even an empty log.
+    assert (sweep_nightly.state_dir(chela) / "owed-dropped.jsonl").exists() is not kept
     assert result["owed_left"] == int(kept) and result["owed_new"] == 0
     assert len(result["owed_ran"]) == (why == "ran")
     assert len(result["owed_dropped"]) == (why == "not_mutatable")
@@ -314,6 +316,12 @@ def test_locate_owed(tmp_path):
     (tmp_path / "bin.py").write_bytes(b"\xff\xfe\x00bad")
     with pytest.raises(UnicodeDecodeError):
         loc(tmp_path, _entry(file="bin.py"), set())
+
+
+def test_locate_owed_counts_lines_as_the_mutators_do(tmp_path):
+    """A form feed is a line break to `str.splitlines`, never to the mutators' `split("\\n")`."""
+    (tmp_path / "a.py").write_text("x = 1\f\n    if x:\n")
+    assert sweep_nightly.locate_owed(tmp_path, _entry(file="a.py", line=2), set()) == 2
 
 
 def test_owed_first_puts_owed_first_and_drops_the_rest_of_an_owed_only_line():

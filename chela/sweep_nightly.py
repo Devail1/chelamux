@@ -612,7 +612,7 @@ def locate_owed(worktree: Path, entry: dict, taken: set) -> int | None:
     file is gone. Raises ``OSError``/``UnicodeDecodeError`` for a file that exists but cannot be
     read: unknown is never "the line is gone"."""
     try:
-        src = (worktree / entry["file"]).read_text().splitlines()
+        src = (worktree / entry["file"]).read_text().split("\n")   # the mutators' own line split
     except (FileNotFoundError, NotADirectoryError):
         return None
     hits = sorted((abs(i - entry["line"]), i) for i, text in enumerate(src, 1)
