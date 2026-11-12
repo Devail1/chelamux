@@ -87,7 +87,11 @@ const FIXTURE = 'http://chela.test';
 // applied, each followed by fit(). The vendored build has no FitAddon: fit() is a no-op.
 // `pokes`: call window.chelaApplyTermPrefs that many more times, one per frame, the way
 // the shim's own 500ms reconcile tick can land while the first apply is mid-walk.
-function ttydLikePage({ server, pokes = 0 }) {
+// `prefsMidWalk` (CMX-375): instead of after 300ms, SET_PREFERENCES lands once, in the
+// microtask right after the shim first writes the decoy size: before the next frame, so
+// before xterm ever renders the decoy. That is where a real ttyd's socket landed it in
+// about 1 boot in 10; here it lands there every time.
+function ttydLikePage({ server, pokes = 0, prefsMidWalk = false }) {
     return `<script>
         const t = new Terminal(${JSON.stringify(TTYD_OPEN)});
         window.term = t; window.term.fit = () => {};
@@ -96,16 +100,25 @@ function ttydLikePage({ server, pokes = 0 }) {
         const poke = () => { if (pokes-- > 0) { window.chelaApplyTermPrefs(); requestAnimationFrame(poke); } };
         requestAnimationFrame(poke);
         t.write('$ echo boot\\r\\nboot\\r\\n$ ');
-        setTimeout(() => {
+        const setPreferences = () => {
             const q = Object.fromEntries(new URLSearchParams(location.search));
             if (q.fontSize) q.fontSize = Number.parseInt(q.fontSize, 10);
             const prefs = { ...${JSON.stringify(server)}, ...q };
             for (const k of ['fontSize', 'fontFamily']) if (k in prefs) { t.options[k] = prefs[k]; t.fit(); }
-        }, 300);
+        };
+        if (${prefsMidWalk}) {
+            const d = Object.getOwnPropertyDescriptor(t.options, 'fontSize');
+            Object.defineProperty(t.options, 'fontSize', { configurable: true, enumerable: true, get: d.get, set(v) {
+                d.set.call(this, v);
+                if (v === ${DECOY} && !window.__prefsMidWalk) { window.__prefsMidWalk = true; queueMicrotask(setPreferences); }
+            } });
+        } else {
+            setTimeout(setPreferences, 300);
+        }
     </script>`;
 }
 
-async function bootVendored({ head, hangFonts = false, server, pokes = 0 }) {
+async function bootVendored({ head, hangFonts = false, server, pokes = 0, prefsMidWalk = false }) {
     const context = await browser.newContext(PHONE);
     await context.route('**/*', route => {
         const url = new URL(route.request().url());
@@ -118,7 +131,7 @@ async function bootVendored({ head, hangFonts = false, server, pokes = 0 }) {
             body: '<!doctype html><html><head><meta charset="utf-8">'
                 + '<link rel="stylesheet" href="/vendor/xterm.css">' + head + '</head>'
                 + '<body style="margin:0"><div id="terminal-container" style="width:100vw;height:100vh"></div>'
-                + '<script src="/vendor/xterm.js"></script>' + ttydLikePage({ server, pokes }) + '</body></html>',
+                + '<script src="/vendor/xterm.js"></script>' + ttydLikePage({ server, pokes, prefsMidWalk }) + '</body></html>',
         });
     });
     await context.addInitScript(bootInit, { prefSize: PREF_SIZE, hangFonts });
@@ -166,6 +179,23 @@ describe('a pane paints nothing until its final font and size (vendored xterm.js
             // Revealed when the walk ends, not left for the fallback.
             const waited = frames.find(f => f.visible).at - frames[0].at;
             assert.ok(waited < shims.fallbackMs - 500, `revealed only after ${Math.round(waited)}ms: the walk's end never revealed`);
+        } finally {
+            await context.close();
+        }
+    });
+
+    test('SET_PREFERENCES landing mid-walk does not cut the decoy short (CMX-375)', async () => {
+        const { context, page } = await bootVendored({ head: head(), server, prefsMidWalk: true });
+        try {
+            const frames = await framesUntilSettled(page);
+            assert.equal(await page.evaluate(() => window.__prefsMidWalk), true, 'SET_PREFERENCES never landed mid-walk: this test tested nothing');
+            const last = frames[frames.length - 1];
+            assert.ok(last && last.visible, `the pane never became visible: ${JSON.stringify(last)}`);
+            assert.deepEqual([last.size, last.fam], [PREF_SIZE, PREF_FAM]);
+            assert.deepEqual(wrongVisibleFrames(frames), []);
+            // The walk ran again once its decoy was overwritten, so a frame did render it.
+            assert.ok(frames.some(f => !f.visible && f.size === DECOY),
+                'no frame at the decoy size: SET_PREFERENCES overwrote it before xterm rendered it, and the walk was not re-run');
         } finally {
             await context.close();
         }
