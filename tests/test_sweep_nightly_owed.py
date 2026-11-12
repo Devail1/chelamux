@@ -207,36 +207,66 @@ def test_a_battery_that_cannot_verify_settles_nothing(tmp_path, monkeypatch):
     assert "1 owed from earlier nights, all still owed" in res["summary"]
 
 
-def test_an_owed_survivor_whose_filing_failed_stays_owed(tmp_path, monkeypatch):
-    repo, chela = _repo(tmp_path), tmp_path / "chela"
-    _seed(chela, repo, [_entry()])
-    _fake_battery(monkeypatch, (WEAK_MUT, judge.SURVIVED))
-    res = _run(repo, chela, Filer(fail=RuntimeError("tracker down")))
-    assert res["failed"] and _ids(_owed(chela, repo)) == {("size.py", 2, "if-false")}
+def _unfiled_by_raise(chela, monkeypatch):
+    return Filer(fail=RuntimeError("tracker down"))
 
 
-def test_an_owed_survivor_whose_filing_was_refused_stays_owed(tmp_path, monkeypatch):
-    """The filed-key store is unreadable, so ``_file`` refuses before calling the filer: the
-    night is CANNOT VERIFY with ``failed`` EMPTY — the status alone says it was not filed. The
-    owed survivor must stay owed; settling it as ``ran`` would lose it for good."""
-    repo, chela = _repo(tmp_path), tmp_path / "chela"
-    _seed(chela, repo, [_entry()])
+def _unfiled_by_torn_store(chela, monkeypatch):
+    """``_file`` refuses before the filer runs: CANNOT VERIFY with ``failed`` EMPTY."""
     (sweep_nightly.state_dir(chela) / "filed.json").write_text("{torn")
+    return Filer()
+
+
+def _unfiled_by_unlisted_sites(chela, monkeypatch):
+    """The category's sites cannot be listed, so it is never handed to the filer."""
+    monkeypatch.setattr(sweep_nightly, "same_shape_sites", lambda wt, text: None)
+    return Filer()
+
+
+@pytest.mark.parametrize("unfile", [_unfiled_by_raise, _unfiled_by_torn_store,
+                                    _unfiled_by_unlisted_sites])
+def test_an_owed_survivor_that_was_not_filed_stays_owed_whatever_stopped_it(
+        tmp_path, monkeypatch, unfile):
+    """EVERY way a survivor can go unfiled keeps it owed — its PR is out of the window, so
+    settling it as ``ran`` would lose it for good. The entry was recorded at a stale line: it
+    is kept, whole, at the line it was found on tonight."""
+    repo, chela = _repo(tmp_path), tmp_path / "chela"
+    e = _entry(line=7, pr="`abc` PR 1", since=3.0)
+    _seed(chela, repo, [e])
     _fake_battery(monkeypatch, (WEAK_MUT, judge.SURVIVED))
-    filer = Filer()
+    filer = unfile(chela, monkeypatch)
+    res = _run(repo, chela, filer)
+    assert res["filed"] == [] and res["status"] in ("survivors", "cannot_verify")
+    assert _owed(chela, repo) == [{**e, "line": 2}]
+    assert _dropped_log(chela) == []
+    assert (res["owed_ran"], res["owed_left"], res["owed_new"]) == ([], 1, 0)
+    assert "1 owed from earlier nights: 0 ran, 1 still owed" in res["summary"]
+
+
+def test_an_owed_survivor_whose_filing_was_refused_has_only_the_status_to_say_so(
+        tmp_path, monkeypatch):
+    """The torn-store refusal leaves ``failed`` empty and never reaches the filer, so the
+    CANNOT VERIFY status is the only signal the settle step gets."""
+    repo, chela = _repo(tmp_path), tmp_path / "chela"
+    _seed(chela, repo, [_entry()])
+    filer = _unfiled_by_torn_store(chela, monkeypatch)
+    _fake_battery(monkeypatch, (WEAK_MUT, judge.SURVIVED))
     res = _run(repo, chela, filer)
     assert res["status"] == "cannot_verify" and "filed-key store" in res["why"]
-    assert res["failed"] == [] and filer.sites == []      # the status is the only signal
+    assert res["failed"] == [] and filer.sites == []
     assert _ids(_owed(chela, repo)) == {("size.py", 2, "if-false")}
-    assert [d for d in _dropped_log(chela) if d["why"] == "ran"] == []
 
 
 def test_an_owed_survivor_that_was_filed_is_settled(tmp_path, monkeypatch):
     repo, chela = _repo(tmp_path), tmp_path / "chela"
-    _seed(chela, repo, [_entry()])
+    e = _entry(line=7)
+    _seed(chela, repo, [e])
     _fake_battery(monkeypatch, (WEAK_MUT, judge.SURVIVED))
     res = _run(repo, chela, Filer())
     assert res["filed"] == ["CMX-901"] and _owed(chela, repo) == []
+    assert [(d["why"], d["line"], d["detail"]) for d in _dropped_log(chela)] == [
+        ("ran", 2, judge.SURVIVED)]
+    assert (len(res["owed_ran"]), res["owed_left"]) == (1, 0)
 
 
 # --- the parts ------------------------------------------------------------------------------
@@ -272,16 +302,24 @@ def test_settle_by_status(tmp_path, status, kept, why):
 
 
 def test_settle_keeps_a_survivor_while_its_filing_failed(tmp_path):
+    """Kept at the line it was located on TONIGHT (recorded at 9, found at 2), whole, counted
+    as still owed and logged nowhere; a KILLED one is settled even while filing failed."""
     wf, chela = _wf(tmp_path), tmp_path / "chela"
-    e = _entry()
+    e = _entry(line=9, pr="`abc` PR 1", since=4.0)
     rep = sweep.SweepReport(results=[sweep.SweepResult(WEAK_MUT, judge.SURVIVED)])
-    sweep_nightly._settle_owed(wf, rep, [(e, 2)], [], {}, {}, chela, {"at": 1.0},
+    result = {"at": 1.0}
+    sweep_nightly._settle_owed(wf, rep, [(e, 2)], [], {}, {}, chela, result,
                                keep_survivors=True)
-    assert sweep_nightly.read_owed(wf, chela) == [e]
+    assert sweep_nightly.read_owed(wf, chela) == [{**e, "line": 2}]
+    assert _dropped_log(chela) == []
+    assert (result["owed_ran"], result["owed_dropped"], result["owed_left"]) == ([], [], 1)
     rep = sweep.SweepReport(results=[sweep.SweepResult(WEAK_MUT, judge.KILLED)])
-    sweep_nightly._settle_owed(wf, rep, [(e, 2)], [], {}, {}, chela, {"at": 1.0},
+    result = {"at": 1.0}
+    sweep_nightly._settle_owed(wf, rep, [(e, 2)], [], {}, {}, chela, result,
                                keep_survivors=True)
     assert sweep_nightly.read_owed(wf, chela) == []
+    assert [d["why"] for d in _dropped_log(chela)] == ["ran"]
+    assert (len(result["owed_ran"]), result["owed_left"]) == (1, 0)
 
 
 def test_settle_adds_tonights_unrun_once_with_its_pr_after_the_kept(tmp_path):
