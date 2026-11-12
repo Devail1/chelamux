@@ -22,6 +22,15 @@ every same-shape site; slice 3/3 (CMX-305) files them in the tracker and tells t
   :func:`chela.sweep.sweep` — the judge's own mechanics, ``judge.select_tests``, suite timeout
   and budget. A mutation the budget never reached is UNRUN and a file no mutator handles is
   UNKNOWN: a night with either and no survivor says so, never ``clean``.
+* **Owed** (CMX-374). The budget is spent in the same order every night, so an UNRUN mutation
+  would hit the same wall again — and once the window moves on, nothing would sweep its line at
+  all. Each UNRUN mutation (file, line, kind, its line before and after, the PR it blames to) is
+  OWED, in ``$CHELA_DIR/sweep-nightly/owed.json``, and the next night measures every owed one
+  FIRST, inside the same budget — even a night with no new merge. One leaves the set only when
+  it RAN (killed or survived — a survivor whose filing failed stays owed), or when no line of
+  its file reads as it did (deleted or rewritten) or the line no longer yields it; each drop
+  goes to ``owed-dropped.jsonl`` with why, and the notice says so. An unreadable store is
+  CANNOT VERIFY, never "nothing owed".
 * **The covered window.** The last 24 h — or, after a night that could not look, back to the
   last run that did (at most :data:`MAX_CATCHUP_SECONDS`). Only a run that looked and
   finished (not CANNOT VERIFY, no refused filing, no mutation left UNRUN) moves it, in ``$CHELA_DIR/sweep-nightly/
@@ -537,6 +546,135 @@ def survivor_groups(wf_path: str, worktree: Path, survivors: list[sweep.Mutation
     return groups, failed
 
 
+# --- what is owed (CMX-374) -----------------------------------------------------------------
+
+OWED_FIELDS = {"file": str, "line": int, "kind": str, "before": str, "after": str, "pr": str}
+# Why an owed mutation left the owed set — recorded in OWED_LOG, said in the notice.
+RAN, LINE_GONE, NOT_MUTATABLE = "ran", "line_gone", "not_mutatable"
+# The verdicts that settle an owed mutation: it RAN. Any other status keeps it owed (UNRUN,
+# TIMEOUT, INVALID — never measured), except one that can never be measured on this line.
+RAN_STATUSES = frozenset({judge.KILLED, judge.SURVIVED})
+UNMEASURABLE = frozenset({sweep.UNPARSEABLE, sweep.NOT_APPLIED})
+
+
+def _owed_path(chela_dir: Path | None) -> Path:
+    return state_dir(chela_dir) / "owed.json"
+
+
+def _valid_owed(entry: object) -> bool:
+    return isinstance(entry, dict) and all(
+        isinstance(entry.get(k), t) and not isinstance(entry.get(k), bool)
+        for k, t in OWED_FIELDS.items()) and entry["line"] > 0
+
+
+def read_owed(wf, chela_dir: Path | None = None) -> list[dict]:
+    """``wf``'s owed mutations, oldest first: ``{file, line, kind, before, after, pr, since}``
+    each — what an earlier night's budget never reached. Raises ``ValueError`` for a store that
+    exists but cannot be read, or holds an entry that is not one: unknown is never "none owed"."""
+    path = _owed_path(chela_dir)
+    entries = _read_json(path).get(str(wf.path), [])
+    if not isinstance(entries, list) or not all(_valid_owed(e) for e in entries):
+        raise ValueError(f"{path} holds a malformed owed list for {wf.path}")
+    return entries
+
+
+def write_owed(wf, entries: list[dict], chela_dir: Path | None = None) -> None:
+    """Replace ``wf``'s owed list, keeping every other workflow's."""
+    path = _owed_path(chela_dir)
+    store = _read_json(path)
+    if entries:
+        store[str(wf.path)] = entries
+    else:
+        store.pop(str(wf.path), None)
+    _write_json(path, store)
+
+
+def _log_dropped(wf, dropped: list[dict], now: float, chela_dir: Path | None) -> None:
+    """Append each owed mutation that left the set, and why, to ``owed-dropped.jsonl``."""
+    if not dropped:
+        return
+    path = state_dir(chela_dir) / "owed-dropped.jsonl"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "a", encoding="utf-8") as fh:
+        for d in dropped:
+            fh.write(json.dumps({"at": now, "workflow": str(wf.path), **d}, sort_keys=True)
+                     + "\n")
+
+
+def mutation_id(m: sweep.Mutation) -> tuple[str, int, str, str]:
+    return m.file, m.line, m.kind, m.after
+
+
+def locate_owed(worktree: Path, entry: dict, taken: set) -> int | None:
+    """The line ``entry``'s mutation sits on at the swept tip: the line that reads exactly its
+    ``before`` text, nearest its recorded line (later merges shift it) and not ``taken`` by
+    another owed entry. ``None`` when no line of the file reads so — deleted, rewritten, or the
+    file is gone. Raises ``OSError``/``UnicodeDecodeError`` for a file that exists but cannot be
+    read: unknown is never "the line is gone"."""
+    try:
+        src = (worktree / entry["file"]).read_text().splitlines()
+    except (FileNotFoundError, NotADirectoryError):
+        return None
+    hits = sorted((abs(i - entry["line"]), i) for i, text in enumerate(src, 1)
+                  if text == entry["before"]
+                  and (entry["file"], i, entry["kind"], entry["after"]) not in taken)
+    return hits[0][1] if hits else None
+
+
+def owed_first(muts: list[sweep.Mutation], owed: list[tuple], blamed: dict[str, set[int]],
+               ) -> list[sweep.Mutation]:
+    """The order tonight's battery measures in: every OWED mutation first (oldest first), then
+    the new merges' in the sweep's own priority. A mutation on a line swept only because it is
+    owed, and that is not itself owed, is dropped — it was measured on an earlier night."""
+    by_id = {mutation_id(m): m for m in muts}
+    owed_set = set(owed)
+    first = [by_id[i] for i in owed if i in by_id]
+    rest = [m for m in muts if mutation_id(m) not in owed_set and m.line in blamed.get(m.file, ())]
+    return first + rest
+
+
+def _settle_owed(wf, report, located: list[tuple[dict, int]], gone: list[dict], origin: dict,
+                 subjects: dict, chela_dir: Path, result: dict,
+                 keep_survivors: bool = False) -> None:
+    """After the battery: drop each owed mutation that ran (killed or survived) or whose line
+    is gone, keep the rest owed at their new line, add tonight's UNRUN, and persist it.
+    ``keep_survivors``: the filing failed, so a survivor is not settled yet — it stays owed."""
+    status = {mutation_id(r.mutation): r.status for r in report.results}
+    keep, dropped = [], []
+    for e in gone:
+        dropped.append({**e, "why": LINE_GONE,
+                        "detail": f"its line is no longer on {base_ref(wf)}"})
+    for e, ln in located:
+        st = status.get((e["file"], ln, e["kind"], e["after"]))
+        if st == judge.SURVIVED and keep_survivors:
+            keep.append({**e, "line": ln})
+        elif st in RAN_STATUSES:
+            dropped.append({**e, "line": ln, "why": RAN, "detail": st})
+        elif st is None or st in UNMEASURABLE:
+            dropped.append({**e, "line": ln, "why": NOT_MUTATABLE,
+                            "detail": f"its line no longer yields this mutation ({st})"
+                            if st else "its line no longer yields this mutation"})
+        else:
+            keep.append({**e, "line": ln})
+    known = {(e["file"], e["line"], e["kind"], e["after"]) for e in keep}
+    new = []
+    for r in report.results:
+        m = r.mutation
+        if r.status == sweep.UNRUN and mutation_id(m) not in known:
+            known.add(mutation_id(m))
+            new.append({"file": m.file, "line": m.line, "kind": m.kind, "before": m.before,
+                        "after": m.after, "since": result["at"],
+                        "pr": subjects.get(origin.get((m.file, m.line)), "")})
+    _log_dropped(wf, dropped, result["at"], chela_dir)
+    write_owed(wf, keep + new, chela_dir)
+    result.update(
+        owed_ran=[f"{d['file']}:{d['line']} {d['kind']} ({d['detail']})"
+                  for d in dropped if d["why"] == RAN],
+        owed_dropped=[f"{d['file']}:{d['line']} {d['kind']} — {d['detail']}"
+                      for d in dropped if d["why"] != RAN],
+        owed_left=len(keep), owed_new=len(new), owed=len(keep) + len(new))
+
+
 # --- the run --------------------------------------------------------------------------------
 
 
@@ -612,14 +750,21 @@ def _run(wf, now: float, chela_dir: Path, filer: Filer | None, result: dict) -> 
         result.update(status=CANNOT_VERIFY, why=f"could not read {ref}: {e}")
         return
     standard = [c for c in commits if c["tier"] == risktier.STANDARD]
+    try:
+        owed = read_owed(wf, chela_dir)
+    except ValueError as e:
+        # ⛔ Unknown is not "nothing owed": rewriting it would forget what is.
+        result.update(status=CANNOT_VERIFY, why=f"the owed-mutation store: {e}")
+        return
     result["covered"] = True
+    result["owed_carried"] = len(owed)
     window = ("in the last 24h" if since >= now - WINDOW_SECONDS
               else f"since {datetime.fromtimestamp(since).isoformat(timespec='minutes')}")
     result["head"] = head
     result["prs"] = [f"{c['sha'][:12]} {c['subject']}" for c in standard]
     result["not_swept"] = {t: sum(1 for c in commits if c["tier"] == t)
                            for t in (risktier.CORE, risktier.HUMAN, risktier.PROSE)}
-    if not standard:
+    if not standard and not owed:
         result.update(status=SKIPPED, reason=NO_MERGES,
                       why=f"no standard-tier PR merged to {ref} {window}")
         return
@@ -631,7 +776,7 @@ def _run(wf, now: float, chela_dir: Path, filer: Filer | None, result: dict) -> 
         result.update(status=CANNOT_VERIFY, why=f"could not check out {head[:12]}: {e}")
         return
     try:
-        _sweep_and_file(wf, worktree, head, ref, standard, chela_dir, filer, result)
+        _sweep_and_file(wf, worktree, head, ref, standard, chela_dir, filer, result, owed)
     finally:
         try:
             remove_worktree(repo, worktree, root)
@@ -640,12 +785,31 @@ def _run(wf, now: float, chela_dir: Path, filer: Filer | None, result: dict) -> 
 
 
 def _sweep_and_file(wf, worktree: Path, head: str, ref: str, standard: list[dict],
-                    chela_dir: Path, filer: Filer | None, result: dict) -> None:
+                    chela_dir: Path, filer: Filer | None, result: dict,
+                    owed: list[dict] | None = None) -> None:
     try:
         lines, origin = blamed_lines(worktree, standard)
     except _Git as e:
         result.update(status=CANNOT_VERIFY, why=f"could not blame the merged lines: {e}")
         return
+    # CMX-374: the mutations an earlier night's budget never reached are swept too — FIRST.
+    located, gone, taken = [], [], set()
+    for e in owed or ():
+        try:
+            ln = locate_owed(worktree, e, taken)
+        except (OSError, UnicodeDecodeError) as err:
+            result.update(status=CANNOT_VERIFY,
+                          why=f"could not read {e['file']} to find an owed mutation: {err}")
+            return
+        if ln is None:
+            gone.append(e)
+            continue
+        taken.add((e["file"], ln, e["kind"], e["after"]))
+        located.append((e, ln))
+    swept = {f: set(ns) for f, ns in lines.items()}
+    for e, ln in located:
+        swept.setdefault(e["file"], set()).add(ln)
+    order = [(e["file"], ln, e["kind"], e["after"]) for e, ln in located]
     # ⛔ CMX-325: this checkout is never launched through an agent, so no `hooks.before_run`
     # built it — no venv, no node_modules. Provision it HERE, before the battery: the sweep's
     # own provisioning runs only after it has collected the mutations, and collecting a
@@ -662,7 +826,8 @@ def _sweep_and_file(wf, worktree: Path, head: str, ref: str, standard: list[dict
     report = sweep.sweep(worktree, f"{ref}@{head[:12]} (standard-tier lines)",
                          cfg.test_cmd, timeout=cfg.suite_timeout_seconds,
                          select_tests=cfg.select_tests, provision=False, budget=budget,
-                         lines=lines, keep=evidence_dir(wf, result["at"], chela_dir))
+                         lines=swept, keep=evidence_dir(wf, result["at"], chela_dir),
+                         order=lambda muts: owed_first(muts, order, lines))
     unrun = [r.mutation.key for r in report._with(sweep.UNRUN)]
     result.update(mutations=len(report.results), unrun=len(unrun),
                   unrun_sites=sorted(set(unrun)), unsupported=list(report.unsupported),
@@ -670,12 +835,21 @@ def _sweep_and_file(wf, worktree: Path, head: str, ref: str, standard: list[dict
                   baseline_flakes=list(report.baseline_flakes),
                   baseline_rerun=report.baseline_rerun, kept=report.kept)
     if report.cannot_verify:
+        # The owed set is left as it was: a battery that could not verify settled nothing.
         result.update(status=CANNOT_VERIFY, why=report.cannot_verify)
         return
     survivors = [r.mutation for r in report.survivors]
     result["survivors"] = len(survivors)
     if survivors:
-        _file(wf, worktree, head, ref, survivors, origin, standard, chela_dir, filer, result)
+        owed_in = {f"{e['file']}:{ln}": e["pr"] for e, ln in located}
+        _file(wf, worktree, head, ref, survivors, origin, standard, chela_dir, filer, result,
+              owed_in)
+    # After the filing: an owed survivor that could not be filed stays owed — its PR is out of
+    # the window, so nothing else would ever measure it again.
+    subjects = {c["sha"]: f"`{c['sha'][:12]}` {c['subject']}" for c in standard}
+    unfiled = result.get("status") == CANNOT_VERIFY or bool(result["failed"])
+    _settle_owed(wf, report, located, gone, origin, subjects, chela_dir, result,
+                 keep_survivors=unfiled)
     if result.get("status") is None:
         result.update(status=_quiet_status(result), why=_quiet_why(result))
 
@@ -702,7 +876,7 @@ def _quiet_why(result: dict) -> str:
 
 def _file(wf, worktree: Path, head: str, ref: str, survivors: list[sweep.Mutation],
           origin: dict, standard: list[dict], chela_dir: Path, filer: Filer | None,
-          result: dict) -> None:
+          result: dict, owed_in: dict[str, str] | None = None) -> None:
     keys_path = state_dir(chela_dir) / "filed.json"
     try:
         store = _read_json(keys_path)
@@ -712,7 +886,9 @@ def _file(wf, worktree: Path, head: str, ref: str, survivors: list[sweep.Mutatio
         return
     filed = store.setdefault("keys", {})
     subjects = {c["sha"]: f"`{c['sha'][:12]}` {c['subject']}" for c in standard}
-    merged = {f"{f}:{ln}": subjects.get(sha, "") for (f, ln), sha in origin.items()}
+    # An owed mutation's line no longer blames to tonight's merges: its PR is the recorded one.
+    merged = {**(owed_in or {}),
+              **{f"{f}:{ln}": subjects.get(sha, "") for (f, ln), sha in origin.items()}}
     filer = filer if filer is not None else default_filer(wf)
     groups, unlisted = survivor_groups(str(wf.path), worktree, survivors)
     result["failed"].extend(unlisted)
@@ -772,6 +948,17 @@ def summary(result: dict) -> str:
                  f"mutation(s), {result.get('unrun', 0)} UNRUN")
         if result.get("unsupported"):
             line += f", {len(result['unsupported'])} file(s) UNKNOWN (no mutator)"
+    if result.get("owed_carried"):
+        line += f" — {result['owed_carried']} owed from earlier nights"
+        if "owed_left" in result:
+            line += (f": {len(result['owed_ran'])} ran, {result['owed_left']} still owed"
+                     + (f", {len(result['owed_dropped'])} dropped ("
+                        f"{'; '.join(result['owed_dropped'])})" if result["owed_dropped"]
+                        else ""))
+        else:
+            line += ", all still owed (none could run tonight)"
+    if result.get("owed_new"):
+        line += f" — {result['owed_new']} newly owed (UNRUN tonight, run first next night)"
     if result.get("baseline_flakes"):
         line += (f" — ⚠️ baseline flake: {', '.join(result['baseline_flakes'])} (red once, green "
                  "alone; deselected from the battery)"
