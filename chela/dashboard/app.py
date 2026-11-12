@@ -1098,7 +1098,19 @@ def _term_theme_shim() -> str:
 #     fontFamily into the URL (history.replaceState, before ttyd's body script
 #     runs). The server default never lands, on load or on a WS reconnect.
 # The CHELA_GRID_FONT presenter size is not pinned (it is known only later).
+#
+# CMX-375 — the walk must actually HOLD the decoy. ttyd's SET_PREFERENCES arrives on
+# the WebSocket whenever it arrives, and it writes fontSize (the viewer's size, pinned
+# into the URL above). Landing between the decoy write and the next frame, it put the
+# size back before xterm ever rendered the decoy config, so the eviction (2) above
+# never ran, yet atlasFixed was set and nothing re-ran it (~1 boot in 10, measured
+# against a real ttyd 1.7.7). The walk now checks, in each of its two frames, that the
+# size is still the decoy; if anything changed it, the walk runs again, at most
+# TERM_WALK_TRIES times in all, all while the pane is still hidden. Walks can overlap
+# (the 500 ms reconcile tick, a `loadingdone`) and cut each other short the same way,
+# so the pane is revealed only once no walk is in flight (`walking` counts them).
 TERM_BOOT_FALLBACK_MS = 1500
+TERM_WALK_TRIES = 3
 
 _TERM_BOOT_CSS = "<style>html.chela-term-booting .xterm{opacity:0!important}</style>"
 
@@ -1109,7 +1121,7 @@ _TERM_FONT_PREF_SHIM = (
     "var HEB={miriam:'Miriam Mono CLM',noto:'Noto Sans Hebrew',heebo:'Heebo',"
     "assistant:'Assistant',rubik:'Rubik',frankruhl:'Frank Ruhl Libre',"
     "david:'David Libre'};"
-    "var atlasFixed=false,seen=false,shown=false;"
+    "var atlasFixed=false,seen=false,shown=false,walking=0;"
     "var root=document.documentElement;"
     "try{root.classList.add('chela-term-booting');}catch(e){}"
     "function reveal(){if(shown)return;shown=true;"
@@ -1155,17 +1167,23 @@ _TERM_FONT_PREF_SHIM = (
     "try{if(t.clearTextureAtlas)t.clearTextureAtlas();}catch(e){}"
     "try{"
     "var decoy=s>1?s-1:s+1;"
+    "var walk=function(n){var held=true;"
+    "function hold(){if(getSize()!==decoy)held=false;}"
     "setSize(decoy);"
     "if(t.refresh&&t.rows)t.refresh(0,t.rows-1);"
-    "return raf().then(raf).then(function(){"
+    "return raf().then(function(){hold();return raf();}).then(function(){hold();"
+    "if(!held&&n<" + str(TERM_WALK_TRIES) + ")return walk(n+1);"
     "try{setSize(s);"
     "if(t.refresh&&t.rows)t.refresh(0,t.rows-1);"
     "if(t.fit&&!window.__CHELA_GRID_FONT__)t.fit();"
     "}catch(e){}"
     "atlasFixed=true;"
-    "});"
+    "});};"
+    "var done=function(){walking--;};"
+    "walking++;"
+    "return walk(1).then(done,done);"
     "}catch(e){atlasFixed=true;}"
-    "}).catch(function(){}).then(raf).then(reveal);}"
+    "}).catch(function(){}).then(raf).then(function(){if(!walking)reveal();});}"
     "window.chelaApplyTermPrefs=apply;"
     "try{var p0=pick(),ps0=prefSize();pin(ps0,famOf(p0.lat,p0.heb));load(want(p0,ps0));}catch(e){}"
     "var t0=Date.now();"
