@@ -885,8 +885,9 @@ def test_a_budget_overflow_is_counted_unrun(tmp_path):
     repo, chela = _repo(tmp_path, extra="sweep:\n  max_mutations: 1\n"), tmp_path / "chela"
     res = _run(repo, chela, Filer())
     assert (res["mutations"], res["unrun"]) == (4, 3)
-    # ...and lines never measured are not covered: the window stays where it was.
-    assert _covered_record(chela) == {}
+    # CMX-374: the three are OWED, so the window moves on — they run first next night.
+    assert res["owed"] == 3
+    assert _covered_record(chela) == {str((repo / "WORKFLOW.md").resolve()): res["at"]}
 
 
 def test_a_battery_with_nothing_unrun_moves_the_window(tmp_path):
@@ -1414,7 +1415,10 @@ def test_a_budget_overflow_with_no_survivor_is_unrun_not_clean(tmp_path, monkeyp
     assert res["unrun_sites"] == ["other.py:3"]
     assert res["why"] == ("2 mutation(s) the budget never reached are UNRUN — CANNOT VERIFY "
                           "for their lines, not clean")
-    assert _covered_record(chela) == {}
+    # CMX-374: the UNRUN one is owed (once — the duplicate result is one mutation), so the
+    # window moves on.
+    assert res["owed"] == 1
+    assert _covered_record(chela) == {str((repo / "WORKFLOW.md").resolve()): res["at"]}
 
 
 def test_the_real_battery_overflow_is_unrun(tmp_path):
@@ -1439,8 +1443,8 @@ def test_survivors_with_unrun_mutations_still_say_survivors(tmp_path, monkeypatc
     assert (res["status"], res["filed"], res["unrun"]) == ("survivors", ["CMX-901"], 1)
     assert res["why"] == ("1 mutation(s) the budget never reached are UNRUN — CANNOT VERIFY "
                           "for their lines, not clean")
-    # filed, but never measured everything: the window still does not move
-    assert _covered_record(chela) == {}
+    # filed; the UNRUN one is owed (CMX-374), so the window moves on
+    assert _covered_record(chela) == {str((repo / "WORKFLOW.md").resolve()): res["at"]}
     again = _run(repo, chela, Filer())
     assert (again["status"], again["already_filed"], again["filed"]) == ("unrun", 1, [])
 

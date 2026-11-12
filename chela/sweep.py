@@ -944,12 +944,15 @@ def sweep(
     timeout: float = judge.SUITE_TIMEOUT_SECONDS, select_tests: bool = True, progress=None,
     provision: bool = True, budget: SweepBudget | None = None,
     lines: dict[str, set[int]] | None = None, keep: Path | None = None,
+    order=None,
 ) -> SweepReport:
     """``provision=False`` standalone: the repo's env is its owner's (no ``uv sync``).
     ``lines`` (CMX-303, the nightly sweep): mutate exactly these lines of the checkout instead
     of the branch's diff vs ``base`` — ``base`` is then only the report's label.
     ``keep`` (CMX-341): the directory a baseline that was not green on its first run leaves
-    its JUnit report and output tail in — they outlive the checkout."""
+    its JUnit report and output tail in — they outlive the checkout.
+    ``order`` (CMX-374, the nightly sweep): given the prioritised mutations, returns the ones
+    to measure in the order to measure them — the budget is spent on its head first."""
     worktree = Path(worktree).resolve()
     budget = budget if budget is not None else SweepBudget()
     started = _now()
@@ -957,7 +960,7 @@ def sweep(
     try:
         report = _sweep(worktree, base, test_cmd, timeout=timeout, select_tests=select_tests,
                         progress=progress, provision=provision, budget=budget,
-                        started=started, lines=lines, keep=keep)
+                        started=started, lines=lines, keep=keep, order=order)
     except _Interrupted as e:
         # The mutation's own `finally` has already restored the file by the time this runs.
         report = SweepReport(cannot_verify=f"interrupted by signal {e.args[0]} — the sweep "
@@ -973,7 +976,7 @@ def sweep(
 def _sweep(worktree: Path, base: str, test_cmd: str, *, timeout: float, select_tests: bool,
            progress, budget: SweepBudget, started: float,
            provision: bool = True, lines: dict[str, set[int]] | None = None,
-           keep: Path | None = None) -> SweepReport:
+           keep: Path | None = None, order=None) -> SweepReport:
     report = SweepReport(budget=budget)
     report.recovered, err = recover(worktree)
     if err:
@@ -1036,6 +1039,8 @@ def _sweep(worktree: Path, base: str, test_cmd: str, *, timeout: float, select_t
             test_cmd, [a for node in report.baseline_flakes for a in ("--deselect", node)])
 
     muts = prioritise(muts)
+    if order is not None:
+        muts = order(muts)
     chosen = muts[:budget.max_mutations]
     guardian = _start_guardian(worktree)
     if guardian is None:
