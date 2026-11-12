@@ -215,6 +215,22 @@ def test_an_owed_survivor_whose_filing_failed_stays_owed(tmp_path, monkeypatch):
     assert res["failed"] and _ids(_owed(chela, repo)) == {("size.py", 2, "if-false")}
 
 
+def test_an_owed_survivor_whose_filing_was_refused_stays_owed(tmp_path, monkeypatch):
+    """The filed-key store is unreadable, so ``_file`` refuses before calling the filer: the
+    night is CANNOT VERIFY with ``failed`` EMPTY — the status alone says it was not filed. The
+    owed survivor must stay owed; settling it as ``ran`` would lose it for good."""
+    repo, chela = _repo(tmp_path), tmp_path / "chela"
+    _seed(chela, repo, [_entry()])
+    (sweep_nightly.state_dir(chela) / "filed.json").write_text("{torn")
+    _fake_battery(monkeypatch, (WEAK_MUT, judge.SURVIVED))
+    filer = Filer()
+    res = _run(repo, chela, filer)
+    assert res["status"] == "cannot_verify" and "filed-key store" in res["why"]
+    assert res["failed"] == [] and filer.sites == []      # the status is the only signal
+    assert _ids(_owed(chela, repo)) == {("size.py", 2, "if-false")}
+    assert [d for d in _dropped_log(chela) if d["why"] == "ran"] == []
+
+
 def test_an_owed_survivor_that_was_filed_is_settled(tmp_path, monkeypatch):
     repo, chela = _repo(tmp_path), tmp_path / "chela"
     _seed(chela, repo, [_entry()])
