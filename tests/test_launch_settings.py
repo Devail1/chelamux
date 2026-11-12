@@ -302,6 +302,13 @@ def test_a_non_plugin_channel_needs_no_installed_plugin():
     assert ls.replay(rec, plugins=set())[0] == ["--channels", "server:local", "--model", "opus"]
 
 
+def test_a_plugin_shaped_value_of_a_later_flag_is_not_read_as_a_channel():
+    # The --channels values end at the next flag: a plugin-shaped --add-dir value after
+    # it is a directory, not a channel, so a missing plugin by that name keeps the replay.
+    flags = ["--channels", "server:local", "--add-dir", "plugin:gone@m"]
+    assert ls.replay({"flags": flags}, plugins=set()) == (flags, {}, [], [])
+
+
 def test_replay_drops_a_vanished_path_entry_and_a_no_longer_allowlisted_name():
     rec = {**REC, "env": {"DISCORD_STATE_DIR": "/s", "GITHUB_TOKEN": "t", "OLD": "1"},
            "path_prefix": ["/bun", "/gone", "rel", 3]}
