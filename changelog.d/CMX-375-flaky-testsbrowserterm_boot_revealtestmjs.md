@@ -7,7 +7,7 @@
   sets the font size too. In about 1 boot in 10 it arrived before xterm had rendered the
   decoy. The walk still marked itself done, so stale glyphs could stay. The walk now
   checks in each of its two frames that the decoy is still set, and runs again if it is
-  not (up to 3 times, all before the pane is revealed). A second apply that arrives during
-  a walk now waits for it to finish instead of starting a walk of its own. This also fixes
+  not (up to 3 times, all before the pane is revealed). The pane is revealed only once no
+  walk is still running. This also fixes
   `tests/browser/term_boot_reveal.test.mjs`, which failed intermittently ("no hidden frame
   at the decoy size"). (CMX-375)

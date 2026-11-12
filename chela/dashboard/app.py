@@ -1106,7 +1106,9 @@ def _term_theme_shim() -> str:
 # never ran, yet atlasFixed was set and nothing re-ran it (~1 boot in 10, measured
 # against a real ttyd 1.7.7). The walk now checks, in each of its two frames, that the
 # size is still the decoy; if anything changed it, the walk runs again, at most
-# TERM_WALK_TRIES times in all, all while the pane is still hidden.
+# TERM_WALK_TRIES times in all, all while the pane is still hidden. Walks can overlap
+# (the 500 ms reconcile tick, a `loadingdone`) and cut each other short the same way,
+# so the pane is revealed only once no walk is in flight (`walking` counts them).
 TERM_BOOT_FALLBACK_MS = 1500
 TERM_WALK_TRIES = 3
 
@@ -1119,7 +1121,7 @@ _TERM_FONT_PREF_SHIM = (
     "var HEB={miriam:'Miriam Mono CLM',noto:'Noto Sans Hebrew',heebo:'Heebo',"
     "assistant:'Assistant',rubik:'Rubik',frankruhl:'Frank Ruhl Libre',"
     "david:'David Libre'};"
-    "var atlasFixed=false,seen=false,shown=false,walking=null;"
+    "var atlasFixed=false,seen=false,shown=false,walking=0;"
     "var root=document.documentElement;"
     "try{root.classList.add('chela-term-booting');}catch(e){}"
     "function reveal(){if(shown)return;shown=true;"
@@ -1157,7 +1159,6 @@ _TERM_FONT_PREF_SHIM = (
     "else if(t.setOption)t.setOption('fontFamily',f);}"
     "if(atlasFixed&&getSize()===s&&getFam()===fam)return;"
     "load(want(p,s)).then(function(){"
-    "if(walking)return walking.then(function(){apply();});"
     "try{setFam(fam);setSize(s);"
     "if(t.fit&&!window.__CHELA_GRID_FONT__)t.fit();"
     "if(t.refresh&&t.rows)t.refresh(0,t.rows-1);"
@@ -1178,11 +1179,11 @@ _TERM_FONT_PREF_SHIM = (
     "}catch(e){}"
     "atlasFixed=true;"
     "});};"
-    "var done=function(){walking=null;};"
-    "walking=walk(1).then(done,done);"
-    "return walking;"
+    "var done=function(){walking--;};"
+    "walking++;"
+    "return walk(1).then(done,done);"
     "}catch(e){atlasFixed=true;}"
-    "}).catch(function(){}).then(raf).then(reveal);}"
+    "}).catch(function(){}).then(raf).then(function(){if(!walking)reveal();});}"
     "window.chelaApplyTermPrefs=apply;"
     "try{var p0=pick(),ps0=prefSize();pin(ps0,famOf(p0.lat,p0.heb));load(want(p0,ps0));}catch(e){}"
     "var t0=Date.now();"
