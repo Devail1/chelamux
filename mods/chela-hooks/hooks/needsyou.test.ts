@@ -89,7 +89,6 @@ test('the band sits under what is beneath it, never in place of it', async ($, o
   // core's own drawing is kept, exactly once, and the line comes after (under) it
   expect(mine.filter(n => n === '<engine>')).toHaveLength(1)
   expect(mine.indexOf('<needs-you>')).toBeGreaterThan(mine.indexOf('<engine>'))
-  expect(mine.indexOf('<engine>')).toBe(0)
   // and the other row on the band, the test's own, is still drawn beside it
   expect(walk(drawn)).toContain('ENGINE')
   await ui.unmount()

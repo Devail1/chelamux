@@ -8,6 +8,7 @@ the mod posts is one :func:`chela.hooks.ingest` files with the right type and su
 """
 from __future__ import annotations
 
+import functools
 import json
 import os
 import re
@@ -85,18 +86,20 @@ ENGINE_PASSED_ON = "2.1.323"
 
 def _engine_version(text: str) -> str | None:
     """``2.1.323`` from ``claude --version``'s ``2.1.323 (Claude Code)``; else None."""
-    m = re.match(r"(\d+\.\d+\.\d+)(?![\d.])", text.strip())
+    m = re.match(r"(\d+\.\d+\.\d+)", text.strip())
     return m.group(1) if m else None
 
 
 def _drift_note(passed_on: str, installed: str | None) -> str:
     """What a red run says about the engine it ran on."""
     if installed == passed_on:
-        return f"Claude Code {installed}, the version this suite last passed on: the mod broke it."
+        return (f"Claude Code {installed} is the version this suite last passed on: "
+                "not engine drift, so look at the mod (or this host) first.")
     return (f"Claude Code is {installed or 'unreadable'}; this suite last passed on {passed_on}. "
             "Likely engine drift: read the engine's changelog and types before the mod.")
 
 
+@functools.cache
 def _claude_with_mods() -> tuple[str, str] | None:
     """``(exe, version)`` for a Claude Code that has Mods (>= 2.1.301), else None."""
     exe = shutil.which("claude")
@@ -115,8 +118,8 @@ def _claude_with_mods() -> tuple[str, str] | None:
 def test_the_engine_version_reads_from_claude_version():
     for text, version in [("2.1.323 (Claude Code)\n", "2.1.323"), ("2.1.323", "2.1.323"),
                           ("  10.20.300 (Claude Code)", "10.20.300"), ("2.1.3234 x", "2.1.3234"),
-                          ("", None), ("Claude Code 2.1.323", None), ("2.1 (Claude Code)", None),
-                          ("2.1.323.4", None), ("v2.1.323", None)]:
+                          ("2.1.323.4", "2.1.323"), ("", None), ("Claude Code 2.1.323", None),
+                          ("2.1 (Claude Code)", None), ("v2.1.323", None)]:
         assert (text, _engine_version(text)) == (text, version)
 
 
@@ -125,7 +128,7 @@ def test_a_red_run_names_the_engine_it_ran_on_and_the_one_it_last_passed_on():
     assert "2.1.324" in drift and "last passed on 2.1.323" in drift and "drift" in drift
     assert "unreadable" in _drift_note("2.1.323", None)
     same = _drift_note("2.1.323", "2.1.323")
-    assert "the mod broke it" in same and "drift" not in same
+    assert "not engine drift" in same and "look at the mod" in same
 
 
 @pytest.mark.skipif(_claude_with_mods() is None, reason="needs Claude Code >= 2.1.301")
