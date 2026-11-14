@@ -1,14 +1,15 @@
 // CMX-276: the sidebar's session list (#sidebar-agents): Needs you, the groups in their
 // order (Dispatched last), the Archived group, and their menus (CMX-277). What an action
 // DOES is controller.ts's (through `actions`, CMX-278).
-import { useEffect, useRef, useState, type MouseEvent, type ReactNode } from 'react';
+import { useEffect, useRef, useState, type MouseEvent, type PointerEvent, type ReactNode } from 'react';
 import { icons } from '../../../shared/icons/index.ts';
 import { TextButton } from '../../../shared/ui/index.ts';
 import {
-  ARCHIVED_SECTION_KEY, DISPATCHED_KEY, type Group, type Item, type SidebarState, folderLines, isSingleFolder,
-  showsFolderLine, sidebarModel,
+  ARCHIVED_SECTION_KEY, DISPATCHED_KEY, type Group, type Item, type SidebarState, assignKey, canDragGroup, dropAssignee,
+  folderLines, isSingleFolder, showsFolderLine, sidebarModel,
 } from '../model.ts';
 import type { SidebarActions } from './actions.ts';
+import { type DragSource, type DragView, useSidebarDrag } from './drag.ts';
 import { GroupMenu, RowMenu, type RowGroup, useMenuOpen } from './menus.tsx';
 import { type Meta, type MetaKind, ago, rowView } from './rowview.ts';
 
@@ -97,10 +98,18 @@ interface RowProps {
   folder?: string;
   /** CMX-379: a single-session folder's row carries its (absent) header's actions. */
   group?: RowGroup;
+  /** CMX-380: what dragging this row moves (its folder's place, or itself to a group). */
+  drag?: Drag;
   children?: ReactNode;
 }
 
-function Row({ it, s, actions, archived = false, altNum, folder, group, children }: RowProps) {
+/** CMX-380: a draggable row or header's pointerdown, and whether it is the one being dragged. */
+interface Drag { onPointerDown: (e: PointerEvent<HTMLElement>) => void; dragging: boolean }
+
+// Shown on hover (style.css), never on the folded icon rail.
+const Grip = () => <span className="drag-grip" aria-hidden="true"><icons.grip size={12} /></span>;
+
+function Row({ it, s, actions, archived = false, altNum, folder, group, drag, children }: RowProps) {
   const menu = useMenuOpen();
   const press = useLongPress();
   const v = rowView(it, s);
@@ -109,7 +118,8 @@ function Row({ it, s, actions, archived = false, altNum, folder, group, children
   // A plain shell already shows its live cwd as a chip (CMX-330): no second copy under it.
   if (v.meta.some(m => m.kind === 'cwd')) folder = undefined;
   const cls = ['agent-row', 'rich', name === s.active && 'active', v.onWall && 'on-wall',
-    v.runId && 'run-row', archived && 'archived', press.full && 'show-full', folder && 'has-folder']
+    v.runId && 'run-row', archived && 'archived', press.full && 'show-full', folder && 'has-folder',
+    drag && 'draggable', drag?.dragging && 'dragging']
     .filter(Boolean).join(' ');
   const line = (
     <>
@@ -128,11 +138,13 @@ function Row({ it, s, actions, archived = false, altNum, folder, group, children
   );
   return (
     <div className={cls} data-agent={name} data-run={v.runId ?? undefined} data-item={it.key} title={v.title}
-      onClick={() => { if (!press.consumed()) actions.selectAgent(name); }} onContextMenu={menu.onContext} {...press.handlers}>
+      onClick={() => { if (!press.consumed()) actions.selectAgent(name); }} onContextMenu={menu.onContext} {...press.handlers}
+      onPointerDown={drag?.onPointerDown}>
       {/* CMX-377: with a folder line, the first line keeps exactly what a one-line row has */}
       {folder ? <span className="ar-line">{line}</span> : line}
       {folder && <span className="ar-folder-line">{folder}</span>}
       {altNum ? <span className="ar-altnum" aria-hidden="true">{altNum}</span> : null}
+      {drag && <Grip />}
     </div>
   );
 }
@@ -162,20 +174,43 @@ interface GroupProps {
   actions: SidebarActions;
   alt: Map<string, number>;
   folders: Record<string, string>;
+  drag: ReturnType<typeof useSidebarDrag>;
 }
 
-function GroupView({ g, index, count, s, actions, alt, folders }: GroupProps) {
+const sameSource = (a: DragSource | undefined, b: DragSource) =>
+  !!a && a.kind === b.kind && (a.kind === 'group' ? a.key === (b as typeof a).key : a.item === (b as typeof a).item);
+
+/** The drop classes a section draws while a drag runs. */
+function dropCls(key: string, v: DragView | null): string {
+  if (!v) return '';
+  const out: string[] = [];
+  if (v.line?.key === key) out.push(`drop-${v.line.side}`);
+  if (v.over?.key === key) out.push(v.over.ok ? 'drop-target' : 'drop-reject');
+  return out.map(c => ` ${c}`).join('');
+}
+
+function GroupView({ g, index, count, s, actions, alt, folders, drag }: GroupProps) {
   const menu = useMenuOpen();
   // CMX-379: a folder with one session is one bare row naming its folder, never collapsed.
   const single = isSingleFolder(g, s.view.groupBy);
   const lines = single || showsFolderLine(s.view.groupBy);
+  // CMX-380: a group moves by its header, a bare folder by its row; under Custom groups a
+  // session row drags onto another group.
+  const movable = canDragGroup(g);
+  const groupSrc: DragSource = { kind: 'group', key: g.key };
+  const handle = (src: DragSource): Drag => ({ onPointerDown: drag.bind(src), dragging: sameSource(drag.view?.source, src) });
+  const rowDrag = (it: Item): Drag | undefined => {
+    if (single) return movable ? handle(groupSrc) : undefined;
+    if (s.view.groupBy !== 'custom') return undefined;
+    return handle({ kind: 'row', assign: assignKey(it), group: g.key, item: it.key });
+  };
   const rows = g.items.map(it => (
     <Row key={it.key} it={it} s={s} actions={actions} altNum={alt.get(it.key)}
-      folder={lines ? folders[it.key] : undefined} group={single ? { g, index, count } : undefined} />
+      folder={lines ? folders[it.key] : undefined} group={single ? { g, index, count } : undefined} drag={rowDrag(it)} />
   ));
   if (g.flat) {
     // Group by ▸ None: one flat list, no header.
-    return <div className="side-group flat" data-g={g.key}><div className="group-rows">{rows}</div></div>;
+    return <div className={`side-group flat${dropCls(g.key, drag.view)}`} data-g={g.key}><div className="group-rows">{rows}</div></div>;
   }
   const collapsed = !single && s.collapsed.includes(g.key);
   const n = g.items.length;
@@ -183,12 +218,16 @@ function GroupView({ g, index, count, s, actions, alt, folders }: GroupProps) {
     e.stopPropagation();
     f(e);
   };
+  const dragging = movable && sameSource(drag.view?.source, groupSrc);
   return (
-    <div className={`side-group${collapsed ? ' collapsed' : ''}${n ? '' : ' empty'}${single ? ' single' : ''}`} data-g={g.key}>
+    <div className={`side-group${collapsed ? ' collapsed' : ''}${n ? '' : ' empty'}${single ? ' single' : ''}${dragging ? ' dragging' : ''}${dropCls(g.key, drag.view)}`}
+      data-g={g.key}>
       {/* the header slot stays (as `false`) when there is none, so the row keeps its DOM node
           when a folder goes from 1 to 2 sessions or back (CMX-379) */}
-      {!single && <div className="group-head" data-g={g.key} aria-expanded={!collapsed}
-        onClick={() => actions.toggleGroup(g.key)} onContextMenu={menu.onContext}>
+      {!single && <div className={`group-head${movable ? ' draggable' : ''}`} data-g={g.key} aria-expanded={!collapsed}
+        onClick={() => actions.toggleGroup(g.key)} onContextMenu={menu.onContext}
+        onPointerDown={movable ? drag.bind(groupSrc) : undefined}>
+        {movable && <Grip />}
         <span className="group-name" title={g.cwd || g.label}>{g.label}</span>
         {g.key === DISPATCHED_KEY && <span className="group-count" title={`${n} run${n === 1 ? '' : 's'}`}>{n}</span>}
         <span className="group-caret"><icons.expand size={12} aria-hidden="true" /></span>
@@ -220,6 +259,13 @@ function altNumbers(needsYou: Item[], groups: Group[], s: SidebarState): Map<str
 }
 
 export function Sidebar({ state: s, actions }: { state: SidebarState | null; actions: SidebarActions }) {
+  // CMX-380: what a drop writes is the controller's: the same order Move up / Move down
+  // write, the same assignment Move to group writes.
+  const drag = useSidebarDrag({
+    group: (key, before) => actions.dropGroup(key, before),
+    accepts: key => !!s && s.view.groupBy === 'custom' && dropAssignee(key, s.custom) !== undefined,
+    row: (assign, key) => actions.dropOnGroup(assign, key),
+  });
   if (!s || !s.agents.length) return <div className="side-empty">No agents</div>;
   const model = sidebarModel(s);
   const alt = altNumbers(model.needsYou, model.groups, s);
@@ -234,7 +280,7 @@ export function Sidebar({ state: s, actions }: { state: SidebarState | null; act
   return (
     <>
       {model.needsYou.length > 0 && (
-        <div className="side-triage side-needs-you">
+        <div className={`side-triage side-needs-you${dropCls('~needs-you', drag.view)}`}>
           <div className="triage-head">Needs you <span className="triage-count">{model.needsYou.length}</span></div>
           {model.needsYou.map(it => (
             <Row key={it.key} it={it} s={s} actions={actions} altNum={alt.get(it.key)} folder={folders[it.key]} />
@@ -243,10 +289,11 @@ export function Sidebar({ state: s, actions }: { state: SidebarState | null; act
       )}
       {model.groups.map((g, i) => (
         <GroupView key={g.key} g={g} index={i} count={model.groups.length} s={s} actions={actions} alt={alt}
-          folders={all} />
+          folders={all} drag={drag} />
       ))}
       {drawsArchive && (
-        <div className={`side-group side-archived${archivedOpen ? '' : ' collapsed'}`} data-g={ARCHIVED_SECTION_KEY}>
+        <div className={`side-group side-archived${archivedOpen ? '' : ' collapsed'}${dropCls(ARCHIVED_SECTION_KEY, drag.view)}`}
+          data-g={ARCHIVED_SECTION_KEY}>
           <div className="group-head" data-g={ARCHIVED_SECTION_KEY} aria-expanded={archivedOpen}
             onClick={() => actions.toggleArchivedSection()}>
             <span className="group-name">Archived</span>

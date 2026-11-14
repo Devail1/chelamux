@@ -15,6 +15,10 @@ export interface SidebarActions {
   /** `agent` / `judge` (open that pane) / `archive` */
   rowMenuAction(key: string, act: string): unknown;
   moveToGroup(itemKey: string, id: string | null): void;
+  /** CMX-380: a dragged group dropped just before group `before` (null: at the end). */
+  dropGroup(key: string, before: string | null): boolean;
+  /** CMX-380: a dragged row (its assignment key) dropped on group `groupKey` (null: none). */
+  dropOnGroup(itemKey: string, groupKey: string | null): boolean;
   /** One View choice: `status:all`, `env:judge` (toggles), `group:state`, `toggle:showPR`, … */
   viewMenuAction(act: string): void;
   /** Prompts for the name; null when none was given. */

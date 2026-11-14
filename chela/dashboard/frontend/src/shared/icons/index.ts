@@ -4,7 +4,7 @@
 import {
   ArrowUpToLine, Ban, Bell, CalendarClock, Check, ChevronDown, ChevronRight, ChevronUp, Circle,
   CircleDashed, CircleDot, CircleHelp, CircleMinus, Columns3, Crown, Ellipsis, EllipsisVertical, ExternalLink, Eye,
-  Diamond, Flag, Hourglass, FlaskConical, FolderPlus, GitBranch, GitCompare, GitMerge, GitPullRequest, Globe, Hand, Inbox, Keyboard, LayoutGrid, Link2, Lock, LockOpen, Maximize2, Menu, Minimize2, Minus,
+  Diamond, Flag, Hourglass, FlaskConical, FolderPlus, GitBranch, GitCompare, GitMerge, GitPullRequest, Globe, GripVertical, Hand, Inbox, Keyboard, LayoutGrid, Link2, Lock, LockOpen, Maximize2, Menu, Minimize2, Minus,
   NotebookPen, OctagonX, Pause, Pin, Play, Plug, Plus, RefreshCw, RotateCw, Scale, Search, Settings, Share2,
   SlidersHorizontal, Snowflake, SquareCheck, SquareTerminal, Star, Target, TriangleAlert, Workflow, X,
 } from 'lucide-react';
@@ -16,6 +16,8 @@ export const icons = {
   expand: ChevronRight,
   chevronDown: ChevronDown,
   more: Ellipsis,
+  // CMX-380: a sidebar group or row can be dragged (shown on hover)
+  grip: GripVertical,
   add: Plus,
   share: Share2,
   viewOnly: Eye,

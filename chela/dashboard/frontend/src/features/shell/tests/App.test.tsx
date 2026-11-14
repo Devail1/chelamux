@@ -227,7 +227,7 @@ test('a nav row\'s click is the shell\'s view switch', () => {
 test('sidebarActions are the controller\'s commands, and the shell\'s view switch and session click', () => {
   expect([sidebarActions.selectAgent, sidebarActions.selectView]).toEqual([selectAgent, selectView]);
   const same = ['toggleGroup', 'groupNewSession', 'toggleArchivedSection', 'unarchiveRow', 'groupMenuAction', 'rowMenuAction',
-    'moveToGroup', 'viewMenuAction', 'deleteCustomGroup', 'setSidebarWidth', 'resumeSession', 'dismissRecentSession',
+    'moveToGroup', 'dropGroup', 'dropOnGroup', 'viewMenuAction', 'deleteCustomGroup', 'setSidebarWidth', 'resumeSession', 'dismissRecentSession',
     'clearRecentSessions', 'undoDismissRecent', 'closeRecentUndo', 'toggleDispatcherSessions'] as const;
   for (const k of same) expect([k, sidebarActions[k]]).toEqual([k, sb[k]]);
 });

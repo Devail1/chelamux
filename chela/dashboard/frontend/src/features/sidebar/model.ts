@@ -412,6 +412,47 @@ export function moveGroup(keys: string[], stored: string[] | null | undefined, k
     return [...order, ...(stored || []).filter(k => !order.includes(k))];
 }
 
+// --- Drag and drop (CMX-380) --------------------------------------------------------
+//
+// A DRAG lands in the same persisted state the menus write: a group dropped somewhere is
+// the `order` Move up / Move down would have reached one step at a time (`placeGroup`),
+// and a session dropped on a custom group is the row menu's Move to group (`dropAssignee`).
+// The pinned sections (Needs you, Dispatched, Archived) neither move nor take a drop.
+
+/** May this group's header (or single-session folder row) be dragged to a new place? */
+export function canDragGroup(g: Pick<Group, 'key' | 'flat'>): boolean {
+    return !g.flat && g.key !== DISPATCHED_KEY;
+}
+
+/** Move group `key` to just before `before` (null: to the end) within the rendered order
+ * `keys`, and return the order to persist, shaped as {@link moveGroup}'s: the new visible
+ * order, then the stored keys not on screen. Dispatched stays last (`before` null or
+ * Dispatched lands just above it). Null when nothing would change, or the move is not one
+ * a viewer may make (an unknown or pinned group). */
+export function placeGroup(keys: string[], stored: string[] | null | undefined, key: string,
+    before: string | null): string[] | null {
+    if (key === DISPATCHED_KEY || !keys.includes(key) || key === before) return null;
+    if (before != null && !keys.includes(before)) return null;
+    const rest = keys.filter(k => k !== key);
+    const pinned = rest.indexOf(DISPATCHED_KEY);
+    let at = before == null || before === DISPATCHED_KEY ? (pinned < 0 ? rest.length : pinned) : rest.indexOf(before);
+    if (pinned >= 0 && at > pinned) at = pinned;
+    const order = [...rest.slice(0, at), key, ...rest.slice(at)];
+    if (order.every((k, i) => k === keys[i])) return null;
+    return [...order, ...(stored || []).filter(k => !order.includes(k))];
+}
+
+/** A session dropped on group `groupKey`: the custom group id it now belongs to, null to
+ * unassign it (Ungrouped, or no group at all), or undefined when that is no drop target
+ * (a pinned section, a group of another grouping mode). */
+export function dropAssignee(groupKey: string | null, custom: Custom): string | null | undefined {
+    if (groupKey == null || groupKey === UNGROUPED_KEY) return null;
+    const pre = customKey('');
+    if (!groupKey.startsWith(pre)) return undefined;
+    const id = groupKey.slice(pre.length);
+    return custom.groups.some(g => g.id === id) ? id : undefined;
+}
+
 // --- The VIEW menu (CMX-66) ---------------------------------------------------------
 
 // The choices, their defaults, and what a stored value is allowed to be. A stored view

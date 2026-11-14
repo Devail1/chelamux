@@ -12,11 +12,12 @@ import { registerLane } from '../../shared/scheduler/index.ts';
 import { type Agent, agents as agentsStore } from '../../shared/store/agents.ts';
 import { onOverlayOpen } from '../../shared/ui/index.ts';
 import { archiveLoaded, archivedKeys, archivedSessions, pruneHidden, refreshArchive, setArchive } from './lib/archive.ts';
-import { getLayout, refreshLayout, writeLayout } from './lib/layout.ts';
+import { commitLayout, getLayout, refreshLayout, writeLayout } from './lib/layout.ts';
 import { isObj, lsJson, lsRead, lsSet, postJson, publish, say, sayRefused } from './lib/page.ts';
 import {
-  ARCHIVED_SECTION_KEY, type AgentRow, clampWidth, type Custom, dismissKey, type Group, type Item, isArchivable,
-  isSingleFolder, moveGroup, type NavState, normalizeView, reconcileAssign, type RecentRow, type RecentState, recentView,
+  ARCHIVED_SECTION_KEY, type AgentRow, clampWidth, type Custom, dismissKey, dropAssignee, type Group, type Item,
+  isArchivable, isSingleFolder, moveGroup, placeGroup, type NavState, normalizeView, reconcileAssign, type RecentRow,
+  SESSION_KEY_PREFIX, type RecentState, recentView,
   sidebarModel,
   sidebarOrder as modelSidebarOrder, type SidebarState, type View, type Wants,
 } from './model.ts';
@@ -105,7 +106,7 @@ if (lsRead(SIDEBAR_COLLAPSED_KEY, null) === '1') {
 
 /** The width handle's commit: kept in the server layout, so it follows across devices. */
 export function setSidebarWidth(w: number): void {
-  writeLayout({ width: clampWidth(w) });
+  void writeLayout({ width: clampWidth(w) });
   refit();
 }
 
@@ -163,9 +164,10 @@ function custom(): Custom {
   return { groups, assign: isObj(c.assign) ? { ...(c.assign as Record<string, string>) } : {}, seen };
 }
 // `seen` only while it holds a stamp: the server omits an empty one (sidebar_layout.py).
-const saveCustom = (c: Custom) => writeLayout({
+const customFields = (c: Custom) => ({
   custom: { groups: c.groups, assign: c.assign, ...(c.seen && Object.keys(c.seen).length ? { seen: c.seen } : {}) },
 });
+const saveCustom = (c: Custom) => void writeLayout(customFields(c));
 const without = (assign: Record<string, string>, drop: (k: string, v: string) => boolean) =>
   Object.fromEntries(Object.entries(assign).filter(([k, v]) => !drop(k, v)));
 
@@ -312,7 +314,7 @@ export function groupMenuAction(key: string, act: string): unknown {
   if (act === 'new') return groupNewSession(key);
   if (act === 'up' || act === 'down') {
     const next = moveGroup(sb.groups.map(x => x.key), getLayout().order, key, act === 'up' ? -1 : 1);
-    if (next) writeLayout({ order: next });
+    if (next) void commitOrder(next);
   } else if (act === 'collapse-all') {
     // CMX-379: a one-session folder has no header to fold. Stamping its key would fold it
     // later, unasked, the moment it gains a second session.
@@ -348,14 +350,53 @@ export function rowMenuAction(key: string, act: string): unknown {
   return undefined;
 }
 
+// CMX-380: the group order and a row's group are what a viewer moved by hand: shown at once,
+// and put back (saying why) when the server refuses or does not answer (layout.commitLayout).
+// Move up / Move down and a drag share commitOrder; Move to group and a drop share
+// assignGroup, so the two paths can never write different things.
+function commitOrder(next: string[]): Promise<boolean> {
+  return commitLayout({ order: next }, 'Moving the group', rerender);
+}
+
+function assignGroup(itemKey: string, id: string | null): Promise<boolean> {
+  const c = custom();
+  c.assign = without(c.assign, k => k === itemKey);
+  const seen: Record<string, number> = Object.fromEntries(Object.entries(c.seen ?? {}).filter(([k]) => k !== itemKey));
+  if (id && c.groups.some(g => g.id === id)) {
+    c.assign[itemKey] = id;
+    // stamped here, in the one write: else the next render's reconcileAssign stamps it in a
+    // second write, and a failed first write could no longer be put back under it
+    if (itemKey.startsWith(SESSION_KEY_PREFIX)) seen[itemKey] = Date.now();
+  }
+  c.seen = seen;
+  const done = commitLayout(customFields(c), 'Moving the session', rerender);
+  rerender();
+  return done;
+}
+
 /** Assign a row (by its STABLE assignment key, model.assignKey) to custom group `id`, or to
  * Ungrouped (null). */
 export function moveToGroup(itemKey: string, id: string | null): void {
-  const c = custom();
-  c.assign = without(c.assign, k => k === itemKey);
-  if (id && c.groups.some(g => g.id === id)) c.assign[itemKey] = id;
-  saveCustom(c);
+  void assignGroup(itemKey, id);
+}
+
+/** A group header (or single-session folder row) dropped just before group `before` (null:
+ * after the last one). False when it moved nothing (a pinned group, no change). */
+export function dropGroup(key: string, before: string | null): boolean {
+  const next = placeGroup(sb.groups.map(x => x.key), getLayout().order, key, before);
+  if (!next) return false;
+  void commitOrder(next);
   rerender();
+  return true;
+}
+
+/** A row (by its assignment key) dropped on group `groupKey` (null: on no group, which
+ * unassigns it, as Ungrouped does). False when that is no drop target (a pinned section). */
+export function dropOnGroup(itemKey: string, groupKey: string | null): boolean {
+  const id = dropAssignee(groupKey, custom());
+  if (id === undefined) return false;
+  void assignGroup(itemKey, id);
+  return true;
 }
 
 function askName(msg: string, dflt = ''): string {
