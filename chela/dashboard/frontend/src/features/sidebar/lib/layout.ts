@@ -82,11 +82,14 @@ export async function commitLayout(fields: Fields, what: string, onRevert?: () =
   const gen = layout.gen;
   const err = await pending;
   if (err == null) return true;
-  if (layout.gen === gen) {
-    layout = { ...layout, ...before };
-    publishLayout();
-    onRevert?.();
+  if (layout.gen !== gen) {
+    // a newer write owns the screen now: say so, never claim a revert that did not happen
+    say(`${what} failed: ${err}. A later change is shown; the next refresh reads the saved layout.`);
+    return false;
   }
+  layout = { ...layout, ...before };
+  publishLayout();
+  onRevert?.();
   say(`${what} failed: ${err}. It was put back.`);
   return false;
 }

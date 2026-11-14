@@ -183,6 +183,22 @@ describe('desktop: a mouse drag with a move threshold', () => {
     expect(document.body.classList.contains('sidebar-dragging')).toBe(false);
   });
 
+  test('losing the window (a release over a terminal iframe) cancels the drag', () => {
+    const { acts, head } = folders();
+    fireEvent.pointerDown(head('c'), pt(20, 90));
+    fireEvent.pointerMove(window, pt(20, 10));
+    expect(document.body.classList.contains('sidebar-dragging')).toBe(true);
+    fireEvent.blur(window);
+    expect(document.body.classList.contains('sidebar-dragging')).toBe(false);
+    fireEvent.pointerUp(window, pt(20, 10));
+    expect(acts.dropGroup).not.toHaveBeenCalled();
+    // and the next drag starts: nothing was left stuck
+    fireEvent.pointerDown(head('c'), pt(20, 90));
+    fireEvent.pointerMove(window, pt(20, 10));
+    fireEvent.pointerUp(window, pt(20, 10));
+    expect(acts.dropGroup.mock.calls).toEqual([['/srv/c', '/srv/a']]);
+  });
+
   test('a right button, the ⋯ menu and the + start no drag', () => {
     const { el, acts, head } = folders();
     fireEvent.pointerDown(head('c'), pt(20, 90, { button: 2 }));

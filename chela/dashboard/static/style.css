@@ -2865,6 +2865,8 @@ body.sidebar-resizing iframe { pointer-events: none; }
 .group-head.draggable:hover .drag-grip, .agent-row.rich.draggable:hover .drag-grip { opacity: 0.7; }
 body.sidebar-dragging, body.sidebar-dragging * { cursor: grabbing !important; }
 body.sidebar-dragging #sidebar-agents { -webkit-user-select: none; user-select: none; }
+/* the wall's terminal iframes would swallow the drag's pointer events (as for the resize) */
+body.sidebar-dragging iframe { pointer-events: none; }
 .side-group.dragging, .agent-row.rich.dragging { opacity: 0.45; }
 .side-group.drop-before, .side-group.drop-after { position: relative; }
 .side-group.drop-before::before, .side-group.drop-after::after {

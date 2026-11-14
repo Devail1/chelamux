@@ -124,7 +124,8 @@ test('a failed write never reverts over a NEWER one', async () => {
   dropGroup('/srv/a', null);
   await flush();
   expect(drawnOrder()).toEqual(['/srv/c', '/srv/b', '/srv/a']);
-  expect(alerts).toHaveBeenCalledTimes(1);
+  expect(alerts.mock.calls).toEqual([
+    ['Moving the group failed: disk full. A later change is shown; the next refresh reads the saved layout.']]);
 });
 
 const CUSTOM = { view: { groupBy: 'custom' }, custom: { groups: [{ id: 'g1', name: 'Infra' }, { id: 'g2', name: 'Web' }], assign: {} } };

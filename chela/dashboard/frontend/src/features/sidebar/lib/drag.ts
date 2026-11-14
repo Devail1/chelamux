@@ -67,6 +67,12 @@ function movableGroups(root: Element) {
     });
 }
 
+function sameView(a: DragView | null, b: DragView | null): boolean {
+  if (!a || !b) return a === b;
+  return a.source === b.source && a.line?.key === b.line?.key && a.line?.side === b.line?.side
+    && a.over?.key === b.over?.key && a.over?.ok === b.over?.ok;
+}
+
 const inside = (r: DOMRect, x: number, y: number) => x >= r.left && x <= r.right && y >= r.top && y <= r.bottom;
 
 /** The section under (x, y): a group's key, UNGROUPED_KEY for the list outside every group,
@@ -121,7 +127,9 @@ export interface DragDrop {
 
 /** The list's drag: `view` to draw, and `bind(source)` for the pointerdown of a header or row. */
 export function useSidebarDrag(drop: DragDrop) {
-  const [view, setView] = useState<DragView | null>(null);
+  const [view, setViewRaw] = useState<DragView | null>(null);
+  // a pointermove that changes nothing on screen re-renders nothing
+  const setView = useCallback((v: DragView | null) => setViewRaw(prev => (sameView(prev, v) ? prev : v)), []);
   const cur = useRef<Session | null>(null);
   const dropRef = useRef(drop);
   useEffect(() => { dropRef.current = drop; });
@@ -250,6 +258,8 @@ export function useSidebarDrag(drop: DragDrop) {
       s.done();
     };
     // A long press on a phone also asks for the row's context menu: not while it drags.
+    // The window lost the pointer (a release over a terminal iframe, a tab switch): cancel.
+    const lost = () => cur.current?.done();
     const menu = (ev: Event) => {
       if (!cur.current?.active) return;
       ev.preventDefault();
@@ -266,6 +276,7 @@ export function useSidebarDrag(drop: DragDrop) {
         window.removeEventListener('pointercancel', cancel);
         window.removeEventListener('keydown', key, true);
         window.removeEventListener('contextmenu', menu, true);
+        window.removeEventListener('blur', lost);
         document.body.classList.remove('sidebar-dragging');
         if (cur.current === s) cur.current = null;
         setView(null);
@@ -277,8 +288,9 @@ export function useSidebarDrag(drop: DragDrop) {
     window.addEventListener('pointercancel', cancel);
     window.addEventListener('keydown', key, true);
     window.addEventListener('contextmenu', menu, true);
+    window.addEventListener('blur', lost);
     if (touch) s.timer = setTimeout(() => { if (cur.current === s) begin(s); }, LONG_PRESS_DRAG_MS);
-  }, []);
+  }, [setView]);
 
   return { view, bind };
 }
