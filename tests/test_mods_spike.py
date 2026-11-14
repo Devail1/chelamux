@@ -8,6 +8,7 @@ the mod posts is one :func:`chela.hooks.ingest` files with the right type and su
 """
 from __future__ import annotations
 
+import functools
 import json
 import os
 import re
@@ -76,7 +77,31 @@ def test_ingest_files_every_payload_the_mod_posts(log_file, body):
     assert event_log.read()["events"][-1]["seq"] == record["seq"]
 
 
-def _claude_with_mods() -> str | None:
+# The Claude Code the mod's own suite last passed on. The suite runs against the INSTALLED
+# engine, which auto-updates, so a red run on another version names both: the next drift
+# diagnoses itself (CMX-376: 2.1.323 made the band one row per plugin). Bump it when the
+# suite is green on a new engine.
+ENGINE_PASSED_ON = "2.1.323"
+
+
+def _engine_version(text: str) -> str | None:
+    """``2.1.323`` from ``claude --version``'s ``2.1.323 (Claude Code)``; else None."""
+    m = re.match(r"(\d+\.\d+\.\d+)", text.strip())
+    return m.group(1) if m else None
+
+
+def _drift_note(passed_on: str, installed: str | None) -> str:
+    """What a red run says about the engine it ran on."""
+    if installed == passed_on:
+        return (f"Claude Code {installed} is the version this suite last passed on: "
+                "not engine drift, so look at the mod (or this host) first.")
+    return (f"Claude Code is {installed or 'unreadable'}; this suite last passed on {passed_on}. "
+            "Likely engine drift: read the engine's changelog and types before the mod.")
+
+
+@functools.cache
+def _claude_with_mods() -> tuple[str, str] | None:
+    """``(exe, version)`` for a Claude Code that has Mods (>= 2.1.301), else None."""
     exe = shutil.which("claude")
     if not exe:
         return None
@@ -84,15 +109,35 @@ def _claude_with_mods() -> str | None:
         out = subprocess.run([exe, "--version"], capture_output=True, text=True, timeout=30)
     except (OSError, subprocess.SubprocessError):
         return None
-    m = re.match(r"(\d+)\.(\d+)\.(\d+)", out.stdout.strip())
-    return exe if m and tuple(map(int, m.groups())) >= (2, 1, 301) else None
+    version = _engine_version(out.stdout)
+    if not version or tuple(map(int, version.split("."))) < (2, 1, 301):
+        return None
+    return exe, version
+
+
+def test_the_engine_version_reads_from_claude_version():
+    for text, version in [("2.1.323 (Claude Code)\n", "2.1.323"), ("2.1.323", "2.1.323"),
+                          ("  10.20.300 (Claude Code)", "10.20.300"), ("2.1.3234 x", "2.1.3234"),
+                          ("2.1.323.4", "2.1.323"), ("", None), ("Claude Code 2.1.323", None),
+                          ("2.1 (Claude Code)", None), ("v2.1.323", None)]:
+        assert (text, _engine_version(text)) == (text, version)
+
+
+def test_a_red_run_names_the_engine_it_ran_on_and_the_one_it_last_passed_on():
+    drift = _drift_note("2.1.323", "2.1.324")
+    assert "2.1.324" in drift and "last passed on 2.1.323" in drift and "drift" in drift
+    assert "unreadable" in _drift_note("2.1.323", None)
+    same = _drift_note("2.1.323", "2.1.323")
+    assert "not engine drift" in same and "look at the mod" in same
 
 
 @pytest.mark.skipif(_claude_with_mods() is None, reason="needs Claude Code >= 2.1.301")
 def test_the_mods_own_suite_passes():
     """The mod's ``*.test.ts`` run against the engine itself. Skipped without a Claude
     Code that has Mods (CI has none); the judge's host does."""
-    proc = subprocess.run([_claude_with_mods(), "plugin", "test", str(MOD)],
+    exe, version = _claude_with_mods()
+    proc = subprocess.run([exe, "plugin", "test", str(MOD)],
                           capture_output=True, text=True, timeout=300)
-    assert proc.returncode == 0, proc.stdout[-4000:] + proc.stderr[-2000:]
-    assert re.search(r"\b0 fail\b", proc.stdout + proc.stderr)
+    note = _drift_note(ENGINE_PASSED_ON, version)
+    assert proc.returncode == 0, note + "\n" + proc.stdout[-4000:] + proc.stderr[-2000:]
+    assert re.search(r"\b0 fail\b", proc.stdout + proc.stderr), note

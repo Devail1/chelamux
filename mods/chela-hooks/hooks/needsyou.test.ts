@@ -59,11 +59,38 @@ for (const surface of ['terminal', 'desktop'] as const) {
   })
 }
 
+// Since Claude Code 2.1.323 the band is one row per plugin (`AbovePromptList` stacks them):
+// the mod's `next(e)` resolves to core's own drawing, `{ type: 'engine', ref }`, and the
+// test's hook above draws a row of its own. So what sits beneath the mod's line is that
+// engine node, inside the row stamped `part: { plugin: 'chela-hooks-mod' }`.
+function rowOf(tree: any, plugin: string): any {
+  if (!tree || typeof tree !== 'object') return undefined
+  if (tree.part?.plugin === plugin && tree.type === 'Box') return tree
+  for (const c of tree.children ?? []) { const r = rowOf(c, plugin); if (r) return r }
+  return undefined
+}
+
+// Every node in document order, as `kind` labels: 'engine', a Box's key, or a text.
+function walk(tree: any, out: string[] = []): string[] {
+  if (typeof tree === 'string') { out.push(tree); return out }
+  if (!tree || typeof tree !== 'object') return out
+  if (tree.type === 'engine') out.push('<engine>')
+  else if (tree.props?.key) out.push(`<${tree.props.key}>`)
+  for (const c of tree.children ?? []) walk(c, out)
+  return out
+}
+
 test('the band sits under what is beneath it, never in place of it', async ($, on) => {
   await started($, on, ORCH)
   const ui = await $.ui.mount({ plugin: 'chela-hooks-mod', surface: 'terminal', component: 'AbovePrompt',
                                 props: { hasSurvey: false, isWorking: false } as any })
-  expect((await ui.findAll({ type: 'Text' })).map((t: any) => t.text)[0]).toBe('ENGINE')
+  const drawn = await ui.drawn()
+  const mine = walk(rowOf(drawn, 'chela-hooks-mod'))
+  // core's own drawing is kept, exactly once, and the line comes after (under) it
+  expect(mine.filter(n => n === '<engine>')).toHaveLength(1)
+  expect(mine.indexOf('<needs-you>')).toBeGreaterThan(mine.indexOf('<engine>'))
+  // and the other row on the band, the test's own, is still drawn beside it
+  expect(walk(drawn)).toContain('ENGINE')
   await ui.unmount()
 })
 
