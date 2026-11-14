@@ -5,7 +5,8 @@ import { useEffect, useRef, useState, type MouseEvent, type ReactNode } from 're
 import { icons } from '../../../shared/icons/index.ts';
 import { TextButton } from '../../../shared/ui/index.ts';
 import {
-  ARCHIVED_SECTION_KEY, DISPATCHED_KEY, type Group, type Item, type SidebarState, sidebarModel,
+  ARCHIVED_SECTION_KEY, DISPATCHED_KEY, type Group, type Item, type SidebarState, folderLines, showsFolderLine,
+  sidebarModel,
 } from '../model.ts';
 import type { SidebarActions } from './actions.ts';
 import { GroupMenu, RowMenu, useMenuOpen } from './menus.tsx';
@@ -92,20 +93,22 @@ interface RowProps {
   actions: SidebarActions;
   archived?: boolean;
   altNum?: number;
+  /** CMX-377: the dim second line naming the row's folder; absent when grouped by folder. */
+  folder?: string;
   children?: ReactNode;
 }
 
-function Row({ it, s, actions, archived = false, altNum, children }: RowProps) {
+function Row({ it, s, actions, archived = false, altNum, folder, children }: RowProps) {
   const menu = useMenuOpen();
   const press = useLongPress();
   const v = rowView(it, s);
   if (!v) return null;
   const name = v.agent.name ?? '';
   const cls = ['agent-row', 'rich', name === s.active && 'active', v.onWall && 'on-wall',
-    v.runId && 'run-row', archived && 'archived', press.full && 'show-full'].filter(Boolean).join(' ');
-  return (
-    <div className={cls} data-agent={name} data-run={v.runId ?? undefined} data-item={it.key} title={v.title}
-      onClick={() => { if (!press.consumed()) actions.selectAgent(name); }} onContextMenu={menu.onContext} {...press.handlers}>
+    v.runId && 'run-row', archived && 'archived', press.full && 'show-full', folder && 'has-folder']
+    .filter(Boolean).join(' ');
+  const line = (
+    <>
       <span className={`term-status-dot ${v.dotCls}`} role="img" aria-label={v.dotLabel} title={v.dotLabel} />
       {/* no title of its own (CMX-331): hovering the name shows the row's tooltip, which opens
           with the full title, then the window key */}
@@ -117,6 +120,14 @@ function Row({ it, s, actions, archived = false, altNum, children }: RowProps) {
       </span>
       <RowMenu it={it} s={s} actions={actions} menu={menu} />
       {children}
+    </>
+  );
+  return (
+    <div className={cls} data-agent={name} data-run={v.runId ?? undefined} data-item={it.key} title={v.title}
+      onClick={() => { if (!press.consumed()) actions.selectAgent(name); }} onContextMenu={menu.onContext} {...press.handlers}>
+      {/* CMX-377: with a folder line, the first line keeps exactly what a one-line row has */}
+      {folder ? <span className="ar-line">{line}</span> : line}
+      {folder && <span className="ar-folder-line">{folder}</span>}
       {altNum ? <span className="ar-altnum" aria-hidden="true">{altNum}</span> : null}
     </div>
   );
@@ -146,11 +157,14 @@ interface GroupProps {
   s: SidebarState;
   actions: SidebarActions;
   alt: Map<string, number>;
+  folders: Record<string, string>;
 }
 
-function GroupView({ g, index, count, s, actions, alt }: GroupProps) {
+function GroupView({ g, index, count, s, actions, alt, folders }: GroupProps) {
   const menu = useMenuOpen();
-  const rows = g.items.map(it => <Row key={it.key} it={it} s={s} actions={actions} altNum={alt.get(it.key)} />);
+  const rows = g.items.map(it => (
+    <Row key={it.key} it={it} s={s} actions={actions} altNum={alt.get(it.key)} folder={folders[it.key]} />
+  ));
   if (g.flat) {
     // Group by ▸ None: one flat list, no header.
     return <div className="side-group flat" data-g={g.key}><div className="group-rows">{rows}</div></div>;
@@ -201,16 +215,22 @@ export function Sidebar({ state: s, actions }: { state: SidebarState | null; act
   const archivedOpen = s.view.status === 'archived' || s.collapsed.includes(`${ARCHIVED_SECTION_KEY}:open`);
   const nArch = model.archived.length;
   const drawsArchive = showArchived && nArch > 0;
+  const folders = showsFolderLine(s.view.groupBy)
+    ? folderLines([...model.needsYou, ...model.groups.flatMap(g => g.items), ...model.archived])
+    : {};
   return (
     <>
       {model.needsYou.length > 0 && (
         <div className="side-triage side-needs-you">
           <div className="triage-head">Needs you <span className="triage-count">{model.needsYou.length}</span></div>
-          {model.needsYou.map(it => <Row key={it.key} it={it} s={s} actions={actions} altNum={alt.get(it.key)} />)}
+          {model.needsYou.map(it => (
+            <Row key={it.key} it={it} s={s} actions={actions} altNum={alt.get(it.key)} folder={folders[it.key]} />
+          ))}
         </div>
       )}
       {model.groups.map((g, i) => (
-        <GroupView key={g.key} g={g} index={i} count={model.groups.length} s={s} actions={actions} alt={alt} />
+        <GroupView key={g.key} g={g} index={i} count={model.groups.length} s={s} actions={actions} alt={alt}
+          folders={folders} />
       ))}
       {drawsArchive && (
         <div className={`side-group side-archived${archivedOpen ? '' : ' collapsed'}`} data-g={ARCHIVED_SECTION_KEY}>
@@ -224,7 +244,7 @@ export function Sidebar({ state: s, actions }: { state: SidebarState | null; act
             {model.archived.map(it => it.kind === 'session'
               ? <SessionRow key={it.key} it={it} s={s} actions={actions} />
               : (
-                <Row key={it.key} it={it} s={s} actions={actions} archived>
+                <Row key={it.key} it={it} s={s} actions={actions} archived folder={folders[it.key]}>
                   <Unarchive itemKey={it.key} resume={false} actions={actions} />
                 </Row>
               ))}

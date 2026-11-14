@@ -1,7 +1,7 @@
 import { act, cleanup, fireEvent, render } from '@testing-library/react';
-import { afterEach, expect, test } from 'vitest';
+import { afterEach, describe, expect, test } from 'vitest';
 import { CONTEXT_SHOWN_FROM, Sidebar } from '../index.ts';
-import { DISPATCHED_KEY, OTHER_KEY, type SidebarState, sidebarOrder } from '../model.ts';
+import { type AgentRow, DISPATCHED_KEY, OTHER_KEY, type SidebarState, normalizeView, sidebarOrder } from '../model.ts';
 import { NOW, actions, runWin, state, win } from './fixtures.ts';
 
 afterEach(cleanup);
@@ -384,4 +384,90 @@ test('no rows: "No agents"; rows the view filters all out: "No sessions match th
   cleanup();
   const { el } = draw(state([win('a')], { view: { ...state([]).view, env: ['judge'] } }));
   expect(el.querySelector('.side-empty')?.textContent).toBe('No sessions match this view');
+});
+
+// --- CMX-377 (Liav, 11-14): the folder line --------------------------------------------
+
+describe('the folder line (CMX-377)', () => {
+  const folderOf = (row: HTMLElement) => row.querySelector<HTMLElement>('.ar-folder-line')?.textContent ?? null;
+  const ungrouped = (agents: AgentRow[], over: Partial<SidebarState> = {}) =>
+    state(agents, { view: normalizeView({ activity: 'all', sort: 'name', groupBy: 'none' }), ...over });
+
+  test('ungrouped: every row has a folder line, and the home folder reads ~', () => {
+    const home = win('home', { cwd: '/home/u', cwd_is_home: true });
+    const proj = win('proj', { cwd: '/srv/code/alpha' });
+    const { el } = draw(ungrouped([home, proj]));
+    expect(folderOf(rowOf(el, 'home'))).toBe('~');
+    expect(folderOf(rowOf(el, 'proj'))).toBe('alpha');
+    expect(el.querySelectorAll('.agent-row.has-folder')).toHaveLength(2);
+  });
+
+  test('grouped by folder: no row has a folder line', () => {
+    const agents = [win('home', { cwd: '/home/u', cwd_is_home: true }), win('proj'), runWin('CMX-5', 'agent')];
+    const { el } = draw(state(agents, { view: normalizeView({ activity: 'all', sort: 'name', groupBy: 'folder' }) }));
+    expect(el.querySelectorAll('.agent-row')).toHaveLength(3);
+    expect(el.querySelectorAll('.ar-folder-line')).toHaveLength(0);
+    expect(el.querySelectorAll('.agent-row.has-folder')).toHaveLength(0);
+  });
+
+  test.each(['date', 'state', 'custom', 'none'])('grouped by %s: the folder line shows', (groupBy) => {
+    const { el } = draw(state([win('proj')], { view: normalizeView({ activity: 'all', sort: 'name', groupBy }) }));
+    expect(folderOf(rowOf(el, 'proj'))).toBe('alpha');
+  });
+
+  test('a row lifted into Needs you and an archived row get the line too', () => {
+    const blocked = win('blocked', { cwd: '/srv/code/beta', needs_human: true });
+    const old = win('old', { cwd: '/srv/code/gamma', done: true });
+    const { el } = draw(ungrouped([blocked, old], { archived: [`w:${old.window_id}`] }));
+    expect(folderOf(rowOf(el, 'blocked'))).toBe('beta');
+    expect(folderOf(rowOf(el, 'old'))).toBe('gamma');
+  });
+
+  test('two folders sharing a basename are told apart by their parent', () => {
+    const a = win('a', { cwd: '/home/u/projects/foo' });
+    const b = win('b', { cwd: '/home/u/work/foo/' });
+    const c = win('c', { cwd: '/home/u/work/foo' });
+    const { el } = draw(ungrouped([a, b, c]));
+    expect(folderOf(rowOf(el, 'a'))).toBe('projects/foo');
+    expect(folderOf(rowOf(el, 'b'))).toBe('work/foo');
+    expect(folderOf(rowOf(el, 'c'))).toBe('work/foo');
+  });
+
+  test('a shared parent too: the shortest tail that is unique', () => {
+    const a = win('a', { cwd: '/x/src/foo' });
+    const b = win('b', { cwd: '/y/src/foo' });
+    const c = win('c', { cwd: '/y/bar' });
+    const { el } = draw(ungrouped([a, b, c]));
+    expect(folderOf(rowOf(el, 'a'))).toBe('x/src/foo');
+    expect(folderOf(rowOf(el, 'b'))).toBe('y/src/foo');
+    expect(folderOf(rowOf(el, 'c'))).toBe('bar');
+  });
+
+  test('a worktree reads <project> · <task id>, never the .chela/worktrees path', () => {
+    const run = runWin('CMX-374', 'agent', {}, { cwd: '/home/u/.chela/worktrees/chelamux/CMX-374' });
+    const bare = win('bare', { cwd: '/home/u/.chela/worktrees/chelamux/CMX-9/' });
+    const { el } = draw(ungrouped([run, bare]));
+    expect(folderOf(rowOf(el, 'liavacc/cmx-374'))).toBe('chelamux · CMX-374');
+    expect(folderOf(rowOf(el, 'bare'))).toBe('chelamux · CMX-9');
+    expect(el.textContent).not.toContain('.chela');
+  });
+
+  test('a row with no cwd has no folder line, and keeps the one-line shape', () => {
+    const { el } = draw(ungrouped([win('nowhere', { cwd: null })]));
+    const row = rowOf(el, 'nowhere');
+    expect(folderOf(row)).toBeNull();
+    expect([...row.children].map(c => c.className)).toEqual(['term-status-dot idle', 'agent-row-name', 'ar-meta', 'row-more']);
+  });
+
+  test('the first line keeps the title, badges, crown and menu; the folder line comes after it', () => {
+    const a = win('orch', { cwd: '/srv/code/alpha' });
+    const { el } = draw(ungrouped([a], { orchWid: a.window_id ?? null, ctx: { [a.window_id ?? '']: 70 } }));
+    const row = rowOf(el, 'orch');
+    expect([...row.children].map(c => c.className)).toEqual(['ar-line', 'ar-folder-line']);
+    const line = row.querySelector('.ar-line') as HTMLElement;
+    expect([...line.children].map(c => c.className)).toEqual(['term-status-dot idle', 'agent-row-name', 'ar-meta', 'row-more']);
+    expect(line.querySelector('[data-meta="orchestrator"]')).toBeTruthy();
+    expect(line.querySelector('[data-meta="context"]')?.textContent).toBe('70%');
+    expect(folderOf(row)).toBe('alpha');
+  });
 });

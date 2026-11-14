@@ -46,6 +46,8 @@ export interface AgentRow {
     name?: string;
     window_id?: string;
     cwd?: string | null;
+    /** CMX-35: the session's cwd IS the home dir (app.py decides it, where home is known). */
+    cwd_is_home?: boolean;
     run?: RunCard | null;
     dispatched?: boolean;
     judge_battery?: Battery | null;
@@ -167,6 +169,58 @@ export function folderLabels(keys: string[]): Record<string, string> {
     }
     if (keys.includes(DISPATCHED_KEY)) out[DISPATCHED_KEY] = 'Dispatched';
     if (keys.includes(OTHER_KEY)) out[OTHER_KEY] = 'Other';
+    return out;
+}
+
+// CMX-377 (Liav, 11-14): each row's FOLDER LINE, the dim second line saying which project a
+// session belongs to. Drawn only while the sidebar is NOT grouped by folder: there the group
+// header already says it. `{itemKey: text}` for the rows given; a row with no cwd gets none.
+//   the home dir          `~`
+//   a dispatched worktree `<project> · <task id>` (`chelamux · CMX-374`), never the raw
+//                         `.chela/worktrees/...` path
+//   any other folder      its basename; two folders that share one are told apart by the
+//                         shortest run of parent segments that makes them unique
+//                         (`projects/foo` / `work/foo`)
+export function showsFolderLine(groupBy: string): boolean {
+    return groupBy !== 'folder';
+}
+
+export function folderLines(items: Item[]): Record<string, string> {
+    const out: Record<string, string> = {};
+    const plain: [string, string][] = [];
+    for (const it of items) {
+        const a = primaryWindow(it);
+        const cwd = _norm(a?.cwd);
+        if (!a || !cwd) continue;
+        if (a.cwd_is_home) { out[it.key] = '~'; continue; }
+        const at = cwd.indexOf(WORKTREE_SEG);
+        if (at >= 0) {
+            const [project = '', dir = ''] = _segments(cwd.slice(at + WORKTREE_SEG.length));
+            const task = it.run?.task_id || a.run?.task_id || dir;
+            out[it.key] = [project, task].filter(Boolean).join(' · ') || cwd;
+            continue;
+        }
+        plain.push([it.key, cwd]);
+    }
+    const byBase: Record<string, Set<string>> = {};
+    for (const [, cwd] of plain) {
+        const segs = _segments(cwd);
+        (byBase[segs[segs.length - 1] || cwd] ??= new Set()).add(cwd);
+    }
+    const label: Record<string, string> = {};
+    for (const [base, set] of Object.entries(byBase)) {
+        const paths = [...set];
+        if (paths.length === 1) { label[paths[0] as string] = base; continue; }
+        const segs = paths.map(_segments);
+        const depth = Math.max(...segs.map(s => s.length));
+        let n = 2;
+        for (; n < depth; n++) {
+            const tails = segs.map(s => s.slice(-n).join('/'));
+            if (new Set(tails).size === tails.length) break;
+        }
+        paths.forEach((p, i) => { label[p] = (segs[i] || []).slice(-n).join('/') || p; });
+    }
+    for (const [key, cwd] of plain) out[key] = label[cwd] ?? cwd;
     return out;
 }
 
