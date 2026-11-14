@@ -185,6 +185,15 @@ export function showsFolderLine(groupBy: string): boolean {
     return groupBy !== 'folder';
 }
 
+// CMX-379 (Liav, 11-14): grouped by folder, a FOLDER (a group with a `cwd`, so never Other
+// or Dispatched) holding exactly ONE session draws no header: the session is one bare row
+// whose folder line is always shown, and the header's `+` and ⋯ actions move into the
+// row's ⋯ menu. It keeps its place in the group order (folder name, Move up / Move down)
+// and is never collapsed. A folder with 2+ sessions keeps its header.
+export function isSingleFolder(g: Group, groupBy: string): boolean {
+    return groupBy === 'folder' && !g.flat && !!g.cwd && g.items.length === 1;
+}
+
 export function folderLines(items: Item[]): Record<string, string> {
     const out: Record<string, string> = {};
     const plain: [string, string][] = [];

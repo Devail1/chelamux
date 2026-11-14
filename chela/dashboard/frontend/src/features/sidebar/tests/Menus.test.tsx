@@ -31,7 +31,9 @@ function draw(s: SidebarState, acts = actions()) {
 }
 
 test('the group ⋯ is a keyboard-reachable <button>: Enter opens its menu, Enter picks', () => {
-  const { el, acts } = draw(state([win('a'), win('b', { cwd: '/srv/code/beta' })]));
+  // two sessions per folder: a one-session folder has no header (CMX-379)
+  const { el, acts } = draw(state([win('a'), win('a2', { session_status: 'busy' }), win('b', { cwd: '/srv/code/beta' }),
+    win('b2', { cwd: '/srv/code/beta', session_status: 'busy' })]));
   const more = el.querySelector('.side-group[data-g="/srv/code/alpha"] .group-more');
   expect(more?.tagName).toBe('BUTTON');
   expect(more?.getAttribute('type')).toBe('button');

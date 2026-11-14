@@ -142,6 +142,9 @@ test('Move up in the sidebar re-orders the swipe on the next render, no reload',
 });
 
 test('a collapsed group keeps its sessions in the swipe, at the group position', async () => {
+    // CMX-379: a one-session folder is never collapsed, so beta gets a second session; it has
+    // no pane (not in OPTIONS), so the swipe reads as before
+    useRows([...BASE, { name: 'b2', window_id: '@206', online: true, claude_running: true, session_status: 'busy', cwd: '/srv/code/beta' }]);
     await setLayout({ order: ['/srv/code/beta', '/srv/code/alpha', '/srv/code/gamma'] });
     sidebar.toggleGroup('/srv/code/beta');
     await settle();

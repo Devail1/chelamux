@@ -2846,6 +2846,9 @@ body.sidebar-resizing iframe { pointer-events: none; }
 /* Show empty groups: a folder header with no matching session keeps its `+`. */
 .side-group.empty .group-rows { display: none; }
 .side-group.flat { margin-top: 4px; }
+/* CMX-379: grouped by folder, a folder with one session is one bare row (no header), so
+   it spends no header and no group gap either. */
+.side-group.single { margin-top: 2px; }
 /* A compact menu, dividers between action groups (.popover-sep). */
 .side-menu { min-width: 168px; }
 .side-menu .popover-item { padding: 6px 10px; }
