@@ -209,6 +209,7 @@ def test_rows_keys_are_cleaned_like_the_group_order():
     assert sl._clean_rows({long: {"keys": ["s:A"], "at": 9}, "": {"keys": ["s:A"], "at": 9}}) == {}
     assert sl._clean_rows(["/g"]) == {}
     assert sl._clean_rows(None) == {}
+    assert sl._MAX_ITEMS == 500
     many = {f"/g{i}": {"keys": ["s:A"], "at": 1} for i in range(sl._MAX_ITEMS + 5)}
     assert len(sl._clean_rows(many)) == sl._MAX_ITEMS
 
