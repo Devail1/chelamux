@@ -11,12 +11,13 @@ import { headLabel, isShell, type HeadAgent } from '../panehead/model.ts';
 import { registerLane } from '../../shared/scheduler/index.ts';
 import { type Agent, agents as agentsStore } from '../../shared/store/agents.ts';
 import { onOverlayOpen } from '../../shared/ui/index.ts';
-import { archivedKeys, archivedSessions, pruneHidden, refreshArchive, setArchive } from './lib/archive.ts';
+import { archiveLoaded, archivedKeys, archivedSessions, pruneHidden, refreshArchive, setArchive } from './lib/archive.ts';
 import { getLayout, refreshLayout, writeLayout } from './lib/layout.ts';
 import { isObj, lsJson, lsRead, lsSet, postJson, publish, say, sayRefused } from './lib/page.ts';
 import {
   ARCHIVED_SECTION_KEY, type AgentRow, clampWidth, type Custom, dismissKey, type Group, type Item, isArchivable,
-  isSingleFolder, moveGroup, type NavState, normalizeView, type RecentRow, type RecentState, recentView, sidebarModel,
+  isSingleFolder, moveGroup, type NavState, normalizeView, reconcileAssign, type RecentRow, type RecentState, recentView,
+  sidebarModel,
   sidebarOrder as modelSidebarOrder, type SidebarState, type View, type Wants,
 } from './model.ts';
 
@@ -158,9 +159,13 @@ function custom(): Custom {
   const c = getLayout().custom ?? {};
   const groups = Array.isArray(c.groups)
     ? (c.groups as Custom['groups']).filter(g => isObj(g) && typeof g.id === 'string' && typeof g.name === 'string') : [];
-  return { groups, assign: isObj(c.assign) ? { ...(c.assign as Record<string, string>) } : {} };
+  const seen = isObj(c.seen) ? { ...(c.seen as Record<string, number>) } : {};
+  return { groups, assign: isObj(c.assign) ? { ...(c.assign as Record<string, string>) } : {}, seen };
 }
-const saveCustom = (c: Custom) => writeLayout({ custom: { groups: c.groups, assign: c.assign } });
+// `seen` only while it holds a stamp: the server omits an empty one (sidebar_layout.py).
+const saveCustom = (c: Custom) => writeLayout({
+  custom: { groups: c.groups, assign: c.assign, ...(c.seen && Object.keys(c.seen).length ? { seen: c.seen } : {}) },
+});
 const without = (assign: Record<string, string>, drop: (k: string, v: string) => boolean) =>
   Object.fromEntries(Object.entries(assign).filter(([k, v]) => !drop(k, v)));
 
@@ -170,6 +175,8 @@ let sb: { groups: Group[]; items: Map<string, Item> } = { groups: [], items: new
 let state: SidebarState | null = null;
 let activeRow: string | null = null;
 let altHeld = false;
+// CMX-378: each window's session id at the last render, so a `/clear` carries its group.
+let lastSid: ReadonlyMap<string, string> = new Map();
 
 function publishSidebar(patch: Partial<SidebarState>) {
   if (!state) return;
@@ -209,13 +216,15 @@ export function renderSidebarAgents(agents: AgentRow[] | null | undefined): void
     publish('sidebar', state);
     return;
   }
-  // A custom-group assignment for a WINDOW that is gone is dropped (a recycled @N must not
-  // inherit it); a run's (`run:CMX-N`) is kept, a run outlives its windows.
-  const live = new Set(rows.filter(Boolean).map(a => `w:${a.window_id || a.name}`));
-  const gone = Object.keys(c.assign).filter(k => k.startsWith('w:') && !live.has(k));
-  if (gone.length) {
-    c.assign = without(c.assign, k => gone.includes(k));
-    saveCustom(c);
+  // CMX-378: assignments follow the SESSION, not the window (model.reconcileAssign has the
+  // rules): a legacy `w:@N` of a live window moves to its session key, a gone window's
+  // `w:` is dropped, a session absent right now keeps its group. Applied to THIS render too,
+  // so a session resumed under a new window id lands in its group on the first draw.
+  const next = reconcileAssign(c, rows, archiveLoaded() ? state.sessions : null, state.now, lastSid);
+  lastSid = new Map(rows.filter(a => a?.window_id && a.session_id).map(a => [a.window_id as string, a.session_id as string]));
+  if (next) {
+    state.custom = next;
+    saveCustom(next);
   }
   const model = sidebarModel(state);
   pruneHidden(model.hidden);
@@ -339,7 +348,8 @@ export function rowMenuAction(key: string, act: string): unknown {
   return undefined;
 }
 
-/** Assign a row (by its STABLE item key) to custom group `id`, or to Ungrouped (null). */
+/** Assign a row (by its STABLE assignment key, model.assignKey) to custom group `id`, or to
+ * Ungrouped (null). */
 export function moveToGroup(itemKey: string, id: string | null): void {
   const c = custom();
   c.assign = without(c.assign, k => k === itemKey);

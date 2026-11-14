@@ -557,6 +557,55 @@ test('a custom-group assignment is dropped when its WINDOW is gone (a recycled @
     assert.deepEqual(server.st.layout.custom.assign, { 'run:CMX-8': g.id });
 });
 
+// CMX-378 (Liav, 2026-11-14: "can we make the groups setup persist?"): a reboot resumes every
+// session under a NEW window id. The assignment follows the Claude session, not the window.
+test('CMX-378: a session resumed under a new window id is still in its custom group, from the first render', async () => {
+    const before = win('mine', { window_id: '@7', session_id: 'sess-S' });
+    render([before, win('other')]);
+    view('group:custom');
+    const g = sidebar.newCustomGroup('Keep');
+    openMenu(host().querySelector('.agent-row[data-agent="mine"] .row-more'));
+    clickMenu('Move to group…');
+    clickMenu('Keep');
+    assert.deepEqual(rowsUnder('Keep'), ['mine']);
+    await flush();
+    assert.deepEqual(server.st.layout.custom.assign, { 's:sess-S': g.id }, 'saved by the window id, not the session');
+    // tmux restarted: the restore is mid-flight — the session is absent for a tick
+    render([win('other')]);
+    await flush();
+    assert.deepEqual(server.st.layout.custom.assign, { 's:sess-S': g.id }, 'an absent session lost its group');
+    // and back under a new window id
+    render([{ ...before, window_id: '@3' }, win('other')]);
+    assert.deepEqual(rowsUnder('Keep'), ['mine'], 'the resumed session fell out of its custom group');
+});
+
+test('CMX-378: a legacy window-keyed assignment of a live session is migrated to its session key', async () => {
+    const a = win('legacy', { session_id: 'sess-L' });
+    render([a]);
+    view('group:custom');
+    const g = sidebar.newCustomGroup('Old');
+    sidebar.moveToGroup(`w:${a.window_id}`, g.id);   // what a pre-CMX-378 build saved
+    render([a]);
+    assert.deepEqual(rowsUnder('Old'), ['legacy'], 'the migrated row is drawn ungrouped on the render that migrates it');
+    await flush();
+    assert.deepEqual(server.st.layout.custom.assign, { 's:sess-L': g.id });
+    render([{ ...a, window_id: '@77' }]);
+    assert.deepEqual(rowsUnder('Old'), ['legacy']);
+});
+
+test('CMX-378: /clear in a grouped window (a new session id, same window) keeps the row in its group', async () => {
+    const a = win('cleared', { session_id: 'sess-A' });
+    render([a]);
+    view('group:custom');
+    const g = sidebar.newCustomGroup('Mine');
+    sidebar.moveToGroup('s:sess-A', g.id);
+    render([a]);
+    render([{ ...a, session_id: 'sess-B' }]);
+    assert.deepEqual(rowsUnder('Mine'), ['cleared'], 'the cleared window fell out of its group');
+    await flush();
+    assert.deepEqual(server.st.layout.custom.assign, { 's:sess-B': g.id });
+});
+
 test('the custom-groups page in the view menu creates, renames and deletes (prompted names)', () => {
     render([win('a1')]);
     const realPrompt = window.prompt;

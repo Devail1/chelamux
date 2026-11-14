@@ -14,6 +14,8 @@ let arch: { hidden: string[] | null; sessions: SessionRecord[] | null; loaded: b
 
 export const archivedKeys = (): string[] => arch.hidden ?? [];
 export const archivedSessions = (): SessionRecord[] => arch.sessions ?? [];
+/** CMX-378: whether the server's archive has answered yet (a prune must not act before). */
+export const archiveLoaded = (): boolean => arch.loaded;
 
 export function setArchive(st: unknown): void {
   if (!isObj(st)) return;

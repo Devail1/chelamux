@@ -26,7 +26,8 @@ server only bounds its shape — it does not second-guess the menu's vocabulary.
 Store shape (``CHELA_DIR/sidebar-layout.json``)::
 
     {"order":  ["<group key>", ...],
-     "custom": {"groups": [{"id": "...", "name": "..."}, ...], "assign": {"<item key>": "<id>"}},
+     "custom": {"groups": [{"id": "...", "name": "..."}, ...], "assign": {"<item key>": "<id>"},
+                "seen": {"s:<session id>": <epoch ms>}},   # CMX-378, omitted while empty
      "view":   {"groupBy": "...", "sort": "...", ...},
      "width":  288}
 
@@ -72,8 +73,20 @@ def _clean_custom(v: object) -> dict:
     assign_in = v.get("assign") if isinstance(v.get("assign"), dict) else {}
     # an assignment to a group that does not exist would re-capture its row the day a
     # group of that id is created — drop it here, as deleting a group does client-side
-    assign = {k: g for k, g in assign_in.items() if _str(k) and g in seen}
-    return {"groups": groups[:_MAX_ITEMS], "assign": dict(list(assign.items())[:_MAX_ITEMS])}
+    assign = dict(list({k: g for k, g in assign_in.items() if _str(k) and g in seen}.items())[:_MAX_ITEMS])
+    out = {"groups": groups[:_MAX_ITEMS], "assign": assign}
+    # CMX-378: when each session-keyed assignment's session was last seen (epoch ms) — the
+    # client prunes an `s:` key only after its session has been gone for days. A stamp is
+    # kept only for a key that is still assigned; omitted entirely while there are none.
+    seen_in = v.get("seen") if isinstance(v.get("seen"), dict) else {}
+    stamps = {k: t for k, t in seen_in.items() if k in assign and _stamp(t)}
+    if stamps:
+        out["seen"] = stamps
+    return out
+
+
+def _stamp(v: object) -> bool:
+    return not isinstance(v, bool) and isinstance(v, (int, float)) and v == v and 0 <= v < float("inf")
 
 
 def _clean_view(v: object) -> dict:

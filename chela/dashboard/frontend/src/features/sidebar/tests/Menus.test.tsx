@@ -146,6 +146,21 @@ test('Move to group… only under Custom groups; its page moves the row, and sta
   expect(acts.moveToGroup.mock.calls.slice(2)).toEqual([[key, 'g9']]);
 });
 
+// CMX-378: a row with a Claude session is moved by its SESSION key, so its group survives
+// the new window id a restore gives it; the radio reads that key too.
+test('Move to group… saves (and reads) a session row by its session key, not its window', () => {
+  const a = win('a', { session_id: 'S' });
+  const custom = { groups: [{ id: 'g1', name: 'Infra' }, { id: 'g2', name: 'Ops' }], assign: { 's:S': 'g2', [`w:${a.window_id}`]: 'g1' } };
+  const base = state([a], { custom });
+  const { el, acts } = draw({ ...base, view: { ...base.view, groupBy: 'custom' } });
+  fireEvent.contextMenu(el.querySelector('.agent-row[data-agent="a"]') as Element);
+  pick('Move to group…');
+  const checked = screen.getAllByRole('menuitemradio').filter(i => i.getAttribute('aria-checked') === 'true');
+  expect(checked.map(i => i.textContent)).toEqual(['Ops']);
+  pick('Infra');
+  expect(acts.moveToGroup.mock.calls).toEqual([['s:S', 'g1']]);
+});
+
 function drawView(s: SidebarState | null) {
   const acts = actions();
   render(<ViewMenu state={s} actions={acts} />);
