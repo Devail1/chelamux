@@ -9,8 +9,9 @@
 import { act, cleanup, fireEvent, render } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
 import { installBridge } from '../../../shared/bridge/index.ts';
+import { setArchive } from '../lib/archive.ts';
 import {
-  dropOnGroup, dropRow, moveToGroup, refreshLayout, renderSidebarAgents, viewMenuAction,
+  deleteCustomGroup, dropOnGroup, dropRow, moveToGroup, refreshLayout, renderSidebarAgents, viewMenuAction,
 } from '../controller.ts';
 import { LONG_PRESS_DRAG_MS, Sidebar } from '../index.ts';
 import {
@@ -78,10 +79,26 @@ test('placeRow: the drawn order by session key, the hidden stored keys kept afte
   const its = items({ a: [10, 3], b: [10, 2], c: [10, 1] });
   const [a, b, c] = its as [Item, Item, Item];
   const stored: RowOrder = { keys: ['s:S-hidden', 's:S-gone'], at: 1 };
+  const AT = NOW - 10 * HOUR; // the newest `created` among the rows
   expect(placeRow(its, stored, c.key, a.key, NOW, k => k !== 's:S-gone'))
-    .toEqual({ keys: ['s:S-c', 's:S-a', 's:S-b', 's:S-hidden'], at: NOW });
-  expect(placeRow(its, null, a.key, null, NOW)).toEqual({ keys: ['s:S-b', 's:S-c', 's:S-a'], at: NOW });
-  expect(placeRow(its, null, c.key, b.key, NOW)).toEqual({ keys: ['s:S-a', 's:S-c', 's:S-b'], at: NOW });
+    .toEqual({ keys: ['s:S-c', 's:S-a', 's:S-b', 's:S-hidden'], at: AT });
+  expect(placeRow(its, null, a.key, null, NOW)).toEqual({ keys: ['s:S-b', 's:S-c', 's:S-a'], at: AT });
+  expect(placeRow(its, null, c.key, b.key, NOW)).toEqual({ keys: ['s:S-a', 's:S-c', 's:S-b'], at: AT });
+});
+
+test('placeRow: `at` is the newest row\'s server `created`, never this browser\'s clock; `now` only when none is dated', () => {
+  const its = items({ a: [10, 3], b: [2, 2], c: [7, 1] });
+  const [a, , c] = its as [Item, Item, Item];
+  expect(placeRow(its, null, c.key, a.key, NOW + 99 * HOUR)?.at).toBe(NOW - 2 * HOUR);
+  const undated = buildItems([win('u', { cwd: '/srv/x' }), win('v', { cwd: '/srv/x' })]);
+  const [u, v] = undated as [Item, Item];
+  expect(placeRow(undated, null, v.key, u.key, 1234)?.at).toBe(1234);
+});
+
+test('placeRow: a drawn row\'s old window key is dropped, never kept beside its session key', () => {
+  const its = items({ a: [10, 3], b: [10, 2] });
+  const [a, b] = its as [Item, Item];
+  expect(placeRow(its, { keys: [a.key, 's:S-other'], at: 1 }, b.key, a.key, NOW)?.keys).toEqual(['s:S-b', 's:S-a', 's:S-other']);
 });
 
 test('placeRow: a drop that changes nothing, or names a row not in the group, is null', () => {
@@ -317,11 +334,31 @@ describe('Manual + folder grouping', () => {
   test('a stored key of a session that is gone is dropped from the next write; a filtered-out live one is kept', async () => {
     // h is a live judge window: the default Environment filter hides it
     const hidden = win('judge-h', { cwd: '/srv/x', session_id: 'S-h' });
-    await load({ ...MANUAL, rows: { '/srv/x': { keys: ['s:S-gone', 's:S-h'], at: 1 } } }, sessions(0, [hidden]));
+    const rows = { '/srv/x': { keys: ['s:S-gone', 's:S-arch', 's:S-h'], at: 1 } };
+    // before the archive has answered nothing is known to be gone: every key is kept
+    await load({ ...MANUAL, rows }, sessions(0, [hidden]));
     expect(drawn()).toEqual(['a', 'b', 'c']);
     expect(dropRow('/srv/x', itemOf('c'), itemOf('a'))).toBe(true);
     await flush();
-    expect(lastRows()?.['/srv/x']?.keys).toEqual(['s:S-c', 's:S-a', 's:S-b', 's:S-h']);
+    expect(lastRows()?.['/srv/x']?.keys).toEqual(['s:S-c', 's:S-a', 's:S-b', 's:S-gone', 's:S-arch', 's:S-h']);
+    // once it has, a gone one is dropped; a live hidden one and an archived one are kept
+    setArchive({ hidden: [], sessions: [{ key: 's:S-arch', session_id: 'S-arch' }] });
+    await load({ ...MANUAL, rows }, sessions(0, [hidden]));
+    expect(dropRow('/srv/x', itemOf('c'), itemOf('a'))).toBe(true);
+    await flush();
+    expect(lastRows()?.['/srv/x']?.keys).toEqual(['s:S-c', 's:S-a', 's:S-b', 's:S-arch', 's:S-h']);
+    setArchive({ hidden: [], sessions: [] }); // no Archived section in the tests after this one
+  });
+
+  test('deleting a custom group drops its manual row order with it', async () => {
+    const groups = [{ id: 'g1', name: 'Infra' }];
+    const rows = { [customKey('g1')]: { keys: ['s:S-a'], at: 1 }, '/srv/x': { keys: ['s:S-b'], at: 1 } };
+    await load({ view: { groupBy: 'custom', sort: 'manual', activity: 'all' }, custom: { groups, assign: { 's:S-a': 'g1' } }, rows });
+    deleteCustomGroup('g1');
+    await flush();
+    const del = posts.filter(p => (p.custom as { groups?: unknown[] } | undefined)?.groups?.length === 0);
+    expect(del[0]?.rows).toEqual({ '/srv/x': { keys: ['s:S-b'], at: 1 } });
+    expect(server.rows).toEqual({ '/srv/x': { keys: ['s:S-b'], at: 1 } });
   });
 });
 

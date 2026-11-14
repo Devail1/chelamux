@@ -648,7 +648,8 @@ function _sortItems(items: Item[], sort: string, labelOf: (it: Item) => string, 
 /** One group's hand-made row order. */
 export interface RowOrder {
     keys: string[];
-    /** When it was written (epoch ms): a row created after it is new, and goes on top. */
+    /** The newest `created` among the rows it ordered (epoch ms, the SERVER's clock, as the
+     * rows' own stamps are): a row created after it is new, and goes on top. */
     at: number;
 }
 
@@ -684,8 +685,10 @@ export function manualSort(items: Item[], order: RowOrder | null | undefined, re
 /** Row `key` (an item key) dropped just before row `before` (null: at the end) of a group
  * drawn as `items`. The order to persist: the drawn order's row keys, then the stored keys
  * not drawn right now that `keep` still holds (a row a filter hides, a session mid-restore);
- * a key of a session that is gone is dropped there. Null when nothing would change, or the
- * row or `before` is not in the group. */
+ * a key of a session that is gone, or a drawn row's old window key, is dropped there. `at` is
+ * the newest `created` among the drawn rows (the server's clock, never this browser's, which
+ * may be skewed); `now` only when none is dated. Null when nothing would change, or the row
+ * or `before` is not in the group. */
 export function placeRow(items: Item[], stored: RowOrder | null | undefined, key: string, before: string | null,
     now: number, keep: (k: string) => boolean = () => true): RowOrder | null {
     const keys = items.map(it => it.key);
@@ -696,8 +699,9 @@ export function placeRow(items: Item[], stored: RowOrder | null | undefined, key
     if (order.every((k, i) => k === keys[i])) return null;
     const byKey = new Map(items.map(it => [it.key, it]));
     const drawn = order.map(k => rowOrderKey(byKey.get(k) as Item));
-    const hidden = (stored?.keys || []).filter(k => !drawn.includes(k) && keep(k));
-    return { keys: [...drawn, ...hidden], at: now };
+    const hidden = (stored?.keys || []).filter(k => !drawn.includes(k) && !byKey.has(k) && keep(k));
+    const dated = items.map(createdTs).filter((t): t is number => t != null);
+    return { keys: [...drawn, ...hidden], at: dated.length ? Math.max(...dated) : now };
 }
 
 // An archived (CLOSED) session's row (CMX-75): it has no window any more — only the

@@ -15,7 +15,7 @@ import { archiveLoaded, archivedKeys, archivedSessions, pruneHidden, refreshArch
 import { commitLayout, getLayout, refreshLayout, writeLayout } from './lib/layout.ts';
 import { isObj, lsJson, lsRead, lsSet, postJson, publish, say, sayRefused } from './lib/page.ts';
 import {
-  ARCHIVED_SECTION_KEY, type AgentRow, assignKey, buildItems, canOrderRows, clampWidth, type Custom, dismissKey,
+  ARCHIVED_SECTION_KEY, type AgentRow, assignKey, buildItems, canOrderRows, clampWidth, type Custom, customKey, dismissKey,
   dropAssignee, type Group, type Item, isArchivable, isSingleFolder, moveGroup, placeGroup, placeRow, type NavState,
   normalizeView, reconcileAssign, type RecentRow, type RowOrder, SESSION_KEY_PREFIX, type RecentState, recentView,
   sidebarModel,
@@ -421,7 +421,9 @@ export function dropRow(groupKey: string, itemKey: string, before: string | null
   const known = new Set<string>();
   for (const it of buildItems(agentsNow())) known.add(assignKey(it)).add(it.key);
   for (const r of archivedSessions() ?? []) if (r?.session_id) known.add(`${SESSION_KEY_PREFIX}${r.session_id}`);
-  const next = placeRow(g.items, all[groupKey], itemKey, before, Date.now(), k => known.has(k));
+  // before the archive has answered, an archived session is not known yet: drop nothing
+  const keep = archiveLoaded() ? (k: string) => known.has(k) : () => true;
+  const next = placeRow(g.items, all[groupKey], itemKey, before, Date.now(), keep);
   if (!next) return false;
   void commitLayout({ rows: { ...all, [groupKey]: next } }, 'Moving the session', rerender);
   rerender();
@@ -463,7 +465,13 @@ export function deleteCustomGroup(id: string): void {
   const c = custom();
   c.groups = c.groups.filter(g => g.id !== id);
   c.assign = without(c.assign, (_k, v) => v === id);
-  saveCustom(c);
+  const rows = rowOrders();
+  if (customKey(id) in rows) {
+    // CMX-381: its manual row order goes with it (a later group of the same id starts fresh)
+    void writeLayout({ ...customFields(c), rows: Object.fromEntries(Object.entries(rows).filter(([k]) => k !== customKey(id))) });
+  } else {
+    saveCustom(c);
+  }
   rerender();
 }
 
