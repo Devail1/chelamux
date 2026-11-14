@@ -141,3 +141,29 @@ def test_a_width_write_keeps_the_other_fields(phone):
     _post(phone, {"order": ["/srv/a"]})
     _post(phone, {"width": 320})
     assert (_get(phone)["order"], _get(phone)["width"]) == (["/srv/a"], 320)
+
+
+def test_cmx378_seen_stamps_travel_only_for_assigned_keys(phone, laptop):
+    # the last-seen clock a session-keyed assignment is pruned by (CMX-378): kept for an
+    # assigned key with a numeric stamp; a stray key, a bool, a string, NaN, a negative and
+    # inf are all dropped
+    _post(laptop, {"custom": {"groups": [{"id": "g1", "name": "A"}],
+                              "assign": {"s:abc": "g1", "s:def": "g1", "s:ghi": "g1", "s:jkl": "g1",
+                                         "s:mno": "g1", "s:pqr": "g1"},
+                              "seen": {"s:abc": 1700000000000, "s:def": True, "s:ghi": "1",
+                                       "s:jkl": float("nan"), "s:mno": -1, "s:pqr": float("inf"),
+                                       "s:stray": 5}}})
+    assert _get(phone)["custom"]["seen"] == {"s:abc": 1700000000000}
+
+
+def test_cmx378_no_seen_field_while_no_stamp_survives(phone):
+    _post(phone, {"custom": {"groups": [{"id": "g1", "name": "A"}], "assign": {"s:a": "g1"},
+                             "seen": {"s:gone": 1}}})
+    assert "seen" not in _get(phone)["custom"]
+
+
+def test_cmx378_a_stamp_for_a_dropped_assignment_is_dropped_too(phone):
+    # the assignment points at a group that does not exist, so it goes; its stamp with it
+    _post(phone, {"custom": {"groups": [{"id": "g1", "name": "A"}], "assign": {"s:a": "nope"},
+                             "seen": {"s:a": 1}}})
+    assert _get(phone)["custom"] == {"groups": [{"id": "g1", "name": "A"}], "assign": {}}

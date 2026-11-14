@@ -8,7 +8,7 @@ import { icons } from '../../../shared/icons/index.ts';
 import { IconButton, Menu, type MenuItem } from '../../../shared/ui/index.ts';
 import {
   ENV_KINDS, GROUP_MODES, SORTS, VIEW_ACTIVITY, VIEW_STATUS, type Group, type Item, type SidebarState,
-  isArchivable, normalizeView,
+  assignKey, isArchivable, normalizeView,
 } from '../model.ts';
 import type { SidebarActions } from './actions.ts';
 
@@ -68,17 +68,18 @@ export function RowMenu({ it, s, actions, menu }: { it: Item; s: SidebarState; a
   };
   const items: MenuItem[] = [];
   if (page === 'move') {
-    const cur = s.custom.assign[it.key];
+    const ak = assignKey(it);
+    const cur = s.custom.assign[ak];
     const has = cur != null && s.custom.groups.some(g => g.id === cur);
     items.push({ label: 'Move to group', back: true, keepOpen: true, onSelect: () => setPage('main') }, 'separator');
     for (const g of s.custom.groups) {
-      items.push({ label: g.name, check: 'radio', checked: g.id === cur, onSelect: () => actions.moveToGroup(it.key, g.id) });
+      items.push({ label: g.name, check: 'radio', checked: g.id === cur, onSelect: () => actions.moveToGroup(ak, g.id) });
     }
-    items.push({ label: 'Ungrouped', check: 'radio', checked: !has, onSelect: () => actions.moveToGroup(it.key, null) }, 'separator', {
+    items.push({ label: 'Ungrouped', check: 'radio', checked: !has, onSelect: () => actions.moveToGroup(ak, null) }, 'separator', {
       label: 'New group…',
       onSelect: () => {
         const g = actions.newCustomGroup();
-        if (g) actions.moveToGroup(it.key, g.id);
+        if (g) actions.moveToGroup(ak, g.id);
       },
     });
   } else {

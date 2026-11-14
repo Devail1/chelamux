@@ -613,6 +613,112 @@ export function sessionItem(rec: SessionRecord): Item {
 export interface Custom {
     groups: { id: string; name: string }[];
     assign: Record<string, string>;
+    /** CMX-378: `{s:<session id>: epoch ms}` — when each session-keyed assignment's session
+     * was last seen (live in a window, or held as an archived record). */
+    seen?: Record<string, number>;
+}
+
+// --- Custom-group assignment keys (CMX-378) -----------------------------------------------
+//
+// An agent row's custom-group assignment is keyed by its Claude SESSION (`s:<session id>`),
+// not its window: a reboot or tmux restart brings every session back (`--resume`) under a
+// NEW window id, and a `w:@N` key then names nothing — or a stranger's window. A row with no
+// session id falls back to its item key (`w:<window id>`); a run row keeps `run:<task>`.
+export const SESSION_KEY_PREFIX = 's:';
+/** A session-keyed assignment whose session has been neither live nor archived for this
+ * long is gone for good, and pruned. */
+export const ASSIGN_PRUNE_DAYS = 30;
+const DAY_MS = 86400000;
+
+export function assignKey(it: Item): string {
+    const sid = it.kind === 'agent' ? it.agent?.session_id : null;
+    return sid ? `${SESSION_KEY_PREFIX}${sid}` : it.key;
+}
+
+/**
+ * The assignments brought up to date with the live rows. Returns a NEW Custom when anything
+ * changed, else null (nothing to save). The rules, one per key kind:
+ *
+ *  * `w:<window>` (legacy, or a row that had no session id yet): a live window that now has
+ *    a session id MOVES its assignment to `s:<session id>` (the migration). A window that is
+ *    gone is dropped: a recycled `@N` must not inherit a stranger's group.
+ *  * `s:<session id>`: never dropped for being absent — a restore may be mid-flight. Its
+ *    last-seen stamp is refreshed (at most once a day) while the session is live or held as
+ *    an archived record (unarchiving resumes it into its group); it is pruned only once it
+ *    has been neither for {@link ASSIGN_PRUNE_DAYS} days. A key with no stamp yet starts
+ *    the clock now.
+ *    `sessions` is null while the archive has not answered: nothing is pruned then (an
+ *    archive this page has not seen never reads as "not archived"). A stamp in the future
+ *    (a clock skew, a bad write) is reset to now rather than holding the key forever.
+ *  * A window whose session CHANGED in place since the last render (`prevSid`, window id →
+ *    session id; `/clear` starts a new session) carries its assignment to the new session,
+ *    unless the old session is still live in another window.
+ *  * anything else (`run:<task>`): kept; a run outlives its windows.
+ */
+export function reconcileAssign(
+    custom: Custom, agents: (AgentRow | null | undefined)[], sessions: SessionRecord[] | null, now: number,
+    prevSid: ReadonlyMap<string, string> = new Map(),
+): Custom | null {
+    const liveW = new Set<string>();
+    const sidOfW = new Map<string, string>();
+    const known = new Set<string>();
+    const sidOfWid = new Map<string, string>();
+    for (const a of agents) {
+        if (!a) continue;
+        const w = `w:${a.window_id || a.name}`;
+        liveW.add(w);
+        if (a.session_id) {
+            known.add(`${SESSION_KEY_PREFIX}${a.session_id}`);
+            if (!(a.run && a.run.task_id)) {
+                sidOfW.set(w, a.session_id);
+                if (a.window_id) sidOfWid.set(a.window_id, a.session_id);
+            }
+        }
+    }
+    const liveS = new Set(known);
+    for (const r of sessions || []) if (r && r.session_id) known.add(`${SESSION_KEY_PREFIX}${r.session_id}`);
+    const assign = new Map(Object.entries(custom.assign));
+    const seen = new Map(Object.entries(custom.seen || {}));
+    for (const [k, g] of Object.entries(custom.assign)) {
+        if (!k.startsWith('w:')) continue;
+        const sid = sidOfW.get(k);
+        if (sid) {
+            const sk = `${SESSION_KEY_PREFIX}${sid}`;
+            assign.delete(k);
+            if (!assign.has(sk)) assign.set(sk, g);
+        } else if (!liveW.has(k)) {
+            assign.delete(k);
+        }
+    }
+    for (const [wid, sid] of sidOfWid) {
+        const was = prevSid.get(wid);
+        if (!was || was === sid) continue;
+        const from = `${SESSION_KEY_PREFIX}${was}`, to = `${SESSION_KEY_PREFIX}${sid}`;
+        const g = assign.get(from);
+        if (g == null || assign.has(to) || liveS.has(from)) continue;
+        assign.delete(from);
+        assign.set(to, g);
+    }
+    for (const k of [...assign.keys()]) {
+        if (!k.startsWith(SESSION_KEY_PREFIX)) continue;
+        const t = seen.get(k);
+        const fresh = typeof t === 'number' && t <= now;
+        if (known.has(k)) {
+            if (!fresh || now - t >= DAY_MS) seen.set(k, now);
+        } else if (!fresh) {
+            seen.set(k, now);
+        } else if (sessions && now - t > ASSIGN_PRUNE_DAYS * DAY_MS) {
+            assign.delete(k);
+        }
+    }
+    for (const k of [...seen.keys()]) if (!assign.has(k)) seen.delete(k);
+    const same = (x: Record<string, unknown>, y: Record<string, unknown>) => {
+        const kx = Object.keys(x);
+        return kx.length === Object.keys(y).length && kx.every(k => k in y && x[k] === y[k]);
+    };
+    const out = { groups: custom.groups, assign: Object.fromEntries(assign), seen: Object.fromEntries(seen) };
+    if (same(out.assign, custom.assign) && same(out.seen, custom.seen || {})) return null;
+    return out;
 }
 
 export interface GroupOptions {
@@ -704,8 +810,9 @@ export function groupSidebar(agents: (AgentRow | null | undefined)[] | null | un
         if (mode === 'state') return `~state:${itemState(it, wants)}`;
         if (mode === 'date') return isLive(it, wants) ? '~date:today' : dateBucket(activityTs(it), now);
         if (mode === 'custom') {
-            // keyed on the row's STABLE identity (window id / run id), never its label
-            const id = (custom.assign || {})[it.key];
+            // keyed on the row's STABLE identity (session id / run id), never its label —
+            // nor its window id, which a restore renumbers (CMX-378)
+            const id = (custom.assign || {})[assignKey(it)];
             return id != null && customIds.has(id) ? customKey(id) : UNGROUPED_KEY;
         }
         return it.kind === 'run' ? DISPATCHED_KEY : folderKey(primaryWindow(it));
