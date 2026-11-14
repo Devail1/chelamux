@@ -9,9 +9,8 @@
 import { act, cleanup, fireEvent, render } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
 import { installBridge } from '../../../shared/bridge/index.ts';
-import { setArchive } from '../lib/archive.ts';
 import {
-  deleteCustomGroup, dropOnGroup, dropRow, moveToGroup, refreshLayout, renderSidebarAgents, viewMenuAction,
+  deleteCustomGroup, dropOnGroup, dropRow, moveToGroup, refreshArchive, refreshLayout, renderSidebarAgents, viewMenuAction,
 } from '../controller.ts';
 import { LONG_PRESS_DRAG_MS, Sidebar } from '../index.ts';
 import {
@@ -131,6 +130,8 @@ test('groupSidebar: Manual reads `rows` per group; by state or date, Manual is L
 let server: Record<string, unknown> = {};
 let posts: Record<string, unknown>[] = [];
 let answer: 'ok' | 'refused' = 'ok';
+/** What GET /api/sidebar/archive answers (the server's archive). */
+let archive: Record<string, unknown> = { hidden: [], sessions: [] };
 const alerts = vi.fn();
 
 beforeEach(() => {
@@ -141,6 +142,9 @@ beforeEach(() => {
   vi.stubGlobal('alert', alerts);
   vi.stubGlobal('fetch', (url: string, opts?: RequestInit) => {
     const method = opts?.method ?? 'GET';
+    if (url.endsWith('/api/sidebar/archive') && method === 'GET') {
+      return Promise.resolve({ json: () => Promise.resolve(archive) });
+    }
     if (url.endsWith('/api/sidebar/layout') && method === 'GET') {
       return Promise.resolve({ json: () => Promise.resolve({ layout: server }) });
     }
@@ -342,12 +346,14 @@ describe('Manual + folder grouping', () => {
     await flush();
     expect(lastRows()?.['/srv/x']?.keys).toEqual(['s:S-c', 's:S-a', 's:S-b', 's:S-gone', 's:S-arch', 's:S-h']);
     // once it has, a gone one is dropped; a live hidden one and an archived one are kept
-    setArchive({ hidden: [], sessions: [{ key: 's:S-arch', session_id: 'S-arch' }] });
+    archive = { hidden: [], sessions: [{ key: 's:S-arch', session_id: 'S-arch' }] };
+    await refreshArchive();
     await load({ ...MANUAL, rows }, sessions(0, [hidden]));
     expect(dropRow('/srv/x', itemOf('c'), itemOf('a'))).toBe(true);
     await flush();
     expect(lastRows()?.['/srv/x']?.keys).toEqual(['s:S-c', 's:S-a', 's:S-b', 's:S-arch', 's:S-h']);
-    setArchive({ hidden: [], sessions: [] }); // no Archived section in the tests after this one
+    archive = { hidden: [], sessions: [] };
+    await refreshArchive(); // no Archived section in the tests after this one
   });
 
   test('deleting a custom group drops its manual row order with it', async () => {
