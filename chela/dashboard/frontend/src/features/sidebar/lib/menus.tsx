@@ -59,8 +59,28 @@ export function GroupMenu({ g, index, count, s, actions, menu }: {
   );
 }
 
+/** A single-session folder's place in the group order (CMX-379): its header's actions ride the row's menu. */
+export interface RowGroup { g: Group; index: number; count: number }
+
+/** The header actions a single-session folder row carries (CMX-379): New session, Move up / down, Collapse / Expand all. */
+function folderItems({ g, index, count }: RowGroup, actions: SidebarActions): MenuItem[] {
+  const act = (a: string) => () => void actions.groupMenuAction(g.key, a);
+  return [
+    { label: 'New session in this folder', onSelect: () => void actions.groupNewSession(g.key) },
+    'separator',
+    { label: 'Move up', onSelect: act('up'), disabled: index === 0 },
+    { label: 'Move down', onSelect: act('down'), disabled: index === count - 1 },
+    'separator',
+    { label: 'Collapse all', onSelect: act('collapse-all') },
+    { label: 'Expand all', onSelect: act('expand-all') },
+    'separator',
+  ];
+}
+
 /** A row's menu: a run's panes, Move to group… (under Custom groups only, CMX-74), Archive. */
-export function RowMenu({ it, s, actions, menu }: { it: Item; s: SidebarState; actions: SidebarActions; menu: Open }) {
+export function RowMenu({ it, s, actions, menu, group }: {
+  it: Item; s: SidebarState; actions: SidebarActions; menu: Open; group?: RowGroup;
+}) {
   const [page, setPage] = useState<'main' | 'move'>('main');
   const onOpenChange = (o: boolean) => {
     menu.setOpen(o);
@@ -83,6 +103,7 @@ export function RowMenu({ it, s, actions, menu }: { it: Item; s: SidebarState; a
       },
     });
   } else {
+    if (group) items.push(...folderItems(group, actions));
     if (it.kind === 'run') {
       if (it.agent) items.push({ label: 'Open agent pane', onSelect: () => void actions.rowMenuAction(it.key, 'agent') });
       items.push({ label: 'Open judge pane', disabled: !it.judge, onSelect: () => void actions.rowMenuAction(it.key, 'judge') }, 'separator');

@@ -32,6 +32,9 @@ const ROWS = [
     { name: 'a', window_id: '@201', online: true, claude_running: true, session_status: 'idle', cwd: '/srv/code/alpha' },
     { name: 'b', window_id: '@202', online: true, claude_running: true, session_status: 'idle', cwd: '/srv/code/beta' },
     { name: 'c', window_id: '@203', online: true, claude_running: true, session_status: 'idle', cwd: '/srv/code/gamma' },
+    // CMX-379: a second beta session, so beta keeps a header that can collapse (a one-session
+    // folder is a bare row, never collapsed)
+    { name: 'b2', window_id: '@204', online: true, claude_running: true, session_status: 'busy', cwd: '/srv/code/beta' },
 ];
 const server = fakeArchiveServer(() => ROWS);
 

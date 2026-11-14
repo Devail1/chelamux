@@ -4,7 +4,7 @@
 //   - neither line overlaps the row's ⋯ button, which stays hit-testable;
 //   - a long title and a long folder each truncate on their own: no horizontal scroll,
 //     not in the drawer and not on the page;
-//   - grouped by folder (the default), no folder line is drawn at all.
+//   - grouped by folder (the default), only a one-session folder's bare row draws it (CMX-379).
 // The jsdom half (features/sidebar/tests/Sidebar.test.tsx) holds what each row SAYS.
 //
 // Harness: tests/browser/fixture.mjs. Local: `pnpm run test:browser`.
@@ -98,18 +98,73 @@ describe(`CMX-377 phone ${W}×${H}, ungrouped: the folder line`, { skip: why }, 
     });
 });
 
-describe(`CMX-377 phone ${W}×${H}, grouped by folder: no folder line`, { skip: why }, () => {
+// CMX-379 (Liav, 11-14): grouped by folder, a folder with ONE session is a bare row (no
+// header) whose folder line is always drawn; a folder with 2+ keeps its header and its rows
+// draw none. Folders of 1, 1 and 3 here.
+const BY_FOLDER = [
+    { name: 'home', window_id: '@1', online: true, session_status: 'idle', cwd: '/home/u', cwd_is_home: true, ai_title: LONG },
+    { name: 'deep', window_id: '@2', online: true, session_status: 'idle', ai_title: 'Short',
+      cwd: '/srv/an-extremely-long-folder-name-that-will-certainly-not-fit-on-one-phone-line' },
+    ...['a1', 'a2', 'a3'].map((name, i) => ({ name, window_id: `@${3 + i}`, online: true, session_status: 'idle',
+        ai_title: name, cwd: '/srv/code/alpha' })),
+];
+
+describe(`CMX-379 phone ${W}×${H}, grouped by folder: one-session folders are bare rows`, { skip: why }, () => {
     let page, context;
     const ready = setup(async () => {
-        ({ page, context } = await openDashboard(browser, { width: W, height: H, touch: true, storage: view('folder'), api }));
-        await page.waitForSelector('.agent-row[data-agent="wt"]', { state: 'attached', timeout: 15000 });
+        ({ page, context } = await openDashboard(browser, { width: W, height: H, touch: true, storage: view('folder'),
+            api: { '/api/agents': BY_FOLDER } }));
+        await page.waitForSelector('.agent-row[data-agent="a3"]', { state: 'attached', timeout: 15000 });
+        await openDrawer(page);
     });
     after(() => context && context.close());
 
-    test('the group header names the folder, so no row repeats it', async () => {
+    test('two bare rows naming their folder, one headed group of 3 with no folder lines', async () => {
         ready();
-        const n = await page.evaluate(() => [document.querySelectorAll('.sidebar .agent-row').length,
-            document.querySelectorAll('.sidebar .ar-folder-line').length]);
-        assert.deepEqual(n, [3, 0]);
+        const m = await page.evaluate(() => ({
+            heads: [...document.querySelectorAll('.sidebar .group-head .group-name')].map(e => e.textContent),
+            lines: [...document.querySelectorAll('.sidebar .agent-row')].map(r =>
+                [r.dataset.agent, r.querySelector('.ar-folder-line')?.textContent ?? null]).sort(),
+        }));
+        assert.deepEqual(m, {
+            heads: ['alpha'],
+            lines: [['a1', null], ['a2', null], ['a3', null],
+                ['deep', 'an-extremely-long-folder-name-that-will-certainly-not-fit-on-one-phone-line'], ['home', '~']],
+        });
+    });
+
+    test('a bare row: folder line under its title, ⋯ hit-testable, no horizontal scroll', async () => {
+        ready();
+        const m = await page.evaluate(() => {
+            const out = {};
+            for (const r of document.querySelectorAll('.sidebar .side-group.single .agent-row')) {
+                const row = r.getBoundingClientRect(), name = r.querySelector('.agent-row-name').getBoundingClientRect();
+                const folder = r.querySelector('.ar-folder-line').getBoundingClientRect();
+                const more = r.querySelector('.row-more').getBoundingClientRect();
+                const top = document.elementFromPoint(more.left + more.width / 2, more.top + more.height / 2);
+                out[r.dataset.agent] = {
+                    under: folder.height > 0 && folder.top >= name.bottom - 0.5 && folder.bottom <= row.bottom + 0.5,
+                    inside: folder.right <= row.right + 0.5, hit: !!top?.closest('.row-more'),
+                };
+            }
+            const list = document.querySelector('#sidebar-agents');
+            out.scroll = [document.documentElement.scrollWidth - window.innerWidth, list.scrollWidth - list.clientWidth];
+            return out;
+        });
+        const ok = { under: true, inside: true, hit: true };
+        assert.deepEqual(m, { home: ok, deep: ok, scroll: [0, 0] });
+    });
+
+    test('the row\'s ⋯ offers "New session in this folder", inside the phone viewport', async () => {
+        ready();
+        await page.locator('.agent-row[data-agent="deep"] .row-more').tap();
+        const item = page.getByRole('menuitem', { name: 'New session in this folder' });
+        await item.waitFor({ state: 'visible', timeout: 15000 });
+        // a label naming the folder made this item 543px wide on a long folder name: the
+        // menu could not fit a phone. Its WIDTH is the fact; where the menu sits is the
+        // menu kit's (it can still be sliding in).
+        const box = await item.boundingBox();
+        assert.ok(box && box.width <= W - 32, `the item is wider than the phone: ${JSON.stringify(box)}`);
+        await page.keyboard.press('Escape');
     });
 });

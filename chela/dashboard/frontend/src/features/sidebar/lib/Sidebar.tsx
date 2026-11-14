@@ -5,11 +5,11 @@ import { useEffect, useRef, useState, type MouseEvent, type ReactNode } from 're
 import { icons } from '../../../shared/icons/index.ts';
 import { TextButton } from '../../../shared/ui/index.ts';
 import {
-  ARCHIVED_SECTION_KEY, DISPATCHED_KEY, type Group, type Item, type SidebarState, folderLines, showsFolderLine,
-  sidebarModel,
+  ARCHIVED_SECTION_KEY, DISPATCHED_KEY, type Group, type Item, type SidebarState, folderLines, isSingleFolder,
+  showsFolderLine, sidebarModel,
 } from '../model.ts';
 import type { SidebarActions } from './actions.ts';
-import { GroupMenu, RowMenu, useMenuOpen } from './menus.tsx';
+import { GroupMenu, RowMenu, type RowGroup, useMenuOpen } from './menus.tsx';
 import { type Meta, type MetaKind, ago, rowView } from './rowview.ts';
 
 export type { SidebarActions } from './actions.ts';
@@ -95,10 +95,12 @@ interface RowProps {
   altNum?: number;
   /** CMX-377: the dim second line naming the row's folder; absent when grouped by folder. */
   folder?: string;
+  /** CMX-379: a single-session folder's row carries its (absent) header's actions. */
+  group?: RowGroup;
   children?: ReactNode;
 }
 
-function Row({ it, s, actions, archived = false, altNum, folder, children }: RowProps) {
+function Row({ it, s, actions, archived = false, altNum, folder, group, children }: RowProps) {
   const menu = useMenuOpen();
   const press = useLongPress();
   const v = rowView(it, s);
@@ -120,7 +122,7 @@ function Row({ it, s, actions, archived = false, altNum, folder, children }: Row
         {/* CMX-417: the `@N` that chela peek and the inbox use, shown on hover */}
         {v.agent.window_id && <span className="ar-more"><span className="ar-wid">{v.agent.window_id}</span></span>}
       </span>
-      <RowMenu it={it} s={s} actions={actions} menu={menu} />
+      <RowMenu it={it} s={s} actions={actions} menu={menu} group={group} />
       {children}
     </>
   );
@@ -164,22 +166,28 @@ interface GroupProps {
 
 function GroupView({ g, index, count, s, actions, alt, folders }: GroupProps) {
   const menu = useMenuOpen();
+  // CMX-379: a folder with one session is one bare row naming its folder, never collapsed.
+  const single = isSingleFolder(g, s.view.groupBy);
+  const lines = single || showsFolderLine(s.view.groupBy);
   const rows = g.items.map(it => (
-    <Row key={it.key} it={it} s={s} actions={actions} altNum={alt.get(it.key)} folder={folders[it.key]} />
+    <Row key={it.key} it={it} s={s} actions={actions} altNum={alt.get(it.key)}
+      folder={lines ? folders[it.key] : undefined} group={single ? { g, index, count } : undefined} />
   ));
   if (g.flat) {
     // Group by ▸ None: one flat list, no header.
     return <div className="side-group flat" data-g={g.key}><div className="group-rows">{rows}</div></div>;
   }
-  const collapsed = s.collapsed.includes(g.key);
+  const collapsed = !single && s.collapsed.includes(g.key);
   const n = g.items.length;
   const stop = (f: (e: MouseEvent) => void) => (e: MouseEvent) => {
     e.stopPropagation();
     f(e);
   };
   return (
-    <div className={`side-group${collapsed ? ' collapsed' : ''}${n ? '' : ' empty'}`} data-g={g.key}>
-      <div className="group-head" data-g={g.key} aria-expanded={!collapsed}
+    <div className={`side-group${collapsed ? ' collapsed' : ''}${n ? '' : ' empty'}${single ? ' single' : ''}`} data-g={g.key}>
+      {/* the header slot stays (as `false`) when there is none, so the row keeps its DOM node
+          when a folder goes from 1 to 2 sessions or back (CMX-379) */}
+      {!single && <div className="group-head" data-g={g.key} aria-expanded={!collapsed}
         onClick={() => actions.toggleGroup(g.key)} onContextMenu={menu.onContext}>
         <span className="group-name" title={g.cwd || g.label}>{g.label}</span>
         {g.key === DISPATCHED_KEY && <span className="group-count" title={`${n} run${n === 1 ? '' : 's'}`}>{n}</span>}
@@ -193,18 +201,20 @@ function GroupView({ g, index, count, s, actions, alt, folders }: GroupProps) {
             </TextButton>
           )}
         </span>
-      </div>
+      </div>}
       <div className="group-rows">{rows}</div>
     </div>
   );
 }
 
 // CMX-85: Alt+1..9 numbers the first nine rows a user can see, top to bottom: Needs you,
-// then each group that is not collapsed. The Archived section is not numbered.
+// then each group that is not collapsed (a single-session folder row never is, CMX-379).
+// The Archived section is not numbered.
 function altNumbers(needsYou: Item[], groups: Group[], s: SidebarState): Map<string, number> {
   const out = new Map<string, number>();
   if (!s.altHeld) return out;
-  const visible = [...needsYou, ...groups.filter(g => g.flat || !s.collapsed.includes(g.key)).flatMap(g => g.items)];
+  const shown = (g: Group) => g.flat || isSingleFolder(g, s.view.groupBy) || !s.collapsed.includes(g.key);
+  const visible = [...needsYou, ...groups.filter(shown).flatMap(g => g.items)];
   for (const it of visible.filter(it => rowView(it, s)).slice(0, 9)) out.set(it.key, out.size + 1);
   return out;
 }
@@ -217,9 +227,10 @@ export function Sidebar({ state: s, actions }: { state: SidebarState | null; act
   const archivedOpen = s.view.status === 'archived' || s.collapsed.includes(`${ARCHIVED_SECTION_KEY}:open`);
   const nArch = model.archived.length;
   const drawsArchive = showArchived && nArch > 0;
-  const folders = showsFolderLine(s.view.groupBy)
-    ? folderLines([...model.needsYou, ...model.groups.flatMap(g => g.items), ...model.archived])
-    : {};
+  // Every row's folder line; grouped by folder only a single-session folder's row draws its
+  // own (CMX-379), so Needs you and Archived draw theirs only when not grouped by folder.
+  const all = folderLines([...model.needsYou, ...model.groups.flatMap(g => g.items), ...model.archived]);
+  const folders = showsFolderLine(s.view.groupBy) ? all : {};
   return (
     <>
       {model.needsYou.length > 0 && (
@@ -232,7 +243,7 @@ export function Sidebar({ state: s, actions }: { state: SidebarState | null; act
       )}
       {model.groups.map((g, i) => (
         <GroupView key={g.key} g={g} index={i} count={model.groups.length} s={s} actions={actions} alt={alt}
-          folders={folders} />
+          folders={all} />
       ))}
       {drawsArchive && (
         <div className={`side-group side-archived${archivedOpen ? '' : ' collapsed'}`} data-g={ARCHIVED_SECTION_KEY}>

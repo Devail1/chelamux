@@ -497,7 +497,12 @@ test('CMX-74: outside Custom groups no row offers "Move to group…" — a plain
         render(rows);
         const plain = host().querySelector('.agent-row[data-agent="plain"]');
         openMenu(plain.querySelector('.row-more'));
-        assert.deepEqual(menuRows().map(r => r.label), ['Archive'],
+        // CMX-379: grouped by folder, `plain` is its folder's only session, so its menu also
+        // carries the folder's (absent) header actions, never a move
+        const expected = mode === 'folder'
+            ? ['New session in this folder', 'Move up', 'Move down', 'Collapse all', 'Expand all', 'Archive']
+            : ['Archive'];
+        assert.deepEqual(menuRows().map(r => r.label), expected,
             `${mode}: the plain row's menu offers a move that would be invisible`);
         closeMenu();
         const run = host().querySelector('.agent-row[data-run="CMX-37"]');

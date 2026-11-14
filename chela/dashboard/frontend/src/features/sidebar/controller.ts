@@ -16,7 +16,8 @@ import { getLayout, refreshLayout, writeLayout } from './lib/layout.ts';
 import { isObj, lsJson, lsRead, lsSet, postJson, publish, say, sayRefused } from './lib/page.ts';
 import {
   ARCHIVED_SECTION_KEY, type AgentRow, clampWidth, type Custom, dismissKey, type Group, type Item, isArchivable,
-  moveGroup, type NavState, normalizeView, reconcileAssign, type RecentRow, type RecentState, recentView, sidebarModel,
+  isSingleFolder, moveGroup, type NavState, normalizeView, reconcileAssign, type RecentRow, type RecentState, recentView,
+  sidebarModel,
   sidebarOrder as modelSidebarOrder, type SidebarState, type View, type Wants,
 } from './model.ts';
 
@@ -313,7 +314,10 @@ export function groupMenuAction(key: string, act: string): unknown {
     const next = moveGroup(sb.groups.map(x => x.key), getLayout().order, key, act === 'up' ? -1 : 1);
     if (next) writeLayout({ order: next });
   } else if (act === 'collapse-all') {
-    saveCollapsed(new Set([...collapsedGroups(), ...sb.groups.map(x => x.key)]));
+    // CMX-379: a one-session folder has no header to fold. Stamping its key would fold it
+    // later, unasked, the moment it gains a second session.
+    const by = view().groupBy;
+    saveCollapsed(new Set([...collapsedGroups(), ...sb.groups.filter(x => !isSingleFolder(x, by)).map(x => x.key)]));
   } else if (act === 'expand-all') {
     const keys = new Set(sb.groups.map(x => x.key));
     saveCollapsed(new Set([...collapsedGroups()].filter(k => !keys.has(k))));

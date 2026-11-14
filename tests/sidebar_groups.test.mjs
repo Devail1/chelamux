@@ -67,6 +67,9 @@ let _wid = 100;
 const win = (name, over = {}) => ({
     name, window_id: `@${_wid++}`, online: true, claude_running: true, session_status: 'idle', ...over,
 });
+// CMX-379: a folder with ONE session draws no header (its row names the folder), so a test
+// about a group HEADER gives the folder a second, busy (never archivable) session.
+const peer = cwd => win(`peer:${cwd}`, { cwd, session_status: 'busy' });
 
 function render(rows) {
     agentsStore.set(rows);
@@ -99,9 +102,10 @@ test('rows group by cwd — two differently-named windows in one folder share ON
     assert.equal(labelOf('/srv/code/alpha'), 'alpha');
     assert.deepEqual(rowsIn('/srv/code/alpha').sort(), ['alpha-1', 'alpha-2']);
     assert.deepEqual(rowsIn('/srv/code/beta').sort(), ['alpha-1', 'beta-1']);
-    // a lone session still gets its folder header (the desktop's look — no loose rows)
+    // CMX-379 (Liav, 11-14): a lone session gets NO header; its row names the folder instead
     render([win('solo', { cwd: '/srv/code/gamma' })]);
-    assert.equal(labelOf('/srv/code/gamma'), 'gamma');
+    assert.equal(group('/srv/code/gamma').querySelector('.group-head'), null);
+    assert.equal(group('/srv/code/gamma').querySelector('.agent-row[data-agent="solo"] .ar-folder-line').textContent, 'gamma');
 });
 
 // CMX-72: the home dir is a folder like any other — Liav, from the phone: "both the
@@ -151,8 +155,8 @@ test('CMX-72: a home folder whose basename matches another folder is told apart 
     assert.equal(labels['/root'], 'root');
     assert.equal(labels['/x/root'], 'root · x');
     render([
-        win('h', { cwd: '/home/u', cwd_is_home: true }),
-        win('s', { cwd: '/srv/u' }),
+        win('h', { cwd: '/home/u', cwd_is_home: true }), peer('/home/u'),
+        win('s', { cwd: '/srv/u' }), peer('/srv/u'),
     ]);
     assert.equal(labelOf('/home/u'), 'u · home');
     assert.equal(labelOf('/srv/u'), 'u · srv');
@@ -160,10 +164,10 @@ test('CMX-72: a home folder whose basename matches another folder is told apart 
 
 test('a basename collision is disambiguated by the parent path, like the desktop', () => {
     render([
-        win('a', { cwd: '/srv/work/python-agent' }),
-        win('b', { cwd: '/srv/personal/python-agent' }),
-        win('c', { cwd: '/srv/x/same/tool' }),
-        win('d', { cwd: '/srv/y/same/tool' }),
+        win('a', { cwd: '/srv/work/python-agent' }), peer('/srv/work/python-agent'),
+        win('b', { cwd: '/srv/personal/python-agent' }), peer('/srv/personal/python-agent'),
+        win('c', { cwd: '/srv/x/same/tool' }), peer('/srv/x/same/tool'),
+        win('d', { cwd: '/srv/y/same/tool' }), peer('/srv/y/same/tool'),
     ]);
     assert.equal(labelOf('/srv/work/python-agent'), 'python-agent · work');
     assert.equal(labelOf('/srv/personal/python-agent'), 'python-agent · personal');
@@ -177,7 +181,7 @@ test('a basename collision is disambiguated by the parent path, like the desktop
 test('"+" on a group calls the launcher with THAT group\'s cwd — even where a session already runs', async () => {
     render([
         win('alpha-1', { cwd: '/srv/code/alpha' }),
-        win('beta-1', { cwd: '/srv/code/beta' }),
+        win('beta-1', { cwd: '/srv/code/beta' }), peer('/srv/code/beta'),
     ]);
     fire(group('/srv/code/beta').querySelector('.group-add'));
     await flush();
@@ -188,7 +192,8 @@ test('"+" on a group calls the launcher with THAT group\'s cwd — even where a 
 // --- 3. collapse -----------------------------------------------------------------
 
 test('collapse is per group, persists, and survives a re-render', () => {
-    const rows = [win('a', { cwd: '/srv/code/alpha' }), win('b', { cwd: '/srv/code/beta' })];
+    const rows = [win('a', { cwd: '/srv/code/alpha' }), peer('/srv/code/alpha'), win('b', { cwd: '/srv/code/beta' }),
+        peer('/srv/code/beta')];
     render(rows);
     fire(group('/srv/code/alpha').querySelector('.group-head'));
     assert.ok(group('/srv/code/alpha').classList.contains('collapsed'));
@@ -218,7 +223,7 @@ function withThrowingStorage(fn) {
 test('a THROWING localStorage still renders, and collapse / order / archive still work for the session', async () => {
     await withThrowingStorage(async () => {
         const rows = [
-            win('a', { cwd: '/srv/code/alpha' }),
+            win('a', { cwd: '/srv/code/alpha' }), peer('/srv/code/alpha'),
             win('b', { cwd: '/srv/code/beta', session_status: 'busy' }),
             win('b-done', { cwd: '/srv/code/beta', done: true }),
         ];
@@ -236,7 +241,8 @@ test('a THROWING localStorage still renders, and collapse / order / archive stil
 // --- 4. the group menu -----------------------------------------------------------
 
 test('the group menu opens on right-click AND on the ⋯ button, with the desktop\'s items', () => {
-    render([win('a', { cwd: '/srv/code/alpha', session_status: 'busy' }), win('b', { cwd: '/srv/code/beta' })]);
+    render([win('a', { cwd: '/srv/code/alpha', session_status: 'busy' }), peer('/srv/code/alpha'),
+        win('b', { cwd: '/srv/code/beta' }), peer('/srv/code/beta')]);
     rightClick(group('/srv/code/alpha').querySelector('.group-head'));
     assert.ok(menu(), 'right-click did not open the group menu');
     assert.deepEqual(menuItems().map(i => i.text),
@@ -254,6 +260,7 @@ test('the group menu opens on right-click AND on the ⋯ button, with the deskto
 test('Move up / Move down reorder the groups and the order persists', async () => {
     const rows = [
         win('a', { cwd: '/srv/code/alpha' }), win('b', { cwd: '/srv/code/beta' }), win('c', { cwd: '/srv/code/gamma' }),
+        peer('/srv/code/alpha'), peer('/srv/code/beta'), peer('/srv/code/gamma'),
     ];
     render(rows);
     assert.deepEqual(groupKeys(), ['/srv/code/alpha', '/srv/code/beta', '/srv/code/gamma']);
@@ -273,7 +280,8 @@ test('Move up / Move down reorder the groups and the order persists', async () =
 // CMX-277: the menu's Move up / Move down are the CMX-82 SERVER layout's writes: each pick is
 // ONE POST of the whole new order, in order; a move off either end writes nothing.
 test('Move up / Move down through the kit menu POST the layout, one write per pick, in order', async () => {
-    render([win('a', { cwd: '/srv/code/alpha' }), win('b', { cwd: '/srv/code/beta' }), win('c', { cwd: '/srv/code/gamma' })]);
+    render([win('a', { cwd: '/srv/code/alpha' }), win('b', { cwd: '/srv/code/beta' }), win('c', { cwd: '/srv/code/gamma' }),
+        peer('/srv/code/alpha'), peer('/srv/code/beta'), peer('/srv/code/gamma')]);
     const writes = () => server.calls.filter(c => c.method === 'POST' && c.path === '/api/sidebar/layout').map(c => c.body);
     const pick = (key, label) => {
         openMenu(group(key).querySelector('.group-more'));
@@ -303,13 +311,37 @@ test('Move up / Move down through the kit menu POST the layout, one write per pi
 });
 
 test('Collapse all / Expand all fold and unfold every group', () => {
-    render([win('a', { cwd: '/srv/code/alpha' }), win('b', { cwd: '/srv/code/beta' })]);
+    render([win('a', { cwd: '/srv/code/alpha' }), peer('/srv/code/alpha'), win('b', { cwd: '/srv/code/beta' }),
+        peer('/srv/code/beta')]);
     openMenu(group('/srv/code/alpha').querySelector('.group-more'));
     clickMenu('Collapse all');
     assert.ok(groupKeys().every(k => group(k).classList.contains('collapsed')));
     openMenu(group('/srv/code/beta').querySelector('.group-more'));
     clickMenu('Expand all');
     assert.ok(groupKeys().every(k => !group(k).classList.contains('collapsed')));
+});
+
+// CMX-379: a one-session folder's row carries the header's menu; its Collapse all folds the
+// headed groups, and leaves no key on the bare folder to fold it later, unasked.
+test('CMX-379: Collapse all from a bare row folds the headed groups; the bare folder comes up OPEN when it gains a session', () => {
+    const solo = win('solo', { cwd: '/srv/code/beta' });
+    render([win('a', { cwd: '/srv/code/alpha' }), peer('/srv/code/alpha'), solo]);
+    assert.equal(group('/srv/code/beta').querySelector('.group-head'), null);
+    openMenu(host().querySelector('.agent-row[data-agent="solo"] .row-more'));
+    clickMenu('Collapse all');
+    assert.ok(group('/srv/code/alpha').classList.contains('collapsed'));
+    assert.deepEqual(JSON.parse(localStorage.getItem('chela_grp_collapsed')), ['/srv/code/alpha']);
+    render([win('a', { cwd: '/srv/code/alpha' }), peer('/srv/code/alpha'), solo, peer('/srv/code/beta')]);
+    assert.ok(group('/srv/code/beta').querySelector('.group-head'), 'two sessions: the header is back');
+    assert.ok(!group('/srv/code/beta').classList.contains('collapsed'), 'the folder came up folded, unasked');
+});
+
+test('CMX-379: "New session in this folder" on a bare row spawns in ITS folder', async () => {
+    render([win('a', { cwd: '/srv/code/alpha' }), peer('/srv/code/alpha'), win('solo', { cwd: '/srv/code/beta' })]);
+    openMenu(host().querySelector('.agent-row[data-agent="solo"] .row-more'));
+    clickMenu('New session in this folder');
+    await flush();
+    assert.deepEqual(spawns, [{ cwd: '/srv/code/beta', command: 'claude' }]);
 });
 
 // --- 4b. Archive all --------------------------------------------------------------
@@ -428,7 +460,7 @@ test('"Archive all" never SENDS a live row to be archived — not even one the r
 
 test('the Archive all count is the group\'s archivable rows, and is DISABLED at 0', async () => {
     render([win('f1', { cwd: '/srv/code/mix', done: true }), win('f2', { cwd: '/srv/code/mix', done: true }),
-        win('live', { cwd: '/srv/code/mix', session_status: 'busy' })]);
+        win('live', { cwd: '/srv/code/mix', session_status: 'busy' }), peer('/srv/code/mix')]);
     openMenu(group('/srv/code/mix').querySelector('.group-more'));
     assert.ok(menuItems().some(i => i.text === 'Archive all (2)'));
     closeMenu();
@@ -454,7 +486,7 @@ const archivePosts = () => server.calls.filter(c => c.method === 'POST' && c.pat
 
 test('CMX-81: an idle live session counts in "Archive all" and Archive all closes it', async () => {
     const idle = win('idle', { cwd: '/srv/code/home-scout' });
-    render([idle]);
+    render([idle, peer('/srv/code/home-scout')]);
     openMenu(group('/srv/code/home-scout').querySelector('.group-more'));
     const item = menuItems().find(i => i.text.startsWith('Archive all'));
     assert.equal(item.text, 'Archive all (1)');
@@ -462,7 +494,7 @@ test('CMX-81: an idle live session counts in "Archive all" and Archive all close
     clickMenu('Archive all (1)');
     await flush();
     assert.deepEqual(archivePosts().map(c => c.body.keys), [[`w:${idle.window_id}`]]);
-    assert.equal(group('/srv/code/home-scout'), null, 'the closed idle session leaves its group');
+    assert.deepEqual(rowsIn('/srv/code/home-scout'), ['peer:/srv/code/home-scout'], 'the closed idle session leaves its group');
 });
 
 test('CMX-81: the row menu\'s Archive is enabled on an idle session and archives it ALONE — one request, its w: key', async () => {
@@ -765,7 +797,7 @@ test('model: sort by name is NUMERIC — CMX-100 sorts after CMX-37, not between
 
 test('Collapse all keeps groups collapsed earlier that are off screen now', () => {
     localStorage.setItem('chela_grp_collapsed', JSON.stringify(['/srv/code/away']));
-    render([win('a', { cwd: '/srv/code/alpha' })]);
+    render([win('a', { cwd: '/srv/code/alpha' }), peer('/srv/code/alpha')]);
     sidebar.groupMenuAction('/srv/code/alpha', 'collapse-all');
     assert.deepEqual(JSON.parse(localStorage.getItem('chela_grp_collapsed')).sort(), ['/srv/code/alpha', '/srv/code/away']);
 });

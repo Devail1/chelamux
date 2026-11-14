@@ -1,7 +1,10 @@
 import { act, cleanup, fireEvent, render } from '@testing-library/react';
 import { afterEach, describe, expect, test } from 'vitest';
 import { CONTEXT_SHOWN_FROM, Sidebar } from '../index.ts';
-import { type AgentRow, DISPATCHED_KEY, OTHER_KEY, type SidebarState, normalizeView, sidebarOrder } from '../model.ts';
+import {
+  type AgentRow, DISPATCHED_KEY, type Group, OTHER_KEY, type SidebarState, buildItems, isSingleFolder, normalizeView,
+  sidebarOrder,
+} from '../model.ts';
 import { NOW, actions, runWin, state, win } from './fixtures.ts';
 
 afterEach(cleanup);
@@ -26,7 +29,8 @@ const meta = (row: HTMLElement, kind: string) => row.querySelector<HTMLElement>(
 // real browser: tests/browser/react_islands.test.mjs.
 test('the title comes first and the metadata after it, both on the one row line', () => {
   const a = win('orch', { ai_title: 'A long session title' });
-  const { el } = draw(state([a], { orchWid: a.window_id ?? null, labels: { [a.window_id ?? '']: 'A long session title' } }));
+  // a second session in the folder keeps its header, so the row stays one line (CMX-379)
+  const { el } = draw(state([a, win('peer')], { orchWid: a.window_id ?? null, labels: { [a.window_id ?? '']: 'A long session title' } }));
   const row = rowOf(el, 'orch');
   const kids = [...row.children].map(c => c.className);
   expect(kids.indexOf('agent-row-name')).toBeGreaterThan(-1);
@@ -211,7 +215,7 @@ test('sidebarOrder() lifts the View filters: a filtered-out row keeps its slot',
 });
 
 test('a group head: name, caret, menu and "+" (only with a folder); a collapsed group says so', () => {
-  const { el, acts } = draw(state([win('a'), runWin('CMX-1', 'agent')], { collapsed: ['/srv/code/alpha'] }));
+  const { el, acts } = draw(state([win('a'), win('b'), runWin('CMX-1', 'agent')], { collapsed: ['/srv/code/alpha'] }));
   const g = el.querySelector<HTMLElement>('.side-group[data-g="/srv/code/alpha"]');
   expect(g?.className).toBe('side-group collapsed');
   const head = g?.querySelector<HTMLElement>('.group-head');
@@ -402,10 +406,11 @@ describe('the folder line (CMX-377)', () => {
     expect(el.querySelectorAll('.agent-row.has-folder')).toHaveLength(2);
   });
 
-  test('grouped by folder: no row has a folder line', () => {
-    const agents = [win('home', { cwd: '/home/u', cwd_is_home: true }), win('proj'), runWin('CMX-5', 'agent')];
+  test('grouped by folder: no row of a headed folder has a folder line', () => {
+    const agents = [win('home', { cwd: '/home/u', cwd_is_home: true }), win('home2', { cwd: '/home/u', cwd_is_home: true }),
+      win('proj'), win('proj2'), runWin('CMX-5', 'agent')];
     const { el } = draw(state(agents, { view: normalizeView({ activity: 'all', sort: 'name', groupBy: 'folder' }) }));
-    expect(el.querySelectorAll('.agent-row')).toHaveLength(3);
+    expect(el.querySelectorAll('.agent-row')).toHaveLength(5);
     expect(el.querySelectorAll('.ar-folder-line')).toHaveLength(0);
     expect(el.querySelectorAll('.agent-row.has-folder')).toHaveLength(0);
   });
@@ -477,5 +482,147 @@ describe('the folder line (CMX-377)', () => {
     expect(line.querySelector('[data-meta="orchestrator"]')).toBeTruthy();
     expect(line.querySelector('[data-meta="context"]')?.textContent).toBe('70%');
     expect(folderOf(row)).toBe('alpha');
+  });
+});
+
+// --- CMX-379 (Liav, 11-14): a folder with one session is one bare row ------------------
+
+describe('a folder with one session (CMX-379)', () => {
+  const byFolder = (agents: AgentRow[], over: Partial<SidebarState> = {}) =>
+    state(agents, { view: normalizeView({ activity: 'all', sort: 'name', groupBy: 'folder' }), ...over });
+  const group = (el: HTMLElement, key: string) => {
+    const g = el.querySelector<HTMLElement>(`.side-group[data-g="${key}"]`);
+    if (!g) throw new Error(`no group ${key}`);
+    return g;
+  };
+  const folderOf = (row: HTMLElement) => row.querySelector<HTMLElement>('.ar-folder-line')?.textContent ?? null;
+  // folders of 1, 1 and 3 sessions
+  const agents = () => [
+    win('solo-b', { cwd: '/srv/code/beta' }),
+    win('solo-h', { cwd: '/home/u', cwd_is_home: true }),
+    win('a1'), win('a2'), win('a3'),
+  ];
+  const menuItems = () => [...document.querySelectorAll<HTMLElement>('[role="menu"] [role^="menuitem"]')];
+  const menuItem = (label: string) => {
+    const m = menuItems().find(i => i.textContent === label);
+    if (!m) throw new Error(`no "${label}" in ${JSON.stringify(menuItems().map(i => i.textContent))}`);
+    return m;
+  };
+  const openRowMenu = (row: HTMLElement) => fireEvent.keyDown(row.querySelector('.row-more') as Element, { key: 'Enter' });
+  const pick = (label: string) => fireEvent.keyDown(menuItem(label), { key: 'Enter' });
+
+  test('folders of 1, 1 and 3: two bare rows naming their folder, one headed group of 3 with no folder lines', () => {
+    const { el } = draw(byFolder(agents()));
+    // the one-session folders draw no header, and their row names the folder
+    for (const [key, name, folder] of [['/srv/code/beta', 'solo-b', 'beta'], ['/home/u', 'solo-h', '~']] as const) {
+      const g = group(el, key);
+      expect(g.className).toBe('side-group single');
+      expect(g.querySelector('.group-head')).toBeNull();
+      expect(g.querySelectorAll('.agent-row')).toHaveLength(1);
+      expect(folderOf(rowOf(el, name))).toBe(folder);
+      expect(rowOf(el, name).classList.contains('has-folder')).toBe(true);
+    }
+    // the folder of 3 keeps its header, and its rows keep the folder line hidden
+    const alpha = group(el, '/srv/code/alpha');
+    expect(alpha.className).toBe('side-group');
+    expect(alpha.querySelector('.group-head .group-name')?.textContent).toBe('alpha');
+    expect(alpha.querySelectorAll('.agent-row')).toHaveLength(3);
+    expect(alpha.querySelectorAll('.ar-folder-line')).toHaveLength(0);
+    expect(el.querySelectorAll('.group-head')).toHaveLength(1);
+    expect(el.querySelectorAll('.ar-folder-line')).toHaveLength(2);
+  });
+
+  test('single rows sort among the headed groups by folder name, and keep a stored order', () => {
+    expect(groupKeys(draw(byFolder(agents())).el)).toEqual(['/srv/code/alpha', '/srv/code/beta', '/home/u']);
+    cleanup();
+    const stored = ['/home/u', '/srv/code/alpha', '/srv/code/beta'];
+    expect(groupKeys(draw(byFolder(agents(), { order: stored })).el)).toEqual(stored);
+  });
+
+  test('the row ⋯ menu carries the header actions: New session, Move up / down, Collapse / Expand all', () => {
+    const { el, acts } = draw(byFolder(agents()));
+    openRowMenu(rowOf(el, 'solo-b'));
+    expect(menuItems().map(i => i.textContent)).toEqual([
+      'New session in this folder', 'Move up', 'Move down', 'Collapse all', 'Expand all', 'Archive']);
+    expect(menuItem('Move up').hasAttribute('data-disabled')).toBe(false);
+    expect(menuItem('Move down').hasAttribute('data-disabled')).toBe(false);
+    pick('New session in this folder');
+    expect(acts.groupNewSession.mock.calls).toEqual([['/srv/code/beta']]);
+    expect(acts.selectAgent).not.toHaveBeenCalled();
+    for (const [label, act] of [['Move up', 'up'], ['Move down', 'down'], ['Collapse all', 'collapse-all'], ['Expand all', 'expand-all']]) {
+      openRowMenu(rowOf(el, 'solo-b'));
+      pick(label as string);
+      expect(acts.groupMenuAction.mock.calls.at(-1)).toEqual(['/srv/code/beta', act]);
+    }
+    // the last group cannot move down; the first cannot move up
+    openRowMenu(rowOf(el, 'solo-h'));
+    expect(menuItem('Move up').hasAttribute('data-disabled')).toBe(false);
+    expect(menuItem('Move down').hasAttribute('data-disabled')).toBe(true);
+  });
+
+  test('a row in a headed folder keeps the plain row menu', () => {
+    const { el } = draw(byFolder(agents()));
+    openRowMenu(rowOf(el, 'a1'));
+    expect(menuItems().map(i => i.textContent)).toEqual(['Archive']);
+  });
+
+  test('collapsing does not apply: a stored collapsed key still shows the row, and Alt numbers it', () => {
+    const { el } = draw(byFolder(agents(), { collapsed: ['/srv/code/beta', '/srv/code/alpha'], altHeld: true }));
+    expect(group(el, '/srv/code/beta').className).toBe('side-group single');
+    expect(group(el, '/srv/code/alpha').className).toBe('side-group collapsed');
+    expect(rowOf(el, 'solo-b').querySelector('.ar-altnum')?.textContent).toBe('1');
+    expect(rowOf(el, 'solo-h').querySelector('.ar-altnum')?.textContent).toBe('2');
+    expect(rowOf(el, 'a1').querySelector('.ar-altnum')).toBeNull();
+  });
+
+  test('1 → 2 → 1 sessions switches form on the next render, keeping the same row node', () => {
+    const solo = win('solo', { cwd: '/srv/code/beta' });
+    const other = win('other', { cwd: '/srv/code/beta' });
+    const acts = actions();
+    const { container, rerender } = render(<Sidebar state={byFolder([solo])} actions={acts} />);
+    const row = rowOf(container, 'solo');
+    expect(container.querySelector('.group-head')).toBeNull();
+    rerender(<Sidebar state={byFolder([solo, other])} actions={acts} />);
+    expect(group(container, '/srv/code/beta').querySelector('.group-head .group-name')?.textContent).toBe('beta');
+    expect(folderOf(rowOf(container, 'solo'))).toBeNull();
+    // the row's DOM node survives both switches: it is updated in place, never remounted,
+    // so the list above and below it does not jump
+    expect(rowOf(container, 'solo')).toBe(row);
+    rerender(<Sidebar state={byFolder([solo])} actions={acts} />);
+    expect(container.querySelector('.group-head')).toBeNull();
+    expect(folderOf(rowOf(container, 'solo'))).toBe('beta');
+    expect(rowOf(container, 'solo')).toBe(row);
+  });
+
+  test('Other and Dispatched with one row keep their header; Needs you and Archived draw no folder line', () => {
+    const blocked = win('blocked', { cwd: '/srv/code/gamma', needs_human: true });
+    const old = win('old', { cwd: '/srv/code/delta', done: true });
+    const { el } = draw(byFolder([win('nowhere', { cwd: null }), runWin('CMX-5', 'agent'), blocked, old],
+      { archived: [`w:${old.window_id}`] }));
+    expect(group(el, OTHER_KEY).querySelector('.group-head')).toBeTruthy();
+    expect(group(el, DISPATCHED_KEY).querySelector('.group-head')).toBeTruthy();
+    expect(el.querySelectorAll('.side-group.single')).toHaveLength(0);
+    expect(folderOf(rowOf(el, 'blocked'))).toBeNull();
+    expect(folderOf(rowOf(el, 'old'))).toBeNull();
+  });
+
+  test('isSingleFolder: only a folder group, grouped by folder, holding exactly one row', () => {
+    const one = [buildItems([win('x')])[0]].filter(Boolean) as Group['items'];
+    const g = (over: Partial<Group> = {}): Group => ({ key: '/srv/code/alpha', label: 'alpha', cwd: '/srv/code/alpha', items: one, ...over });
+    expect(isSingleFolder(g(), 'folder')).toBe(true);
+    // the mode alone decides, even for a group that carries a folder
+    for (const mode of ['date', 'state', 'custom', 'none']) expect(isSingleFolder(g(), mode)).toBe(false);
+    expect(isSingleFolder(g({ cwd: null }), 'folder')).toBe(false);
+    expect(isSingleFolder(g({ flat: true }), 'folder')).toBe(false);
+    expect(isSingleFolder(g({ items: [] }), 'folder')).toBe(false);
+    expect(isSingleFolder(g({ items: [...one, ...one] }), 'folder')).toBe(false);
+  });
+
+  test.each(['date', 'state', 'custom'])('grouped by %s: a group of one keeps its header', (groupBy) => {
+    const { el } = draw(state([win('proj')], { view: normalizeView({ activity: 'all', sort: 'name', groupBy }) }));
+    expect(el.querySelectorAll('.group-head')).toHaveLength(1);
+    expect(el.querySelectorAll('.side-group.single')).toHaveLength(0);
+    openRowMenu(rowOf(el, 'proj'));
+    expect(menuItems().map(i => i.textContent)).not.toContain('New session in this folder');
   });
 });
