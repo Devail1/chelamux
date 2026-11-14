@@ -9,10 +9,13 @@
 //                scroll and never starts one
 //   Esc          cancels; so does a pointercancel
 //
+// CMX-381: under the Manual sort a session row also drags up or down WITHIN its group, with a
+// drop line between rows (dropRow, the group's persisted row order).
+//
 // The pinned sections (Needs you, Dispatched, Archived) are not draggable and take no drop.
 // While a drag runs, the list takes no click: the click that ends a drag opens nothing.
 import { useCallback, useEffect, useRef, useState, type PointerEvent as ReactPointerEvent } from 'react';
-import { ARCHIVED_SECTION_KEY, DISPATCHED_KEY, UNGROUPED_KEY } from '../model.ts';
+import { ARCHIVED_SECTION_KEY, DISPATCHED_KEY, NEEDS_YOU_KEY, UNGROUPED_KEY } from '../model.ts';
 
 export const DRAG_THRESHOLD_PX = 5;
 export const LONG_PRESS_DRAG_MS = 400;
@@ -23,8 +26,9 @@ const EDGE_PX = 36;
 
 export type DragSource =
   | { kind: 'group'; key: string }
-  /** A session row: its assignment key (model.assignKey) and the group it sits in now. */
-  | { kind: 'row'; assign: string; group: string; item: string };
+  /** A session row: its assignment key (model.assignKey), the group it sits in now, and
+   * (CMX-381) whether it may be put in a new place within that group. */
+  | { kind: 'row'; assign: string; group: string; item: string; reorder?: boolean };
 
 /** What the list draws while a drag runs. */
 export interface DragView {
@@ -33,6 +37,8 @@ export interface DragView {
   line: { key: string; side: 'before' | 'after' } | null;
   /** Row drop: the group under the pointer (UNGROUPED_KEY: on the list, outside every group). */
   over: { key: string; ok: boolean } | null;
+  /** CMX-381: a row reordered within its group: the line between rows (by item key). */
+  rowLine?: { key: string; side: 'before' | 'after' } | null;
 }
 
 /** Where a dragged group lands: `before` (null = at the end) for the drop, `line` for the
@@ -67,10 +73,21 @@ function movableGroups(root: Element) {
     });
 }
 
+/** The rows of group `key` in `root`, top to bottom, by item key. */
+function groupRows(root: Element, key: string) {
+  const sec = sections(root).find(el => el.dataset.g === key);
+  if (!sec) return [];
+  return [...sec.querySelectorAll<HTMLElement>('.group-rows > .agent-row[data-item]')].map(el => {
+    const r = el.getBoundingClientRect();
+    return { key: el.dataset.item as string, top: r.top, bottom: r.bottom };
+  });
+}
+
 function sameView(a: DragView | null, b: DragView | null): boolean {
   if (!a || !b) return a === b;
   return a.source === b.source && a.line?.key === b.line?.key && a.line?.side === b.line?.side
-    && a.over?.key === b.over?.key && a.over?.ok === b.over?.ok;
+    && a.over?.key === b.over?.key && a.over?.ok === b.over?.ok
+    && a.rowLine?.key === b.rowLine?.key && a.rowLine?.side === b.rowLine?.side;
 }
 
 const inside = (r: DOMRect, x: number, y: number) => x >= r.left && x <= r.right && y >= r.top && y <= r.bottom;
@@ -80,7 +97,7 @@ const inside = (r: DOMRect, x: number, y: number) => x >= r.left && x <= r.right
 function sectionAt(root: Element, x: number, y: number): { key: string; pinned: boolean } | null {
   for (const el of sections(root)) {
     if (!inside(el.getBoundingClientRect(), x, y)) continue;
-    return { key: el.dataset.g ?? '~needs-you', pinned: isPinned(el) };
+    return { key: el.dataset.g ?? NEEDS_YOU_KEY, pinned: isPinned(el) };
   }
   return inside(root.getBoundingClientRect(), x, y) ? { key: UNGROUPED_KEY, pinned: false } : null;
 }
@@ -123,6 +140,8 @@ export interface DragDrop {
   /** A row dropped on group `groupKey`: may it go there (a custom group, Ungrouped)? */
   accepts(groupKey: string): boolean;
   row(assign: string, groupKey: string): unknown;
+  /** CMX-381: row `item` of group `groupKey` dropped just before row `before` (null: last). */
+  reorder(groupKey: string, item: string, before: string | null): unknown;
 }
 
 /** The list's drag: `view` to draw, and `bind(source)` for the pointerdown of a header or row. */
@@ -163,6 +182,11 @@ export function useSidebarDrag(drop: DragDrop) {
         return;
       }
       const at = sectionAt(s.root, s.x, s.y);
+      if (s.source.reorder && at?.key === s.source.group) {
+        const { line } = groupSlot(groupRows(s.root, s.source.group), s.source.item, s.y);
+        setView({ source: s.source, line: null, over: null, rowLine: line });
+        return;
+      }
       const ok = !!at && !at.pinned && at.key !== s.source.group && dropRef.current.accepts(at.key);
       setView({ source: s.source, line: null, over: at ? { key: at.key, ok } : null });
     };
@@ -217,6 +241,11 @@ export function useSidebarDrag(drop: DragDrop) {
         return;
       }
       const at = sectionAt(s.root, s.x, s.y);
+      if (s.source.reorder && at?.key === s.source.group) {
+        const { before, line } = groupSlot(groupRows(s.root, s.source.group), s.source.item, s.y);
+        if (line) dropRef.current.reorder(s.source.group, s.source.item, before);
+        return;
+      }
       if (!at || at.pinned || at.key === s.source.group || !dropRef.current.accepts(at.key)) return;
       dropRef.current.row(s.source.assign, at.key);
     };

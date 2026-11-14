@@ -15,9 +15,9 @@ import { archiveLoaded, archivedKeys, archivedSessions, pruneHidden, refreshArch
 import { commitLayout, getLayout, refreshLayout, writeLayout } from './lib/layout.ts';
 import { isObj, lsJson, lsRead, lsSet, postJson, publish, say, sayRefused } from './lib/page.ts';
 import {
-  ARCHIVED_SECTION_KEY, type AgentRow, clampWidth, type Custom, dismissKey, dropAssignee, type Group, type Item,
-  isArchivable, isSingleFolder, moveGroup, placeGroup, type NavState, normalizeView, reconcileAssign, type RecentRow,
-  SESSION_KEY_PREFIX, type RecentState, recentView,
+  ARCHIVED_SECTION_KEY, type AgentRow, assignKey, buildItems, canOrderRows, clampWidth, type Custom, dismissKey,
+  dropAssignee, type Group, type Item, isArchivable, isSingleFolder, moveGroup, placeGroup, placeRow, type NavState,
+  normalizeView, reconcileAssign, type RecentRow, type RowOrder, SESSION_KEY_PREFIX, type RecentState, recentView,
   sidebarModel,
   sidebarOrder as modelSidebarOrder, type SidebarState, type View, type Wants,
 } from './model.ts';
@@ -163,6 +163,15 @@ function custom(): Custom {
   const seen = isObj(c.seen) ? { ...(c.seen as Record<string, number>) } : {};
   return { groups, assign: isObj(c.assign) ? { ...(c.assign as Record<string, string>) } : {}, seen };
 }
+// CMX-381: the Manual sort's row order per group; an entry that is not {keys, at} is skipped.
+function rowOrders(): Record<string, RowOrder> {
+  const out: Record<string, RowOrder> = {};
+  for (const [g, e] of Object.entries(getLayout().rows ?? {})) {
+    if (!isObj(e) || !Array.isArray(e.keys) || typeof e.at !== 'number') continue;
+    out[g] = { keys: e.keys.filter((k): k is string => typeof k === 'string'), at: e.at };
+  }
+  return out;
+}
 // `seen` only while it holds a stamp: the server omits an empty one (sidebar_layout.py).
 const customFields = (c: Custom) => ({
   custom: { groups: c.groups, assign: c.assign, ...(c.seen && Object.keys(c.seen).length ? { seen: c.seen } : {}) },
@@ -208,7 +217,7 @@ export function renderSidebarAgents(agents: AgentRow[] | null | undefined): void
   const ctx: Record<string, number> = {};
   for (const [wid, x] of Object.entries(ctxByWid)) if (x.used_pct != null) ctx[wid] = x.used_pct;
   state = {
-    agents: rows, wants: host.wants, orchWid: host.orchWid(), view: view(), order: getLayout().order, custom: c,
+    agents: rows, wants: host.wants, orchWid: host.orchWid(), view: view(), order: getLayout().order, rows: rowOrders(), custom: c,
     archived: archivedKeys(), sessions: archivedSessions(), labels, now: Date.now(), collapsed: [...collapsedGroups()],
     ctx, onWall: TERMINALS_ON ? host.onWall() : [], active: activeRow, altHeld,
   };
@@ -396,6 +405,26 @@ export function dropOnGroup(itemKey: string, groupKey: string | null): boolean {
   const id = dropAssignee(groupKey, custom());
   if (id === undefined) return false;
   void assignGroup(itemKey, id);
+  return true;
+}
+
+/** CMX-381: under Manual, row `itemKey` of group `groupKey` dropped just before row `before`
+ * (null: last). Persists the group's row order by the rows' stable keys (model.placeRow), with
+ * the same optimistic write and snap-back as a group move. False when it moved nothing: not
+ * Manual, grouped by state or date, a pinned section, or no change. */
+export function dropRow(groupKey: string, itemKey: string, before: string | null): boolean {
+  const g = sb.groups.find(x => x.key === groupKey);
+  if (!g || !canOrderRows(view(), groupKey)) return false;
+  const all = rowOrders();
+  // a stored key is kept only while its session is still somewhere: live in a window (a
+  // filter may hide it) or held in the archive. A gone one is dropped from the order.
+  const known = new Set<string>();
+  for (const it of buildItems(agentsNow())) known.add(assignKey(it)).add(it.key);
+  for (const r of archivedSessions() ?? []) if (r?.session_id) known.add(`${SESSION_KEY_PREFIX}${r.session_id}`);
+  const next = placeRow(g.items, all[groupKey], itemKey, before, Date.now(), k => known.has(k));
+  if (!next) return false;
+  void commitLayout({ rows: { ...all, [groupKey]: next } }, 'Moving the session', rerender);
+  rerender();
   return true;
 }
 

@@ -116,6 +116,8 @@ export const OTHER_KEY = '~other';
 // collapsed-groups set as `~archived:open`.
 export const ARCHIVED_SECTION_KEY = '~archived';
 export const DISPATCHED_KEY = '~dispatched';
+/** The lifted "Needs you" section above the groups (not a group: it has no `data-g`). */
+export const NEEDS_YOU_KEY = '~needs-you';
 // Where the dispatcher puts a run's worktree. A session sitting in one is dispatched
 // work, and must never get a group named after the worktree (one group per run).
 export const WORKTREE_SEG = '/.chela/worktrees/';
@@ -464,7 +466,8 @@ export const VIEW_STATUS: readonly string[] = ['active', 'all', 'archived'];
 export const ENV_KINDS: readonly string[] = ['interactive', 'dispatched', 'judge', 'background'];
 export const VIEW_ACTIVITY: Readonly<Record<string, number | null>> = { '1d': 1, '7d': 7, '30d': 30, all: null };
 export const GROUP_MODES: readonly string[] = ['date', 'folder', 'state', 'custom', 'none'];
-export const SORTS: readonly string[] = ['activity', 'name', 'created'];
+// CMX-381: Manual is the order a viewer dragged the rows into, per group (`rows` below).
+export const SORTS: readonly string[] = ['activity', 'name', 'created', 'manual'];
 export interface View {
     status: string;
     env: string[];
@@ -616,10 +619,11 @@ export const UNGROUPED_KEY = '~ungrouped';
 export const FLAT_KEY = '~all';
 export function customKey(id: string): string { return `~custom:${id}`; }
 
-function _sortItems(items: Item[], sort: string, labelOf: (it: Item) => string): Item[] {
+function _sortItems(items: Item[], sort: string, labelOf: (it: Item) => string, manual?: RowOrder | null): Item[] {
     // numeric: CMX-100 sorts after CMX-37, not between CMX-10 and CMX-11
     const byName = (a: Item, b: Item) => labelOf(a).localeCompare(labelOf(b), undefined, { numeric: true });
     if (sort === 'name') return [...items].sort(byName);
+    if (sort === 'manual') return manualSort(items, manual, list => _sortItems(list, 'activity', labelOf));
     if (sort === 'activity' || sort === 'created') {
         const f = sort === 'activity' ? activityTs : createdTs;
         // newest first; a row nothing dates sinks to the bottom, by name
@@ -630,6 +634,70 @@ function _sortItems(items: Item[], sort: string, labelOf: (it: Item) => string):
         });
     }
     return items;
+}
+
+// --- The Manual sort (CMX-381) ---------------------------------------------------------
+//
+// Under Manual the rows inside a group are in the order a viewer DRAGGED them into, kept per
+// group in the server layout's `rows`: the rows' stable keys (assignKey, CMX-378: the Claude
+// session, never the window id a restore renumbers), and `at`, when that group was ordered.
+// Only where a row's group is its own doing: grouped by folder, by custom group, or not at
+// all. Grouped by state or date a row moves between groups on its own, so those keep Last
+// activity, and so does a group nobody ordered yet.
+
+/** One group's hand-made row order. */
+export interface RowOrder {
+    keys: string[];
+    /** When it was written (epoch ms): a row created after it is new, and goes on top. */
+    at: number;
+}
+
+/** The grouping modes whose rows a viewer may put in order (Manual). */
+export const ROW_ORDER_MODES: readonly string[] = ['folder', 'custom', 'none'];
+
+/** May the rows of group `groupKey` be dragged into an order under `view`? Only under the
+ * Manual sort, in a mode where a row stays in its group (never by state or date), and never
+ * in a pinned section (Needs you, Dispatched, Archived). */
+export function canOrderRows(view: Pick<View, 'groupBy' | 'sort'>, groupKey?: string | null): boolean {
+    if (view.sort !== 'manual' || !ROW_ORDER_MODES.includes(view.groupBy)) return false;
+    return groupKey == null || (groupKey !== DISPATCHED_KEY && groupKey !== ARCHIVED_SECTION_KEY && groupKey !== NEEDS_YOU_KEY);
+}
+
+/** The key a row is ordered by: its custom-group assignment key (a session id when it has one). */
+export const rowOrderKey = (it: Item): string => assignKey(it);
+
+/** `items` in `order`'s order. A row the order does not know: created after it was written
+ * (a new session) goes on TOP; any other (moved in from another group, ordered under a filter
+ * that hid it) goes BELOW the ordered ones. Both of those by `rest` (Last activity). A row that
+ * left leaves no gap: the order is read through the rows there now. */
+export function manualSort(items: Item[], order: RowOrder | null | undefined, rest: (items: Item[]) => Item[]): Item[] {
+    if (!order || !order.keys.length) return rest(items);
+    const pos = new Map(order.keys.map((k, i) => [k, i]));
+    // a row keyed by its window before it had a session id is still found by it
+    const at = (it: Item) => pos.get(rowOrderKey(it)) ?? pos.get(it.key);
+    const known = items.filter(it => at(it) != null).sort((a, b) => (at(a) ?? 0) - (at(b) ?? 0));
+    const unknown = items.filter(it => at(it) == null);
+    const isNew = (it: Item) => { const t = createdTs(it); return t != null && t > order.at; };
+    return [...rest(unknown.filter(isNew)), ...known, ...rest(unknown.filter(it => !isNew(it)))];
+}
+
+/** Row `key` (an item key) dropped just before row `before` (null: at the end) of a group
+ * drawn as `items`. The order to persist: the drawn order's row keys, then the stored keys
+ * not drawn right now that `keep` still holds (a row a filter hides, a session mid-restore);
+ * a key of a session that is gone is dropped there. Null when nothing would change, or the
+ * row or `before` is not in the group. */
+export function placeRow(items: Item[], stored: RowOrder | null | undefined, key: string, before: string | null,
+    now: number, keep: (k: string) => boolean = () => true): RowOrder | null {
+    const keys = items.map(it => it.key);
+    if (!keys.includes(key) || key === before || (before != null && !keys.includes(before))) return null;
+    const rest = keys.filter(k => k !== key);
+    const at = before == null ? rest.length : rest.indexOf(before);
+    const order = [...rest.slice(0, at), key, ...rest.slice(at)];
+    if (order.every((k, i) => k === keys[i])) return null;
+    const byKey = new Map(items.map(it => [it.key, it]));
+    const drawn = order.map(k => rowOrderKey(byKey.get(k) as Item));
+    const hidden = (stored?.keys || []).filter(k => !drawn.includes(k) && keep(k));
+    return { keys: [...drawn, ...hidden], at: now };
 }
 
 // An archived (CLOSED) session's row (CMX-75): it has no window any more — only the
@@ -787,6 +855,8 @@ export interface GroupOptions {
     showEmpty?: boolean;
     custom?: Custom;
     sessions?: SessionRecord[];
+    /** CMX-381: the Manual sort's row order per group key. */
+    rows?: Record<string, RowOrder>;
 }
 
 export interface SidebarModel {
@@ -800,7 +870,7 @@ export function groupSidebar(agents: (AgentRow | null | undefined)[] | null | un
     const { mode = 'folder', wants, orchWid = null, order = [], archived = new Set<string>(),
         showArchived = false, env = null, activityDays = null, now = Date.now(),
         sort = 'name', labelOf = (it: Item) => it.key, showEmpty = false,
-        custom = { groups: [], assign: {} }, sessions = [] } = opts;
+        custom = { groups: [], assign: {} }, sessions = [], rows = {} } = opts;
     const status = opts.status || (showArchived ? 'all' : 'active');
     if (!GROUP_MODES.includes(mode)) throw new Error(`unknown sidebar grouping mode: ${mode}`);
     const items = buildItems(agents);
@@ -876,15 +946,17 @@ export function groupSidebar(agents: (AgentRow | null | undefined)[] | null | un
     }
 
     const labels = folderLabels([...byKey.values()].filter(g => !g.label && !g.flat).map(g => g.key));
+    // Manual where rows cannot be ordered (by state or date, a pinned section) is Last activity.
+    const sortOf = (key: string) => (sort === 'manual' && !canOrderRows({ groupBy: mode, sort }, key) ? 'activity' : sort);
     let groups: Group[] = [...byKey.values()].map(g => {
         // The folder a "+" opens a new session in; Other and Dispatched have none.
         const cwd = mode === 'folder' && g.key !== OTHER_KEY && g.key !== DISPATCHED_KEY ? g.key : null;
         const label = g.label != null ? g.label : (labels[g.key] ?? g.key);
-        return { ...g, label, cwd, items: _sortItems(g.items, sort, labelOf) };
+        return { ...g, label, cwd, items: _sortItems(g.items, sortOf(g.key), labelOf, rows[g.key]) };
     });
     if (!showEmpty) groups = groups.filter(g => g.items.length || g.flat);
     return {
-        needsYou: _sortItems(lifted, sort, labelOf),
+        needsYou: _sortItems(lifted, sortOf(NEEDS_YOU_KEY), labelOf),
         groups: orderGroups(groups, order),
         archived: archivedRows,
         hidden,
@@ -931,6 +1003,8 @@ export interface SidebarState {
     orchWid: string | null;
     view: View;
     order: string[];
+    /** CMX-381: the Manual sort's row order per group (the server layout's `rows`). */
+    rows?: Record<string, RowOrder>;
     custom: Custom;
     archived: string[];
     sessions: SessionRecord[];
@@ -957,7 +1031,7 @@ export function modelOptions(s: SidebarState): GroupOptions {
         archived: new Set(s.archived), status: s.view.status, env: s.view.env,
         activityDays: VIEW_ACTIVITY[s.view.activity] ?? null, now: s.now, sort: s.view.sort,
         labelOf: it => itemLabel(it, s.labels), showEmpty: s.view.showEmpty, custom: s.custom,
-        sessions: s.sessions,
+        sessions: s.sessions, rows: s.rows,
     };
 }
 

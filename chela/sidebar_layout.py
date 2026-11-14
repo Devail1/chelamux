@@ -29,10 +29,16 @@ Store shape (``CHELA_DIR/sidebar-layout.json``)::
      "custom": {"groups": [{"id": "...", "name": "..."}, ...], "assign": {"<item key>": "<id>"},
                 "seen": {"s:<session id>": <epoch ms>}},   # CMX-378, omitted while empty
      "view":   {"groupBy": "...", "sort": "...", ...},
-     "width":  288}
+     "width":  288,
+     "rows":   {"<group key>": {"keys": ["s:<session id>", ...], "at": <epoch ms>}}}
 
 ``width`` (CMX-278) is the desktop sidebar's width in CSS px, clamped to
 [:data:`MIN_WIDTH`, :data:`MAX_WIDTH`]; ``None`` until someone drags it (the default).
+
+``rows`` (CMX-381) is the Manual sort's order of the sessions inside each group: the rows'
+stable keys (CMX-378's ``s:<session id>``, else ``run:<task>`` / ``w:<window>``) top to
+bottom, and ``at``, when that group was last ordered (a session created after it goes to
+the top). A group nobody ordered by hand has no entry.
 """
 from __future__ import annotations
 
@@ -45,7 +51,7 @@ from chela.config import CHELA_DIR
 _STORE = CHELA_DIR / "sidebar-layout.json"
 _LOCK = threading.Lock()
 
-FIELDS = ("order", "custom", "view", "width")
+FIELDS = ("order", "custom", "view", "width", "rows")
 
 # Bounds — a layout is a few dozen keys; anything far larger is a bug or abuse, never a
 # sidebar. Over-long values are dropped, not truncated into something that half-means.
@@ -115,7 +121,25 @@ def _clean_width(v: object) -> int | None:
     return max(MIN_WIDTH, min(MAX_WIDTH, round(v)))
 
 
-_CLEAN = {"order": _clean_order, "custom": _clean_custom, "view": _clean_view, "width": _clean_width}
+def _clean_rows(v: object) -> dict:
+    """``{group key: {"keys": [row key, ...], "at": epoch ms}}``; an entry with a bad key, no
+    keys or no usable stamp is dropped whole (a half-entry would misplace every new row)."""
+    if not isinstance(v, dict):
+        return {}
+    out = {}
+    for g, e in v.items():
+        if len(out) >= _MAX_ITEMS:
+            break
+        if not _str(g) or not isinstance(e, dict) or not _stamp(e.get("at")):
+            continue
+        keys = _clean_order(e.get("keys"))
+        if keys:
+            out[g] = {"keys": keys, "at": e["at"]}
+    return out
+
+
+_CLEAN = {"order": _clean_order, "custom": _clean_custom, "view": _clean_view, "width": _clean_width,
+          "rows": _clean_rows}
 
 
 def _read() -> dict | None:

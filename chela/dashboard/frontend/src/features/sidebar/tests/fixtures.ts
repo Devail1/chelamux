@@ -38,6 +38,7 @@ export function actions() {
     moveToGroup: vi.fn<SidebarActions['moveToGroup']>(),
     dropGroup: vi.fn<SidebarActions['dropGroup']>(() => true),
     dropOnGroup: vi.fn<SidebarActions['dropOnGroup']>(() => true),
+    dropRow: vi.fn<SidebarActions['dropRow']>(() => true),
     viewMenuAction: vi.fn<SidebarActions['viewMenuAction']>(),
     newCustomGroup: vi.fn<SidebarActions['newCustomGroup']>(() => null),
     renameCustomGroup: vi.fn<SidebarActions['renameCustomGroup']>(),

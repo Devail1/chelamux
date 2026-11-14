@@ -1,6 +1,6 @@
 // The layout (CMX-82): SERVER state, shared by every device. chela/sidebar_layout.py, behind
 // /api/sidebar/layout: the group order, the custom groups and their membership, the View
-// menu's choices and (CMX-278) the desktop width. Read on start and on every sidebar refresh;
+// menu's choices, (CMX-278) the desktop width and (CMX-381) the Manual sort's row order. Read on start and on every sidebar refresh;
 // a change here is written there. `loaded` stays false until the first answer, and NOTHING is
 // written back before it: a render off the defaults must never overwrite the layout a device
 // saved. `gen` counts local writes: once loaded, a read that started before one is stale.
@@ -12,8 +12,9 @@ import { isObj, lsJson, lsRead, lsRemove, postJson, publish, say } from './page.
 // Pre-CMX-82 these were per browser; a browser that still holds them imports them ONCE.
 const LEGACY_KEYS = { order: 'chela_sb_group_order', custom: 'chela_sb_custom_groups', view: 'chela_sb_view' } as const;
 
-type Fields = Partial<Pick<SidebarLayout, 'order' | 'custom' | 'view' | 'width'>>;
-let layout: SidebarLayout & { gen: number } = { order: [], custom: null, view: null, width: null, loaded: false, gen: 0 };
+type Fields = Partial<Pick<SidebarLayout, 'order' | 'custom' | 'view' | 'width' | 'rows'>>;
+type Key = keyof Fields;
+let layout: SidebarLayout & { gen: number } = { order: [], custom: null, view: null, width: null, rows: {}, loaded: false, gen: 0 };
 
 export const getLayout = (): Readonly<SidebarLayout> => layout;
 
@@ -25,8 +26,8 @@ export function applyWidth(w: unknown): void {
 }
 
 function publishLayout() {
-  const { order, custom, view, width, loaded } = layout;
-  publish('sidebarLayout', { order, custom, view, width, loaded });
+  const { order, custom, view, width, rows, loaded } = layout;
+  publish('sidebarLayout', { order, custom, view, width, rows, loaded });
   applyWidth(width);
 }
 
@@ -39,11 +40,12 @@ function setLayout(l: unknown) {
     custom: isObj(o.custom) ? o.custom : null,
     view: isObj(o.view) ? o.view : null,
     width: typeof o.width === 'number' ? o.width : null,
+    rows: isObj(o.rows) ? o.rows : {},
     loaded: true,
   };
   // Every tick re-reads the layout: publish (and repaint) only what changed.
-  const same = (k: 'order' | 'custom' | 'view' | 'width') => JSON.stringify(before[k]) === JSON.stringify(layout[k]);
-  if (before.loaded && same('order') && same('custom') && same('view') && same('width')) {
+  const same = (k: Key) => JSON.stringify(before[k]) === JSON.stringify(layout[k]);
+  if (before.loaded && (['order', 'custom', 'view', 'width', 'rows'] as const).every(same)) {
     layout = before;
     return;
   }
