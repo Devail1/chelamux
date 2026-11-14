@@ -104,6 +104,8 @@ function Row({ it, s, actions, archived = false, altNum, folder, children }: Row
   const v = rowView(it, s);
   if (!v) return null;
   const name = v.agent.name ?? '';
+  // A plain shell already shows its live cwd as a chip (CMX-330): no second copy under it.
+  if (v.meta.some(m => m.kind === 'cwd')) folder = undefined;
   const cls = ['agent-row', 'rich', name === s.active && 'active', v.onWall && 'on-wall',
     v.runId && 'run-row', archived && 'archived', press.full && 'show-full', folder && 'has-folder']
     .filter(Boolean).join(' ');

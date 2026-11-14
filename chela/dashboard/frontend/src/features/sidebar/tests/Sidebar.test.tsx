@@ -452,6 +452,14 @@ describe('the folder line (CMX-377)', () => {
     expect(el.textContent).not.toContain('.chela');
   });
 
+  test('a plain shell keeps its cwd chip and gets no second copy as a folder line', () => {
+    const sh = win('sh', { claude_running: false, shell_cwd: '~/srv/code/alpha', cwd: '/srv/code/alpha' });
+    const { el } = draw(ungrouped([sh, win('proj')]));
+    expect(meta(rowOf(el, 'sh'), 'cwd')?.textContent).toBe('~/srv/code/alpha');
+    expect(folderOf(rowOf(el, 'sh'))).toBeNull();
+    expect(folderOf(rowOf(el, 'proj'))).toBe('alpha');
+  });
+
   test('a row with no cwd has no folder line, and keeps the one-line shape', () => {
     const { el } = draw(ungrouped([win('nowhere', { cwd: null })]));
     const row = rowOf(el, 'nowhere');
