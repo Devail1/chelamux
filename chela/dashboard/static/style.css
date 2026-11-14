@@ -2767,6 +2767,17 @@ body.sidebar-resizing iframe { pointer-events: none; }
 .agent-row.rich:hover .ar-more,
 .agent-row.rich:focus-within .ar-more { display: inline; }
 .agent-row.rich.archived { opacity: 0.55; }
+/* CMX-377 (Liav, 11-14): the FOLDER LINE, a dim second line naming the session's project
+   (`~`, `chelamux`, `projects/foo`, `chelamux · CMX-374`), drawn unless the sidebar is grouped
+   by folder. The first line (.ar-line) is exactly a one-line row's content, so the title,
+   badges, crown and ⋯ stay where they were; the folder line sits under the title and
+   truncates on its own. */
+.agent-row.rich.has-folder { flex-direction: column; align-items: stretch; gap: 1px; }
+.agent-row.rich .ar-line { display: flex; align-items: center; gap: 9px; min-width: 0; }
+.agent-row.rich .ar-folder-line {
+    min-width: 0; padding-left: 19px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    font-size: 10.5px; line-height: 1.3; color: var(--text-dim);
+}
 /* CMX-85: the Alt fast-switch number, shown only while Alt is held (the React
    sidebar island draws it, CMX-276), like the Claude desktop app's
    Ctrl-held numbers. Over the row's right edge, so the row never reflows. */
@@ -2990,6 +3001,7 @@ body.sidebar-resizing iframe { pointer-events: none; }
     body.sidebar-collapsed .agent-row .ar-main,
     body.sidebar-collapsed .agent-row.rich .agent-row-name,
     body.sidebar-collapsed .agent-row.rich .ar-meta,
+    body.sidebar-collapsed .agent-row.rich .ar-folder-line,
     body.sidebar-collapsed .agent-row .row-unarchive,
     body.sidebar-collapsed .agent-row .recent-resume,
     body.sidebar-collapsed .agent-row .recent-dismiss,
@@ -3011,6 +3023,7 @@ body.sidebar-resizing iframe { pointer-events: none; }
        and the session's status dot a notch so they read at a glance. */
     body.sidebar-collapsed .side-item-icon { flex: 0 0 auto; font-size: 18px; }
     body.sidebar-collapsed .agent-row.rich { align-items: center; }
+    body.sidebar-collapsed .agent-row.rich .ar-line { justify-content: center; gap: 5px; }
     body.sidebar-collapsed .agent-row.rich .term-status-dot { margin-top: 0; width: 10px; height: 10px; }
 
     /* Grouped sessions flatten: no header to hang the nesting guide off. */
