@@ -1,7 +1,10 @@
 import { act, cleanup, fireEvent, render } from '@testing-library/react';
 import { afterEach, describe, expect, test } from 'vitest';
 import { CONTEXT_SHOWN_FROM, Sidebar } from '../index.ts';
-import { type AgentRow, DISPATCHED_KEY, OTHER_KEY, type SidebarState, normalizeView, sidebarOrder } from '../model.ts';
+import {
+  type AgentRow, DISPATCHED_KEY, type Group, OTHER_KEY, type SidebarState, buildItems, isSingleFolder, normalizeView,
+  sidebarOrder,
+} from '../model.ts';
 import { NOW, actions, runWin, state, win } from './fixtures.ts';
 
 afterEach(cleanup);
@@ -601,6 +604,18 @@ describe('a folder with one session (CMX-379)', () => {
     expect(el.querySelectorAll('.side-group.single')).toHaveLength(0);
     expect(folderOf(rowOf(el, 'blocked'))).toBeNull();
     expect(folderOf(rowOf(el, 'old'))).toBeNull();
+  });
+
+  test('isSingleFolder: only a folder group, grouped by folder, holding exactly one row', () => {
+    const one = [buildItems([win('x')])[0]].filter(Boolean) as Group['items'];
+    const g = (over: Partial<Group> = {}): Group => ({ key: '/srv/code/alpha', label: 'alpha', cwd: '/srv/code/alpha', items: one, ...over });
+    expect(isSingleFolder(g(), 'folder')).toBe(true);
+    // the mode alone decides, even for a group that carries a folder
+    for (const mode of ['date', 'state', 'custom', 'none']) expect(isSingleFolder(g(), mode)).toBe(false);
+    expect(isSingleFolder(g({ cwd: null }), 'folder')).toBe(false);
+    expect(isSingleFolder(g({ flat: true }), 'folder')).toBe(false);
+    expect(isSingleFolder(g({ items: [] }), 'folder')).toBe(false);
+    expect(isSingleFolder(g({ items: [...one, ...one] }), 'folder')).toBe(false);
   });
 
   test.each(['date', 'state', 'custom'])('grouped by %s: a group of one keeps its header', (groupBy) => {
