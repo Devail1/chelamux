@@ -7,7 +7,7 @@
 import { api } from '../../../shared/api/index.ts';
 import type { SidebarLayout } from '../../../shared/bridge/index.ts';
 import { clampWidth } from '../model.ts';
-import { isObj, lsJson, lsRead, lsRemove, postJson, publish } from './page.ts';
+import { isObj, lsJson, lsRead, lsRemove, postJson, publish, say } from './page.ts';
 
 // Pre-CMX-82 these were per browser; a browser that still holds them imports them ONCE.
 const LEGACY_KEYS = { order: 'chela_sb_group_order', custom: 'chela_sb_custom_groups', view: 'chela_sb_view' } as const;
@@ -50,15 +50,45 @@ function setLayout(l: unknown) {
   publishLayout();
 }
 
-/** Keep the named fields at once (the next render shows them); send them once loaded. */
-export function writeLayout(fields: Fields): void {
+/** Why a layout write failed, in words for the viewer; null when it did not. */
+export type WriteResult = string | null;
+
+/** Keep the named fields at once (the next render shows them); send them once loaded.
+ * Resolves to the failure (the server's `error`, or that it did not answer), else null. */
+export function writeLayout(fields: Fields): Promise<WriteResult> {
   layout = { ...layout, ...fields, gen: layout.gen + 1 };
   publishLayout();
-  if (!layout.loaded) return;
+  if (!layout.loaded) return Promise.resolve(null);
   const gen = layout.gen;
-  postJson('/api/sidebar/layout', fields)
-    .then(res => { if (isObj(res) && res.layout && gen === layout.gen) setLayout(res.layout); })
-    .catch(() => { /* transient: the next refresh re-reads the server's copy */ });
+  return postJson('/api/sidebar/layout', fields)
+    .then((res): WriteResult => {
+      if (isObj(res) && (res.ok === false || typeof res.error === 'string')) {
+        return typeof res.error === 'string' && res.error ? res.error : 'the dashboard refused it';
+      }
+      if (isObj(res) && res.layout && gen === layout.gen) setLayout(res.layout);
+      return null;
+    })
+    .catch((): WriteResult => 'the dashboard did not answer');
+}
+
+/** CMX-380: an OPTIMISTIC write the viewer asked for (a drag, Move up / Move down, Move to
+ * group): shown at once, and on a failed write put back as it was, saying why (`what`
+ * names the change). Never a silent revert, and never over a newer write: a change made
+ * since this one keeps the screen. Resolves true when the write held. */
+export async function commitLayout(fields: Fields, what: string, onRevert?: () => void): Promise<boolean> {
+  const before: Fields = {};
+  for (const k of Object.keys(fields) as (keyof Fields)[]) (before as Record<string, unknown>)[k] = layout[k];
+  const pending = writeLayout(fields);
+  const gen = layout.gen;
+  const err = await pending;
+  if (err == null) return true;
+  if (layout.gen === gen) {
+    layout = { ...layout, ...before };
+    publishLayout();
+    onRevert?.();
+  }
+  say(`${what} failed: ${err}. It was put back.`);
+  return false;
 }
 
 function legacyLayout(): Fields | null {

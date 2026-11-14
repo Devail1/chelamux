@@ -2849,6 +2849,32 @@ body.sidebar-resizing iframe { pointer-events: none; }
 /* CMX-379: grouped by folder, a folder with one session is one bare row (no header), so
    it spends no header and no group gap either. */
 .side-group.single { margin-top: 2px; }
+/* CMX-380: drag a group (its header, or a bare folder's row) to reorder, and under Custom
+   groups a session onto a group. The grip shows on hover, in the row's left gutter; the
+   whole header or row is the handle (a click under the move threshold still clicks). A
+   drop LINE marks where a group will land; a drop target is outlined, a pinned section
+   that refuses the drop is dimmed. Touch: a long press starts it, so no touch-action
+   change: a plain swipe scrolls as before. */
+.group-head, .agent-row.rich.draggable { position: relative; }
+.agent-row.rich.draggable { -webkit-touch-callout: none; -webkit-user-select: none; user-select: none; }
+.drag-grip {
+    position: absolute; left: -5px; top: 50%; transform: translateY(-50%);
+    display: inline-flex; color: var(--text-dim); opacity: 0; pointer-events: none;
+    transition: opacity 0.12s;
+}
+.group-head.draggable:hover .drag-grip, .agent-row.rich.draggable:hover .drag-grip { opacity: 0.7; }
+body.sidebar-dragging, body.sidebar-dragging * { cursor: grabbing !important; }
+body.sidebar-dragging #sidebar-agents { -webkit-user-select: none; user-select: none; }
+.side-group.dragging, .agent-row.rich.dragging { opacity: 0.45; }
+.side-group.drop-before, .side-group.drop-after { position: relative; }
+.side-group.drop-before::before, .side-group.drop-after::after {
+    content: ''; position: absolute; left: 4px; right: 4px; height: 2px; border-radius: 2px;
+    background: var(--accent); pointer-events: none;
+}
+.side-group.drop-before::before { top: -6px; }
+.side-group.drop-after::after { bottom: -4px; }
+.side-group.drop-target { outline: 1.5px dashed var(--accent); outline-offset: 1px; border-radius: 7px; }
+.side-group.drop-reject, .side-triage.drop-reject { opacity: 0.5; cursor: no-drop; }
 /* A compact menu, dividers between action groups (.popover-sep). */
 .side-menu { min-width: 168px; }
 .side-menu .popover-item { padding: 6px 10px; }
@@ -3009,7 +3035,8 @@ body.sidebar-resizing iframe { pointer-events: none; }
     body.sidebar-collapsed .agent-row .recent-resume,
     body.sidebar-collapsed .agent-row .recent-dismiss,
     body.sidebar-collapsed .recent-toggle-dispatcher,
-    body.sidebar-collapsed .agent-row .row-more { display: none; }
+    body.sidebar-collapsed .agent-row .row-more,
+    body.sidebar-collapsed .drag-grip { display: none; }
 
     /* The section heads are gone, so a rule stands in for the section break. */
     body.sidebar-collapsed .side-section { margin-bottom: 10px; }

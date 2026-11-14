@@ -31,7 +31,7 @@ export const sidebarActions: SidebarActions = {
   selectAgent, selectView,
   toggleGroup: sb.toggleGroup, groupNewSession: sb.groupNewSession, toggleArchivedSection: sb.toggleArchivedSection,
   unarchiveRow: sb.unarchiveRow, groupMenuAction: sb.groupMenuAction, rowMenuAction: sb.rowMenuAction,
-  moveToGroup: sb.moveToGroup, viewMenuAction: sb.viewMenuAction, newCustomGroup: () => sb.newCustomGroup(),
+  moveToGroup: sb.moveToGroup, dropGroup: sb.dropGroup, dropOnGroup: sb.dropOnGroup, viewMenuAction: sb.viewMenuAction, newCustomGroup: () => sb.newCustomGroup(),
   renameCustomGroup: (id) => sb.renameCustomGroup(id), deleteCustomGroup: sb.deleteCustomGroup,
   setSidebarWidth: sb.setSidebarWidth, resumeSession: sb.resumeSession, dismissRecentSession: sb.dismissRecentSession,
   clearRecentSessions: sb.clearRecentSessions, undoDismissRecent: sb.undoDismissRecent, closeRecentUndo: sb.closeRecentUndo,
