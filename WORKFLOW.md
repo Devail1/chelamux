@@ -147,6 +147,16 @@ judge:
   # tool_config: ["eslint.config.*", ".dependency-cruiser.*", "tsconfig*.json", "vite.config.*",
   #               "vitest.config.*", "package.json:scripts", ".github/workflows/*"]
 
+# ⏳ CMX-382, Liav 2026-11-15: the NIGHTLY sweep's own budget (`chela/sweep_nightly.py`). It is
+# nightly-only: the per-PR sweep in `chela judge sweep` / `task-finished` keeps
+# `judge.sweep_budget_seconds` above. Unset, the nightly falls back to `judge.sweep_*` and then
+# to the defaults (900 s, 60 mutations). Raised because the 11-15 night owed 365 mutations from
+# four sidebar PRs and reached only ~19 (346 still owed); the battery starts ~02:00 while the
+# box is idle, so 3 h fits in idle hours. Suites still run one at a time (suite_slots: 1).
+sweep:
+  budget_seconds: 10800   # nightly only: 3 h, from ~02:00 while the box is idle
+  max_mutations: 400
+
 hooks:
   # ⛔ THIS HOOK IS THE JUDGE'S ENVIRONMENT TOO, not just the agent's — `_launch_agent` runs
   # it on every launch, and a judge worktree is a launch. It therefore has to build an

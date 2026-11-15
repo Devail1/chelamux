@@ -755,6 +755,14 @@ def _run(wf, now: float, chela_dir: Path, filer: Filer | None, result: dict) -> 
             log.exception("nightly sweep: could not remove %s", worktree)
 
 
+def nightly_budget(wf) -> sweep.SweepBudget:
+    """⏳ CMX-382: the nightly battery's budget — ``sweep.budget_seconds`` /
+    ``sweep.max_mutations`` (nightly-only) over ``judge.sweep_*`` (the per-PR budget) over
+    the defaults, each field on its own (:func:`sweep.resolve_budget`)."""
+    return sweep.resolve_budget(wf, seconds=wf.get("sweep", "budget_seconds"),
+                                max_mutations=wf.get("sweep", "max_mutations"))
+
+
 def _sweep_and_file(wf, worktree: Path, head: str, ref: str, standard: list[dict],
                     chela_dir: Path, filer: Filer | None, result: dict,
                     owed: list[dict]) -> None:
@@ -792,8 +800,7 @@ def _sweep_and_file(wf, worktree: Path, head: str, ref: str, standard: list[dict
         return
     prune_evidence(chela_dir)
     cfg = judge.judge_suite_config(wf)
-    budget = sweep.resolve_budget(wf, seconds=wf.get("sweep", "budget_seconds"),
-                                  max_mutations=wf.get("sweep", "max_mutations"))
+    budget = nightly_budget(wf)
     report = sweep.sweep(worktree, f"{ref}@{head[:12]} (standard-tier lines)",
                          cfg.test_cmd, timeout=cfg.suite_timeout_seconds,
                          select_tests=cfg.select_tests, provision=False, budget=budget,
