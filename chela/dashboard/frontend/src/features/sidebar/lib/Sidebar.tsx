@@ -5,8 +5,8 @@ import { useEffect, useRef, useState, type MouseEvent, type PointerEvent, type R
 import { icons } from '../../../shared/icons/index.ts';
 import { TextButton } from '../../../shared/ui/index.ts';
 import {
-  ARCHIVED_SECTION_KEY, DISPATCHED_KEY, type Group, type Item, type SidebarState, assignKey, canDragGroup, dropAssignee,
-  folderLines, isSingleFolder, showsFolderLine, sidebarModel,
+  ARCHIVED_SECTION_KEY, DISPATCHED_KEY, type Group, type Item, NEEDS_YOU_KEY, type SidebarState, assignKey, canDragGroup,
+  canOrderRows, dropAssignee, folderLines, isSingleFolder, showsFolderLine, sidebarModel,
 } from '../model.ts';
 import type { SidebarActions } from './actions.ts';
 import { type DragSource, type DragView, useSidebarDrag } from './drag.ts';
@@ -103,8 +103,9 @@ interface RowProps {
   children?: ReactNode;
 }
 
-/** CMX-380: a draggable row or header's pointerdown, and whether it is the one being dragged. */
-interface Drag { onPointerDown: (e: PointerEvent<HTMLElement>) => void; dragging: boolean }
+/** CMX-380: a draggable row or header's pointerdown, and whether it is the one being dragged.
+ * CMX-381: `drop` is the line a row reordered within its group lands on (this row's side). */
+interface Drag { onPointerDown: (e: PointerEvent<HTMLElement>) => void; dragging: boolean; drop?: 'before' | 'after' }
 
 // Shown on hover (style.css), never on the folded icon rail.
 const Grip = () => <span className="drag-grip" aria-hidden="true"><icons.grip size={12} /></span>;
@@ -119,7 +120,7 @@ function Row({ it, s, actions, archived = false, altNum, folder, group, drag, ch
   if (v.meta.some(m => m.kind === 'cwd')) folder = undefined;
   const cls = ['agent-row', 'rich', name === s.active && 'active', v.onWall && 'on-wall',
     v.runId && 'run-row', archived && 'archived', press.full && 'show-full', folder && 'has-folder',
-    drag && 'draggable', drag?.dragging && 'dragging']
+    drag && 'draggable', drag?.dragging && 'dragging', drag?.drop && `drop-${drag.drop}`]
     .filter(Boolean).join(' ');
   const line = (
     <>
@@ -199,10 +200,14 @@ function GroupView({ g, index, count, s, actions, alt, folders, drag }: GroupPro
   const movable = canDragGroup(g);
   const groupSrc: DragSource = { kind: 'group', key: g.key };
   const handle = (src: DragSource): Drag => ({ onPointerDown: drag.bind(src), dragging: sameSource(drag.view?.source, src) });
+  // CMX-381: under Manual (by folder, custom group or none) a row also drags within its group.
+  const reorder = canOrderRows(s.view, g.key) && g.items.length > 1;
+  const rowLine = drag.view?.rowLine;
   const rowDrag = (it: Item): Drag | undefined => {
     if (single) return movable ? handle(groupSrc) : undefined;
-    if (s.view.groupBy !== 'custom') return undefined;
-    return handle({ kind: 'row', assign: assignKey(it), group: g.key, item: it.key });
+    if (s.view.groupBy !== 'custom' && !reorder) return undefined;
+    const d = handle({ kind: 'row', assign: assignKey(it), group: g.key, item: it.key, reorder });
+    return rowLine?.key === it.key ? { ...d, drop: rowLine.side } : d;
   };
   const rows = g.items.map(it => (
     <Row key={it.key} it={it} s={s} actions={actions} altNum={alt.get(it.key)}
@@ -265,6 +270,7 @@ export function Sidebar({ state: s, actions }: { state: SidebarState | null; act
     group: (key, before) => actions.dropGroup(key, before),
     accepts: key => !!s && s.view.groupBy === 'custom' && dropAssignee(key, s.custom) !== undefined,
     row: (assign, key) => actions.dropOnGroup(assign, key),
+    reorder: (key, item, before) => actions.dropRow(key, item, before),
   });
   if (!s || !s.agents.length) return <div className="side-empty">No agents</div>;
   const model = sidebarModel(s);
@@ -280,7 +286,7 @@ export function Sidebar({ state: s, actions }: { state: SidebarState | null; act
   return (
     <>
       {model.needsYou.length > 0 && (
-        <div className={`side-triage side-needs-you${dropCls('~needs-you', drag.view)}`}>
+        <div className={`side-triage side-needs-you${dropCls(NEEDS_YOU_KEY, drag.view)}`}>
           <div className="triage-head">Needs you <span className="triage-count">{model.needsYou.length}</span></div>
           {model.needsYou.map(it => (
             <Row key={it.key} it={it} s={s} actions={actions} altNum={alt.get(it.key)} folder={folders[it.key]} />

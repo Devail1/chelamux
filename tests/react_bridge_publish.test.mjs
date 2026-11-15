@@ -58,7 +58,7 @@ test('a layout read from the server is published whole, loaded, without the priv
     for (let i = 0; i < 8; i++) await flush();
     const last = sets.sidebarLayout.at(-1);
     assert.deepEqual(last.order, ['/srv/elsewhere']);
-    assert.deepEqual(Object.keys(last).sort(), ['custom', 'loaded', 'order', 'view', 'width']);
+    assert.deepEqual(Object.keys(last).sort(), ['custom', 'loaded', 'order', 'rows', 'view', 'width']);
     assert.equal(last.loaded, true);
 });
 

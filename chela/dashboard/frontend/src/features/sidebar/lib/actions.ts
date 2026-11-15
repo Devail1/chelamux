@@ -19,6 +19,9 @@ export interface SidebarActions {
   dropGroup(key: string, before: string | null): boolean;
   /** CMX-380: a dragged row (its assignment key) dropped on group `groupKey` (null: none). */
   dropOnGroup(itemKey: string, groupKey: string | null): boolean;
+  /** CMX-381: under Manual, row `itemKey` of group `groupKey` dropped just before row
+   * `before` (null: at the end). */
+  dropRow(groupKey: string, itemKey: string, before: string | null): boolean;
   /** One View choice: `status:all`, `env:judge` (toggles), `group:state`, `toggle:showPR`, … */
   viewMenuAction(act: string): void;
   /** Prompts for the name; null when none was given. */

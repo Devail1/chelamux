@@ -16,7 +16,7 @@ const STATUS_LABEL: Record<string, string> = { active: 'Active', all: 'All', arc
 const ENV_LABEL: Record<string, string> = { interactive: 'Interactive', dispatched: 'Dispatched agents', judge: 'Judges', background: 'Background sessions' };
 const ACTIVITY_LABEL: Record<string, string> = { '1d': '1d', '7d': '7d', '30d': '30d', all: 'All' };
 const GROUP_LABEL: Record<string, string> = { date: 'Date', folder: 'Folder', state: 'State', custom: 'Custom groups', none: 'None' };
-const SORT_LABEL: Record<string, string> = { activity: 'Last activity', name: 'Name', created: 'Created' };
+const SORT_LABEL: Record<string, string> = { activity: 'Last activity', name: 'Name', created: 'Created', manual: 'Manual' };
 
 // A click on a trigger inside a row or a group header must not also select the row or fold
 // the group.

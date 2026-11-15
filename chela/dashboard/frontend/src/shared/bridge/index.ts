@@ -53,6 +53,8 @@ export interface SidebarLayout {
   view: Record<string, unknown> | null;
   /** The desktop sidebar's width in px (CMX-278); null = the default. */
   width: number | null;
+  /** CMX-381: the Manual sort's row order per group: `{group key: {keys, at}}`. */
+  rows: Record<string, unknown>;
   loaded: boolean;
 }
 
@@ -76,7 +78,7 @@ declare global {
 export function createBridge(): Bridge {
   return {
     agents: createStore<Agent[]>([]),
-    sidebarLayout: createStore<SidebarLayout>({ order: [], custom: null, view: null, width: null, loaded: false }),
+    sidebarLayout: createStore<SidebarLayout>({ order: [], custom: null, view: null, width: null, rows: {}, loaded: false }),
     sidebar: createStore<SidebarState | null>(null),
     nav: createStore<NavState>({ items: [], active: null, badges: {} }),
     recent: createStore<RecentState>({ rows: [], dispatcher_rows: [], revealed: false, undo: null }),

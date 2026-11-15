@@ -167,3 +167,53 @@ def test_cmx378_a_stamp_for_a_dropped_assignment_is_dropped_too(phone):
     _post(phone, {"custom": {"groups": [{"id": "g1", "name": "A"}], "assign": {"s:a": "nope"},
                              "seen": {"s:a": 1}}})
     assert _get(phone)["custom"] == {"groups": [{"id": "g1", "name": "A"}], "assign": {}}
+
+
+# --- CMX-381: the Manual sort's row order, per group -------------------------------------
+
+def test_a_manual_row_order_on_one_device_is_read_by_the_other(phone, laptop):
+    rows = {"/srv/x": {"keys": ["s:S-c", "s:S-a", "s:S-b"], "at": 1763164800000}}
+    _post(phone, {"rows": rows})
+    assert _get(laptop)["rows"] == rows
+
+
+def test_a_rows_write_keeps_the_other_fields_and_they_keep_it(phone):
+    _post(phone, {"order": ["/srv/b"], "view": {"sort": "manual"}})
+    _post(phone, {"rows": {"/srv/x": {"keys": ["s:A"], "at": 5}}})
+    _post(phone, {"order": ["/srv/a"]})
+    got = _get(phone)
+    assert got["order"] == ["/srv/a"]
+    assert got["view"] == {"sort": "manual"}
+    assert got["rows"] == {"/srv/x": {"keys": ["s:A"], "at": 5}}
+
+
+@pytest.mark.parametrize("entry", [
+    {"keys": ["s:A"]},                              # no stamp
+    {"keys": ["s:A"], "at": True},                  # a bool is not a stamp
+    {"keys": ["s:A"], "at": -1},
+    {"keys": ["s:A"], "at": float("inf")},
+    {"keys": ["s:A"], "at": "5"},
+    {"keys": [], "at": 5},                          # nothing ordered
+    {"keys": [3, None, ""], "at": 5},               # no usable key
+    {"keys": "s:A", "at": 5},
+    ["s:A"],
+    None,
+])
+def test_a_half_rows_entry_is_dropped_whole(entry):
+    assert sl._clean_rows({"/srv/x": entry, "/srv/y": {"keys": ["s:B"], "at": 7}}) == {"/srv/y": {"keys": ["s:B"], "at": 7}}
+
+
+def test_rows_keys_are_cleaned_like_the_group_order():
+    long = "x" * (sl._MAX_STR + 1)
+    assert sl._clean_rows({"/g": {"keys": ["s:A", "s:A", long, 4, "s:B"], "at": 9}}) == {"/g": {"keys": ["s:A", "s:B"], "at": 9}}
+    assert sl._clean_rows({long: {"keys": ["s:A"], "at": 9}, "": {"keys": ["s:A"], "at": 9}}) == {}
+    assert sl._clean_rows(["/g"]) == {}
+    assert sl._clean_rows(None) == {}
+    assert sl._MAX_ITEMS == 500
+    many = {f"/g{i}": {"keys": ["s:A"], "at": 1} for i in range(sl._MAX_ITEMS + 5)}
+    assert len(sl._clean_rows(many)) == sl._MAX_ITEMS
+
+
+def test_a_layout_saved_before_rows_existed_reads_with_none(store, phone):
+    store.write_text('{"order": ["/srv/a"], "custom": {}, "view": {}, "width": null}')
+    assert _get(phone)["rows"] == {}
