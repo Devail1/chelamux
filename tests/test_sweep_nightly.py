@@ -1916,6 +1916,31 @@ def test_a_swept_night_notifies_and_records_no_reason(tmp_path, notices, events)
         "at": res["at"], "status": "survivors", "reason": None}
 
 
+def test_a_swept_night_carries_the_batterys_measured_rate_into_its_notice(
+        tmp_path, notices, monkeypatch):
+    """⚡ CMX-383: the rate in the result AND the inbox line is the battery's own — wired
+    through ``run``, not recomputed or dropped on the way."""
+    repo, chela = _repo(tmp_path), tmp_path / "chela"
+    real, seen = sweep.sweep, []
+
+    def timed(*a, **kw):
+        report = real(*a, **kw)
+        report.battery_seconds = 1234.5   # a distinctive rate the run could not invent
+        seen.append(report)
+        return report
+
+    monkeypatch.setattr(sweep, "sweep", timed)
+    res = _run(repo, chela, Filer())
+    (report,) = seen
+    assert report.measured > 0 and report.per_hour is not None
+    assert (res["measured"], res["battery_seconds"], res["per_hour"]) == (
+        report.measured, 1234.5, report.per_hour)
+    (_, text, payload), = notices
+    assert payload["per_hour"] == report.per_hour
+    assert text == res["summary"]
+    assert f": {report.per_hour:g} mutations/hour" in text
+
+
 @pytest.mark.parametrize("status, reason, is_quiet", [
     ("skipped", "no_merges", True), ("skipped", "fleet_paused", False),
     ("skipped", None, False), ("clean", "no_merges", False),
