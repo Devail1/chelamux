@@ -43,6 +43,16 @@ def _did_not_run(msg: str) -> None:
     pytest.skip(msg)
 
 
+# ⚡ CMX-383: the judge's per-mutation selection names the spec files that can observe a mutated
+# frontend file here (paths relative to FRONTEND, os.pathsep-joined), so a mutation runs those
+# instead of the whole suite. Unset or empty: the whole suite, as always.
+FILES_ENV = "CHELA_FRONTEND_VITEST_FILES"
+
+
+def spec_filters() -> list[str]:
+    return [f for f in os.environ.get(FILES_ENV, "").split(os.pathsep) if f]
+
+
 def test_frontend_vitest_suite():
     node = shutil.which("node")
     if not node:
@@ -56,7 +66,8 @@ def test_frontend_vitest_suite():
     proc = run_contained(
         # 300: the suite is ~4 CPU-minutes (CMX-221's Settings tests alone ~50s), and CI runs it
         # beside xdist's workers on 4 cores; 120 timed out on dev itself at 3d8e78d9.
-        [str(node), str(VITEST), "run"], timeout=VITEST_TIMEOUT, cwd=str(FRONTEND), env=env,
+        [str(node), str(VITEST), "run", *spec_filters()], timeout=VITEST_TIMEOUT,
+        cwd=str(FRONTEND), env=env,
         watch=os.getppid() if os.environ.get("PYTEST_XDIST_WORKER") else None,
     )
     if proc.returncode != 0:
@@ -95,6 +106,7 @@ def test_vitest_runs_contained_with_its_full_call_pinned(monkeypatch, code, work
     monkeypatch.setenv("NODE_CHANNEL_FD", "9")
     monkeypatch.setenv("NODE_CHANNEL_SERIALIZATION_MODE", "json")
     monkeypatch.setattr(os, "getppid", lambda: 4242)
+    monkeypatch.delenv("CHELA_FRONTEND_VITEST_FILES", raising=False)
     monkeypatch.setattr(
         sys.modules[__name__], "run_contained",
         lambda argv, **kw: (calls.append((argv, kw)),
@@ -112,6 +124,32 @@ def test_vitest_runs_contained_with_its_full_call_pinned(monkeypatch, code, work
     assert kw["watch"] == (4242 if worker else None)
     assert not {"NODE_CHANNEL_FD", "NODE_CHANNEL_SERIALIZATION_MODE"} & set(kw["env"])
     assert "PATH" in kw["env"]
+
+
+@pytest.mark.parametrize("value,filters", [
+    (None, []),
+    ("", []),
+    (os.pathsep, []),
+    ("src/a.test.ts", ["src/a.test.ts"]),
+    (f"src/a.test.ts{os.pathsep}src/b/c.test.tsx", ["src/a.test.ts", "src/b/c.test.tsx"]),
+], ids=["unset", "empty", "separator-only", "one", "two"])
+def test_the_judge_s_spec_list_narrows_the_vitest_run(monkeypatch, value, filters):
+    """CMX-383: the judge names a mutation's related spec files in this env var; unset or
+    empty, the whole suite runs (never zero files: Vitest would fail "No test files found")."""
+    calls = []
+    monkeypatch.setattr(shutil, "which", lambda _: "/opt/node")
+    monkeypatch.setattr(sys.modules[__name__], "VITEST", SAMPLE)
+    if value is None:
+        monkeypatch.delenv("CHELA_FRONTEND_VITEST_FILES", raising=False)
+    else:
+        monkeypatch.setenv("CHELA_FRONTEND_VITEST_FILES", value)
+    monkeypatch.setattr(
+        sys.modules[__name__], "run_contained",
+        lambda argv, **kw: (calls.append(argv),
+                            subprocess.CompletedProcess(argv, 0, b"", b""))[1],
+    )
+    test_frontend_vitest_suite()
+    assert calls == [["/opt/node", str(SAMPLE), "run", *filters]]
 
 
 # The CI `frontend` job's gates, graded HERE by running the job's own commands

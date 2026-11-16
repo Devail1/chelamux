@@ -808,6 +808,8 @@ def _sweep_and_file(wf, worktree: Path, head: str, ref: str, standard: list[dict
                          order=lambda muts: owed_first(muts, first, lines))
     unrun = [r.mutation.key for r in report._with(sweep.UNRUN)]
     result.update(mutations=len(report.results), unrun=len(unrun),
+                  measured=report.measured, battery_seconds=report.battery_seconds,
+                  per_hour=report.per_hour,
                   unrun_sites=sorted(set(unrun)), unsupported=list(report.unsupported),
                   baseline_failures=list(report.baseline_failures),
                   baseline_flakes=list(report.baseline_flakes),
@@ -927,6 +929,7 @@ def summary(result: dict) -> str:
                  f"mutation(s), {result.get('unrun', 0)} UNRUN")
         if result.get("unsupported"):
             line += f", {len(result['unsupported'])} file(s) UNKNOWN (no mutator)"
+        line += throughput(result)
     if result.get("owed_carried"):
         line += f" — {result['owed_carried']} owed from earlier nights"
         if "owed_ran" in result:
@@ -944,6 +947,17 @@ def summary(result: dict) -> str:
     if result["warnings"]:
         line += f" — ⚠️ {len(result['warnings'])} warning(s): {result['warnings'][0]}"
     return line
+
+
+def throughput(result: dict) -> str:
+    """⚡ CMX-383: `` — N measured in H h: R mutations/hour`` — the night's rate, so a
+    selection regression shows up (11-16 ran 25 in 3.2 h: 7.8/h). ``""`` when the battery
+    measured nothing or recorded no time."""
+    rate = result.get("per_hour")
+    if not result.get("measured") or not rate:
+        return ""
+    hours = result.get("battery_seconds", 0) / 3600
+    return f" — {result['measured']} measured in {hours:.1f} h: {rate:g} mutations/hour"
 
 
 def _render(result: dict) -> None:

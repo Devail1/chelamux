@@ -206,6 +206,9 @@ class SweepReport:
     base: str = ""
     test_cmd: str = ""
     budget: SweepBudget = field(default_factory=SweepBudget)
+    # ⚡ CMX-383: wall-clock the mutations themselves took (baseline excluded) — the
+    # throughput the nightly notice reports, so a selection regression shows up as a number.
+    battery_seconds: float = 0.0
     # Why the budget stopped the sweep ("" when every mutation was reached).
     exhausted: str = ""
     # ⚖️🧹 CMX-341: a baseline that was not green on its first run — "<id> — <first line>" per
@@ -224,6 +227,18 @@ class SweepReport:
         # ⛔ Like Report.blocking: a cannot-verify sweep names no survivor it could trust.
         return [] if self.cannot_verify else self._with(judge.SURVIVED)
 
+    @property
+    def measured(self) -> int:
+        """Mutations the battery actually ran (UNRUN ones excluded)."""
+        return len([r for r in self.results if r.status != UNRUN])
+
+    @property
+    def per_hour(self) -> float | None:
+        """⚡ CMX-383: measured mutations per hour of battery time; ``None`` with none to divide."""
+        if not self.measured or self.battery_seconds <= 0:
+            return None
+        return round(self.measured * 3600 / self.battery_seconds, 1)
+
     def as_dict(self) -> dict:
         d = {
             "ok": True,
@@ -236,12 +251,14 @@ class SweepReport:
             # ⏳ CMX-111: never measured — CANNOT VERIFY for these lines, never killed.
             "unrun": [r.as_dict() for r in self._with(UNRUN)],
             "timeout": [r.as_dict() for r in self._with(TIMEOUT)],
-            "measured": len([r for r in self.results if r.status != UNRUN]),
+            "measured": self.measured,
             "budget": self.budget.as_dict(), "exhausted": self.exhausted,
             "cannot_verify": self.cannot_verify, "recovered": self.recovered,
             "notes": list(self.notes), "selection": self.selection,
             "full_suite": [r.as_dict() for r in self.results if r.full_suite],
             "seconds": round(self.seconds, 1),
+            "battery_seconds": round(self.battery_seconds, 1),
+            "per_hour": self.per_hour,
             "unsupported": list(self.unsupported), "base": self.base, "test_cmd": self.test_cmd,
             "baseline_failures": list(self.baseline_failures),
             "baseline_flakes": list(self.baseline_flakes),
@@ -1046,6 +1063,7 @@ def _sweep(worktree: Path, base: str, test_cmd: str, *, timeout: float, select_t
     if guardian is None:
         report.notes.append("the kill guardian could not start — a SIGKILL mid-mutation is "
                             "only recovered by the next sweep")
+    battery = _now()
     try:
         for n, mut in enumerate(chosen):
             elapsed = _now() - started
@@ -1063,6 +1081,7 @@ def _sweep(worktree: Path, base: str, test_cmd: str, *, timeout: float, select_t
                 report.cannot_verify = contamination
                 return report
     finally:
+        report.battery_seconds = _now() - battery
         _stop_guardian(guardian)
     if len(muts) > len(chosen):
         why = (f"over the {budget.max_mutations}-mutation budget ({len(muts)} generated)")

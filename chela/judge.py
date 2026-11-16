@@ -426,7 +426,9 @@ class Outcome:
             how = "full suite"
         elif self.confirmed_full:
             first = "green" if self.subset_verdict == SURVIVED else "inconclusive"
-            how = f"{self.selected} selected test(s) {first} → confirmed on the full suite"
+            ring = self.plan is not None and self.plan.confirm is not None
+            how = (f"{self.selected} selected test(s) {first} → confirmed on "
+                   + ("every JS suite, no Python suite (CMX-383)" if ring else "the full suite"))
         else:
             how = f"{self.selected} selected test(s)"
         return f"{how}, {_duration(self.seconds)}"
@@ -2148,6 +2150,9 @@ def _measure(
       still in place, and THAT verdict is the one reported. A survivor only blocks if the
       full suite is also green. (INVALID on the subset is re-run the same way: a subset that
       collapsed proves nothing either way, and the full suite is what used to decide it.)
+      ⚡ CMX-383: a dashboard frontend file confirms on its selection's ``confirm`` ring (every
+      JS test, no Python suite) instead — the full suite's bundle-staleness check fails on any
+      source change, so for that file it decided nothing.
     * **No selection** (no selector, an unknown file type, a ``conftest.py``, nothing
       observes the file) runs the full suite from the start. ⛔ Never skip testing a mutation.
 
@@ -2170,7 +2175,8 @@ def _measure(
             # ⚖️ CMX-174: survivor-class, and said as what it is — not one test imports it.
             outcome.reason = f"UNTESTED — no test file imports {exp.file}. {outcome.reason}"
         return outcome
-    subset = run_suite(judge_select.extend(test_cmd, sel.nodes), worktree, timeout)
+    subset = run_suite(judge_select.extend(test_cmd, sel.argv), worktree, timeout,
+                       sel.env or None)
     outcome = adjudicate(exp, True, reason, parses, parse_detail, _subset_baseline(sel), subset)
     outcome.selected, outcome.selection, outcome.plan = sel.expected, sel.why, sel
     if outcome.verdict == KILLED or not parses or subset.timed_out:
@@ -2180,9 +2186,20 @@ def _measure(
     if heartbeat is not None:
         # ⏳⚖️ CMX-431: a full-suite run is about to start — it is what the wall must budget.
         heartbeat("confirm")
-    full = run_suite(test_cmd, worktree, timeout)
-    confirmed = adjudicate(exp, True, reason, parses, parse_detail, baseline, full)
-    confirmed.selected, confirmed.selection, confirmed.plan = sel.expected, sel.why, sel
+    ring = sel.confirm
+    if ring is None:
+        full = run_suite(test_cmd, worktree, timeout)
+        confirmed = adjudicate(exp, True, reason, parses, parse_detail, baseline, full)
+    else:
+        # ⚡ CMX-383: a frontend file's ring — every JS test, no Python suite (see
+        # judge_select.Selector.js_ring) — is what the full suite was for it, minus a
+        # bundle-staleness check that fails on any source change and so measures nothing.
+        full = run_suite(judge_select.extend(test_cmd, ring.argv), worktree, timeout,
+                         ring.env or None)
+        confirmed = adjudicate(exp, True, reason, parses, parse_detail,
+                               _subset_baseline(ring), full)
+    confirmed.selected, confirmed.plan = sel.expected, sel
+    confirmed.selection = sel.why if ring is None else f"{sel.why}; {ring.why}"
     confirmed.confirmed_full = True
     confirmed.subset_verdict = outcome.verdict
     return confirmed
