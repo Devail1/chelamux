@@ -253,7 +253,10 @@ def _empty() -> dict:
             # cooldown latch of its notice (`denied_events`). CMX-184: the tool_use ids of the
             # denials already judged, so the Mod's direct post and the event-log copy of ONE
             # denial are one notice (`denied_keys`).
-            "denied_cursor": None, "denied_seen": {}, "denied_keys": {}}
+            "denied_cursor": None, "denied_seen": {}, "denied_keys": {},
+            # CMX-384: the runs whose agent got NO VERDICT from its classifier (an outage, not
+            # a denial), by task id, until the agent moves on or is re-prompted to resume.
+            "classifier_out": {}}
 
 
 def _clear_address_alarm(store: dict) -> None:
@@ -3270,6 +3273,19 @@ WID_RE = re.compile(r"@\d+\Z")
 # what the Mod's direct post carries besides `wid` — the PermissionDenied hook's own fields
 DENIAL_FIELDS = ("session_id", "tool_name", "tool_input", "tool_use_id", "reason")
 
+# CMX-384: a classifier that gave NO VERDICT is an outage, recorded and never a 🔒 notice
+UNAVAILABLE_KIND = "classifier_unavailable"
+RESUMED_KIND = "classifier_resumed"
+POST_TOOL_TYPE = hooks.event_type("PostToolUse")    # "hook.post_tool_use"
+# how long an agent's outage is tracked before the 🧊 STUCK alarm is left to it alone
+OUTAGE_TTL_S = 60 * 60
+# tools Claude Code runs without asking the classifier: one of these succeeding proves nothing
+# about whether the classifier is back
+NO_CLASSIFIER_TOOLS = frozenset({"Read", "Grep", "Glob", "LS", "TodoWrite", "ToolSearch"})
+RESUME_PROMPT = ("chela: the permission classifier is back. The no-verdict you got was an "
+                 "outage, not a denial, so resume your task where it stopped and retry that "
+                 "call unchanged.")
+
 
 def read_denials(store: dict, now: float) -> tuple[list[dict], dict]:
     """New ``hook.permission_denied`` records since the store's cursor, and the next cursor.
@@ -3283,8 +3299,11 @@ def read_denials(store: dict, now: float) -> tuple[list[dict], dict]:
     if not isinstance(cursor, dict):
         tip = event_log.tip()
         return [], {"seq": tip["seq"], "boot": tip["boot_id"], "at": now}
-    batch = event_log.read(cursor.get("seq"), after_boot=cursor.get("boot"),
-                           types=[notify.DENIED_TYPE])
+    # CMX-384: a tool call that ran is the evidence the classifier answers again. Read only
+    # while an outage is open: PostToolUse is most of the log's volume.
+    types = [notify.DENIED_TYPE, POST_TOOL_TYPE] if store.get("classifier_out") else \
+        [notify.DENIED_TYPE]
+    batch = event_log.read(cursor.get("seq"), after_boot=cursor.get("boot"), types=types)
     events = batch["events"]
     if batch["gap"] is not None:
         events = [e for e in events if (e.get("ts") or 0) >= (cursor.get("at") or 0)]
@@ -3320,9 +3339,16 @@ def denied_events(denials: list[dict], runs: list[dict], store: dict, now: float
                   if now - ts < DENIED_COOLDOWN_S}
     keys: dict = {k: ts for k, ts in (store.get("denied_keys") or {}).items()
                   if now - ts < DENIED_KEY_TTL_S}
+    outages: dict = store.get("classifier_out") or {}
     out: list[dict] = []
     for denial in denials:
         wid = denial.get("wid")
+        if denial.get("type") == POST_TOOL_TYPE:
+            _note_tool_ran(outages, denial)
+            continue
+        no_verdict = notify.denial_outcome(denial) == notify.NO_VERDICT
+        if not no_verdict:
+            _note_verdict(outages, wid)      # a real denial is a verdict: the classifier answers
         run = active.get(wid) if wid and wid != orch else None
         if run is None or epoch.is_dangling(denial.get("epoch"), now_epoch):
             continue
@@ -3333,6 +3359,11 @@ def denied_events(denials: list[dict], runs: list[dict], store: dict, now: float
                 continue
             keys[key] = now
         task = run["task_id"]
+        if no_verdict:
+            event = _unavailable(outages, run, wid, denial, now)
+            if event:
+                out.append(event)
+            continue
         if task in seen:
             continue
         seen[task] = now
@@ -3348,7 +3379,119 @@ def denied_events(denials: list[dict], runs: list[dict], store: dict, now: float
             wid=wid))
     store["denied_seen"] = seen
     store["denied_keys"] = keys
+    store["classifier_out"] = outages
     return out
+
+
+def _unavailable(outages: dict, run: dict, wid: str, denial: dict, now: float) -> dict | None:
+    """CMX-384: record a NO-VERDICT on ``run``'s agent; the ``classifier_unavailable`` event
+    for the first one of an outage, ``None`` for the rest.
+
+    The event is ``silent``: the Feed and the event log record the outage, and nothing is
+    queued for the orchestrator, since there is nothing for it to do. Waiting and retrying is
+    right, and a "blocked" notice would pull the human in to route around it.
+    """
+    task = run["task_id"]
+    ts = denial.get("ts") or now
+    entry = outages.get(task)
+    outages[task] = {"wid": wid, "since": entry["since"] if entry else ts, "last": ts,
+                     "recovered": None}
+    if entry:
+        return None
+    tool, detail = notify.denied_detail(denial)
+    payload = denial.get("payload") or {}
+    return _event(
+        UNAVAILABLE_KIND,
+        f"⏳ classifier unavailable — agents retrying: {task} · {wid} got no verdict on "
+        f"{tool} {detail}. An outage, not a denial: nothing was refused.",
+        _run_payload(run, tool=tool, detail=detail, at=ts,
+                     reason=_one_line(payload.get("reason"), DENIED_REASON_CHARS),
+                     session_id=payload.get("session_id") or None,
+                     tool_use_id=denial_key(payload)),
+        wid=wid, silent=True)
+
+
+def _note_verdict(outages: dict, wid: str | None) -> None:
+    """The classifier answered: every open outage is recovered. One on ``wid`` itself is over:
+    that agent got a verdict, so it moved on (a real denial there gets its own 🔒 notice)."""
+    for task, entry in list(outages.items()):
+        if wid and entry.get("wid") == wid:
+            del outages[task]
+        else:
+            entry["recovered"] = True
+
+
+def _note_tool_ran(outages: dict, record: dict) -> None:
+    """A ``hook.post_tool_use`` of a tool that needs the classifier: the classifier is back,
+    and the agent that ran it is past its outage. A tool that skips the classifier proves
+    neither (a parallel Read can finish after the no-verdict that stopped the turn)."""
+    tool = (record.get("payload") or {}).get("tool_name")
+    if tool and tool not in NO_CLASSIFIER_TOOLS:
+        _note_verdict(outages, record.get("wid"))
+
+
+def classifier_resumes(store: dict, statuses: dict[str, str], runs: list[dict],
+                       now: float, windows: dict[str, str] | None = None,
+                       now_epoch: str | None = None) -> list[dict]:
+    """CMX-384: the agents to re-prompt now that the classifier answers again.
+
+    An agent whose turn STOPPED on no-verdicts sits idle mid-task until the 🧊 STUCK alarm.
+    Once its outage is recovered and its window is idle, it is told to resume, and its entry
+    is dropped (one prompt per outage). A busy or waiting one is still working, so it stays
+    tracked; an entry whose run settled, whose window changed or is gone, or that is older
+    than :data:`OUTAGE_TTL_S`, is dropped without a prompt. Returns the
+    ``classifier_resumed`` events to send (:func:`send_resumes`), outside the store lock.
+    """
+    outages: dict = store.get("classifier_out") or {}
+    by_task = {r.get("task_id"): r for r in runs if r.get("status") in STUCK_RUN_STATES}
+    out: list[dict] = []
+    for task, entry in list(outages.items()):
+        run = by_task.get(task)
+        wid = entry.get("wid")
+        if (run is None or run_wid(run, windows, now_epoch) != wid
+                or now - (entry.get("last") or 0) > OUTAGE_TTL_S):
+            del outages[task]
+            continue
+        if not entry.get("recovered"):
+            continue
+        status = statuses.get(wid)
+        if status in (BUSY, WAITING):
+            continue
+        del outages[task]
+        if status == IDLE:
+            out.append(_event(
+                RESUMED_KIND,
+                f"▶ classifier is back: {task} · {wid} stopped on a no-verdict and was "
+                f"re-prompted to resume",
+                _run_payload(run, since=entry.get("since")), wid=wid, silent=True)
+                | {"outage": (task, entry)})
+    store["classifier_out"] = outages
+    return out
+
+
+def send_resumes(events: list[dict]) -> None:
+    """Send each agent its :data:`RESUME_PROMPT`: the peer socket first, the pane paste
+    when no socket is reached, and never the paste after an adverse receipt (that would route
+    around a gate the agent chose). Each event is logged with ``delivered`` set, and a send
+    that failed puts its outage back, so the next idle tick tries again."""
+    for event in events:
+        outage = event.pop("outage", None)
+        wid = event["wid"]
+        peer = messenger.send_peer(wid, "chela-inbox", RESUME_PROMPT)
+        if peer.handed_off:
+            delivered = peer.status not in messenger.ADVERSE_RECEIPT_STATUSES
+        else:
+            delivered = messenger.send_tmux(wid, RESUME_PROMPT)
+        event["payload"] = {**event["payload"], "delivered": bool(delivered)}
+        if not delivered:
+            event["summary"] = event["summary"].replace(
+                "was re-prompted to resume", "could not be re-prompted (the send failed)")
+            if outage:
+                with locked_store() as store:
+                    store.setdefault("classifier_out", {}).setdefault(*outage)
+        log.info("inbox: %s %s (%s)", event["kind"],
+                 "sent" if delivered else "NOT sent", wid)
+        event_log.from_inbox(event)
 
 
 def denial_key(payload: dict) -> str | None:
@@ -3390,7 +3533,8 @@ def file_denial(body: dict, now: float | None = None) -> list[dict]:
     with locked_store() as store:
         events = denied_events([record], runs, store, now, windows=windows,
                                now_epoch=now_epoch)
-        store["queue"].extend(events)
+        # CMX-384: a silent event (`classifier_unavailable`) is logged below, never queued
+        store["queue"].extend(e for e in events if not e.get("silent"))
     for event in events:
         log.info("inbox: queued %s (%s, direct)", event["kind"], wid)
         event_log.from_inbox(event)
@@ -3469,6 +3613,8 @@ def tick(prev: dict[str, str], runs: list[dict] | None = None) -> dict[str, str]
                                held=held is not None and not held.expired(now))
         events += denied_events(denials, runs, store, now, windows=windows, now_epoch=now_epoch)
         store["denied_cursor"] = denied_cursor
+        resumes = classifier_resumes(store, statuses, runs, now, windows=windows,
+                                     now_epoch=now_epoch)
 
         for event in events:
             # A `silent` event carries no message — it exists only to retire a watch
@@ -3514,4 +3660,5 @@ def tick(prev: dict[str, str], runs: list[dict] | None = None) -> dict[str, str]
     # the command that FIXES a dangling address — has to take.
     raise_alarms(alarms)
     stall_alerts.send(stalls)
+    send_resumes(resumes)                  # CMX-384: a send is I/O, so outside the lock too
     return statuses
