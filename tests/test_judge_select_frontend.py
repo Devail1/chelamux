@@ -36,6 +36,7 @@ FILES = {
     "tests/unrelated.test.mjs": "import x from 'jsdom';\n",
     "tests/test_js_suites.py": "def test_js_suite():\n    pass\n",
     "tests/test_frontend.py": f"# reads {FE}/features/sidebar/model.ts\n",
+    "tests/test_frontend_build.py": f"CHANGED = '{FE}/features/sidebar/model.ts'\n",
     "tests/test_by_path.py": "SRC = 'frontend/src/features/sidebar/model.ts'\n",
     "tests/test_by_join.py": 'SRC = ROOT / "features" / "sidebar" / "model.ts"\n',
     "tests/test_by_basename.py": "SRC = 'settings/model.ts'  # another model.ts\n",
@@ -54,7 +55,7 @@ def _repo(root: Path, files: dict[str, str] = FILES) -> Path:
 def _cases(*, vitest: bool = True, passed: bool = True) -> list[js.Case]:
     cases = [js.Case(f, f"{f}::test_it", True) for f in (
         "tests/test_by_path.py", "tests/test_by_join.py", "tests/test_by_basename.py",
-        "tests/test_python.py")]
+        "tests/test_python.py", "tests/test_frontend_build.py")]
     if vitest:
         cases.append(js.Case("tests/test_frontend.py", VITEST_NODE, passed))
     cases += [js.Case(SUITES_PY, f"{SUITES_PY}::test_js_suite[{s}]", True, s) for s in JS_CASES]
@@ -100,7 +101,9 @@ def test_the_confirm_ring_is_every_js_suite_and_the_whole_vitest_suite(tmp_path)
 
 def test_a_python_test_is_selected_only_when_it_names_the_file_by_path(tmp_path):
     """A bare ``model.ts`` names a dozen files; ``sidebar/model.ts`` or a pathlib join names
-    this one. ``tests/test_frontend.py`` is the Vitest case's own file: never a whole-file node."""
+    this one. ``tests/test_frontend.py`` is the Vitest case's own file: never a whole-file node.
+    ``tests/test_frontend_build.py`` names it too, but its bundle check fails on ANY source
+    change, so it is never selected (it would "kill" every mutation)."""
     root = _repo(tmp_path)
     sel = js.Selector(root, _cases()).select(MODEL)
 
@@ -109,6 +112,23 @@ def test_a_python_test_is_selected_only_when_it_names_the_file_by_path(tmp_path)
                          "tests/test_by_join.py", "tests/test_by_path.py"]
     assert sel.confirm.nodes == [VITEST_NODE, SUITES_PY,
                                  "tests/test_by_join.py", "tests/test_by_path.py"]
+
+
+def test_the_env_var_is_the_one_the_vitest_case_reads():
+    """Both ends of the contract: renamed on one side, the subset would run the WHOLE suite."""
+    from tests import test_frontend
+    assert js.FRONTEND_FILES_ENV == test_frontend.FILES_ENV == "CHELA_FRONTEND_VITEST_FILES"
+    assert js.FRONTEND_VITEST_NODE == (
+        f"tests/test_frontend.py::{test_frontend.test_frontend_vitest_suite.__name__}")
+
+
+def test_the_spec_tree_is_walked_once_per_selector(tmp_path):
+    root = _repo(tmp_path)
+    s = js.Selector(root, _cases())
+    first = s.frontend_specs()
+    (root / FE / "late.test.ts").write_text("export {};\n")
+    assert s.frontend_specs() == first
+    assert f"{FE}/late.test.ts" in js.Selector(root, _cases()).frontend_specs()
 
 
 @pytest.mark.parametrize("text,want", [

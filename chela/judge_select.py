@@ -109,6 +109,9 @@ FRONTEND_FILES_ENV = "CHELA_FRONTEND_VITEST_FILES"
 # Vitest's default include: ``**/*.{test,spec}.?(c|m)[jt]s?(x)``.
 _VITEST_SPEC = re.compile(r"\.(test|spec)\.[cm]?[jt]sx?$")
 _META_GLOB = re.compile(r"\bimport\.meta\.glob\b")
+# A Python test file that names a frontend file by path but is never one of its observers:
+# its committed-bundle check fails on ANY source change, so it would "kill" every mutation.
+FRONTEND_BUILD_TEST = "tests/test_frontend_build.py"
 # xdist's ``loadfile`` (this repo's addopts) runs every case of one file on one worker.
 SPREAD_ARGS = ["--dist", "load"]
 
@@ -458,6 +461,7 @@ class Selector:
     _text: dict[str, str] = field(default_factory=dict, repr=False)
     _py_imports: dict[str, set[str]] = field(default_factory=dict, repr=False)
     _js_closure: dict[str, set[str]] = field(default_factory=dict, repr=False)
+    _specs: list[str] | None = field(default=None, repr=False)
 
     # -- cached reads --
 
@@ -554,11 +558,14 @@ class Selector:
                      if c.node == FRONTEND_VITEST_NODE and c.passed and not c.js), None)
 
     def frontend_specs(self) -> list[str]:
-        """Every Vitest spec under the frontend's ``src/``, repo-relative, sorted."""
-        src = self.root / FRONTEND_SRC
-        return sorted(p.relative_to(self.root).as_posix() for p in src.rglob("*")
-                      if _VITEST_SPEC.search(p.name) and p.is_file()
-                      and "node_modules" not in p.relative_to(self.root).parts)
+        """Every Vitest spec under the frontend's ``src/``, repo-relative, sorted (walked once
+        per selector: the tree is the baseline's, and every mutation of a night reads it)."""
+        if self._specs is None:
+            src = self.root / FRONTEND_SRC
+            self._specs = sorted(p.relative_to(self.root).as_posix() for p in src.rglob("*")
+                                 if _VITEST_SPEC.search(p.name) and p.is_file()
+                                 and "node_modules" not in p.relative_to(self.root).parts)
+        return self._specs
 
     def related_specs(self, rel: str) -> list[str]:
         """The Vitest specs that can observe ``rel``: itself, every spec whose import graph
@@ -571,7 +578,7 @@ class Selector:
         py_tests, _ = self._sources()
         return sorted(t for t in py_tests
                       if t != rel and t != FRONTEND_VITEST_NODE.split("::")[0]
-                      and names_path(self._read(t), rel))
+                      and t != FRONTEND_BUILD_TEST and names_path(self._read(t), rel))
 
     def _plan(self, nodes: list[str], env: dict[str, str], why: str) -> Selection:
         covered = [c for c in self.cases if c.file in nodes or c.node in nodes]
