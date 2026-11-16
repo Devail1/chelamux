@@ -42,6 +42,7 @@ import fcntl
 import json
 import logging
 import os
+import re
 import threading
 import time
 import urllib.parse
@@ -216,6 +217,35 @@ def denied_detail(event: dict) -> tuple[str, str]:
     return tool, detail
 
 
+# --- a denial vs no verdict (CMX-384) ---------------------------------------------------
+# The classifier hook fires for two different outcomes. A REAL denial ("Permission for this
+# action was denied by the Claude Code auto mode classifier. Reason: …") is a judgment the
+# agent is stopped on. NO VERDICT ("The server-side auto mode classifier gave no verdict
+# (error) … a transient failure of the check, not a judgment about the action") is an outage:
+# the right response is to wait and retry, never to hand the human a workaround. Matched on
+# the harness's stable phrases, never its exact full strings.
+DENIED = "denied"
+NO_VERDICT = "no_verdict"
+_REAL_DENIAL_RE = re.compile(r"\bdenied by the\b[^.]*\bclassifier\b", re.IGNORECASE)
+_NO_VERDICT_RE = re.compile(r"\bgave no verdict\b|\btransient failure of the check\b",
+                            re.IGNORECASE)
+
+
+def denial_outcome(event: dict) -> str:
+    """:data:`DENIED` or :data:`NO_VERDICT` for one ``hook.permission_denied`` record.
+
+    The real-denial phrase wins over the no-verdict one, and a reason that names neither (or
+    none at all) is a denial: an unknown never reads as the quieter outcome.
+    """
+    payload = event.get("payload") or {}
+    reason = " ".join(str(payload.get("reason") or "").split())
+    if _REAL_DENIAL_RE.search(reason):
+        return DENIED
+    if _NO_VERDICT_RE.search(reason):
+        return NO_VERDICT
+    return DENIED
+
+
 def _denied_message(event: dict, names: dict[str, str]) -> str:
     wid = event.get("wid") or ""
     tool, detail = denied_detail(event)
@@ -257,7 +287,9 @@ class DeniedWatch:
             return []
         batch = event_log.read(self._cursor, after_boot=self._boot, types=[DENIED_TYPE])
         self._cursor, self._boot = batch["next_seq"], batch["boot_id"]
-        events = [e for e in batch["events"] if e.get("wid")]
+        # CMX-384: a no-verdict is an outage the agent retries through, not a block
+        events = [e for e in batch["events"]
+                  if e.get("wid") and denial_outcome(e) == DENIED]
         if batch["gap"] is not None:
             events = [e for e in events if (e.get("ts") or 0) >= since]
         if not events or not (owner or _owner).acquire():
