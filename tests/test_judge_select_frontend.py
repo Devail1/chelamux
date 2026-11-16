@@ -273,11 +273,15 @@ def runs(monkeypatch):
 
 GREEN = judge.SuiteResult(True, 0, 4, 0, 0, "4 passed")
 RED = judge.SuiteResult(True, 1, 3, 1, 0, "1 failed, 3 passed")
+# The FULL suite's baseline is ~12k tests — never the subset's or the ring's 4. A red subset or
+# ring that ran all ITS tests is a kill; compared against this count it would read as a
+# collapsed suite (INVALID). Equal counts here would hide which baseline was used.
+FULL = judge.SuiteResult(True, 0, 12_000, 0, 0, "12000 passed")
 
 
 def _measure(root: Path, sel: js.Selection) -> judge.Outcome:
     exp = judge.Experiment(guard="g", file=DRAG, before="a", after="b")
-    return judge._measure(root, "uv run pytest -q", exp, "applied", True, "", GREEN, 60,
+    return judge._measure(root, "uv run pytest -q", exp, "applied", True, "", FULL, 60,
                           None, sel)
 
 
@@ -287,7 +291,7 @@ def test_a_killed_frontend_subset_is_final_and_runs_with_its_env(tmp_path, runs)
     runs.script[:] = [RED]
     out = _measure(root, sel)
 
-    assert out.verdict == judge.KILLED and not out.confirmed_full
+    assert out.verdict == judge.KILLED and not out.confirmed_full, out.reason
     assert runs.seen == [(js.extend("uv run pytest -q", sel.argv), sel.env)]
 
 
@@ -299,13 +303,31 @@ def test_a_frontend_subset_survivor_is_confirmed_on_the_ring_never_the_full_suit
     runs.script[:] = [GREEN, ring]
     out = _measure(root, sel)
 
-    assert out.verdict == verdict and out.confirmed_full
+    assert out.verdict == verdict and out.confirmed_full, out.reason
     assert out.subset_verdict == judge.SURVIVED
     assert runs.seen[1] == (js.extend("uv run pytest -q", sel.confirm.argv), None)
     assert "uv run pytest -q" not in [cmd for cmd, _ in runs.seen]
     assert out.selection == f"{sel.why}; {sel.confirm.why}"
     assert out.measured_by.startswith(
         "2 selected test(s) green → confirmed on every JS suite, no Python suite (CMX-383)")
+
+
+def test_ring_and_subset_are_adjudicated_against_their_own_counts_not_the_full_suites(
+        tmp_path, runs):
+    """A red ring that ran all 4 of its tests is KILLED (4 of 4 expected), while a ring that
+    really collapsed — 1 of its 4 tests ran — is INVALID. Both fail if either side is read
+    against the full suite's 12k (both INVALID) or against no count at all (both KILLED)."""
+    root = _repo(tmp_path)
+    sel = js.Selector(root, _cases()).select(DRAG)
+    assert (sel.expected, sel.confirm.expected) == (2, 4) and FULL.ran > 100 * sel.confirm.expected
+    collapsed = judge.SuiteResult(True, 1, 0, 1, 0, "1 failed")
+    runs.script[:] = [GREEN, RED]
+    assert _measure(root, sel).verdict == judge.KILLED
+    runs.script[:] = [GREEN, collapsed]
+    out = _measure(root, sel)
+    assert out.verdict == judge.INVALID and "only 1 of the baseline's 4 tests" in out.reason
+    runs.script[:] = [judge.SuiteResult(True, 1, 1, 1, 0, "1 failed, 1 passed")]
+    assert _measure(root, sel).verdict == judge.KILLED      # the subset: 2 of its 2 ran
 
 
 def test_a_python_subset_survivor_still_confirms_on_the_full_suite(tmp_path, runs):
