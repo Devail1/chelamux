@@ -11,7 +11,7 @@ import { agentModeLabel, agentModelLabel, staleWords, updateView, type Config, t
 import { ConfigSwitch, SaveMsg, Section, useLoad, type Msg } from './parts.tsx';
 import { config, postConfig } from './state.ts';
 
-type StatusItem = { label?: string; on?: boolean; state?: string; detail?: string };
+type StatusItem = { key?: string; label?: string; on?: boolean; state?: string; detail?: string };
 type SettingsPayload = { sections?: { title?: string; items?: StatusItem[] }[]; update?: UpdateInfo } | null;
 
 /** Test seam: the post-apply poll's clock, sleep, fetch and reload (features/update/flow.ts). */
@@ -34,7 +34,7 @@ function Badge({ on, children }: { on: boolean; children: React.ReactNode }) {
   );
 }
 
-function StatusList({ data }: { data: SettingsPayload | 'failed' | null }) {
+function StatusList({ data, dispatchOff = BOOT.dispatchOffByChoice }: { data: SettingsPayload | 'failed' | null; dispatchOff?: boolean }) {
   if (data === null) return <div className="s-status-list"><div className="s-desc">Loading…</div></div>;
   if (data === 'failed') return <div className="s-status-list"><div className="s-desc">Status unavailable.</div></div>;
   const sections = data?.sections || [];
@@ -44,13 +44,20 @@ function StatusList({ data }: { data: SettingsPayload | 'failed' | null }) {
       {sections.map((sec, i) => (
         <div className="s-status-group" key={i}>
           <div className="s-status-grouphead">{sec.title || ''}</div>
-          {(sec.items || []).map((it, j) => (
+          {(sec.items || []).map((it, j) => (dispatchOff && it.key === 'dispatch' ? (
+            // CMX-388: off by choice is not a status to badge, it is a decision: one line.
+            <div className="s-status-row s-status-note" key={j} id="dispatch-off-note">
+              <span className="s-status-detail">
+                Dispatch is off by choice: unset <code className="s-cmd">CHELA_DISPATCH</code> to enable (docs/CONFIG.md)
+              </span>
+            </div>
+          ) : (
             <div className="s-status-row" key={j}>
               <Badge on={!!it.on}>{it.state || ''}</Badge>
               <span className="s-status-label">{it.label || ''}</span>
               {it.detail && <span className="s-status-detail" title={it.detail}>{it.detail}</span>}
             </div>
-          ))}
+          )))}
         </div>
       ))}
     </div>

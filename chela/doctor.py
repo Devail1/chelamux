@@ -48,6 +48,7 @@ import logging
 from chela import notify
 from chela.runtime_truth import (  # noqa: F401 — doctor's public surface, re-exported
     ERROR,
+    INFO,
     KNOWN_VARS,
     OK,
     WARN,

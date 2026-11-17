@@ -94,8 +94,11 @@ from chela.workflow import load_workflow
 OK = "ok"
 WARN = "warn"
 ERROR = "error"
+# CMX-388: information, not a warning — a state the operator CHOSE (CHELA_DISPATCH=off).
+# Never fails the run, and never reads as a problem.
+INFO = "info"
 
-_SYMBOL = {OK: "✓", WARN: "!", ERROR: "✗"}
+_SYMBOL = {OK: "✓", WARN: "!", ERROR: "✗", INFO: "i"}
 
 # The variables the env file is expected to own. Anything else in it is still sourced;
 # these are the ones a drift is worth naming.
@@ -108,6 +111,7 @@ KNOWN_VARS = (
     "CHELA_TERMINALS_ENABLED",
     "CHELA_TERMINALS_EXPOSE",
     "CHELA_DISPATCH_WORKFLOWS",
+    "CHELA_DISPATCH",
     "CHELA_GATE_WAIT_S",
     "CHELA_GATE_MAX_WAITS",
 )
@@ -1858,6 +1862,21 @@ def _daemon_report(declared: list[dict], obs: Observation) -> list[Finding]:
         label = cap.get("label") or cap.get("key") or "?"
         if cap.get("on"):
             out.append(Finding(OK, f"{label}: ON", str(cap.get("detail") or "")))
+        elif cap.get("off_by_choice"):
+            # CMX-388: CHELA_DISPATCH=off — the operator decided. Say so as INFO; the
+            # accidental empty list (no switch) falls through to the WARN below.
+            out.append(Finding(INFO, f"{label}: {capabilities.BY_CHOICE_DETAIL}",
+                               "unset CHELA_DISPATCH to enable (docs/CONFIG.md)"))
+            configured = cap.get("configured_workflows") or []
+            if configured:
+                out.append(Finding(
+                    ERROR,
+                    f"{label}: CHELA_DISPATCH=off AND CHELA_DISPATCH_WORKFLOWS names "
+                    f"{len(configured)} workflow(s) — a contradiction",
+                    "Dispatch stays OFF: the switch wins, so these are ignored: "
+                    f"{', '.join(map(str, configured))}. Unset CHELA_DISPATCH to dispatch "
+                    "them, or empty CHELA_DISPATCH_WORKFLOWS to keep dispatch off.",
+                ))
         elif cap.get("warn_when_off"):
             detail = str(cap.get("detail") or "")
             fix = str(cap.get("fix") or "")

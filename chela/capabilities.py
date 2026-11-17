@@ -195,6 +195,11 @@ def _memory_slice_capability() -> Capability:
     )
 
 
+# The startup line and doctor's INFO for CHELA_DISPATCH=off (CMX-388) — one phrase, so a
+# grep for it finds both.
+BY_CHOICE_DETAIL = "OFF (by choice, CHELA_DISPATCH=off)"
+
+
 def effective() -> list[Capability]:
     """The capabilities a daemon started with THIS process's config would have.
 
@@ -219,32 +224,56 @@ def effective() -> list[Capability]:
     # surfaces — `chela doctor`, /api/settings — re-read the hold FILE rather than trust
     # this snapshot, because a hold taken after startup would never show up in it.
     held = hold.active()
+    # 🚫 CMX-388: CHELA_DISPATCH=off — the operator DECIDED this install has no
+    # dispatcher. Only the explicit switch earns the quiet INFO line: an empty workflow
+    # list WITHOUT it is still the nine-hour accident and keeps warn_when_off.
+    by_choice = config.DISPATCH_OFF_BY_CHOICE
+    configured = [str(p) for p in config.DISPATCH_WORKFLOWS_CONFIGURED] if by_choice else []
+    choice_extra = {"off_by_choice": by_choice, "configured_workflows": configured}
+    choice_fix = "unset CHELA_DISPATCH (docs/CONFIG.md) and restart the daemon"
+    if by_choice:
+        dispatch_detail = BY_CHOICE_DETAIL + (
+            f" — {len(configured)} workflow(s) in CHELA_DISPATCH_WORKFLOWS are IGNORED: "
+            "the switch wins" if configured else "")
+    elif workflows:
+        dispatch_detail = (f"{n} workflow{'' if n == 1 else 's'}, every "
+                           f"{config.dispatch_tick_interval()}s: {names}")
+    else:
+        dispatch_detail = ("CHELA_DISPATCH_WORKFLOWS is empty — NO task will ever be "
+                           "claimed from a tracker")
     dispatch = Capability(
         key="dispatch",
         label="Work dispatcher",
         on=bool(workflows),
-        detail=(f"{n} workflow{'' if n == 1 else 's'}, every "
-                f"{config.dispatch_tick_interval()}s: {names}" if workflows else
-                "CHELA_DISPATCH_WORKFLOWS is empty — NO task will ever be claimed from a "
-                "tracker"),
-        fix=dispatch_fix,
-        warn_when_off=True,
+        detail=dispatch_detail,
+        fix=choice_fix if by_choice else dispatch_fix,
+        warn_when_off=not by_choice,
         extra={
             "workflows": [str(p) for p in workflows],
             "hold": held.as_dict() if held else None,
+            **choice_extra,
         },
     )
+    if by_choice:
+        reconcile_detail = ("off by choice with dispatch (CHELA_DISPATCH=off) — no "
+                            "dispatched run exists to reconcile")
+    elif workflows:
+        reconcile_detail = "merged/closed PRs close out their runs and free their concurrency slot"
+    else:
+        reconcile_detail = ("OFF FOR THE SAME REASON — reconciliation rides the dispatch "
+                            "tick, so an empty CHELA_DISPATCH_WORKFLOWS also means a merged "
+                            "PR's run sits in `awaiting_review` forever, holding its "
+                            "concurrency slot")
     reconcile = Capability(
         key="reconcile",
         label="Run reconciliation",
         on=bool(workflows),
-        detail=("merged/closed PRs close out their runs and free their concurrency slot"
-                if workflows else
-                "OFF FOR THE SAME REASON — reconciliation rides the dispatch tick, so an "
-                "empty CHELA_DISPATCH_WORKFLOWS also means a merged PR's run sits in "
-                "`awaiting_review` forever, holding its concurrency slot"),
-        fix=dispatch_fix,
-        warn_when_off=True,
+        detail=reconcile_detail,
+        fix=choice_fix if by_choice else dispatch_fix,
+        warn_when_off=not by_choice,
+        # No configured_workflows here: the contradiction is the dispatcher's to report,
+        # once, not once per capability that rides it.
+        extra={"off_by_choice": by_choice},
     )
     return [
         Capability(
@@ -339,6 +368,15 @@ def announce(caps: list[Capability], log: logging.Logger) -> None:
                 "released (`chela dispatch --resume`); reconciliation continues.",
                 cap.label, held.get("summary", "held"),
             )
+        elif not cap.on and cap.extra.get("off_by_choice"):
+            # CMX-388: the operator said so — INFO, never WARNING. A contradicting
+            # workflow list is the one thing still worth shouting about.
+            log.info("%s: %s", cap.key, BY_CHOICE_DETAIL)
+            if cap.extra.get("configured_workflows"):
+                log.error(
+                    "%s: CHELA_DISPATCH=off AND CHELA_DISPATCH_WORKFLOWS names %d "
+                    "workflow(s) — a contradiction. Dispatch stays OFF (the switch wins); "
+                    "unset one of them.", cap.key, len(cap.extra["configured_workflows"]))
         elif cap.on and cap.warn_when_on:
             log.warning("%s: ON — %s", cap.label, cap.detail)
         elif cap.on:
