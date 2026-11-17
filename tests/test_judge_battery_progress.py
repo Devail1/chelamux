@@ -378,12 +378,12 @@ def test_a_judge_run_publishes_its_suite_slot_wait(tmp_path, monkeypatch):
     real_slot, waited = judge.suite_guard.slot, []
 
     @contextmanager
-    def queued_once(cwd, on_wait=None, max_wait=None):
+    def queued_once(cwd, on_wait=None, max_wait=None, **kw):
         if not waited:
             waited.append(1)
             on_wait(time.time() - 40)
             on_wait(None)
-        with real_slot(cwd, on_wait=on_wait, max_wait=max_wait):
+        with real_slot(cwd, on_wait=on_wait, max_wait=max_wait, **kw):
             yield
     monkeypatch.setattr(judge.suite_guard, "slot", queued_once)
     with patch.object(dispatcher, "_post_pr_comment", return_value=(True, "")):

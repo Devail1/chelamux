@@ -65,6 +65,7 @@ from chela import (
     sessionids,
     sidebar_archive,
     spawn,
+    suite_guard,
     sweep_nightly,
     ticklock,
     update,
@@ -2628,6 +2629,45 @@ def cmd_task_finished(args) -> None:
         print(f"task-finished: 🔎 {review['error']}")
         sys.exit(1)
 
+    # 🧠 CMX-393: ONE suite slot for every check below, start to finish — the self-check,
+    # the sweep, the standard suite and the base-move re-run all re-enter it, so no other
+    # agent's battery runs between two of them.
+    try:
+        with dispatcher.hand_in_battery(args.task_id):
+            partial, accepted = _task_finished_checks(args, experiments, no_new_guards, sync)
+    except suite_guard.SlotTimeout as e:
+        print(f"task-finished: 🧠 the hand-in checks could not start: {e}")
+        sys.exit(1)
+    kwargs = {"handoff": getattr(args, "handoff", None)}
+    if accepted:
+        kwargs["sweep_equivalents"] = accepted
+    if size.get("slices"):
+        filed = dispatcher.file_split(args.task_id, size["record"], size["slices"])
+        if not filed.get("ok"):
+            print(f"task-finished: 📏 {filed['error']}")
+            sys.exit(1)
+        size["record"] = filed["record"]
+        print(f"📏 split filed: {', '.join(filed['record']['sub_issues'])}")
+    if size.get("record"):
+        kwargs["size_gate"] = size["record"]
+    if partial:
+        kwargs["self_check_partial"] = partial
+    if sync.get("record"):
+        kwargs["base_sync"] = sync["record"]
+    if review.get("record"):
+        kwargs["review_gate"] = review["record"]
+    result = dispatcher.request_task_finished(args.task_id, **kwargs)
+    if not result.get("ok"):
+        print(f"task-finished: {result.get('error', 'unknown error')}")
+        sys.exit(1)
+    print(f"Task {result['task_id']}: completion requested — chela will transition it to "
+          "awaiting review and close this window on its next pass.")
+
+
+def _task_finished_checks(args, experiments: str | None, no_new_guards: bool,
+                          sync: dict) -> tuple[dict | None, list[dict]]:
+    """The suite-heavy part of :func:`cmd_task_finished` — run inside its battery slot.
+    Returns ``(partial, accepted)``; exits 1 on a refusal, as the caller always did."""
     # ⚖️🪜 CMX-296: what the hand-in checks follows the diff's risk tier.
     tier = dispatcher.hand_in_tier(args.task_id)
     checks = dispatcher.hand_in_checks(tier, experiments=bool(experiments))
@@ -2694,30 +2734,7 @@ def cmd_task_finished(args) -> None:
 
             sync["record"] = move["record"]
             print(basesync.render(move["record"]))
-    kwargs = {"handoff": getattr(args, "handoff", None)}
-    if accepted:
-        kwargs["sweep_equivalents"] = accepted
-    if size.get("slices"):
-        filed = dispatcher.file_split(args.task_id, size["record"], size["slices"])
-        if not filed.get("ok"):
-            print(f"task-finished: 📏 {filed['error']}")
-            sys.exit(1)
-        size["record"] = filed["record"]
-        print(f"📏 split filed: {', '.join(filed['record']['sub_issues'])}")
-    if size.get("record"):
-        kwargs["size_gate"] = size["record"]
-    if partial:
-        kwargs["self_check_partial"] = partial
-    if sync.get("record"):
-        kwargs["base_sync"] = sync["record"]
-    if review.get("record"):
-        kwargs["review_gate"] = review["record"]
-    result = dispatcher.request_task_finished(args.task_id, **kwargs)
-    if not result.get("ok"):
-        print(f"task-finished: {result.get('error', 'unknown error')}")
-        sys.exit(1)
-    print(f"Task {result['task_id']}: completion requested — chela will transition it to "
-          "awaiting review and close this window on its next pass.")
+    return partial, accepted
 
 
 def _task_finished_standard(task_id: str, experiments: str | None, notes: list[str]) -> None:
