@@ -2582,8 +2582,6 @@ def _resolve_base_conflict(conn: sqlite3.Connection, wf: WorkflowDef, row, head:
         drift = _local_vs_pushed_note(row["worktree_path"], head)
         if drift:
             body += f"\n{drift}\n"
-            log.warning("Task %s: %s", task_id, drift)
-            _notify_head_unpushed(row, head, drift)
         result = request_changes(task_id, body,
                                  cause=REWORK_CAUSE_CONFLICT if free else REWORK_CAUSE_REVIEW)
     except sqlite3.Error as e:
@@ -2596,6 +2594,9 @@ def _resolve_base_conflict(conn: sqlite3.Connection, wf: WorkflowDef, row, head:
         return "none"
     log.warning("Task %s: PR conflicts with origin/%s (%s) — sent back, not charged: %s",
                 task_id, base, res["outcome"], ", ".join(res["files"]))
+    if drift:
+        log.warning("Task %s: %s", task_id, drift)
+        _notify_head_unpushed(row, head, drift)
     return "rework"
 
 
@@ -3967,6 +3968,12 @@ def ensure_pushed_head(task_id: str) -> dict:
         return {"ok": False, "error": f"could not tell whether HEAD {local[:12]} is pushed: {e}"}
     if origin == local:
         return {"ok": True, "local": local, "origin": origin, "requested": False}
+    if origin and not _git_ok(_git(Path(wt), "merge-base", "--is-ancestor", origin, local)):
+        # A plain push only fast-forwards: origin has a commit HEAD lacks (CMX-262's automatic
+        # base merge, a hand push), so filing one would only fail and escalate later.
+        return {"ok": False, "error": f"{unpushed_message(local, origin)}, and origin has "
+                                      f"commits HEAD lacks: `git pull --no-rebase origin "
+                                      f"{row['branch_name']}`, then task-finished"}
     if not row["pr_url"]:
         return {"ok": False, "error": f"{unpushed_message(local, origin)}: run request-push"}
     filed = request_push(task_id)

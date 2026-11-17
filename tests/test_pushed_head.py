@@ -356,3 +356,59 @@ def test_a_conflict_rework_on_a_stale_pushed_head_says_so(tmp_path, repo, monkey
                        f"{note}")
     assert payload == {"task_id": "t1", "branch_name": BRANCH,
                        "pr_url": "https://github.com/o/r/pull/80", "pushed_sha": pushed}
+
+
+def test_origin_with_commits_head_lacks_is_refused_not_pushed(tmp_path, repo):
+    """CMX-262's automatic base merge pushes to the PR branch: a plain push from the stale
+    local HEAD would only be rejected later. Refuse now, with the pull to run."""
+    origin, wt = repo
+    a = _commit(wt, "a")
+    _git(wt, "push", "-q", "origin", BRANCH)
+    other = tmp_path / "other"
+    _git(tmp_path, "clone", "-q", "-b", BRANCH, str(origin), str(other))
+    o = _commit(other, "o")
+    _git(other, "push", "-q", "origin", BRANCH)
+    _git(wt, "fetch", "-q", "origin")
+    b = _commit(wt, "b")
+    assert a != o
+    _run(wt)
+
+    out = dispatcher.ensure_pushed_head("t1")
+
+    assert out == {"ok": False, "error": f"HEAD {b[:12]} not pushed (origin has {o[:12]}), and "
+                                         f"origin has commits HEAD lacks: `git pull --no-rebase "
+                                         f"origin {BRANCH}`, then task-finished"}
+    assert not dispatcher._push_request_path(wt).exists()
+
+
+def test_a_pending_request_is_named_by_the_cli(tmp_path, repo, capsys, monkeypatch):
+    _origin, wt = repo
+    a = _commit(wt, "a")
+    _run(wt, pr_url=None)
+    dispatcher.request_push("t1", pr_title="CMX-1: x")
+    monkeypatch.setattr(dispatcher, "hand_in_tier", lambda *a: "high")
+    monkeypatch.setattr(dispatcher, "hand_in_checks", lambda *a, **k: ())
+
+    code, out = _cli(["task-finished", "t1", "--no-new-guards"], capsys)
+
+    assert code == 0, out
+    assert f"📌 a push request is pending — chela pushes HEAD {a[:12]} and checks origin has " \
+           "it before handing the run in." in out
+
+
+def test_no_unpushed_notice_when_the_rework_was_not_written(tmp_path, repo, monkeypatch):
+    from chela import inbox
+    _origin, wt = repo
+    _commit(wt, "a")
+    wf = _wf(tmp_path)
+    with dispatcher._db() as conn:
+        row = _row(conn, task_id="t1", status="awaiting_review", worktree_path=str(wt),
+                   branch_name=BRANCH)
+    monkeypatch.setattr(basemerge, "attempt", lambda *a: {
+        "outcome": basemerge.CONFLICT, "files": ["x.py"], "base_sha": "b" * 40, "detail": ""})
+    monkeypatch.setattr(dispatcher, "request_changes", lambda *a, **k: {"ok": False, "error": "x"})
+    notices = []
+    monkeypatch.setattr(inbox, "enqueue", lambda *a: notices.append(a) or True)
+    with dispatcher._db() as conn:
+        assert dispatcher._resolve_base_conflict(conn, wf, row, "e" * 40) == "none"
+    assert notices == []

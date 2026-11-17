@@ -2721,6 +2721,9 @@ def cmd_task_finished(args) -> None:
     if pushed.get("origin") is not None and pushed.get("requested"):
         print(f"📌 {dispatcher.unpushed_message(pushed['local'], pushed['origin'])} — "
               "push requested; chela pushes it before handing the run in.")
+    elif pushed.get("requested"):
+        print(f"📌 a push request is pending — chela pushes HEAD {pushed['local'][:12]} and "
+              "checks origin has it before handing the run in.")
     result = dispatcher.request_task_finished(args.task_id, **kwargs)
     if not result.get("ok"):
         print(f"task-finished: {result.get('error', 'unknown error')}")
