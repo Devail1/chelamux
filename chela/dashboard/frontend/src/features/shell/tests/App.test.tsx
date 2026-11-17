@@ -255,3 +255,21 @@ function sbState(view: Record<string, unknown> = {}): SidebarState {
     ctx: {}, onWall: [], active: null, altHeld: false,
   };
 }
+
+// CMX-388: CHELA_DISPATCH=off. The Work board and New task are not drawn; the Wall is.
+test('CMX-388: dispatch off by choice draws no Work panel and no New task island; the Wall and approvals stay', () => {
+  BOOT.dispatchOffByChoice = true;
+  try {
+    mount();
+    expect($('#' + panelId('work'))).toBeNull();
+    expect($('#newtask-island')).toBeNull();
+    expect($('#' + panelId('terminals'))).not.toBeNull();
+    expect($('#approvals-island')).not.toBeNull();
+  } finally {
+    BOOT.dispatchOffByChoice = false;
+  }
+  act(() => roots.splice(0).forEach((r) => r.unmount()));
+  mount();
+  expect($('#' + panelId('work'))).not.toBeNull();
+  expect($('#newtask-island')).not.toBeNull();
+});

@@ -6,6 +6,8 @@
 
 export interface ViewCtx {
   terminalsOn: boolean;
+  /** CMX-388: false when CHELA_DISPATCH=off (dispatch off by choice). Absent reads as on. */
+  dispatchOn?: boolean;
 }
 
 export interface ViewBadge {

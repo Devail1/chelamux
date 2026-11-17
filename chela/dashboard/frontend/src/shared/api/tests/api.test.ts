@@ -16,15 +16,16 @@ afterEach(() => {
 
 test('the boot block is read as rendered', async () => {
   const { BOOT, ASSET_VERSION } = await load(
-    '{"assetVersion": "abc123", "terminalsEnabled": false, "wallTileDispatched": true, "sharingConfigured": false, "telegramConfigured": false}',
+    '{"assetVersion": "abc123", "terminalsEnabled": false, "wallTileDispatched": true, "sharingConfigured": false, "telegramConfigured": false, "dispatchOffByChoice": true}',
   );
-  expect(BOOT).toEqual({ assetVersion: 'abc123', terminalsEnabled: false, wallTileDispatched: true, sharingConfigured: false, telegramConfigured: false, identity: null });
+  expect(BOOT).toEqual({ assetVersion: 'abc123', terminalsEnabled: false, wallTileDispatched: true, sharingConfigured: false, telegramConfigured: false, dispatchOffByChoice: true, identity: null });
   expect(ASSET_VERSION).toBe('abc123');
 });
 
 test('no block, or one that does not parse, runs as the legacy defaults', async () => {
   // CMX-387: a page with no block keeps today's UI, Share and Telegram controls included.
-  const defaults = { assetVersion: '', terminalsEnabled: true, wallTileDispatched: false, sharingConfigured: true, telegramConfigured: true, identity: null };
+  // CMX-388: and the dispatcher's surfaces (dispatch is not off by choice).
+  const defaults = { assetVersion: '', terminalsEnabled: true, wallTileDispatched: false, sharingConfigured: true, telegramConfigured: true, dispatchOffByChoice: false, identity: null };
   expect((await load(null)).BOOT).toEqual(defaults);
   expect((await load('{"terminalsEnabled": fal')).BOOT).toEqual(defaults);
   expect((await load('null')).BOOT).toEqual(defaults);
@@ -38,11 +39,12 @@ test('a field of the wrong type falls back alone; the others are kept', async ()
     doc.body.innerHTML = `<script type="application/json" id="chela-boot">${json}</script>`;
     return readBoot(doc);
   };
-  expect(page('{"assetVersion": 7, "terminalsEnabled": false, "wallTileDispatched": true, "sharingConfigured": false, "telegramConfigured": 0}')).toEqual({
-    assetVersion: '', terminalsEnabled: false, wallTileDispatched: true, sharingConfigured: false, telegramConfigured: true, identity: null,
+  expect(page('{"assetVersion": 7, "terminalsEnabled": false, "wallTileDispatched": true, "sharingConfigured": false, "telegramConfigured": 0, "dispatchOffByChoice": true}')).toEqual({
+    assetVersion: '', terminalsEnabled: false, wallTileDispatched: true, sharingConfigured: false, telegramConfigured: true, dispatchOffByChoice: true, identity: null,
   });
-  expect(page('{"assetVersion": "v1", "terminalsEnabled": "false", "wallTileDispatched": 1, "sharingConfigured": "false", "telegramConfigured": false}')).toEqual({
-    assetVersion: 'v1', terminalsEnabled: true, wallTileDispatched: false, sharingConfigured: true, telegramConfigured: false, identity: null,
+  // CMX-388: a string "off" is not the boolean the server renders: dispatch stays ON (today's UI).
+  expect(page('{"assetVersion": "v1", "terminalsEnabled": "false", "wallTileDispatched": 1, "sharingConfigured": "false", "telegramConfigured": false, "dispatchOffByChoice": "off"}')).toEqual({
+    assetVersion: 'v1', terminalsEnabled: true, wallTileDispatched: false, sharingConfigured: true, telegramConfigured: false, dispatchOffByChoice: false, identity: null,
   });
 });
 

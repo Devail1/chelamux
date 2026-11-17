@@ -26,6 +26,8 @@ export const VIEWS: readonly View[] = [
     id: 'work',
     label: 'Work',
     lucide: 'columns-3',
+    // CMX-388: CHELA_DISPATCH=off means no dispatcher, so no Work board to open.
+    enabled: (ctx) => ctx.dispatchOn !== false,
     // Visible on every view: the Work poll (a scheduler lane, features/work) fills them.
     badges: [
       { id: 'side-runs-count', title: 'Active runs', text: '0' },

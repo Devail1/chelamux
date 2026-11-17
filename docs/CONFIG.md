@@ -135,6 +135,33 @@ So chela treats "what the daemon can DO" as a first-class, observable thing:
 with the coupling written down next to it. A variable you can see and left empty is a
 choice; a variable that is simply gone is a bug waiting for nine hours.
 
+### Off by choice: `CHELA_DISPATCH=off`
+
+Some installs run no dispatcher at all: only the wall, sessions, the sidebar and terminals
+([ORG_SETUP.md](ORG_SETUP.md)). On those, the WARN above is noise that teaches the operator to
+ignore it, which is the nine-hour failure again. An empty `CHELA_DISPATCH_WORKFLOWS` cannot
+tell the two cases apart, so there is a separate, explicit switch that can:
+
+| Config | Daemon at startup | `chela doctor` | Dispatch |
+|---|---|---|---|
+| workflows empty, no `CHELA_DISPATCH` | WARNING (unchanged) | WARN (unchanged) | off |
+| `CHELA_DISPATCH=off` | `dispatch: OFF (by choice, CHELA_DISPATCH=off)` at INFO | INFO | off |
+| `CHELA_DISPATCH=off` **and** workflows set | the INFO line, plus an ERROR naming the contradiction | ERROR | **off: the switch wins** |
+
+* **Only the switch quiets the warning.** An empty list without it is still treated as the
+  accident it was. The switch is a decision someone wrote down, so it cannot go missing the
+  way a variable can: delete the line and the warning comes back.
+* **The switch wins.** With workflows configured too, `config.DISPATCH_WORKFLOWS` is empty
+  anyway, so the daemon loop, the dashboard and the sources all see one answer. Doctor names
+  the ignored workflows so the contradiction does not sit unread.
+* **The dashboard follows it** (the boot payload's `dispatchOffByChoice`): no Work nav item
+  or board, no **New task**, no sidebar **Dispatched** section (a leftover worktree session
+  groups by its own folder), and Settings shows "Dispatch is off by choice: unset
+  `CHELA_DISPATCH` to enable (docs/CONFIG.md)" in place of the *Work dispatcher* row. The
+  Wall, sessions, grouping, terminals and approvals are unchanged.
+* It is `restart_required`, like `CHELA_DISPATCH_WORKFLOWS`: unset it and restart the daemon
+  and the dashboard to turn dispatch back on. `false`, `0` and `no` mean the same as `off`.
+
 ## The runtime-truth registry
 
 The same bug landed nine times: **a fact lives in two places across a process boundary, and

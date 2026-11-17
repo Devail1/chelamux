@@ -122,7 +122,8 @@ export function App() {
         <Sidebar />
         <main className="canvas" id="canvas">
           <Panel id="agent-detail"><Slot id="agent-detail" as="div" className="" /></Panel>
-          <Panel id="work">{SLOTS['panel-work']?.()}</Panel>
+          {/* CMX-388: CHELA_DISPATCH=off, no dispatcher, so no Work board. */}
+          {!BOOT.dispatchOffByChoice && <Panel id="work">{SLOTS['panel-work']?.()}</Panel>}
           {BOOT.terminalsEnabled && <Wall />}
         </main>
       </div>
@@ -142,7 +143,7 @@ export function App() {
       </div>
       <div className="drawer-scrim" id="sidebar-scrim" onClick={() => closeSidebar()} />
       <Slot id="overlays-island" as="div" className="" />
-      <Slot id="newtask-island" as="div" className="" />
+      {!BOOT.dispatchOffByChoice && <Slot id="newtask-island" as="div" className="" />}
       <Slot id="task-modal-island" as="div" className="" />
       <Slot id="diff-modal-island" as="div" className="" />
       <Slot id="work-toasts" as="div" className="" />
