@@ -36,6 +36,7 @@ def test_the_boot_block_carries_each_flag_as_configured(monkeypatch, terminals, 
         "sharingConfigured": False,
         "telegramConfigured": False,
         "dispatchOffByChoice": False,
+        "identity": None,   # CMX-385: the identity header is off unless configured
     }
 
 
