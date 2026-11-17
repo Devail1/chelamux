@@ -220,6 +220,8 @@ export function renderSidebarAgents(agents: AgentRow[] | null | undefined): void
     agents: rows, wants: host.wants, orchWid: host.orchWid(), view: view(), order: getLayout().order, rows: rowOrders(), custom: c,
     archived: archivedKeys(), sessions: archivedSessions(), labels, now: Date.now(), collapsed: [...collapsedGroups()],
     ctx, onWall: TERMINALS_ON ? host.onWall() : [], active: activeRow, altHeld,
+    // CMX-388: CHELA_DISPATCH=off, no Dispatched section (model.ts plainFolderKey).
+    dispatchOff: BOOT.dispatchOffByChoice,
   };
   if (!rows.length) {
     // "No agents". One empty read must not unarchive every hidden row, nor drop every

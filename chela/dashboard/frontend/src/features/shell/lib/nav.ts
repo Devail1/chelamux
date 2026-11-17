@@ -24,7 +24,7 @@ import { VIEWS } from './registry.ts';
 import { updateTabSignal } from './tabSignal.ts';
 
 const TERMINALS_ON = BOOT.terminalsEnabled;
-const ctx = (): ViewCtx => ({ terminalsOn: TERMINALS_ON });
+const ctx = (): ViewCtx => ({ terminalsOn: TERMINALS_ON, dispatchOn: !BOOT.dispatchOffByChoice });
 const agentsNow = () => agentsStore.get();
 
 /** One nav row per enabled, non-virtual view, with its badge slots (the sidebar draws them). */

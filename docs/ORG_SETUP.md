@@ -16,7 +16,7 @@ Run these PM2 apps from [`examples/ecosystem.config.js`](../examples/ecosystem.c
 
 | App | Why |
 |---|---|
-| `chela-daemon` (`chela run`) | scheduler, dispatcher, notifier |
+| `chela-daemon` (`chela run`) | scheduler and notifier (the dispatcher stays off, see below) |
 | `chela-dashboard` (`chela dashboard`) | the web dashboard; binds `CHELA_DASHBOARD_PORT` (default 5001) on `127.0.0.1` |
 | `chela-agent-terminals` | the ttyd supervisor behind the terminal wall. The wall's tiles are empty without it. Leave it out (and set `CHELA_TERMINALS_ENABLED=false`) only if you do not want terminals in the browser at all |
 
@@ -29,6 +29,21 @@ the ecosystem file, so a cold `pm2 start` cannot bring them back. In `chela.env`
 
 `chela doctor` then reports `Telegram bridge: not configured (optional)`, and Settings →
 *Connections & Status* shows Collaboration as `Off`.
+
+**Turn dispatch off, explicitly.** This setup uses no workflows and no kanban: no
+dispatcher, only the wall, sessions, the sidebar and terminals. Leave
+`CHELA_DISPATCH_WORKFLOWS` empty **and** set, in `chela.env`:
+
+```sh
+CHELA_DISPATCH=off
+```
+
+then restart `chela-daemon` and `chela-dashboard`. The switch says the dispatcher is off by
+choice, not by accident: the daemon logs `dispatch: OFF (by choice, CHELA_DISPATCH=off)` at
+INFO, `chela doctor` reports it as information instead of a warning, and the dashboard hides
+the Work board, **New task** and the sidebar's **Dispatched** section. Settings shows one line
+in place of the *Work dispatcher* row. Without the switch, an empty workflow list still
+warns, on purpose ([CONFIG.md](CONFIG.md#a-config-is-not-a-capability)).
 
 ### What you lose, and what replaces it
 

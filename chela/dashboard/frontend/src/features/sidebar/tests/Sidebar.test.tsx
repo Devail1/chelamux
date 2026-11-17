@@ -626,3 +626,17 @@ describe('a folder with one session (CMX-379)', () => {
     expect(menuItems().map(i => i.textContent)).not.toContain('New session in this folder');
   });
 });
+
+// CMX-388: CHELA_DISPATCH=off. No Dispatched section, and no session vanishes with it: a run's
+// window or a leftover worktree session groups by its own folder.
+test('CMX-388: dispatch off by choice draws no Dispatched section; its sessions group by their folder', () => {
+  const rows = [runWin('CMX-1', 'agent'), win('wt', { cwd: '/home/u/.chela/worktrees/x/CMX-9' }), win('a')];
+  const { el } = draw(state(rows, { dispatchOff: true, order: [DISPATCHED_KEY] }));
+  expect(groupKeys(el)).not.toContain(DISPATCHED_KEY);
+  expect(groupKeys(el)).toEqual(expect.arrayContaining(['/srv/code/alpha', '/home/u/.chela/worktrees/x/CMX-1', '/home/u/.chela/worktrees/x/CMX-9']));
+  expect(el.querySelectorAll('.agent-row').length).toBe(3);
+  cleanup();
+  // negative control: the same rows without the switch keep today's Dispatched section
+  const { el: today } = draw(state(rows));
+  expect(groupKeys(today)).toEqual(['/srv/code/alpha', DISPATCHED_KEY]);
+});
