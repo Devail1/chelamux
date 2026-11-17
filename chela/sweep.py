@@ -47,6 +47,7 @@ killed, never a pass.
 from __future__ import annotations
 
 import ast
+import hashlib
 import json
 import os
 import re
@@ -817,11 +818,49 @@ def marker_path(worktree: Path) -> Path:
 
 
 def _write_marker(worktree: Path, rel: str, original: str, mutated: str) -> None:
+    """The marker for one mutation, written BEFORE it lands. ⛔ CMX-398: it also carries the
+    kernel's ``boot_id`` — after a reboot the pid is reused by unrelated processes, and a
+    marker whose owner "looks alive" would never be recovered — and the mutated ``line``, so
+    every refusal can name ``file:line``. The mutation is journalled (:func:`_journal`) too."""
     path = marker_path(worktree)
+    line = _first_changed_line(original, mutated)
     tmp = path.with_suffix(".tmp")
-    tmp.write_text(json.dumps({"pid": os.getpid(), "file": rel, "original": original,
-                               "mutated": mutated}))
+    tmp.write_text(json.dumps({"pid": os.getpid(), "boot_id": _boot_id(), "file": rel,
+                               "line": line, "original": original, "mutated": mutated}))
     os.replace(tmp, path)
+    _journal(worktree, rel, line, mutated)
+
+
+BOOT_ID = Path("/proc/sys/kernel/random/boot_id")
+
+
+def _boot_id() -> str:
+    try:
+        return BOOT_ID.read_text().strip()
+    except OSError:
+        return ""
+
+
+def _first_changed_line(original: str, mutated: str) -> int:
+    a, b = original.split("\n"), mutated.split("\n")
+    for i, (x, y) in enumerate(zip(a, b)):
+        if x != y:
+            return i + 1
+    return min(len(a), len(b)) + 1
+
+
+def _line_text(text: str, line: int) -> str:
+    lines = text.split("\n")
+    return lines[line - 1].strip() if 0 < line <= len(lines) else "(no such line)"
+
+
+def _owner_alive(data: dict) -> bool:
+    """Is the process that wrote marker ``data`` still running? ⛔ CMX-398: never across a
+    reboot — a marker from another boot has a dead owner whatever its pid answers now."""
+    boot = data.get("boot_id")
+    if boot and boot != _boot_id():
+        return False
+    return _pid_alive(data.get("pid"))
 
 
 def _pid_alive(pid: object) -> bool:
@@ -849,7 +888,13 @@ def _is_zombie(pid: int) -> bool:
 def recover(worktree: Path) -> tuple[str, str]:
     """Undo a mutation a killed sweep left on disk. Returns ``(done, error)``: ``done`` says
     what was restored (``""`` if nothing was needed); ``error`` means the sweep must NOT run —
-    another sweep is live, or the file moved on since and nobody can say what is safe."""
+    another sweep is live, or the file moved on since and nobody can say what is safe.
+
+    ⛔ CMX-398: this is the RESTORE-FIRST gate of every entry point that works in a worktree
+    (the dispatcher's spawn and re-spawn, ``task-finished``, ``request-push``, the judge, the
+    sweep, the nightly sweep, the daemon's boot scan). A file that is neither the marker's
+    ``original`` nor its ``mutated`` text is never written: the error names the three-way
+    state at the mutated line instead."""
     path = marker_path(worktree)
     if not path.exists():
         return "", ""
@@ -858,7 +903,7 @@ def recover(worktree: Path) -> tuple[str, str]:
         rel, original, mutated = data["file"], data["original"], data["mutated"]
     except (OSError, ValueError, KeyError, TypeError) as e:
         return "", f"{path} is unreadable ({e}) — inspect it, restore by hand, then delete it"
-    if _pid_alive(data.get("pid")):
+    if _owner_alive(data):
         return "", (f"another sweep (pid {data['pid']}) is mutating {rel} in this worktree "
                     "right now — wait for it to finish")
     target = Path(worktree) / rel
@@ -869,15 +914,231 @@ def recover(worktree: Path) -> tuple[str, str]:
     if current == original:
         path.unlink(missing_ok=True)
         return "", ""
+    line = _first_changed_line(original, mutated)
     if current != mutated:
         return "", (f"{path} says a killed sweep left {rel} mutated, but {rel} is now neither "
-                    "the mutation nor the original — it was edited since. Restore it by hand "
-                    "(the original is in the marker's `original` field), then delete the marker")
+                    "the mutation nor the original — it was edited since. Three-way state at "
+                    f"{rel}:{line}: original `{_line_text(original, line)}`, mutation "
+                    f"`{_line_text(mutated, line)}`, on disk `{_line_text(current, line)}`. "
+                    "Nothing was written. Restore it by hand (the original is in the marker's "
+                    "`original` field), then delete the marker")
     target.write_text(original)
     if target.read_text() != original:
         return "", f"{rel} could not be restored from {path}"
     path.unlink(missing_ok=True)
-    return f"restored {rel} from a killed sweep's recovery marker", ""
+    return (f"restored {rel} from a killed sweep's recovery marker (line {line}: "
+            f"`{_line_text(mutated, line)}` → `{_line_text(original, line)}`)"), ""
+
+
+def live_owner(worktree: Path) -> int | None:
+    """The pid of the LIVE process whose recovery marker is in ``worktree``, or ``None`` —
+    no marker, an unreadable one, or a dead owner (any of which :func:`recover` handles)."""
+    try:
+        data = json.loads(marker_path(worktree).read_text())
+    except (OSError, ValueError):
+        return None
+    if isinstance(data, dict) and _owner_alive(data):
+        return data.get("pid")
+    return None
+
+
+class MutationLeftover(RuntimeError):
+    """⛔ CMX-398: a worktree still holds — or may hold — a sweep/self-check mutation, so no
+    agent may start in it until a human resolves it."""
+
+
+# --- the mutation journal: never push a mutation (CMX-398) --------------------------------
+
+JOURNAL_NAME = "chela-mutations.jsonl"
+JOURNAL_MAX_BYTES = 256 * 1024
+JOURNAL_KEEP = 600              # entries kept when the journal is trimmed
+
+
+def _git_dir(worktree: Path) -> Path | None:
+    """The worktree's OWN git dir — outside the tree, so neither ``git clean`` nor a commit
+    reaches the journal. ``None`` for a directory that is not a git checkout."""
+    dot = Path(worktree) / ".git"
+    if dot.is_dir():
+        return dot
+    try:
+        text = dot.read_text()
+    except (OSError, UnicodeDecodeError):
+        return None
+    if not text.startswith("gitdir:"):
+        return None
+    gd = Path(text[len("gitdir:"):].strip())
+    return gd if gd.is_absolute() else (Path(worktree) / gd).resolve()
+
+
+def journal_path(worktree: Path) -> Path | None:
+    gd = _git_dir(worktree)
+    return gd / JOURNAL_NAME if gd is not None else None
+
+
+def _blob_id(data: bytes) -> str:
+    """git's (SHA-1) blob id for ``data`` — what ``git ls-tree`` prints for a committed copy."""
+    return hashlib.sha1(b"blob %d\0" % len(data) + data).hexdigest()
+
+
+def _journal(worktree: Path, rel: str, line: int, mutated: str) -> None:
+    """Record one mutation's exact bytes (as a blob id) — what a later hand-in or push is
+    checked against even once the marker is gone. Best-effort: the marker is the primary
+    record, and a journal that cannot be written must never stop the mutation's restore."""
+    path = journal_path(worktree)
+    if path is None:
+        return
+    entry = json.dumps({"file": rel, "line": line, "blob": _blob_id(mutated.encode()),
+                        "text": _line_text(mutated, line)[:200]})
+    try:
+        if path.exists() and path.stat().st_size > JOURNAL_MAX_BYTES:
+            keep = path.read_text().splitlines()[-JOURNAL_KEEP:]
+            path.write_text("".join(f"{k}\n" for k in keep))
+        with path.open("a") as f:
+            f.write(entry + "\n")
+    except (OSError, UnicodeDecodeError) as e:
+        sys.stderr.write(f"chela sweep: could not journal the mutation of {rel}: {e}\n")
+
+
+def _recorded(worktree: Path) -> tuple[list[dict], str]:
+    """Every recorded mutation — the journal's, plus a marker still on disk — or an error
+    when a record exists but cannot be read (unknown is not "nothing recorded")."""
+    out: list[dict] = []
+    path = journal_path(worktree)
+    if path is not None and path.exists():
+        try:
+            for raw in path.read_text().splitlines():
+                e = json.loads(raw)
+                out.append({"file": str(e["file"]), "line": int(e["line"]),
+                            "blob": str(e["blob"]), "text": str(e.get("text", ""))})
+        except (OSError, ValueError, KeyError, TypeError, UnicodeDecodeError) as e:
+            return [], f"the mutation journal {path} is unreadable ({e})"
+    marker = marker_path(worktree)
+    if marker.exists():
+        try:
+            data = json.loads(marker.read_text())
+            line = _first_changed_line(data["original"], data["mutated"])
+            out.append({"file": str(data["file"]), "line": line,
+                        "blob": _blob_id(data["mutated"].encode()),
+                        "text": _line_text(data["mutated"], line)})
+        except (OSError, ValueError, KeyError, TypeError, AttributeError) as e:
+            return [], f"{marker} is unreadable ({e})"
+    return out, ""
+
+
+def _head_blobs(worktree: Path, files: list[str]) -> tuple[dict[str, str], str]:
+    """``{path: blob id}`` of ``files`` as committed in HEAD, or an error."""
+    try:
+        res = subprocess.run(["git", "-C", str(worktree), "ls-tree", "-r", "-z", "HEAD", "--",
+                              *files], capture_output=True, text=True, timeout=60)
+    except (OSError, subprocess.SubprocessError) as e:
+        return {}, f"could not read HEAD's tree to check it for a mutation: {e}"
+    if res.returncode != 0:
+        return {}, ("could not read HEAD's tree to check it for a mutation: "
+                    f"{(res.stderr or '').strip()}")
+    blobs = {}
+    for rec in res.stdout.split("\0"):
+        meta, _, name = rec.partition("\t")
+        parts = meta.split()
+        if name and len(parts) == 3:
+            blobs[name] = parts[2]
+    return blobs, ""
+
+
+def mutation_blockers(worktree: Path, *, head_only: bool = False) -> list[str]:
+    """⛔ CMX-398: why nothing may be pushed (or handed in) from ``worktree`` — ``[]`` when
+    nothing. A recovery marker still on disk blocks; so does any file whose bytes are exactly
+    a recorded mutation, in the working tree or committed in HEAD — each named ``file:line``.
+    ``head_only`` (the daemon's own push) checks only what is about to leave: HEAD."""
+    worktree = Path(worktree)
+    out: list[str] = []
+    if not head_only and marker_path(worktree).exists():
+        out.append(f"a recovery marker is still in the worktree ({marker_path(worktree)}) — a "
+                   "killed sweep or self-check may have left its mutation on disk")
+    recorded, err = _recorded(worktree)
+    if err:
+        return [*out, err]
+    if not recorded:
+        return out
+    by_blob = {(r["file"], r["blob"]): r for r in recorded}
+    files = sorted({r["file"] for r in recorded})
+    head, err = _head_blobs(worktree, files)
+    if err:
+        return [*out, err]
+    for rel in files:
+        if not head_only:
+            try:
+                hit = by_blob.get((rel, _blob_id((worktree / rel).read_bytes())))
+            except FileNotFoundError:
+                hit = None
+            except OSError as e:
+                out.append(f"{rel} could not be read to check it for a mutation: {e}")
+                hit = None
+            if hit:
+                out.append(f"{rel}:{hit['line']} is a sweep/self-check MUTATION "
+                           f"(`{hit['text']}`) in the working tree — restore it")
+        hit = by_blob.get((rel, head.get(rel, "")))
+        if hit:
+            out.append(f"{rel}:{hit['line']} is a sweep/self-check MUTATION "
+                       f"(`{hit['text']}`) COMMITTED in HEAD — revert it before pushing")
+    return out
+
+
+def restore_and_check(worktree: Path) -> tuple[str, str]:
+    """⛔ CMX-398 — ``task-finished`` and ``request-push``: restore first, then refuse while a
+    mutation could still leave this worktree. ``(done, error)``: ``done`` names what was
+    restored; ``error`` is the refusal (the three-way state, a live owner, or each mutated
+    ``file:line``)."""
+    done, err = recover(worktree)
+    if err:
+        return done, err
+    blockers = mutation_blockers(worktree)
+    return done, "; ".join(blockers)
+
+
+# --- the boot scan: after a host restart (CMX-398) -----------------------------------------
+
+BOOT_SCAN_DEPTH = 4
+
+
+def find_markers(root: Path, depth: int = BOOT_SCAN_DEPTH) -> list[Path]:
+    """Every recovery marker under ``root``. The marker sits at a worktree's top, so the
+    walk stops descending at a checkout (a directory holding ``.git``) and at ``depth`` —
+    it never walks a worktree's ``node_modules`` or ``.venv``."""
+    found: list[Path] = []
+    root = Path(root)
+    if not root.is_dir():
+        return found
+    for top, dirs, _files in os.walk(root):
+        here = Path(top)
+        if (here / RECOVERY_MARKER).is_file():
+            found.append(here / RECOVERY_MARKER)
+        if (here / ".git").exists() or len(here.relative_to(root).parts) >= depth:
+            dirs[:] = []
+    return sorted(found)
+
+
+def boot_scan(roots: list[Path]) -> dict:
+    """``{"restored": [...], "left": [...]}`` for every recovery marker under ``roots`` whose
+    owner is dead: restored only where it is provable (the file is byte-for-byte the
+    marker's ``mutated`` text — :func:`recover`), everything else left, named, for a human.
+    A marker whose owner is alive belongs to a sweep running now and is not touched."""
+    restored: list[str] = []
+    left: list[str] = []
+    seen: set[Path] = set()
+    for root in roots:
+        for marker in find_markers(root):
+            wt = marker.parent.resolve()
+            if wt in seen:
+                continue
+            seen.add(wt)
+            if live_owner(wt):
+                continue                    # a sweep running now: not this scan's to touch
+            done, err = recover(wt)
+            if err:
+                left.append(f"{wt}: {err}")
+            elif done:
+                restored.append(f"{wt}: {done}")
+    return {"restored": restored, "left": left}
 
 
 class _Interrupted(BaseException):

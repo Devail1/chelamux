@@ -249,6 +249,13 @@ def cmd_run(args) -> None:
     # log, from the feed genuinely having nothing for a pid (see
     # `agent_manager.native_status_ever_fetched`).
     agent_manager.start_background_refresh()
+    # ⛔ CMX-398: a host restart kills a sweep/self-check AND its guardian mid-mutation, so
+    # nothing restores the file. Before the first tick can relaunch anything into those
+    # worktrees, restore what is provable and say — once — what was left for a human.
+    try:
+        sweep_recovery_boot_scan(DISPATCH_WORKFLOWS)
+    except Exception:
+        log.exception("Sweep-recovery boot scan failed")
     # Per-workflow, not global: each WORKFLOW.md carries its own effective poll
     # interval (`polling.interval_ms`, re-read on change), so they no longer share
     # one clock.
@@ -2565,6 +2572,42 @@ def cmd_restore(args) -> None:
         sys.exit(1)
 
 
+def sweep_recovery_boot_scan(workflows, *, notify=None) -> dict | None:
+    """⛔ CMX-398 — the daemon's reboot path: every recovery marker under the worktree roots
+    (``$CHELA_DIR/worktrees`` and each dispatch workflow's ``workspace.root``) whose owner is
+    dead is restored where provable (:func:`chela.sweep.boot_scan`), and ONE inbox notice
+    lists what was restored and what was left for a human. ``None`` when there was nothing."""
+    from chela import sweep
+
+    roots = [config.CHELA_DIR / "worktrees"]
+    for wf_path in workflows:
+        try:
+            roots.append(workflow.resolve_workspace_root(workflow.load_workflow(wf_path)))
+        except Exception as e:  # noqa: BLE001 — one unreadable workflow never hides the rest
+            log.warning("sweep-recovery boot scan: could not read %s: %s", wf_path, e)
+    result = sweep.boot_scan(roots)
+    if not result["restored"] and not result["left"]:
+        return None
+    summary = (f"⛔ killed sweep/self-check mutations after a restart — restored "
+               f"{len(result['restored'])}: {'; '.join(result['restored']) or 'none'}; "
+               f"left for a human {len(result['left'])}: {'; '.join(result['left']) or 'none'}")
+    log.warning("%s", summary)
+    event_log.append("sweep_recovery_boot", summary, result)
+    (notify or inbox.enqueue)("sweep_recovery_boot", summary, result)
+    return result
+
+
+def _task_finished_mutations(task_id: str) -> None:
+    """⛔ CMX-398: :func:`chela.dispatcher.check_mutations` for ``task-finished`` — say what
+    was restored; exit 1 on a refusal."""
+    check = dispatcher.check_mutations(task_id)
+    if check.get("restored"):
+        print(f"⚠ task-finished: {check['restored']}")
+    if not check.get("ok"):
+        print(f"task-finished: ⛔ {check['error']}")
+        sys.exit(1)
+
+
 def cmd_task_finished(args) -> None:
     """Request that the dispatcher mark this run awaiting_review and kill its tmux window.
 
@@ -2606,6 +2649,9 @@ def cmd_task_finished(args) -> None:
     if experiments and no_new_guards:
         print("task-finished: pass at most one of --self-check-experiments / --no-new-guards")
         sys.exit(2)
+    # ⛔ CMX-398: RESTORE FIRST — a killed hand-in's mutation is put back (or the hand-in
+    # refuses, naming it) before any gate reads the tree.
+    _task_finished_mutations(args.task_id)
     # 🔀 CMX-189: the base-sync gate runs FIRST — before the size gate, self-check and sweep.
     sync = dispatcher.check_base_sync(args.task_id, getattr(args, "allow_behind", False))
     if not sync.get("ok"):
@@ -2712,6 +2758,9 @@ def cmd_task_finished(args) -> None:
         kwargs["base_sync"] = sync["record"]
     if review.get("record"):
         kwargs["review_gate"] = review["record"]
+    # ⛔ CMX-398: and once more after the self-check and sweep mutated the tree — nothing is
+    # handed in while a mutation is still on disk or committed.
+    _task_finished_mutations(args.task_id)
     result = dispatcher.request_task_finished(args.task_id, **kwargs)
     if not result.get("ok"):
         print(f"task-finished: {result.get('error', 'unknown error')}")
@@ -2883,6 +2932,8 @@ def cmd_request_push(args) -> None:
     if args.pr_body_file:
         body = sys.stdin.read() if args.pr_body_file == "-" else Path(args.pr_body_file).read_text()
     result = dispatcher.request_push(args.task_id, pr_title=args.pr_title, pr_body=body)
+    if result.get("restored"):
+        print(f"⚠ request-push: {result['restored']}")
     if not result.get("ok"):
         print(f"request-push: {result.get('error', 'unknown error')}")
         sys.exit(1)

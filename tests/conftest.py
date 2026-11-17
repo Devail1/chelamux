@@ -671,6 +671,15 @@ def _hand_in_fragments_pass(request, monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _hand_in_mutation_gate_passes(request, monkeypatch):
+    """⛔ CMX-398: the restore-first gate passes unless a module sets ``REAL_MUTATION_GATE``."""
+    if not getattr(request.module, "REAL_MUTATION_GATE", False):
+        from chela import dispatcher
+        monkeypatch.setattr(dispatcher, "check_mutations",
+                            lambda *a, **k: {"ok": True, "restored": ""})
+
+
+@pytest.fixture(autouse=True)
 def _hand_in_review_passes(request, monkeypatch):
     """🔎 CMX-209: the self-review gate passes unless a module sets ``REAL_REVIEW_GATE = True``."""
     if not getattr(request.module, "REAL_REVIEW_GATE", False):

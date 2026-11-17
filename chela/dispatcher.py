@@ -3404,6 +3404,23 @@ def check_changelog_fragments(task_id: str) -> dict:
     return {"ok": True}
 
 
+def check_mutations(task_id: str) -> dict:
+    """⛔ CMX-398 — ``task-finished``'s restore-first gate: apply a killed sweep's or
+    self-check's recovery marker in the run's own worktree (:func:`chela.sweep.recover`),
+    then refuse while a marker is still there or any file — on disk or committed in HEAD —
+    is byte-for-byte a recorded mutation, naming ``file:line``. ``{"ok", "restored"}`` or
+    ``{"ok": False, "error"}``; a run with no worktree on record refuses."""
+    with _db() as conn:
+        row = conn.execute("SELECT * FROM runs WHERE task_id=?", (task_id,)).fetchone()
+    if row is None or not row["worktree_path"]:
+        return {"ok": False, "error": f"no run with a worktree on record for {task_id}"}
+    restored, err = sweep.restore_and_check(Path(row["worktree_path"]))
+    if err:
+        return {"ok": False, "error": f"a sweep/self-check mutation blocks this — {err}",
+                "restored": restored}
+    return {"ok": True, "restored": restored}
+
+
 def check_review_section(task_id: str, no_review_reason: str | None = None) -> dict:
     """🔎 CMX-209: the self-review gate — a code PR's body must carry ``## Review`` (see
     :mod:`chela.reviewgate`). ``{"ok", "record"}``; a prose-only diff needs none, and
@@ -3854,6 +3871,11 @@ def request_push(task_id: str, *, pr_title: str | None = None, pr_body: str | No
             "error": "run has no worktree_path on record — cannot request a push",
             "task_id": task_id,
         }
+    # ⛔ CMX-398: never push a mutation — restore first, then refuse while one could leave.
+    restored, err = sweep.restore_and_check(Path(worktree_path))
+    if err:
+        return {"ok": False, "task_id": task_id, "restored": restored,
+                "error": f"refusing to push — a sweep/self-check mutation: {err}"}
     _push_request_path(worktree_path).write_text(
         json.dumps({
             "task_id": task_id, "requested_at": _now(),
@@ -3861,7 +3883,8 @@ def request_push(task_id: str, *, pr_title: str | None = None, pr_body: str | No
         }),
         encoding="utf-8",
     )
-    return {"ok": True, "task_id": task_id, "requested": True}
+    return {"ok": True, "task_id": task_id, "requested": True,
+            **({"restored": restored} if restored else {})}
 
 
 def _apply_push_request(conn: sqlite3.Connection, wf: WorkflowDef, row: sqlite3.Row) -> dict:
@@ -3884,6 +3907,12 @@ def _apply_push_request(conn: sqlite3.Connection, wf: WorkflowDef, row: sqlite3.
     branch = row["branch_name"]
     if not branch:
         return {"ok": False, "error": "run has no branch_name on record"}
+    # ⛔ CMX-398: the push itself — what leaves is HEAD, so HEAD is what is checked (a
+    # self-check running in the worktree right now has a live marker that is not HEAD's).
+    blockers = sweep.mutation_blockers(Path(worktree_path), head_only=True)
+    if blockers:
+        return {"ok": False, "error": "refusing to push a sweep/self-check mutation: "
+                                      + "; ".join(blockers)}
 
     push = _git(Path(worktree_path), "push", "-u", "origin", branch,
                 timeout=GIT_NET_TIMEOUT_SECONDS)
@@ -6672,10 +6701,11 @@ def tick(workflow_path: str | Path) -> dict:
         # 📐🔗 CMX-432: the backstop for a tracker that ARCHIVES finished work — every closed
         # but unarchived issue, whoever closed it (the GitHub integration, a human). The
         # source throttles itself; a failure is logged there and never stops the tick.
-        sweep = getattr(source, "archive_sweep", None)
-        if sweep is not None and not tracker_read_failed:
+        # (Not named `sweep`: that would shadow the module this function uses below.)
+        archive_sweep = getattr(source, "archive_sweep", None)
+        if archive_sweep is not None and not tracker_read_failed:
             try:
-                summary["tracker_archived"] = sweep() or 0
+                summary["tracker_archived"] = archive_sweep() or 0
             except Exception:
                 log.exception("tracker archive sweep failed for %s", wf.path)
 
@@ -7219,7 +7249,12 @@ def tick(workflow_path: str | Path) -> dict:
                 # losing the verdict and bypassing the cap. It goes back where it came from,
                 # one round poorer.
                 log.exception("Rework re-spawn failed for task %s", row["task_id"])
-                _rework_failed(conn, row, f"rework re-spawn failed: {e}")
+                if isinstance(e, sweep.MutationLeftover):
+                    # ⛔ CMX-398: no retry can resolve a mutation nobody can prove safe to
+                    # restore — a human must, so it goes straight to one.
+                    _escalate(conn, row, str(e))
+                else:
+                    _rework_failed(conn, row, f"rework re-spawn failed: {e}")
 
         # 3b′. 🧹💽 THE DISK-BUDGET RAIL (CMX-164) — the `memcap` analog for disk. A fresh
         # claim forks a BRAND-NEW worktree (`ensure_worktree`), and `~/.chela/worktrees/` is
@@ -7292,7 +7327,8 @@ def tick(workflow_path: str | Path) -> dict:
                          status=excluded.status, attempt=excluded.attempt,
                          last_error=excluded.last_error, brief=excluded.brief""",
                     (task.id, str(wf.path), task.title,
-                     "needs_human" if isinstance(e, BranchNamesExhausted) else "failed",
+                     "needs_human" if isinstance(e, (BranchNamesExhausted,
+                                                     sweep.MutationLeftover)) else "failed",
                      attempt, str(e), _now(), _task_brief(task)),
                 )
                 if requeue:
@@ -7980,8 +8016,21 @@ def _launch_agent(
     the capable :data:`DEFAULT_JUDGE_MODEL` and never inherits the fleet's coding-model
     Settings choice — a `sonnet` default must not downgrade the adversarial pass.
 
+    ⛔ CMX-398 — RESTORE FIRST: a sweep or self-check killed mid-mutation (a reboot takes its
+    guardian down too) leaves the mutated file and its recovery marker in the worktree. It
+    is restored here, before the hooks and before the window exists — so before the agent's
+    first tool call — and a marker that cannot be applied safely (a live owner, a three-way
+    state) refuses the launch with :class:`~chela.sweep.MutationLeftover`.
+
     Returns the window target (the ``@id``, or the bare name if the id was unreadable).
     """
+    restored, err = sweep.recover(Path(worktree))
+    if err:
+        raise sweep.MutationLeftover(f"⛔ not launching an agent into {worktree}: {err}")
+    if restored:
+        log.warning("Task %s: %s before launching its agent", task_id, restored)
+        event_log.append("sweep_mutation_restored", f"{task_id}: {restored}",
+                         {"task_id": task_id, "worktree": str(worktree)})
     # CMX-274: a respawn starts clean of the last round's strays — before the hooks, which
     # may start something of their own in the worktree.
     if not judge_window:
