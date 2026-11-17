@@ -177,11 +177,15 @@ def test_an_unreadable_head_fails_closed(tmp_path, repo):
         "ok": False, "error": f"could not read HEAD in {wt}"}
 
 
-def test_a_run_without_a_branch_is_refused(tmp_path):
+def test_a_run_without_a_branch_is_refused(tmp_path, repo):
+    _origin, wt = repo
+    _commit(wt, "a")
     with dispatcher._db() as conn:
-        _row(conn, task_id="t1", status="running", worktree_path=str(tmp_path),
-             branch_name="")
-    assert dispatcher.ensure_pushed_head("t1")["ok"] is False
+        _row(conn, task_id="t1", status="running", worktree_path=str(wt), branch_name="")
+    assert dispatcher.ensure_pushed_head("t1") == {
+        "ok": False, "error": "no run with a worktree and branch on record for t1"}
+    assert dispatcher.ensure_pushed_head("nope") == {
+        "ok": False, "error": "no run with a worktree and branch on record for nope"}
 
 
 def test_a_push_request_that_cannot_be_filed_is_refused(tmp_path, repo):
