@@ -55,6 +55,7 @@ from chela import (
     okf,
     ops,
     park,
+    parentage,
     orchestrator,
     rc_rename,
     restore,
@@ -342,6 +343,13 @@ def cmd_run(args) -> None:
                                   gather=_restore_gather, marker=restore.boot_marker_path())
             except Exception:
                 log.exception("Restore boot pass failed")
+
+            # CMX-389: this daemon is session-parents.json's one writer — fold the event
+            # log's spawn records and first cross-session messages into it.
+            try:
+                parentage.tick()
+            except Exception:
+                log.exception("Session parentage tick failed")
 
             now = time.time()
             if stop.stopping:
@@ -3832,6 +3840,43 @@ def cmd_retry(args) -> None:
               "the authority, so it retries regardless, but nothing landed on the PR.")
 
 
+def cmd_parents(args) -> None:
+    """``chela parents backfill`` — derive parents for sessions already in the event log
+    (CMX-389, rule 2: first cross-session message within the window). A dry run unless
+    ``--apply``; either way it prints the resulting tree."""
+    if args.parents_cmd != "backfill":
+        print("usage: chela parents backfill [--apply]", file=sys.stderr)
+        sys.exit(2)
+    cfg = parentage.settings(args.window_minutes, args.max_depth)
+    try:
+        excluded = parentage.excluder(parentage.dispatched_roots())
+    except Exception as e:  # noqa: BLE001 — refuse rather than parent a dispatched run
+        print(f"parents: cannot read the dispatcher's runs ({e}) — refusing to infer",
+              file=sys.stderr)
+        sys.exit(1)
+    current = parentage.parents()
+    table, decisions = parentage.backfill(cfg, parentage.log_records(), current, excluded)
+    # A child already in the store was decided before: re-folding its record is not news.
+    decisions = [d for d in decisions if d["child"] not in current]
+    added = [d for d in decisions if not d["refused"]]
+    refused = [d for d in decisions if d["refused"]]
+    for d in added:
+        print(f"+ {d['child']} <- {d['parent']} ({d['source']})")
+    for d in refused:
+        print(f"- {d['child']} <- {d['parent']} refused: {d['refused']}")
+    print(f"{len(added)} new parent(s), {len(refused)} refused, {len(current)} already recorded")
+    print("\n".join(parentage.tree_lines(table)) or "(no parents)")
+    if not args.apply:
+        print("dry run — pass --apply to write them")
+        return
+    try:
+        n = parentage.apply_backfill(decisions, cfg)
+    except RuntimeError as e:
+        print(f"parents: {e}", file=sys.stderr)
+        sys.exit(1)
+    print(f"wrote {n} parent(s) to {parentage.store_path()}")
+
+
 def cmd_spawn(args) -> None:
     """Open an agent window in ``cwd`` from the terminal (CMX-13).
 
@@ -3848,10 +3893,21 @@ def cmd_spawn(args) -> None:
     launcher's Recent list, best-effort — a store hiccup never fails a spawn that happened.
     """
     command = args.launch_cmd or agent_manager.DEFAULT_LAUNCH_CMD
+    # CMX-389: run from inside a session, that session is the new one's parent. Resolved
+    # BEFORE the spawn, and a stale `$CHELA_WID` is refused, never guessed past.
+    parent, note = parentage.caller_session()
     result = spawn.spawn_window(args.cwd, command=command)
     if not result.ok:
         print(f"spawn: {result.error}", file=sys.stderr)
         sys.exit(1)
+    if note:
+        print(f"spawn: {note}", file=sys.stderr)
+    elif parent and not result.session_id:
+        print("spawn: the new session's id was not pinned — no parent recorded",
+              file=sys.stderr)
+    elif parent and not parentage.record_spawn(result.session_id, parent, result.wid):
+        print("spawn: could not write the launch record — no parent recorded",
+              file=sys.stderr)
     try:
         launcher.record_recent(result.cwd)
     except Exception:  # noqa: BLE001 — a store hiccup must never fail the spawn
@@ -4025,6 +4081,15 @@ def main() -> None:
         "--command", dest="launch_cmd", default=None, metavar="CMD",
         help="Command to launch in it (default: $CHELA_AGENT_CMD, else `claude`)",
     )
+    p_parents = sub.add_parser("parents", help="Session parentage (which session launched which)")
+    parents_sub = p_parents.add_subparsers(dest="parents_cmd")
+    p_backfill = parents_sub.add_parser(
+        "backfill", help="Derive parents from the event log (dry run unless --apply)")
+    p_backfill.add_argument("--apply", action="store_true", help="Write the new parents")
+    p_backfill.add_argument("--window-minutes", type=int, default=None,
+                            help="First-message window (default: $CHELA_PARENT_WINDOW_MINUTES, 10)")
+    p_backfill.add_argument("--max-depth", type=int, default=None,
+                            help="Max nesting depth (default: $CHELA_PARENT_MAX_DEPTH, 3)")
     sub.add_parser("run", help="Run the daemon loop (scheduler)")
 
     p_sched = sub.add_parser("schedule", help="Manage scheduled tasks")
@@ -4958,6 +5023,8 @@ def main() -> None:
         cmd_status(args)
     elif args.command == "spawn":
         cmd_spawn(args)
+    elif args.command == "parents":
+        cmd_parents(args)
     elif args.command == "run":
         cmd_run(args)
     elif args.command == "schedule":
