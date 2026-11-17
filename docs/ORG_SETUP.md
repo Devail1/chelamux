@@ -203,12 +203,14 @@ which of your devices are let in, it does not prove a device is a phone.
       `<node-name>.<tailnet-name>.ts.net` name. Do not put the org's name, a project name,
       or a person's name in the node name.
 - [ ] **Identity is attribution, not authority.** The dashboard reads `Tailscale-User-Login`
-      only to record *who* approved (`dashboard:<login>`) and who granted access. It never
-      checks it. The tailnet grant is the only thing that decides who gets in; anyone the
-      policy lets through can approve. Strip the header from client requests at the proxy
-      (as in the Caddy block above) so the record cannot be forged. Approval by verified user
-      is tracked in [CMX-385](https://linear.app/chelamux/issue/CMX-385/dashboard-attribute-approvals-to-the-verified-user-from-a-trusted)
-      and not supported yet.
+      only to record *who* approved and who granted access. It never checks it. The tailnet
+      grant is the only thing that decides who gets in; anyone the policy lets through can
+      approve. Set `CHELA_DASHBOARD_IDENTITY_HEADER=tailscale` so the header is believed only
+      from a loopback peer (refused and logged from anywhere else), and every mutating action
+      is recorded with its `by`; see "Who did it" in [DASHBOARD.md](DASHBOARD.md). A process
+      on the host itself can still send the header, and a second proxy must strip it from
+      client requests (as in the Caddy block above). For a login that cannot be forged even
+      locally, use the `cloudflare-access` mode (a verified JWT).
 - [ ] **Keep the dashboard on loopback.** `CHELA_DASH_HOST` unset (it defaults to
       `127.0.0.1`), `CHELA_TERMINALS_EXPOSE` unset.
 
