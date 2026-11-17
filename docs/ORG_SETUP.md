@@ -77,7 +77,9 @@ These stay visible, though none of them can reach anything:
 - Settings → General → **Telegram topics**: the *delete a topic when its window closes*
   toggle and the archived-topic cleanup.
 
-Hiding them when the matching service is off is not supported yet; it is a follow-up.
+Until [CMX-387](https://linear.app/chelamux/issue/CMX-387) lands, these controls still show
+but do nothing: hiding them when the matching service is off, and showing the Relay row as
+off, is not supported yet.
 
 ## 2. Remote access over Tailscale
 
