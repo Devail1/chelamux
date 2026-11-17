@@ -1483,3 +1483,20 @@ def is_loopback_host(host: str) -> bool:
     """True when the dashboard bind host is the local loopback (the safe case
     for serving the writable terminal wall)."""
     return (host or "").strip().lower() in ("127.0.0.1", "::1", "localhost", "")
+
+
+# CMX-389: session parentage (chela.parentage). Env-only, like the upload caps above.
+PARENT_WINDOW_MINUTES_DEFAULT = 10
+PARENT_MAX_DEPTH_DEFAULT = 3
+
+
+def parent_window_minutes() -> int:
+    """How soon after its start a session's first cross-session message must arrive for its
+    sender to become the session's parent (``CHELA_PARENT_WINDOW_MINUTES``, default 10)."""
+    return _env_int("CHELA_PARENT_WINDOW_MINUTES", PARENT_WINDOW_MINUTES_DEFAULT, 0, 1440)
+
+
+def parent_max_depth() -> int:
+    """The deepest a session may nest under its ancestors (``CHELA_PARENT_MAX_DEPTH``,
+    default 3): a parent that is already this deep is refused."""
+    return _env_int("CHELA_PARENT_MAX_DEPTH", PARENT_MAX_DEPTH_DEFAULT, 1, 10)
