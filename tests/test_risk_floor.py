@@ -230,3 +230,12 @@ def test_the_floor_is_stamped_only_by_the_spawn_and_cleared_by_a_no_judge_stamp(
     assert dispatcher._stamp_tier_verdict("t9", "standard", HEAD) is True
     assert dispatcher.resolve_run("t9")["risk_tier_floor"] is None
     json.dumps(dispatcher.resolve_run("t9"))   # the row stays serialisable
+
+
+@pytest.mark.parametrize("risk, merged", [("high", False), ("normal", True)])
+def test_merge_refuses_a_prose_only_stamp_on_a_risk_high_run(wfrepo, risk, merged):
+    result, squashed = _merge(wfrepo, "prose_only", risk, files=["docs/guide.md"])
+    assert result["ok"] is squashed is merged, result
+    if not merged:
+        assert "stamped prose-only, but its live tier is CORE (floor: risk:high)" \
+            in result["error"]

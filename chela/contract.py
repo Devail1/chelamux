@@ -640,7 +640,7 @@ def _gate(run: dict, *, override: bool, actor: str | None,
         elif tier == risktier.HUMAN:
             problem = f"this PR touches {trigger!r}, an ALWAYS-HUMAN path"
         elif judge_state == J_PROSE_ONLY and tier != risktier.PROSE:
-            problem = "the PR was stamped prose-only, but its live diff is not prose-only"
+            problem = f"the PR was stamped prose-only, but its live tier is {shown}"
         elif judge_state == J_STANDARD_NO_JUDGE and tier not in (risktier.STANDARD,
                                                                   risktier.PROSE):
             # CMX-296: no judge ran, so the live diff must still be standard (or the lighter
