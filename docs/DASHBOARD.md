@@ -109,8 +109,82 @@ confirms) and **Deny** go through the same path as Telegram and `chela merge-app
 re-check the head, CI, mergeability and expiry first; a request that cannot be approved says
 why instead of showing the button. It updates live. Settings → Notifications has an opt-in
 browser notification for new requests (off by default). A dashboard decision is recorded as
-`decided_by: dashboard`. Set `CHELA_DASHBOARD_URL` to the address you browse the dashboard at,
+`decided_by: dashboard`, or the signed-in login when an identity header is on
+([Who did it](#who-did-it-remote-access-and-identity)). Set `CHELA_DASHBOARD_URL` to the address you browse the dashboard at,
 so `chela merge --override` prints a link that works for you.
+
+## Who did it: remote access and identity
+
+The dashboard has no login of its own, and that does not change: the network is the trust
+boundary. What you can add is **attribution**: which user pressed Approve, archived a session or
+typed into a terminal. It comes from a proxy on the same host that names the user in a header.
+It is off by default; a local install behaves as it always has.
+
+| `CHELA_DASHBOARD_IDENTITY_HEADER` | Reads | Strength |
+|---|---|---|
+| `off` (default) | nothing new | as before |
+| `tailscale` | `Tailscale-User-Login` / `Tailscale-User-Name`, set by `tailscale serve` | **attribution, not authentication** |
+| `cloudflare-access` | `Cf-Access-Jwt-Assertion`, verified (RS256 signature against your team's certs, `aud`, `iss`, `exp`) | a forged token is refused, even from this host |
+
+The setting is env-only (it is a trust-boundary setting, and `~/.chela/config.json` is a file the
+dashboard itself writes). An unknown value, or cloudflare mode without its two settings, makes
+every request answer 503 rather than run unattributed.
+
+With a mode on:
+
+- The header counts **only from a loopback peer**: `tailscale serve` or `cloudflared` on the same
+  host. The same header from any other address is refused (403) and logged as
+  `dashboard.identity_refused`.
+- Every request that changes something (approve or deny an override, an access request, archive,
+  a layout write, text sent to a terminal, a terminal attach…) adds a `dashboard.action` event
+  with `by` and the response status (a refused attempt is recorded too), and an override's `decided_by` and notice name the login: "approved by
+  you@example.com via dashboard".
+- The sidebar head shows who you are signed in as; `/api/whoami` returns the same.
+
+⚠️ **Tailscale mode is attribution, not authority.** The loopback rule stops a spoofed header
+from the network, not from a process on this host: anything running here (a dispatched agent
+included) can send `Tailscale-User-Login: <anyone>` to `127.0.0.1`. Never treat a tailscale-mode
+`by` as proof that a human approved. Cloudflare mode does not have this gap for the login itself:
+the JWT's signature is checked even on loopback. Neither mode is an approval gate.
+
+⚠️ **In `off` and `tailscale` mode nothing stops a local caller from approving.** A process on
+this host can send an approve request straight to the dashboard's HTTP API, and that request
+gets past the merge-gate hook. The identity header does not close that gap; it is tracked in
+CMX-392. Cloudflare mode refuses such a caller unless it has a valid Access token.
+
+### `tailscale serve` (recommended)
+
+```bash
+export CHELA_DASHBOARD_IDENTITY_HEADER=tailscale     # in the dashboard's env, then restart it
+tailscale serve --bg 5001                            # https://<machine>.<tailnet>.ts.net
+```
+
+- `tailscale serve` sets the identity headers itself and replaces any a client sends. If another
+  reverse proxy on this host also forwards to the dashboard, it must strip `Tailscale-User-*`,
+  or a client can name itself through it (that proxy's requests come from loopback too).
+- Turn on **Tailnet Lock**, so a new node cannot join your tailnet on the coordination server's
+  word alone.
+- Pick a **machine name that reveals nothing**: serve's HTTPS certificate puts
+  `<machine>.<tailnet>.ts.net` in the public Certificate Transparency logs.
+- **Never Funnel.** `tailscale funnel` publishes the dashboard to the internet. The dashboard is a
+  writable shell with no login.
+
+### Cloudflare Access (alternative)
+
+```bash
+export CHELA_DASHBOARD_IDENTITY_HEADER=cloudflare-access
+export CHELA_DASHBOARD_CF_TEAM_DOMAIN=myteam.cloudflareaccess.com
+export CHELA_DASHBOARD_CF_AUD=<the Access application's AUD tag>
+```
+
+Run `cloudflared` on the same host, with an Access application in front of the hostname. Every
+request needs a valid token (401 otherwise); only chela's own local callers (the plugin's
+`/hooks/*`, the Mod's denial filing and needs-you poll, and the share bridge's terminal socket)
+may skip it, and only from loopback. `cloudflared` connects from loopback too, so keep an Access
+policy on every path of the hostname (no bypass rule): those routes cannot tell the tunnel from a
+local caller. The plain `Cf-Access-Authenticated-User-Email` header is never read. The trade-off:
+**Cloudflare terminates TLS**, so it sees every page, keystroke and terminal byte in clear text.
+`tailscale serve` keeps the traffic end to end between your devices.
 
 ## Update
 
