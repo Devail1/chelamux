@@ -111,6 +111,16 @@ def test_cloudflare_settings(monkeypatch):
         identity.cloudflare_settings()
 
 
+def test_the_jwks_client_is_built_once_per_certs_url(monkeypatch):
+    """No network: constructing a PyJWKClient fetches nothing until a key is asked for."""
+    monkeypatch.setattr(identity, "_JWKS", {})
+    url = f"https://{TEAM}/cdn-cgi/access/certs"
+    a = identity._jwks_client(url)
+    assert isinstance(a, jwt.PyJWKClient) and a.uri == url
+    assert identity._jwks_client(url) is a
+    assert identity._jwks_client(url + "?x") is not a
+
+
 # --- tailscale mode ----------------------------------------------------------------------
 
 def test_tailscale_loopback_header_attributes_the_approval(repo, client, tailscale, monkeypatch):

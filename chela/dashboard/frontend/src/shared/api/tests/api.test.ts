@@ -57,6 +57,8 @@ test('identity (CMX-385): a login is kept; a missing or malformed one reads as n
   expect(page('{"identity": {"login": "op@example.com", "mode": "cloudflare-access", "verified": true}}'))
     .toEqual({ login: 'op@example.com', name: null, mode: 'cloudflare-access', verified: true });
   expect(page('{"identity": {"login": "op@example.com", "mode": "tailscale", "verified": "yes"}}')?.verified).toBe(false);
+  expect(page('{"identity": {"login": "op@example.com", "name": "", "mode": "tailscale"}}')?.name).toBeNull();
+  expect(page('{"identity": {"login": "op@example.com", "name": 7, "mode": "tailscale"}}')?.name).toBeNull();
   expect(page('{"identity": null}')).toBeNull();
   expect(page('{"identity": {"login": "", "mode": "tailscale"}}')).toBeNull();
   expect(page('{"identity": {"login": 7, "mode": "tailscale"}}')).toBeNull();
