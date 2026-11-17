@@ -343,6 +343,38 @@ ONE inbox notice (`suite_runs_stopped`), once no slot is held and `MemAvailable`
 one suite's measured peak, so the orchestrator resumes them one at a time instead of
 handling separate stops.
 
+### The nightly sweep starts on idle and yields between mutations (CMX-400)
+
+The nightly sweep's battery is the longest one (`sweep.budget_seconds`, up to 3 h). A fixed
+start hour (`sweep.nightly_at`) collided with agents' hand-ins, which work around the clock.
+With `sweep.mode: idle` (the default) the daemon starts it only when:
+
+- no suite slot is held, so no hand-in, self-check, judge round or agent suite is running;
+- nobody is waiting for a slot (`suite_guard.waiters`, read from the wait ledgers);
+- no fleet pause is active;
+- `MemAvailable` is at least one suite's measured peak (the CMX-393 resume floor). Memory
+  that cannot be read counts as busy;
+- the above has held without a break for `sweep.quiet_seconds` (default 600), so the sweep
+  doesn't start between two hand-ins.
+
+**Yield.** While the sweep holds the slot it checks, after each measured mutation (its file
+already restored), whether another process is waiting for the slot. If one is, the sweep stops
+there and releases the slot to it. The run ends as yielded, and every mutation it didn't reach
+is owed (`owed.json`), so the next run starts with those. The first mutation always runs, so a
+busy box still makes progress.
+
+**Once a day.** A run that ends without yielding finishes the day. A yielded run may resume the
+same day when the box is idle again, until the day's `sweep.budget_seconds` (a daily total) is
+spent. The day record is `$CHELA_DIR/sweep-nightly/day.json`; a run that never reports back
+ends its day, and an unreadable record starts nothing.
+
+**Fallback.** If no idle window comes by `nightly_at` + `sweep.fallback_after_hours`
+(default 2, so 04:00) and nothing has run that day, the sweep runs once anyway, on
+`sweep.fallback_budget_seconds` (default 1800), still yielding. The inbox notice says
+"ran on fallback: the queue was never idle".
+
+`sweep.mode: fixed` keeps the old clock: one run a day from `nightly_at`, still yielding.
+
 ## Why chela cares (and does not fix all of it)
 
 **chela's supervisor shares a failure domain with the workers it spawns.** The daemon, the

@@ -153,8 +153,20 @@ judge:
 # to the defaults (900 s, 60 mutations). Raised because the 11-15 night owed 365 mutations from
 # four sidebar PRs and reached only ~19 (346 still owed); the battery starts ~02:00 while the
 # box is idle, so 3 h fits in idle hours. Suites still run one at a time (suite_slots: 1).
+# ⏳ CMX-400, Liav 2026-11-18 ("the sweep should run when the queue is empty"): the sweep
+# starts when no suite slot is held or waited for, memory is above one suite's peak, and that
+# has lasted `quiet_seconds`. It yields the slot to an agent between two mutations (the rest
+# is owed). budget_seconds is the DAILY total: a yielded run resumes the same day when idle
+# again until it is spent. With no idle window by nightly_at + fallback_after_hours (04:00)
+# and nothing run today, it runs once on fallback_budget_seconds. `mode: fixed` = the old
+# clock at nightly_at. See docs/RESOURCE_ISOLATION.md.
 sweep:
-  budget_seconds: 10800   # nightly only: 3 h, from ~02:00 while the box is idle
+  mode: idle                    # idle (default) | fixed
+  quiet_seconds: 600            # idle this long, unbroken, before an idle start
+  nightly_at: "02:00"           # the fallback is this + fallback_after_hours
+  fallback_after_hours: 2       # → 04:00
+  fallback_budget_seconds: 1800 # a fallback run's budget (out of the day's total)
+  budget_seconds: 10800         # the day's total: 3 h, across every idle run of the day
   max_mutations: 400
 
 hooks:
