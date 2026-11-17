@@ -185,7 +185,11 @@ real, settable env vars (unset falls through to them exactly as before), just no
 `test_inventory_matches_env_reads` doesn't expect them back as literal reads:
 `CHELA_DISPATCH_WORKFLOWS` (colon-separated `WORKFLOW.md` paths, default empty — empty
 means dispatcher off, deliberately, see `docs/CONFIG.md` "a config is not a capability";
-**restart_required**), `CHELA_MAX_REWORKS` (rework cap before a run escalates to
+**restart_required**), `CHELA_DISPATCH` (CMX-388: `off` = dispatch off BY CHOICE, the
+explicit switch that turns the empty-workflows WARN into an INFO and hides the dashboard's
+Work board, New task and Dispatched section; default on; it wins over a configured
+`CHELA_DISPATCH_WORKFLOWS`, which doctor reports as an ERROR; **restart_required**),
+`CHELA_MAX_REWORKS` (rework cap before a run escalates to
 `needs_human`, default `2`, `0` allowed — disables rework), `CHELA_JUDGE` (fleet-wide judge
 kill switch, default `true`; **restart_required**), `CHELA_JUDGE_MAX_UNKNOWN_RETRIES`
 (retries on a `cannot_verify` judge verdict, default `2`, `0` allowed),
@@ -208,8 +212,8 @@ overridable by this, default `dev`; **restart_required**), `CHELA_GATE_WAIT_S` (
 `CHELA_JUDGE_WALL_CEILING_S` / `CHELA_JUDGE_WALL_GRACE_S` (defaults `600` / `360` /
 `10800` / `900` s, read per call — see `docs/RISK_LEVELS.md`).
 
-Four of the eleven (`CHELA_DISPATCH_WORKFLOWS`/`CHELA_JUDGE`/`CHELA_CRITIC`/`CHELA_MERGE_BASE`)
-are resolved once at their owning module's import (`chela/config.py` for the first three,
+Five of these (`CHELA_DISPATCH_WORKFLOWS`/`CHELA_DISPATCH`/`CHELA_JUDGE`/`CHELA_CRITIC`/`CHELA_MERGE_BASE`)
+are resolved once at their owning module's import (`chela/config.py` for the first four,
 `chela/contract.py` for the fourth) — a dashboard write to any of those needs that process
 restarted; the other seven (`chela/config.py`'s `max_reworks()`/
 `judge_max_unknown_retries()`/`judge_max_concurrent()`/`worktree_disk_budget_bytes()`/

@@ -3,6 +3,7 @@
 // settings_telegram_topics (CMX-204), plus the agent mode and model and the projects folder.
 import { fireEvent, screen } from '@testing-library/react';
 import { beforeEach, expect, test, vi } from 'vitest';
+import { BOOT as PAGE_BOOT } from '../../../shared/api/index.ts';
 import { updateDeps } from '../index.ts';
 import { calls, must, openOn, pick, posts, routes, settle, type } from './setup.tsx';
 
@@ -431,4 +432,30 @@ test('before /api/config lands the folder field is not the stored one: Save and 
   release({ projects_dir: '~/code' });
   await settle();
   expect([input.disabled, save.disabled, input.value]).toEqual([false, false, '~/code']);
+});
+
+// --- CMX-388: dispatch off by choice ---------------------------------------------------------
+
+const DISPATCH_ROW = { key: 'dispatch', label: 'Work dispatcher', on: false, state: 'Off', detail: 'daemon detail' };
+const statusText = () => must(document.querySelector('.s-status-list')).textContent?.replace(/\s+/g, ' ') ?? '';
+
+test('CMX-388: dispatch off by choice replaces the Work dispatcher row with one line', async () => {
+  routes['/api/settings'] = { sections: [{ title: 'Features', items: [DISPATCH_ROW, { label: 'Scheduler', on: true, state: 'Polling' }] }] };
+  PAGE_BOOT.dispatchOffByChoice = true;
+  try {
+    await openOn();
+    expect(document.getElementById('dispatch-off-note')?.textContent?.replace(/\s+/g, ' ')).toBe(
+      'Dispatch is off by choice: unset CHELA_DISPATCH to enable (docs/CONFIG.md)');
+    expect(statusText()).not.toMatch(/Work dispatcher/);
+    expect(statusText()).toMatch(/Scheduler/);
+  } finally {
+    PAGE_BOOT.dispatchOffByChoice = false;
+  }
+});
+
+test('CMX-388: without the switch the Work dispatcher row draws exactly as before, and no note', async () => {
+  routes['/api/settings'] = { sections: [{ title: 'Features', items: [DISPATCH_ROW] }] };
+  await openOn();
+  expect(document.getElementById('dispatch-off-note')).toBeNull();
+  expect(statusText()).toMatch(/Off\s*Work dispatcher\s*daemon detail/);
 });
