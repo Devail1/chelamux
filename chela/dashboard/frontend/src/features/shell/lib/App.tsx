@@ -24,6 +24,20 @@ function Panel({ id, children }: { id: string; children?: ReactNode }) {
   return <div className={`panel${active ? ' active' : ''}`} id={panelId(id)}>{children}</div>;
 }
 
+/** CMX-385: who the trusted proxy says you are. Tailscale mode is attribution, not proof of
+ * who is at the keyboard (any local process can send the header); the title says which. */
+export function WhoAmI({ who = BOOT.identity }: { who?: typeof BOOT.identity }) {
+  if (!who) return null;
+  const how = who.verified
+    ? 'verified by Cloudflare Access'
+    : `from ${who.mode} (attribution only, not authentication)`;
+  return (
+    <span className="whoami" id="whoami" title={`Signed in as ${who.login}${who.name ? ` (${who.name})` : ''}, ${how}`}>
+      {who.login}
+    </span>
+  );
+}
+
 function SidebarHead() {
   return (
     <div className="sidebar-head">
@@ -36,6 +50,7 @@ function SidebarHead() {
       </IconButton>
       <div className="brand"><img src={staticUrl('img/claw-mark.svg')} className="brand-mark" alt="" /><span>chela</span></div>
       <div className="sidebar-head-actions">
+        <WhoAmI />
         <Slot id="decisions-island" className="decisions-island" />
       </div>
     </div>

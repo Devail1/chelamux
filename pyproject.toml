@@ -15,6 +15,7 @@ dependencies = [
     "flask>=3.0",        # dashboard web app (agent wall + dispatch Kanban)
     "flask-sock>=0.7",   # same-origin /term/<wid> ttyd reverse proxy (WebSocket)
     "cryptography>=42",  # E2E terminal-share crypto (HKDF-SHA256 + AES-256-GCM); interops with browser WebCrypto
+    "pyjwt[crypto]>=2.10,<3",  # CMX-385: verify a Cloudflare Access JWT (RS256 vs the team JWKS); opt-in mode only
 ]
 
 [project.optional-dependencies]
