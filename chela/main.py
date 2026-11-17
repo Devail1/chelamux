@@ -3856,6 +3856,8 @@ def cmd_parents(args) -> None:
         sys.exit(1)
     current = parentage.parents()
     table, decisions = parentage.backfill(cfg, parentage.log_records(), current, excluded)
+    # A child already in the store was decided before: re-folding its record is not news.
+    decisions = [d for d in decisions if d["child"] not in current]
     added = [d for d in decisions if not d["refused"]]
     refused = [d for d in decisions if d["refused"]]
     for d in added:

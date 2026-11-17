@@ -35,8 +35,14 @@ and by ``chela parents backfill --apply``, which takes that same tick lock first
 Store shape::
 
     {"parents": {"<child sid>": {"parent": "<sid>", "source": "spawn", "ts": 1.0}},
-     "state": {"cursor": {"seq": 0, "boot_id": ""}, "starts": {}, "first_seen": {},
-               "sends": [[ts, "<sender sid>", "<text prefix>"]]}}
+     "state": {"cursor": {"seq": 0, "boot_id": ""}, "starts": {}, "first_seen": {}}}
+
+The ``SendMessage`` text the sender match compares is kept in the daemon's memory only
+(:data:`_SENDS`), never in this file.
+
+Rule 2 needs the session's ``startup`` SessionStart in the log: a session that began as a
+``--resume``, or whose start rolled out of the log before its first message, is never
+inferred.
 """
 from __future__ import annotations
 
@@ -284,8 +290,19 @@ def excluder(roots: list[str]):
 
 # --- the daemon tick (the one writer) -------------------------------------------------
 
+# The SendMessage text prefixes the sender match needs, held in THIS process only: they are
+# agent-to-agent message text, so they never go to disk. A daemon restart forgets at most
+# SEND_MATCH_SECONDS of them.
+_SENDS: list = []
+
+
 def tick(cfg: Settings | None = None) -> list[dict]:
-    """Fold the event log since the stored cursor into the store. ``chela-daemon`` only."""
+    """Fold the event log since the stored cursor into the store. ``chela-daemon`` only.
+
+    The file is rewritten only when something in it changed. A cursor the log could not
+    honour (the hook ring rolled past it between ticks) is logged: anything in that hole
+    is lost to the live fold, and ``chela parents backfill`` is how to recover it.
+    """
     cfg = cfg or settings()
     try:
         roots = dispatched_roots()
@@ -293,13 +310,24 @@ def tick(cfg: Settings | None = None) -> list[dict]:
         log.warning("parentage: runs table unreadable — skipping this tick", exc_info=True)
         return []
     data = load()
+    before = json.dumps(data, sort_keys=True)
     state = data["state"]
     cursor = state.get("cursor") or {}
     res = event_log.read(cursor.get("seq"), after_boot=cursor.get("boot_id"),
                          types=EVENT_TYPES)
-    decisions = fold(data["parents"], state, res["events"], cfg, excluder(roots))
+    if res.get("gap"):
+        log.warning("parentage: the event log could not resume from %s (%s) — parents in "
+                    "the gap are missed; `chela parents backfill` recovers them",
+                    cursor, res["gap"])
+    state.pop("sends", None)
+    state["sends"] = _SENDS
+    try:
+        decisions = fold(data["parents"], state, res["events"], cfg, excluder(roots))
+    finally:
+        _SENDS[:] = state.pop("sends", [])
     state["cursor"] = {"seq": res["next_seq"], "boot_id": res["boot_id"]}
-    save(data)
+    if json.dumps(data, sort_keys=True) != before:
+        save(data)
     for d in decisions:
         if d["refused"]:
             log.info("parentage: %s -> %s (%s) refused: %s", d["child"], d["parent"],

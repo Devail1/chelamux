@@ -683,3 +683,74 @@ def test_a_failing_parentage_tick_never_stops_the_daemon_tick(monkeypatch):
     def boom():
         raise RuntimeError("store exploded")
     assert _one_daemon_tick(monkeypatch, boom) == ["prune"]
+
+
+# --- review fixes: gap log, message text in memory only, no idle rewrites, backfill noise --
+
+@pytest.fixture(autouse=True)
+def _fresh_sends(monkeypatch):
+    monkeypatch.setattr(parentage, "_SENDS", [])
+
+
+def test_tick_logs_a_cursor_the_event_log_could_not_honour(monkeypatch, caplog):
+    monkeypatch.setattr("chela.dispatcher.list_runs", lambda: [])
+    gap = {"resume_from_seq": 9, "reason": "rolled"}
+    monkeypatch.setattr(parentage.event_log, "read", lambda *a, **k: {
+        "events": [], "gap": gap, "next_seq": 12, "boot_id": "b1"})
+    with caplog.at_level("WARNING", logger="chela.parentage"):
+        parentage.tick(CFG)
+    assert any("could not resume" in r.getMessage() and "rolled" in r.getMessage()
+               for r in caplog.records)
+    assert parentage.load()["state"]["cursor"] == {"seq": 12, "boot_id": "b1"}
+
+
+def test_tick_without_a_gap_logs_no_warning(monkeypatch, caplog):
+    monkeypatch.setattr("chela.dispatcher.list_runs", lambda: [])
+    with caplog.at_level("WARNING", logger="chela.parentage"):
+        parentage.tick(CFG)
+    assert not [r for r in caplog.records if r.levelname == "WARNING"]
+
+
+def test_message_text_never_reaches_the_store_but_still_matches_across_ticks(monkeypatch):
+    monkeypatch.setattr("chela.dispatcher.list_runs", lambda: [])
+    _log(start(B, 0), send(A, 0, "secret plans for the build"))
+    parentage.tick(CFG)
+    raw = parentage.store_path().read_text()
+    assert "secret plans" not in raw
+    assert "sends" not in json.loads(raw)["state"]
+    _log(arrive(B, 0, "secret plans for the build"))
+    parentage.tick(CFG)                            # the sender came from memory
+    assert parentage.parents()[B]["parent"] == A
+    assert "secret plans" not in parentage.store_path().read_text()
+
+
+def test_an_old_store_with_message_text_is_scrubbed_on_the_next_tick(monkeypatch):
+    monkeypatch.setattr("chela.dispatcher.list_runs", lambda: [])
+    parentage.save({"parents": {}, "state": {"sends": [[1.0, A, "old secret"]]}})
+    parentage.tick(CFG)
+    assert "old secret" not in parentage.store_path().read_text()
+
+
+def test_an_idle_tick_does_not_rewrite_the_store(monkeypatch):
+    monkeypatch.setattr("chela.dispatcher.list_runs", lambda: [])
+    _log(spawned(B, A, 0))
+    parentage.tick(CFG)
+    writes = []
+    monkeypatch.setattr(parentage, "save", lambda data: writes.append(data))
+    parentage.tick(CFG)
+    assert writes == []
+    _log(spawned(C, A, 0))
+    parentage.tick(CFG)
+    assert len(writes) == 1
+
+
+def test_backfill_does_not_report_children_already_recorded(monkeypatch, capsys):
+    monkeypatch.setattr("chela.dispatcher.list_runs", lambda: [])
+    _log(spawned(C, A, 0))
+    parentage.save({"parents": {C: {"parent": A, "source": "spawn", "ts": 1.0}},
+                    "state": {}})
+    _backfill_log()
+    assert _cli(["parents", "backfill"]) is None
+    out = capsys.readouterr().out
+    assert f"- {C} <- {A}" not in out
+    assert "1 new parent(s), 0 refused, 1 already recorded" in out
