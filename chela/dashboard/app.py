@@ -94,9 +94,14 @@ def require_auth(f):
 # ``before_request`` hook, not inside ``require_auth``, so no route can miss it.
 #
 # Routes local processes call with no proxy in front: the plugin's hooks, the Mod's denial
-# filing, and the share bridge's terminal socket (chela.collab_stream). In cloudflare mode
-# these alone may skip the JWT, and only from loopback.
-_MACHINE_ENDPOINTS = frozenset({"api_hooks", "api_inbox_denial", "term_ws"})
+# filing and its needs-you poll (mods/chela-hooks), and the share bridge's terminal socket
+# (chela.collab_stream). In cloudflare mode these alone may skip the JWT, and only from
+# loopback.
+_MACHINE_ENDPOINTS = frozenset({"api_hooks", "api_inbox_denial", "api_needs_you", "term_ws"})
+# A refusal is logged to the event log at most once per (peer, reason) in this window, so a
+# misrouted client or a probe cannot roll real decisions out of the core log.
+_REFUSAL_LOG_WINDOW_S = 60.0
+_refusals_logged: dict[tuple, float] = {}
 # Methods that change something: each one is recorded with its ``by`` (``dashboard.action``).
 _MUTATING = frozenset({"POST", "PUT", "PATCH", "DELETE"})
 
@@ -126,6 +131,10 @@ def _resolve_identity():
     if isinstance(result, identity.Refusal):
         log.warning("identity refused: %s (peer %s, %s %s)", result.reason,
                     request.remote_addr, request.method, request.path)
+        key, now = (request.remote_addr, result.reason), time.monotonic()
+        if now - _refusals_logged.get(key, float("-inf")) < _REFUSAL_LOG_WINDOW_S:
+            return jsonify({"ok": False, "error": result.reason}), result.status
+        _refusals_logged[key] = now
         event_log.append("dashboard.identity_refused",
                          f"refused {request.method} {request.path}: {result.reason}",
                          payload={"peer": request.remote_addr, "path": request.path,
@@ -134,12 +143,13 @@ def _resolve_identity():
         return jsonify({"ok": False, "error": result.reason}), result.status
     g.identity = result
     if result.mode != identity.OFF and request.endpoint == "term_ws" and result.login:
-        # Keystrokes on a terminal socket are not requests; the attach is the record.
-        _record_action("WS", 101)
+        # Keystrokes on a terminal socket are not requests; the attach REQUEST is the record
+        # (no status: the route may still refuse it).
+        _record_action("WS", None)
     return None
 
 
-def _record_action(method: str, status: int) -> None:
+def _record_action(method: str, status: int | None) -> None:
     ident = _identity()
     by = ident.login
     event_log.append("dashboard.action",
@@ -152,10 +162,11 @@ def _record_action(method: str, status: int) -> None:
 
 @app.after_request
 def _attribute_action(resp):
-    """Every mutating dashboard action records its ``by`` in the event log (CMX-385)."""
+    """Every mutating dashboard action records its ``by`` in the event log (CMX-385) — a
+    refused or failed one too, with its status: who TRIED is what an audit most needs."""
     ident = _identity()
     if (ident.mode != identity.OFF and request.method in _MUTATING
-            and request.endpoint not in _MACHINE_ENDPOINTS and resp.status_code < 400):
+            and request.endpoint not in _MACHINE_ENDPOINTS):
         _record_action(request.method, resp.status_code)
     return resp
 
@@ -317,6 +328,11 @@ def api_version():
     return resp
 
 
+def _boot_identity() -> dict | None:
+    ident = _identity()
+    return ident.public() if ident.login else None
+
+
 @app.route("/")
 @require_auth
 def index():
@@ -329,7 +345,7 @@ def index():
         boot={"assetVersion": ASSET_VERSION, "terminalsEnabled": config.TERMINALS_ENABLED,
               "wallTileDispatched": config.WALL_TILE_DISPATCHED,
               # CMX-385: who the header chip says you are (null when unattributed/off).
-              "identity": _identity().public() if _identity().login else None},
+              "identity": _boot_identity()},
         app_src=asset_path(APP_ENTRY) if APP_ENTRY else None,
         app_css=asset_path(APP_CSS) if APP_CSS else None,
     ))

@@ -43,6 +43,8 @@ def _isolated(tmp_path, monkeypatch):
         monkeypatch.delenv(env, raising=False)
     monkeypatch.setattr(contract.notify, "enabled", lambda: False)
     monkeypatch.setattr(overrides.notify, "enabled", lambda: False)
+    from chela.dashboard import app as dash
+    monkeypatch.setattr(dash, "_refusals_logged", {})   # the refusal-log throttle, per test
 
 
 @pytest.fixture
@@ -184,22 +186,44 @@ def test_share_request_decisions_carry_the_login(client, tailscale, monkeypatch)
     assert seen[-1] == "dashboard@100.64.0.5"
 
 
-def test_layout_write_records_its_by_and_a_failed_or_read_request_does_not(client, tailscale, monkeypatch):
+def test_layout_writes_record_their_by_even_when_refused_and_a_read_does_not(client, tailscale, monkeypatch):
     from chela import sidebar_layout
     monkeypatch.setattr(sidebar_layout, "update", lambda body: {"order": []})
     h = {"Tailscale-User-Login": WHO}
     assert client.post("/api/sidebar/layout", json={"order": []}, headers=h, environ_base=LOOP).status_code == 200
     assert client.post("/api/sidebar/layout", data="x", headers=h, environ_base=LOOP).status_code == 400
     assert client.get("/api/whoami", headers=h, environ_base=LOOP).status_code == 200
-    (action,) = _events("dashboard.action")
-    assert (action["payload"]["by"], action["payload"]["method"], action["payload"]["path"],
-            action["payload"]["status"]) == (WHO, "POST", "/api/sidebar/layout", 200)
+    got = [(e["payload"]["by"], e["payload"]["method"], e["payload"]["path"], e["payload"]["status"])
+           for e in _events("dashboard.action")]
+    assert got == [(WHO, "POST", "/api/sidebar/layout", 200), (WHO, "POST", "/api/sidebar/layout", 400)]
+
+
+def test_a_repeated_refusal_is_logged_once_per_window(client, tailscale, monkeypatch):
+    from chela.dashboard import app as dash
+    monkeypatch.setattr(dash, "_refusals_logged", {})
+    h = {"Tailscale-User-Login": WHO}
+    for _ in range(3):
+        assert client.get("/api/whoami", headers=h, environ_base=TAILNET).status_code == 403
+    assert len(_events("dashboard.identity_refused")) == 1
+    monkeypatch.setattr(dash, "_REFUSAL_LOG_WINDOW_S", 0.0)
+    assert client.get("/api/whoami", headers=h, environ_base=TAILNET).status_code == 403
+    assert len(_events("dashboard.identity_refused")) == 2
 
 
 def test_machine_endpoints_are_not_recorded_as_actions(client, tailscale):
     client.post("/hooks/Nope", json={}, environ_base=LOOP)
     client.post("/api/inbox/denial", json={}, environ_base=LOOP)
     assert _events("dashboard.action") == []
+
+
+def test_a_terminal_attach_is_recorded_without_claiming_it_succeeded(client, tailscale):
+    ws = {"Upgrade": "websocket", "Connection": "Upgrade", "Sec-WebSocket-Version": "13",
+          "Sec-WebSocket-Key": "dGhlIHNhbXBsZSBub25jZQ=="}
+    client.get("/term/@99/ws", headers={**ws, "Tailscale-User-Login": WHO}, environ_base=LOOP)
+    (action,) = _events("dashboard.action")
+    assert (action["payload"]["by"], action["payload"]["method"], action["payload"]["status"]) == (WHO, "WS", None)
+    client.get("/term/@99/ws", headers=ws, environ_base=LOOP)   # unattributed: no record
+    assert len(_events("dashboard.action")) == 1
 
 
 def test_the_page_boot_names_the_identity(client, tailscale):
@@ -341,6 +365,9 @@ def test_cloudflare_service_token_names_its_common_name(client, cloudflare):
 def test_cloudflare_machine_endpoints_skip_the_jwt_from_loopback_only(client, cloudflare):
     assert client.post("/hooks/Nope", json={}, environ_base=LOOP).status_code != 401
     assert client.post("/hooks/Nope", json={}, environ_base=TAILNET).status_code == 401
+    # the Mod's needs-you poll (mods/chela-hooks) carries no JWT either
+    assert client.get("/api/needs-you", environ_base=LOOP).status_code != 401
+    assert client.get("/api/needs-you", environ_base=TAILNET).status_code == 401
     # a token a machine route DOES carry is still verified
     r = client.post("/hooks/Nope", json={}, headers={"Cf-Access-Jwt-Assertion": _token(key=OTHER)},
                     environ_base=LOOP)

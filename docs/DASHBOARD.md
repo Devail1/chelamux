@@ -137,7 +137,7 @@ With a mode on:
   `dashboard.identity_refused`.
 - Every request that changes something (approve or deny an override, an access request, archive,
   a layout write, text sent to a terminal, a terminal attach…) adds a `dashboard.action` event
-  with `by`, and an override's `decided_by` and notice name the login: "approved by
+  with `by` and the response status (a refused attempt is recorded too), and an override's `decided_by` and notice name the login: "approved by
   you@example.com via dashboard".
 - The sidebar head shows who you are signed in as; `/api/whoami` returns the same.
 
@@ -174,8 +174,10 @@ export CHELA_DASHBOARD_CF_AUD=<the Access application's AUD tag>
 
 Run `cloudflared` on the same host, with an Access application in front of the hostname. Every
 request needs a valid token (401 otherwise); only chela's own local callers (the plugin's
-`/hooks/*`, the Mod's denial filing and the share bridge's terminal socket) may skip it, and only
-from loopback. The plain `Cf-Access-Authenticated-User-Email` header is never read. The trade-off:
+`/hooks/*`, the Mod's denial filing and needs-you poll, and the share bridge's terminal socket)
+may skip it, and only from loopback. `cloudflared` connects from loopback too, so keep an Access
+policy on every path of the hostname (no bypass rule): those routes cannot tell the tunnel from a
+local caller. The plain `Cf-Access-Authenticated-User-Email` header is never read. The trade-off:
 **Cloudflare terminates TLS**, so it sees every page, keystroke and terminal byte in clear text.
 `tailscale serve` keeps the traffic end to end between your devices.
 
