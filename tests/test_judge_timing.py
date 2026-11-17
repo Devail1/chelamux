@@ -76,7 +76,12 @@ def _fake_box(monkeypatch, clock: FakeClock, original: str) -> list[float]:
         clock.t += PROVISION
         return ""
 
+    @contextmanager
+    def battery(cwd, kind, on_wait=None, max_wait=None):
+        yield       # 🧠 CMX-393: the battery's own slot — its wait is tested in test_suite_battery
+
     monkeypatch.setattr(suite_guard, "slot", slot)
+    monkeypatch.setattr(suite_guard, "battery", battery)
     monkeypatch.setattr(suite_guard, "bounded", bounded)
     monkeypatch.setattr(procguard, "run_shell_group", run_shell_group)
     monkeypatch.setattr(judge, "provision_suite_env", provision)
