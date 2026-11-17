@@ -6,6 +6,7 @@ import './lib/poll.ts';
 export { Board } from './lib/Board.tsx';
 // CMX-315: the compact card (and the Rows row); CMX-316's desktop board draws it too.
 export { CompactCard, RowItem } from './lib/Compact.tsx';
+export { mergeRun } from './lib/actions.ts';
 export { pollWork } from './lib/poll.ts';
 export { showToast, toasts } from './lib/toasts.ts';
 export { SEGMENTS, SEGMENT_KEY, WorkView } from './lib/WorkView.tsx';

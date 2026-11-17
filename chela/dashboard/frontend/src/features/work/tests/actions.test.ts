@@ -2,7 +2,7 @@
 // Merge (it runs `gh pr merge` itself) without it, so an agent on loopback cannot press it.
 import { afterEach, expect, test, vi } from 'vitest';
 
-vi.mock('../../../shared/store/work.ts', () => ({ refreshWork: vi.fn() }));
+vi.mock('../../../shared/store/work.ts', async (orig) => ({ ...(await orig<object>()), refreshWork: vi.fn() }));
 
 afterEach(() => vi.unstubAllGlobals());
 
@@ -12,7 +12,7 @@ test('Merge posts to the run with the session-token header', async () => {
     calls.push({ url, opts });
     return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve({ ok: true }) });
   });
-  const { mergeRun } = await import('../lib/actions.ts');
+  const { mergeRun } = await import('../index.ts');
   expect(await mergeRun('CMX-1')).toBeNull();
   expect(calls[0]?.url).toBe('/api/dispatcher/runs/CMX-1/merge');
   const headers = calls[0]?.opts.headers as Record<string, string>;
