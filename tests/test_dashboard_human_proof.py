@@ -154,6 +154,18 @@ def _shapes(sid: str, token: str) -> dict:
     }
 
 
+_REASON = {
+    "no Origin": "no Origin header",
+    "foreign Origin": "cross-origin request",
+    "null Origin": "cross-origin request",
+    "cross-site fetch": "cross-site request",
+    "no cookie": "no dashboard session",
+    "no token": "missing or stale session token",
+    "wrong token": "missing or stale session token",
+    "another session's token": "missing or stale session token",
+}
+
+
 @pytest.mark.parametrize("shape", list(_shapes("s", "t")))
 def test_each_missing_proof_alone_refuses_the_approval(repo, shape):  # noqa: F811
     _seed(repo)
@@ -167,7 +179,9 @@ def test_each_missing_proof_alone_refuses_the_approval(repo, shape):  # noqa: F8
         resp = client.post(f"/api/override/{rid}/approve", json={"confirm": True},
                            headers=headers)
     assert resp.status_code == 403, shape
-    assert resp.get_json()["ok"] is False and resp.get_json()["detail"]
+    assert resp.get_json()["ok"] is False
+    # each shape is refused for ITS reason, not by a later check that happens to also miss
+    assert _REASON[shape] in resp.get_json()["detail"], (shape, resp.get_json()["detail"])
     squash.assert_not_called()
     assert overrides.load(rid)["state"] == overrides.PENDING
 
