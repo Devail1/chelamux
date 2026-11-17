@@ -254,11 +254,17 @@ def test_the_dashboard_confirm_page_shows_the_release_and_approves(world, pushes
     pytest.importorskip("flask")
     from chela.dashboard.app import app
     out = _prepare(world)
-    client = as_browser(app.test_client())
+    import re
+    # CMX-392: the operator's real flow, not as_browser: the page's own cookie and the token
+    # its RELEASE form embeds (the same injection as the override form's, its own markup).
+    client = app.test_client()
     page = client.get(f"/override/{out['request_id']}")
     assert page.status_code == 200 and b"Approve release" in page.data
     assert b"CMX-5, CMX-7" in page.data and out["dev_sha"].encode() in page.data
-    ok = client.post(f"/override/{out['request_id']}", data={"decision": "approve"})
+    token = re.search(rb'name="session_token" value="([0-9a-f]{64})"', page.data)
+    assert token, "the release form must carry its session token"
+    ok = client.post(f"/override/{out['request_id']}", headers={"Origin": "http://localhost"},
+                     data={"decision": "approve", "session_token": token.group(1).decode()})
     assert ok.status_code == 200 and b"released" in ok.data
     assert len(pushes) == 4
 

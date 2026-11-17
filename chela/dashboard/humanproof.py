@@ -21,12 +21,13 @@ Why a token and not a fresh Telegram confirm: Telegram is optional (CMX-103 serv
 with no bridge), so requiring it would leave a dashboard-only operator no way to approve.
 
 ⚠️ What this does NOT prove. A process running as the operator's own Unix user can still
-emulate a browser deliberately: GET the page, keep its cookie, scrape the token, forge the
-Origin. Nothing on loopback can tell that apart from a browser; only an OS boundary can (the
-agent sandbox, ``docs/SANDBOX_BOUNDARY.md``, which also denies loopback). What this closes is
-the one-request path, the thing an agent reaches for by reflex, and it turns the remaining
-path into a multi-step, unmistakable forgery that the permission classifier and the merge-gate
-hook both see. ``docs/TRUST_AND_APPROVAL_POSTURE.md`` records this residual.
+emulate a browser deliberately: GET ``/``, keep the cookie it sets, read the token from the
+boot block, forge the Origin. That is two plain HTTP requests, not a hard barrier. Nothing on
+loopback can tell it apart from a browser; only an OS boundary can (the agent sandbox,
+``docs/SANDBOX_BOUNDARY.md``, which also denies loopback). What this closes is the blind
+single POST, and it makes the remaining path an explicit impersonation of the operator's
+browser (a fetched page, a scraped token, a forged Origin) rather than an API call that
+happens to work. ``docs/TRUST_AND_APPROVAL_POSTURE.md`` records this residual.
 """
 from __future__ import annotations
 

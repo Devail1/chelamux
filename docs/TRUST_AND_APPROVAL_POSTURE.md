@@ -207,17 +207,19 @@ Why a token rather than a mandatory Telegram confirm: Telegram is optional, and 
 dashboard-only operator (CMX-103) would be left with no way to approve.
 
 ⚠️ **What this does not stop.** A process running as the operator's Unix user can still
-emulate a browser on purpose: load the page, keep its cookie, scrape the token, forge the
-Origin. Nothing on loopback can tell that apart from a real browser; only an OS boundary can
-(the agent sandbox above, which also denies loopback). The token closes the one-request
-path an agent reaches for by reflex, and turns what remains into a multi-step forgery that
-the permission classifier sees. Until chelamux's own agents run sandboxed, that is the
-honest ceiling.
+emulate a browser on purpose: GET `/`, keep the cookie it sets, read the token from the
+page, forge the Origin. That is two plain HTTP requests, not a hard barrier. Nothing on
+loopback can tell that apart from a real browser; only an OS boundary can (the agent sandbox
+above, which also denies loopback). The token closes the blind single POST, and makes what
+remains an explicit impersonation of the operator's browser rather than an API call that
+happens to work. The same holds in-process: `browser_proven` is an argument any Python caller
+can pass. Until chelamux's own agents run sandboxed, or approval moves to a channel an agent
+cannot drive (a Telegram tap), that is the honest ceiling.
 
 **The merge-gate hook is a speed bump, never the gate.** `chela/mergegate.py` denies a
 session's `curl`/`wget`/`http`/`xh` to `/override/` or `/api/share-requests/…/approve`, and a
 `python` call into `chela.overrides.decide`. It matches strings in argv, so any HTTP client it
-does not name walks past it. It stays because it catches the reflexive attempt and says why;
+does not name walks past it. It stays because it catches the obvious attempt and says why;
 the server-side proof above is what refuses.
 
 **Which dashboard routes need the proof** (audit, CMX-392). Every mutating route was checked

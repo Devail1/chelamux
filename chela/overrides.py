@@ -39,9 +39,13 @@ approve, and each proves a human its own way:
 On top of that the merge-gate hook (:mod:`chela.mergegate`) denies a session's
 ``chela merge-approve``, a ``curl`` to ``/override/``, and a ``python`` call into
 ``chela.overrides.decide``. That hook is a speed bump, never the gate: it string-matches
-argv, so any HTTP client it does not name walks past it (CMX-392). The env check is deliberately NOT applied to the two service
-channels: a pm2 service can inherit a Claude marker from the shell that started it (CMX-21),
-and that must not silently disable the one-tap button the operator relies on.
+argv, so any HTTP client it does not name walks past it (CMX-392).
+
+The env check is deliberately NOT applied to the two service channels: a pm2 service can
+inherit a Claude marker from the shell that started it (CMX-21), and that must not silently
+disable the one-tap button the operator relies on. The dashboard earns that exemption only
+with ``browser_proven``; an in-process caller can pass the flag too, which is why the hook's
+``python … decide`` match stays (see :mod:`chela.dashboard.humanproof` for the ceiling).
 
 🏷️ **Releases ride the same store (CMX-87).** ``chela release X.Y.Z`` (:mod:`chela.release`)
 records a request with ``kind: "release"``, bound (``head_sha``) to the ``dev`` commit the
