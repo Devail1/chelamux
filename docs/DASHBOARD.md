@@ -147,6 +147,11 @@ included) can send `Tailscale-User-Login: <anyone>` to `127.0.0.1`. Never treat 
 `by` as proof that a human approved. Cloudflare mode does not have this gap for the login itself:
 the JWT's signature is checked even on loopback. Neither mode is an approval gate.
 
+⚠️ **In `off` and `tailscale` mode nothing stops a local caller from approving.** A process on
+this host can send an approve request straight to the dashboard's HTTP API, and that request
+gets past the merge-gate hook. The identity header does not close that gap; it is tracked in
+CMX-392. Cloudflare mode refuses such a caller unless it has a valid Access token.
+
 ### `tailscale serve` (recommended)
 
 ```bash

@@ -210,7 +210,9 @@ which of your devices are let in, it does not prove a device is a phone.
       is recorded with its `by`; see "Who did it" in [DASHBOARD.md](DASHBOARD.md). A process
       on the host itself can still send the header, and a second proxy must strip it from
       client requests (as in the Caddy block above). For a login that cannot be forged even
-      locally, use the `cloudflare-access` mode (a verified JWT).
+      locally, use the `cloudflare-access` mode (a verified JWT). In `off` and `tailscale`
+      mode a local process can also approve over the dashboard's HTTP API, which the
+      merge-gate hook misses (CMX-392).
 - [ ] **Keep the dashboard on loopback.** `CHELA_DASH_HOST` unset (it defaults to
       `127.0.0.1`), `CHELA_TERMINALS_EXPOSE` unset.
 
