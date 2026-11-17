@@ -419,6 +419,15 @@ DISPATCH_KNOBS: tuple[DispatchKnob, ...] = (
     DispatchKnob("dispatch_workflows", "CHELA_DISPATCH_WORKFLOWS", "", str,
                  "Dispatch workflows (colon-separated WORKFLOW.md paths)",
                  kind="text", restart_required=True),
+    # 🚫 CMX-388: the explicit "this install runs no dispatcher" switch. ``CHELA_DISPATCH=off``
+    # tells OFF-BY-CHOICE apart from the empty-``CHELA_DISPATCH_WORKFLOWS`` accident that
+    # cost nine hours (docs/CONFIG.md "A config is not a capability"): without it an empty
+    # workflow list still WARNs, exactly as before. With it, dispatch is off and the
+    # dashboard hides the Work surfaces. It WINS over a configured workflow list (a
+    # contradiction ``chela doctor`` reports as an ERROR) — see DISPATCH_WORKFLOWS below.
+    DispatchKnob("dispatch_enabled", "CHELA_DISPATCH", True, _cast_bool,
+                 "Work dispatcher on this install (off = off by choice)",
+                 kind="bool", restart_required=True),
     # ⚖️🎚️ CMX-405: the rework budget is PER RISK LEVEL (the three knobs below); this one
     # is the global CEILING over all of them — `0` still turns the loop off entirely.
     DispatchKnob("max_reworks", "CHELA_MAX_REWORKS", 5, int,
@@ -1054,10 +1063,18 @@ RESTORE_RESUME_ENABLED = os.environ.get("CHELA_RESTORE_RESUME", "false").strip()
 # A Dispatch-tab knob (CMX-220), restart_required — same latched-constant shape as
 # JUDGE_ENABLED/CRITIC_ENABLED above.
 _dispatch_raw = dispatch_value("dispatch_workflows")
-DISPATCH_WORKFLOWS = [
+# Every workflow CHELA_DISPATCH_WORKFLOWS names, whether or not dispatch is on — doctor
+# needs it to see the switch-plus-workflows contradiction (CMX-388).
+DISPATCH_WORKFLOWS_CONFIGURED = [
     Path(os.path.expandvars(os.path.expanduser(p))).resolve()
     for p in _dispatch_raw.split(":") if p.strip()
 ]
+# 🚫 CMX-388: ``CHELA_DISPATCH=off`` — dispatch OFF BY CHOICE. Latched like the list above
+# (restart_required). The switch WINS: with it on, DISPATCH_WORKFLOWS is empty however many
+# workflows are configured, so every ``for wf in DISPATCH_WORKFLOWS`` consumer (the daemon
+# loop, the dashboard, the sources) sees one answer.
+DISPATCH_OFF_BY_CHOICE = not dispatch_value("dispatch_enabled")
+DISPATCH_WORKFLOWS = [] if DISPATCH_OFF_BY_CHOICE else list(DISPATCH_WORKFLOWS_CONFIGURED)
 
 # Needs-input notification: when an agent's pane enters the `waiting` state
 # (blocked on a permission prompt or a question), fire a notification once per

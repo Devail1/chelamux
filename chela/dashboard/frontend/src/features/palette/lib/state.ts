@@ -82,7 +82,8 @@ function baseItems(h: PaletteHost, skip?: Set<string>): PaletteItem[] {
   }
   items.push({ icon: 'shell', title: 'New shell window', sub: 'action', run: () => void newShellWindow() });
   // CMX-6: create a Linear issue.
-  items.push({ icon: 'add', title: 'New task', sub: 'action · Linear issue', run: () => openNewTask() });
+  // CMX-388: no dispatcher (CHELA_DISPATCH=off), no task to create for it.
+  if (!BOOT.dispatchOffByChoice) items.push({ icon: 'add', title: 'New task', sub: 'action · Linear issue', run: () => openNewTask() });
   items.push({ icon: 'schedule', title: 'Add scheduled task', sub: 'action', run: () => showAddSchedule() });
   // CMX-121: the only way to the shortcuts sheet (no dedicated global key).
   items.push({ icon: 'keyboard', title: 'Keyboard shortcuts', sub: 'help', run: () => openShortcuts() });

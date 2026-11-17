@@ -142,6 +142,14 @@ export function folderKey(a: AgentRow | null | undefined): string {
     return cwd;
 }
 
+// CMX-388: with dispatch off by choice (CHELA_DISPATCH=off) there is no Dispatched section.
+// A session that would have gone there (a leftover worktree, an old run's window) is still a
+// session, so it groups by its own folder instead of disappearing.
+export function plainFolderKey(a: AgentRow | null | undefined): string {
+    const cwd = a ? _norm(a.cwd) : '';
+    return cwd || OTHER_KEY;
+}
+
 // `{key: label}` for a set of folder keys. The label is the folder's basename; two
 // folders that share one are told apart the way the desktop does it —
 // `python-agent · work` / `python-agent · personal` — by the shortest run of parent
@@ -861,6 +869,8 @@ export interface GroupOptions {
     sessions?: SessionRecord[];
     /** CMX-381: the Manual sort's row order per group key. */
     rows?: Record<string, RowOrder>;
+    /** CMX-388: CHELA_DISPATCH=off, so no Dispatched section (see plainFolderKey). */
+    dispatchOff?: boolean;
 }
 
 export interface SidebarModel {
@@ -874,10 +884,15 @@ export function groupSidebar(agents: (AgentRow | null | undefined)[] | null | un
     const { mode = 'folder', wants, orchWid = null, order = [], archived = new Set<string>(),
         showArchived = false, env = null, activityDays = null, now = Date.now(),
         sort = 'name', labelOf = (it: Item) => it.key, showEmpty = false,
-        custom = { groups: [], assign: {} }, sessions = [], rows = {} } = opts;
+        custom = { groups: [], assign: {} }, sessions = [], rows = {}, dispatchOff = false } = opts;
     const status = opts.status || (showArchived ? 'all' : 'active');
     if (!GROUP_MODES.includes(mode)) throw new Error(`unknown sidebar grouping mode: ${mode}`);
     const items = buildItems(agents);
+    // The folder group a row lands in by folder (CMX-388: never Dispatched when dispatch is off).
+    const folderOf = (it: Item): string => {
+        if (dispatchOff) return plainFolderKey(primaryWindow(it));
+        return it.kind === 'run' ? DISPATCHED_KEY : folderKey(primaryWindow(it));
+    };
     const envSet = env ? new Set(env) : null;
     const cutoff = activityDays ? now - activityDays * 86400000 : null;
     const needsYou: Item[] = [];
@@ -886,9 +901,8 @@ export function groupSidebar(agents: (AgentRow | null | undefined)[] | null | un
     const kept: Item[] = [];
     const allFolders = new Set<string>();
     for (const it of items) {
-        const prim = primaryWindow(it);
         if (it.windows.some(a => wants(a))) { needsYou.push(it); continue; }
-        if (mode === 'folder') allFolders.add(it.kind === 'run' ? DISPATCHED_KEY : folderKey(prim));
+        if (mode === 'folder') allFolders.add(folderOf(it));
         if (orchWid && it.windows.some(a => a.window_id === orchWid)) { kept.push(it); continue; }
         // Archived only while it is still archivable: a row that wakes up (busy, waiting)
         // is shown again whatever the archive set says. An archived row goes to the ONE
@@ -939,7 +953,7 @@ export function groupSidebar(agents: (AgentRow | null | undefined)[] | null | un
             const id = (custom.assign || {})[assignKey(it)];
             return id != null && customIds.has(id) ? customKey(id) : UNGROUPED_KEY;
         }
-        return it.kind === 'run' ? DISPATCHED_KEY : folderKey(primaryWindow(it));
+        return folderOf(it);
     };
     for (const it of kept) ensure(keyOf(it)).items.push(it);
     // In the State grouping, "Needs you" is a group like the others.
@@ -1019,6 +1033,8 @@ export interface SidebarState {
     onWall: string[];
     active: string | null;
     altHeld: boolean;
+    /** CMX-388: BOOT.dispatchOffByChoice. */
+    dispatchOff?: boolean;
 }
 
 // An item's display label: a run reads `CMX-37 · <title>`; a window reads its CMX-62
@@ -1035,7 +1051,7 @@ export function modelOptions(s: SidebarState): GroupOptions {
         archived: new Set(s.archived), status: s.view.status, env: s.view.env,
         activityDays: VIEW_ACTIVITY[s.view.activity] ?? null, now: s.now, sort: s.view.sort,
         labelOf: it => itemLabel(it, s.labels), showEmpty: s.view.showEmpty, custom: s.custom,
-        sessions: s.sessions, rows: s.rows,
+        sessions: s.sessions, rows: s.rows, dispatchOff: !!s.dispatchOff,
     };
 }
 

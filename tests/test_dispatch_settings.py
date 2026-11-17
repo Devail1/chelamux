@@ -130,10 +130,12 @@ def test_registry_has_exactly_the_twelve_settings_inventory_knobs(mods):
         "judge_wall_ceiling_seconds", "judge_wall_grace_seconds",
         # 🏗️🔁 CMX-192: the infra-restart budget, separate from the rework caps.
         "max_infra_restarts",
+        # 🚫 CMX-388: CHELA_DISPATCH=off, dispatch off by choice.
+        "dispatch_enabled",
     }
 
 
-def test_exactly_four_knobs_are_restart_required(mods):
+def test_exactly_these_knobs_are_restart_required(mods):
     """⚖️ Corrupt (flip any of these, or leave a fifth marked restart_required)
     → RED: this is what the UI's "restart" badge — and CMX-220's own task
     description ("9 knobs, and 4 of them are NOT hot") — depend on being
@@ -142,7 +144,9 @@ def test_exactly_four_knobs_are_restart_required(mods):
     ``worktree_disk_budget_bytes``), so the restart-required set itself is unchanged."""
     config, _ = mods
     restart = {k.key for k in config.DISPATCH_KNOBS if k.restart_required}
-    assert restart == {"dispatch_workflows", "judge_enabled", "critic_enabled", "merge_base"}
+    # CMX-388 adds a fifth: CHELA_DISPATCH is latched at import beside the workflow list.
+    assert restart == {"dispatch_workflows", "dispatch_enabled", "judge_enabled", "critic_enabled",
+                       "merge_base"}
     hot = {k.key for k in config.DISPATCH_KNOBS if not k.restart_required}
     assert hot == {
         "max_reworks", "judge_max_unknown_retries",

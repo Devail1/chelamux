@@ -16,14 +16,14 @@ afterEach(() => {
 
 test('the boot block is read as rendered', async () => {
   const { BOOT, ASSET_VERSION } = await load(
-    '{"assetVersion": "abc123", "terminalsEnabled": false, "wallTileDispatched": true}',
+    '{"assetVersion": "abc123", "terminalsEnabled": false, "wallTileDispatched": true, "dispatchOffByChoice": true}',
   );
-  expect(BOOT).toEqual({ assetVersion: 'abc123', terminalsEnabled: false, wallTileDispatched: true });
+  expect(BOOT).toEqual({ assetVersion: 'abc123', terminalsEnabled: false, wallTileDispatched: true, dispatchOffByChoice: true });
   expect(ASSET_VERSION).toBe('abc123');
 });
 
 test('no block, or one that does not parse, runs as the legacy defaults', async () => {
-  const defaults = { assetVersion: '', terminalsEnabled: true, wallTileDispatched: false };
+  const defaults = { assetVersion: '', terminalsEnabled: true, wallTileDispatched: false, dispatchOffByChoice: false };
   expect((await load(null)).BOOT).toEqual(defaults);
   expect((await load('{"terminalsEnabled": fal')).BOOT).toEqual(defaults);
   expect((await load('null')).BOOT).toEqual(defaults);
@@ -37,11 +37,12 @@ test('a field of the wrong type falls back alone; the others are kept', async ()
     doc.body.innerHTML = `<script type="application/json" id="chela-boot">${json}</script>`;
     return readBoot(doc);
   };
-  expect(page('{"assetVersion": 7, "terminalsEnabled": false, "wallTileDispatched": true}')).toEqual({
-    assetVersion: '', terminalsEnabled: false, wallTileDispatched: true,
+  expect(page('{"assetVersion": 7, "terminalsEnabled": false, "wallTileDispatched": true, "dispatchOffByChoice": true}')).toEqual({
+    assetVersion: '', terminalsEnabled: false, wallTileDispatched: true, dispatchOffByChoice: true,
   });
-  expect(page('{"assetVersion": "v1", "terminalsEnabled": "false", "wallTileDispatched": 1}')).toEqual({
-    assetVersion: 'v1', terminalsEnabled: true, wallTileDispatched: false,
+  // CMX-388: a string "off" is not the boolean the server renders: dispatch stays ON (today's UI).
+  expect(page('{"assetVersion": "v1", "terminalsEnabled": "false", "wallTileDispatched": 1, "dispatchOffByChoice": "off"}')).toEqual({
+    assetVersion: 'v1', terminalsEnabled: true, wallTileDispatched: false, dispatchOffByChoice: false,
   });
 });
 

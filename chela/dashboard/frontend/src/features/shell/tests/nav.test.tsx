@@ -4,6 +4,7 @@
 import { act, cleanup } from '@testing-library/react';
 import type { Root } from 'react-dom/client';
 import { afterEach, beforeEach, expect, test, vi } from 'vitest';
+import { BOOT } from '../../../shared/api/index.ts';
 import { createBridge, installBridge } from '../../../shared/bridge/index.ts';
 import { dispatch } from '../../../shared/events/index.ts';
 import { refresh } from '../../../shared/scheduler/index.ts';
@@ -162,4 +163,17 @@ test('a `windows` event drops the agent list, so the next read refetches it', ()
   agents.set([A]);
   dispatch('windows', '{}');
   expect(agents.get()).toEqual([]);
+});
+
+// CMX-388: CHELA_DISPATCH=off, the operator chose no dispatcher on this install.
+test('CMX-388: dispatch off by choice drops the Work nav row and keeps the Wall; without it, both', () => {
+  BOOT.dispatchOffByChoice = true;
+  try {
+    renderNav();
+    expect(nav().items.map((v) => v.id)).toEqual(['terminals']);
+  } finally {
+    BOOT.dispatchOffByChoice = false;
+  }
+  renderNav();
+  expect(nav().items.map((v) => v.id)).toEqual(['terminals', 'work']);
 });

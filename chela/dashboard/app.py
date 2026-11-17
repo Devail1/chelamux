@@ -247,7 +247,10 @@ def index():
         asset_path=asset_path,
         # CMX-217: the page's boot config, one JSON block (frontend/src/shared/api readBoot).
         boot={"assetVersion": ASSET_VERSION, "terminalsEnabled": config.TERMINALS_ENABLED,
-              "wallTileDispatched": config.WALL_TILE_DISPATCHED},
+              "wallTileDispatched": config.WALL_TILE_DISPATCHED,
+              # CMX-388: CHELA_DISPATCH=off — hide the Work board, New task, the sidebar's
+              # Dispatched section; one line replaces the Settings dispatcher row.
+              "dispatchOffByChoice": config.DISPATCH_OFF_BY_CHOICE},
         app_src=asset_path(APP_ENTRY) if APP_ENTRY else None,
         app_css=asset_path(APP_CSS) if APP_CSS else None,
     ))
@@ -3492,6 +3495,11 @@ def _telegram_bridge_running() -> bool:
         return False
 
 
+# CMX-388: the one line that replaces the Settings "Work dispatcher" row when
+# CHELA_DISPATCH=off (the page renders the same words, features/settings General.tsx).
+DISPATCH_OFF_NOTE = "Dispatch is off by choice: unset `CHELA_DISPATCH` to enable (docs/CONFIG.md)"
+
+
 def _settings_status() -> dict:
     """READ-ONLY aggregation for the Settings drawer's "Connections & Status"
     surface. Every probe is best-effort and independently guarded: one failing
@@ -3622,6 +3630,12 @@ def _settings_status() -> dict:
                            "CHELA_DISPATCH_WORKFLOWS is empty in its environment")
     elif daemon_live is None and n_wf:
         dispatch_detail += " · no daemon running (`chela run`)"
+    # CMX-388: CHELA_DISPATCH=off — a decision, not a fault. The page draws one line for
+    # this row (features/settings General); the words here are for any other reader.
+    if config.DISPATCH_OFF_BY_CHOICE:
+        dispatch_on = False
+        dispatch_state = "Off by choice"
+        dispatch_detail = DISPATCH_OFF_NOTE
 
     # A HELD queue (chela.hold) is the third way this row can be lying about work getting
     # done: everything is configured, the daemon is up — and it is claiming nothing,
@@ -3629,7 +3643,8 @@ def _settings_status() -> dict:
     # daemon's startup snapshot: a hold taken since it booted is not in there, and the
     # file is the shared truth between the two processes on purpose. A daemon that is off
     # entirely is the worse fault, so it keeps the row.
-    dispatch_hold = None if daemon_dispatch_off else hold.active()
+    dispatch_hold = (None if daemon_dispatch_off or config.DISPATCH_OFF_BY_CHOICE
+                     else hold.active())
     if dispatch_hold is not None:
         dispatch_on = False
         dispatch_state = "Held"
@@ -3655,7 +3670,8 @@ def _settings_status() -> dict:
     features = [
         {"label": "Terminal wall", "on": config.TERMINALS_ENABLED,
          "state": "Enabled" if config.TERMINALS_ENABLED else "Off", "detail": wall_detail},
-        {"label": "Work dispatcher", "on": dispatch_on, "state": dispatch_state, "detail": dispatch_detail},
+        {"key": "dispatch", "label": "Work dispatcher", "on": dispatch_on, "state": dispatch_state,
+         "detail": dispatch_detail},
         {"label": "Scheduler", "on": True, "state": "Polling", "detail": sched_detail},
         {"label": "Tool-call relay", "on": config.SHOW_TOOL_CALLS,
          "state": "On" if config.SHOW_TOOL_CALLS else "Hidden",

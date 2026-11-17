@@ -4,6 +4,7 @@
 // "@N", share) are driven through the real wall in tests/wallnav, window_id and share_dialog.
 import { act, cleanup, fireEvent, render, screen } from '@testing-library/react';
 import { afterEach, beforeAll, beforeEach, expect, test, vi } from 'vitest';
+import { BOOT } from '../../../shared/api/index.ts';
 import { agents } from '../../../shared/store/agents.ts';
 import { launcher } from '../../../shared/store/launcher.ts';
 import { Settings, closeSettings, openSettings, settings } from '../../settings/index.ts';
@@ -302,4 +303,19 @@ test('with no host yet the palette has no rows (it never throws)', async () => {
   const fresh = await import('../index.ts');
   expect(fresh.paletteRows('')).toEqual({ items: [], panes: 0 });
   expect(paletteRows('').items.length).toBeGreaterThan(0);
+});
+
+test('CMX-388: dispatch off by choice offers no New task; the other actions stay', () => {
+  BOOT.dispatchOffByChoice = true;
+  try {
+    open();
+    expect(titles()).not.toContain('New task');
+    expect(titles()).toContain('New shell window');
+    expect(titles()).toContain('Add scheduled task');
+  } finally {
+    BOOT.dispatchOffByChoice = false;
+  }
+  act(() => closePalette());
+  open();
+  expect(titles()).toContain('New task');
 });

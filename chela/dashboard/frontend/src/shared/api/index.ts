@@ -8,6 +8,9 @@ export interface BootConfig {
   terminalsEnabled: boolean;
   /** CHELA_WALL_TILE_DISPATCHED: a dispatched worker opens as a full tile, not minimized. */
   wallTileDispatched: boolean;
+  /** CMX-388: CHELA_DISPATCH=off. No dispatcher on this install: no Work board, no New task,
+   * no sidebar Dispatched section, and one line in Settings instead of the dispatcher row. */
+  dispatchOffByChoice: boolean;
 }
 
 /** What a page without the block runs as: the values the legacy globals defaulted to. */
@@ -15,6 +18,7 @@ export const BOOT_DEFAULTS: Readonly<BootConfig> = {
   assetVersion: '',
   terminalsEnabled: true,
   wallTileDispatched: false,
+  dispatchOffByChoice: false,
 };
 
 /** The page's boot config. A missing or unparsable block, or a field of the wrong type,
@@ -33,6 +37,8 @@ export function readBoot(doc: Document = document): BootConfig {
       typeof o.terminalsEnabled === 'boolean' ? o.terminalsEnabled : BOOT_DEFAULTS.terminalsEnabled,
     wallTileDispatched:
       typeof o.wallTileDispatched === 'boolean' ? o.wallTileDispatched : BOOT_DEFAULTS.wallTileDispatched,
+    dispatchOffByChoice:
+      typeof o.dispatchOffByChoice === 'boolean' ? o.dispatchOffByChoice : BOOT_DEFAULTS.dispatchOffByChoice,
   };
 }
 
