@@ -310,12 +310,15 @@ test('CMX-388: dispatch off by choice offers no New task; the other actions stay
   try {
     open();
     expect(titles()).not.toContain('New task');
+    // its form is in the Work panel's Schedules segment, which is not drawn
+    expect(titles()).not.toContain('Add scheduled task');
     expect(titles()).toContain('New shell window');
-    expect(titles()).toContain('Add scheduled task');
+    expect(titles()).toContain('Settings');
   } finally {
     BOOT.dispatchOffByChoice = false;
   }
   act(() => closePalette());
   open();
   expect(titles()).toContain('New task');
+  expect(titles()).toContain('Add scheduled task');
 });
