@@ -29,7 +29,7 @@ from flask import abort, Flask, jsonify, render_template, request, Response, sen
 
 from chela import config
 from chela.config import DISPATCH_WORKFLOWS, CHELA_DIR, TMUX_SESSION, NOTIFY_INTERVAL
-from chela import agent_manager, capabilities, collab, concurrency, collab_host, collab_stream, context, diffsurface, discovery, dismissed_sessions, dispatcher, epoch, event_log, fleet, gateanswer, hold, hooks, inbox, judge, launcher, messenger, notify, okf, park, personas, pr_status, probecache, rc_rename, restore, rooms, sandbox_status, scheduler, sessionids, share_requests, share_sandbox, share_store, sidebar_archive, sidebar_layout, spawn, starter, tasklists, transcripts, update, usage, userconfig
+from chela import agent_manager, capabilities, collab, concurrency, collab_host, collab_stream, context, diffsurface, discovery, dismissed_sessions, dispatcher, epoch, event_log, fleet, gateanswer, hold, hooks, inbox, judge, launcher, messenger, notify, okf, parentage, park, personas, pr_status, probecache, rc_rename, restore, rooms, sandbox_status, scheduler, sessionids, share_requests, share_sandbox, share_store, sidebar_archive, sidebar_layout, spawn, starter, tasklists, transcripts, update, usage, userconfig
 from chela.dashboard import resources, term_fonts, term_themes
 from chela import topic_ledger as tg_topics
 from chela.personas import autolaunch, lease
@@ -450,6 +450,12 @@ def api_agents():
     # the merge). Read the run rows ONCE per request for their terminal pr_state; anything
     # else goes through pr_status's cached gh lookup, never one gh spawn per pane per tick.
     pr_run_states = pr_status.runs_pr_states(runs)
+    # CMX-389: one read of session-parents.json per request, looked up by SESSION id.
+    try:
+        parent_table = parentage.parents()
+    except Exception:
+        log.exception("api_agents: session parents unreadable; every row reads top-level")
+        parent_table = {}
 
     agents = []
     for name, window_id in windows.items():
@@ -538,6 +544,8 @@ def api_agents():
             "session_name": entry["name"] if entry else None,
             # CMX-278: the session this window runs now, so Recent sessions never lists it
             "session_id": entry.get("session_id") if entry else None,
+            # CMX-389: who launched this session (or null), and how that was decided.
+            **parentage.row_fields(entry.get("session_id") if entry else None, parent_table),
             "session_moved": bool(entry and entry["moved"]),
             "has_schedules": name in scheduled_agents,
             "schedule_last_run": agent_schedule_summary.get(name, {}).get("last_run"),
