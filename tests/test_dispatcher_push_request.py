@@ -136,6 +136,20 @@ def test_request_push_errors_when_the_row_has_no_worktree_path(tmp_path):
 # --- dispatcher._apply_push_request (daemon-side, unit level) -----------------------------
 
 
+FAKE_HEAD = "f" * 40
+
+
+def _answers_head(cmd, R) -> bool:
+    """📌 CMX-394: the post-push read-back — the worktree's HEAD and origin agree."""
+    if isinstance(cmd, list) and cmd[:1] == ["git"] and "rev-parse" in cmd:
+        R.stdout = FAKE_HEAD + "\n"
+        return True
+    if isinstance(cmd, list) and cmd[:1] == ["git"] and "ls-remote" in cmd:
+        R.stdout = f"{FAKE_HEAD}\t{cmd[-1]}\n"
+        return True
+    return False
+
+
 def _gh_git_fake(calls, *, push_ok=True, gh_ok=True, pr_url="https://github.com/o/r/pull/9"):
     """``calls`` collects ``(cmd, kwargs)`` pairs, not bare ``cmd`` — issue #502 B2 rework
     round 1, judge findings 3 and 4: a fake that discards kwargs makes `cwd` unobservable
@@ -151,6 +165,8 @@ def _gh_git_fake(calls, *, push_ok=True, gh_ok=True, pr_url="https://github.com/
             stdout = ""
             stderr = ""
 
+        if _answers_head(cmd, R):
+            return R()
         if isinstance(cmd, list) and cmd[:1] == ["git"] and "push" in cmd:
             R.returncode = 0 if push_ok else 1
             if not push_ok:
@@ -373,6 +389,8 @@ def _gh_view_fake(calls, *, create_rc=0, view_ok=True,
             stdout = ""
             stderr = ""
 
+        if _answers_head(cmd, R):
+            return R()
         if isinstance(cmd, list) and cmd[:1] == ["git"] and "push" in cmd:
             return R()
         if isinstance(cmd, list) and cmd[:3] == ["gh", "pr", "create"]:

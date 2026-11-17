@@ -2578,7 +2578,13 @@ def _resolve_base_conflict(conn: sqlite3.Connection, wf: WorkflowDef, row, head:
     try:
         # 🔀 CMX-294: tagged free only when this round actually got a grant (the cap is MIN).
         free = (row["conflict_reworks"] or 0) < MAX_FREE_CONFLICT_REWORKS
-        result = request_changes(task_id, basemerge.rework_body(res, base),
+        body = basemerge.rework_body(res, base)
+        drift = _local_vs_pushed_note(row["worktree_path"], head)
+        if drift:
+            body += f"\n{drift}\n"
+            log.warning("Task %s: %s", task_id, drift)
+            _notify_head_unpushed(row, head, drift)
+        result = request_changes(task_id, body,
                                  cause=REWORK_CAUSE_CONFLICT if free else REWORK_CAUSE_REVIEW)
     except sqlite3.Error as e:
         result = {"ok": False, "error": str(e)}
@@ -2591,6 +2597,39 @@ def _resolve_base_conflict(conn: sqlite3.Connection, wf: WorkflowDef, row, head:
     log.warning("Task %s: PR conflicts with origin/%s (%s) — sent back, not charged: %s",
                 task_id, base, res["outcome"], ", ".join(res["files"]))
     return "rework"
+
+
+def _local_vs_pushed_note(worktree_path: str | None, pushed: str) -> str:
+    """📌 CMX-394: a one-line warning when the worktree's local HEAD is not the pushed head the
+    conflict check graded (CMX-388: sent back to "merge dev", which the agent had already done
+    locally, unpushed). ``""`` when they match or the worktree's HEAD cannot be read — this
+    only adds a note, it never decides anything."""
+    if not worktree_path or not pushed:
+        return ""
+    try:
+        local = _local_head(worktree_path)
+    except RuntimeError:
+        return ""
+    if local == pushed:
+        return ""
+    return (f"⚠️ The worktree's local HEAD `{local[:12]}` is NOT the pushed PR head "
+            f"`{pushed[:12]}` that this check graded — local commits may already resolve it. "
+            "Push them with `chela request-push`, then `chela task-finished`.")
+
+
+def _notify_head_unpushed(row, pushed: str, drift: str) -> None:
+    """📌 CMX-394: tell the orchestrator, in the inbox, that the conflict check graded a pushed
+    head the worktree has moved past. Advisory: a failed enqueue only logs."""
+    from chela import inbox
+    try:
+        inbox.enqueue("run_head_unpushed",
+                      f"📌 {row['branch_name'] or row['task_id']}: sent back for a base conflict "
+                      f"on the PUSHED head — {drift}",
+                      {"task_id": row["task_id"], "branch_name": row["branch_name"],
+                       "pr_url": row["pr_url"], "pushed_sha": pushed})
+    except Exception:  # noqa: BLE001 — the inbox is advisory
+        log.warning("Task %s: could not queue the unpushed-head notice", row["task_id"],
+                    exc_info=True)
 
 
 def _base_merge_infra(conn: sqlite3.Connection, row, res: dict, base: str, head: str) -> str:
@@ -3864,6 +3903,79 @@ def request_push(task_id: str, *, pr_title: str | None = None, pr_body: str | No
     return {"ok": True, "task_id": task_id, "requested": True}
 
 
+def _local_head(worktree_path: str | Path) -> str:
+    """📌 CMX-394: the worktree's HEAD sha. Raises RuntimeError when git cannot say."""
+    head = _git_out(_git(Path(worktree_path), "rev-parse", "--verify", "HEAD^{commit}"))
+    if not head:
+        raise RuntimeError(f"could not read HEAD in {worktree_path}")
+    return head
+
+
+def _origin_branch_head(worktree_path: str | Path, branch: str) -> str:
+    """📌 CMX-394: the sha ``origin`` has for ``refs/heads/<branch>`` RIGHT NOW (not a cached
+    remote-tracking ref), or ``""`` when origin has no such branch. Raises RuntimeError when
+    the remote cannot be read — an unknown origin never reads as "pushed"."""
+    out = _git(Path(worktree_path), "ls-remote", "origin", f"refs/heads/{branch}",
+               timeout=GIT_NET_TIMEOUT_SECONDS)
+    if not _git_ok(out):
+        detail = (out.stderr or out.stdout).strip() if out is not None else (
+            "git ls-remote timed out or git is missing")
+        raise RuntimeError(f"could not read origin/{branch}: {detail}"[:300])
+    for line in out.stdout.splitlines():
+        parts = line.split()
+        if len(parts) == 2 and parts[1] == f"refs/heads/{branch}":
+            return parts[0]
+    return ""
+
+
+def unpushed_message(local: str, origin: str) -> str:
+    """📌 CMX-394: the one wording for "the PR is not on this worktree's HEAD"."""
+    return f"HEAD {local[:12]} not pushed (origin has {origin[:12] if origin else 'nothing'})"
+
+
+def ensure_pushed_head(task_id: str) -> dict:
+    """📌 CMX-394: ``task-finished``'s last gate — the branch on origin must equal the
+    worktree's HEAD before the run is handed in, or the judge, CI and the conflict check all
+    grade an OLDER commit than the one the agent finished on (CMX-386, CMX-388: a
+    ``request-push`` made BEFORE the final commits, nothing pushed after).
+
+    * a push request is still pending → nothing to file: the daemon applies it BEFORE the
+      completion marker, pushes the branch as it stands then, and refuses (retried, then
+      escalated) unless origin landed on the worktree's HEAD;
+    * origin already has HEAD → nothing to do;
+    * origin is behind and the run has a PR → a push request is filed for HEAD (the same
+      mechanism ``request-push`` uses);
+    * origin is behind and there is no PR yet → refused: only ``request-push`` carries the
+      PR title.
+
+    ``{"ok", "local", "origin", "requested"}``, or ``{"ok": False, "error"}``. An unreadable
+    HEAD or origin fails closed."""
+    with _db() as conn:
+        row = conn.execute("SELECT * FROM runs WHERE task_id=?", (task_id,)).fetchone()
+    if row is None or not row["worktree_path"] or not row["branch_name"]:
+        return {"ok": False, "error": f"no run with a worktree and branch on record for {task_id}"}
+    wt = row["worktree_path"]
+    try:
+        local = _local_head(wt)
+    except RuntimeError as e:
+        return {"ok": False, "error": str(e)}
+    if _push_request_path(wt).exists():
+        return {"ok": True, "local": local, "origin": None, "requested": True}
+    try:
+        origin = _origin_branch_head(wt, row["branch_name"])
+    except RuntimeError as e:
+        return {"ok": False, "error": f"could not tell whether HEAD {local[:12]} is pushed: {e}"}
+    if origin == local:
+        return {"ok": True, "local": local, "origin": origin, "requested": False}
+    if not row["pr_url"]:
+        return {"ok": False, "error": f"{unpushed_message(local, origin)}: run request-push"}
+    filed = request_push(task_id)
+    if not filed.get("ok"):
+        return {"ok": False, "error": f"{unpushed_message(local, origin)} — and its push "
+                                      f"could not be requested: {filed.get('error')}"}
+    return {"ok": True, "local": local, "origin": origin, "requested": True}
+
+
 def _apply_push_request(conn: sqlite3.Connection, wf: WorkflowDef, row: sqlite3.Row) -> dict:
     """Daemon-side (issue #502 B2): perform the `git push` — and, on a first dispatch, the
     `gh pr create` — a dispatched agent used to run itself. Runs here, in the dispatcher's
@@ -3891,6 +4003,18 @@ def _apply_push_request(conn: sqlite3.Connection, wf: WorkflowDef, row: sqlite3.
         detail = (push.stderr or push.stdout).strip() if push is not None else (
             "git push timed out or git is missing")
         return {"ok": False, "error": f"git push failed: {detail}"[:500]}
+    # 📌 CMX-394: a push that exits 0 is not proof origin has the worktree's HEAD ("Everything
+    # up-to-date" from a branch the worktree is not on, a commit made after the push ran).
+    # Read origin back and say plainly when it differs — the marker stays and is retried.
+    try:
+        local = _local_head(worktree_path)
+        origin = _origin_branch_head(worktree_path, branch)
+    except RuntimeError as e:
+        return {"ok": False, "error": f"pushed, but could not confirm origin has HEAD: {e}"}
+    if origin != local:
+        return {"ok": False, "error": f"git push exited 0 but origin/{branch} is at "
+                                      f"{origin[:12] if origin else 'nothing'}, not the "
+                                      f"worktree's HEAD {local[:12]}"}
 
     pr_url = row["pr_url"]
     pr_title = marker.get("pr_title")

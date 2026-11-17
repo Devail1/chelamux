@@ -680,6 +680,16 @@ def _hand_in_review_passes(request, monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _hand_in_pushed_head_passes(request, monkeypatch):
+    """📌 CMX-394: the pushed-head gate passes unless a module sets ``REAL_PUSHED_HEAD = True``."""
+    if not getattr(request.module, "REAL_PUSHED_HEAD", False):
+        from chela import dispatcher
+        monkeypatch.setattr(dispatcher, "ensure_pushed_head",
+                            lambda *a, **k: {"ok": True, "local": None, "origin": None,
+                                             "requested": False})
+
+
+@pytest.fixture(autouse=True)
 def _no_live_notifications(monkeypatch):
     """The fence for OUTBOUND side effects: no test may push a real notification.
 
