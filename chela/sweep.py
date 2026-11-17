@@ -975,9 +975,17 @@ def sweep(
     started = _now()
     old = _install_signal_handlers()
     try:
-        report = _sweep(worktree, base, test_cmd, timeout=timeout, select_tests=select_tests,
-                        progress=progress, provision=provision, budget=budget,
-                        started=started, lines=lines, keep=keep, order=order)
+        # 🧠 CMX-393: ONE suite slot for the whole sweep, held start to finish — every
+        # mutation's `run_suite` re-enters it. A slot per mutation let three agents' sweeps
+        # interleave, all mid-flight when the low-memory reaper came (11-14, 11-17).
+        with suite_guard.battery(worktree, "sweep",
+                                  max_wait=suite_guard.battery_max_wait(timeout)):
+            report = _sweep(worktree, base, test_cmd, timeout=timeout,
+                            select_tests=select_tests, progress=progress,
+                            provision=provision, budget=budget, started=started,
+                            lines=lines, keep=keep, order=order)
+    except suite_guard.SlotTimeout as e:
+        report = SweepReport(cannot_verify=f"the sweep could not be run: {e}")
     except _Interrupted as e:
         # The mutation's own `finally` has already restored the file by the time this runs.
         report = SweepReport(cannot_verify=f"interrupted by signal {e.args[0]} — the sweep "
