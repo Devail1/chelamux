@@ -322,3 +322,22 @@ test('CMX-388: dispatch off by choice offers no New task; the other actions stay
   expect(titles()).toContain('New task');
   expect(titles()).toContain('Add scheduled task');
 });
+
+// --- CMX-387: no relay configured, no Share rows -------------------------------------------
+
+test.each([
+  [true, ['Share Alpha', 'Share bravo', 'Share charlie']],
+  [false, []],
+])('sharing configured=%s: the palette offers the share rows %j and keeps every other row', (on, shareRows) => {
+  const was = BOOT.sharingConfigured;
+  BOOT.sharingConfigured = on;
+  try {
+    open();
+    expect(titles().slice(2)).toEqual(['Wall', 'Work', 'charlie', ...shareRows, 'Launch fav', 'Launch /p/rec',
+      'New shell window', 'New task', 'Add scheduled task', 'Keyboard shortcuts', 'Settings']);
+    typeQ('share');
+    expect(titles().filter((t) => /^(Stop sharing|Share) /.test(t ?? ''))).toEqual(shareRows);
+  } finally {
+    BOOT.sharingConfigured = was;
+  }
+});

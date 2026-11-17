@@ -1,6 +1,7 @@
 // CMX-221 (CMX-212 P15): the Collaboration tab: the collab display name (per browser; each
 // pane's presence picks it up from the `storage` event) and Guest typing (CMX-403).
 import { useState } from 'react';
+import { BOOT } from '../../../shared/api/index.ts';
 import { useStore } from '../../../shared/store/index.ts';
 import { FieldRow, TextInput } from '../../../shared/ui/index.ts';
 import { KEYS, setCollabName } from './prefs.ts';
@@ -8,10 +9,21 @@ import { ConfigSwitch, Section } from './parts.tsx';
 import { config } from './state.ts';
 import { lsRead } from './storage.ts';
 
+/** CMX-387: no relay configured means sharing is off, so the tab says only that. */
 export function Collaboration() {
+  return BOOT.sharingConfigured ? <CollaborationOn /> : (
+    <Section title="Collaboration" id="settings-sharing-off">
+      <p className="s-desc" id="sharing-off-note">Sharing is off: set <code>CHELA_COLLAB_RELAY</code> to enable (see{' '}
+        <code>docs/SHARE_SANDBOX.md</code>).</p>
+    </Section>
+  );
+}
+
+function CollaborationOn() {
   const cfg = useStore(config);
   const [name, setName] = useState(() => lsRead(KEYS.collabName) || '');
-  const relay = !cfg ? '…' : cfg.error ? '(unavailable)' : cfg.collab_relay || '(default)';
+  // CMX-387: an unset relay is OFF, never "(default)": there is no default relay.
+  const relay = !cfg ? '…' : cfg.error ? '(unavailable)' : cfg.collab_relay || 'off';
   return (
     <>
       <Section title="Collaboration">

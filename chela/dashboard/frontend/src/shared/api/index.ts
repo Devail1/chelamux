@@ -11,6 +11,10 @@ export interface BootConfig {
   /** CMX-388: CHELA_DISPATCH=off. No dispatcher on this install: no Work board, no New task,
    * no sidebar Dispatched section, and one line in Settings instead of the dispatcher row. */
   dispatchOffByChoice: boolean;
+  /** CMX-387: CHELA_COLLAB_RELAY is set. Off hides every Share control. */
+  sharingConfigured: boolean;
+  /** CMX-387: the Telegram bridge's token and chat id resolve. Off hides Telegram topics. */
+  telegramConfigured: boolean;
 }
 
 /** What a page without the block runs as: the values the legacy globals defaulted to. */
@@ -19,6 +23,8 @@ export const BOOT_DEFAULTS: Readonly<BootConfig> = {
   terminalsEnabled: true,
   wallTileDispatched: false,
   dispatchOffByChoice: false,
+  sharingConfigured: true,
+  telegramConfigured: true,
 };
 
 /** The page's boot config. A missing or unparsable block, or a field of the wrong type,
@@ -39,6 +45,10 @@ export function readBoot(doc: Document = document): BootConfig {
       typeof o.wallTileDispatched === 'boolean' ? o.wallTileDispatched : BOOT_DEFAULTS.wallTileDispatched,
     dispatchOffByChoice:
       typeof o.dispatchOffByChoice === 'boolean' ? o.dispatchOffByChoice : BOOT_DEFAULTS.dispatchOffByChoice,
+    sharingConfigured:
+      typeof o.sharingConfigured === 'boolean' ? o.sharingConfigured : BOOT_DEFAULTS.sharingConfigured,
+    telegramConfigured:
+      typeof o.telegramConfigured === 'boolean' ? o.telegramConfigured : BOOT_DEFAULTS.telegramConfigured,
   };
 }
 

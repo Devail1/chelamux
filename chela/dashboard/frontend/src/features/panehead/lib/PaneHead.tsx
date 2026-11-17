@@ -7,7 +7,7 @@
 // the left, the title over its subtitle in the middle, the status chip and ⋯ on the right,
 // and Close in the ⋯ menu. No maximize there: the phone pane is always full.
 import { useEffect, useRef, useState, type MouseEvent as ReactMouseEvent } from 'react';
-import { api, BASE_PATH } from '../../../shared/api/index.ts';
+import { api, BASE_PATH, BOOT } from '../../../shared/api/index.ts';
 import { icons } from '../../../shared/icons/index.ts';
 import { orchestratorRelease, orchestratorSubscribe } from '../../../shared/orchestrator/index.ts';
 import { agents } from '../../../shared/store/agents.ts';
@@ -173,25 +173,28 @@ export function PaneHead({ wid, wall, agent, orchWid, share, pinned, now, host }
           },
         }]
       : []),
-    {
-      label: 'Share current session',
-      icon: icons.share,
-      className: mode ? 'gs-share-btn on' : 'gs-share-btn',
-      title: 'Share this session',
-      data: { 'data-wid': wid, 'data-mode': mode ?? '' },
-      onSelect: () => void shareSession(wid),
-      trailing: (
-        <>
-          {ModeIcon && mode && (
-            <span className="gs-share-mode" title={SHARE_MODE_UI[mode].label}>
-              <ModeIcon size={12} aria-label={SHARE_MODE_UI[mode].label} />
-            </span>
-          )}
-          {/* presence-owner.js writes the live joiner count here */}
-          <span className="gs-share-count" hidden />
-        </>
-      ),
-    },
+    // CMX-387: no relay configured, no Share item (it could only answer "Sharing is off").
+    ...(BOOT.sharingConfigured
+      ? [{
+          label: 'Share current session',
+          icon: icons.share,
+          className: mode ? 'gs-share-btn on' : 'gs-share-btn',
+          title: 'Share this session',
+          data: { 'data-wid': wid, 'data-mode': mode ?? '' },
+          onSelect: () => void shareSession(wid),
+          trailing: (
+            <>
+              {ModeIcon && mode && (
+                <span className="gs-share-mode" title={SHARE_MODE_UI[mode].label}>
+                  <ModeIcon size={12} aria-label={SHARE_MODE_UI[mode].label} />
+                </span>
+              )}
+              {/* presence-owner.js writes the live joiner count here */}
+              <span className="gs-share-count" hidden />
+            </>
+          ),
+        }]
+      : []),
     {
       label: 'Orchestrator',
       icon: icons.orchestrator,

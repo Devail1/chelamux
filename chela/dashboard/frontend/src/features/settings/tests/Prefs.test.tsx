@@ -104,9 +104,9 @@ test('the collab name: stored per browser, trimmed; blank clears it (presence fa
   expect(localStorage.getItem('chela_collab_name')).toBeNull();
 });
 
-test('the relay says (default) when unset and (unavailable) when the config cannot load', async () => {
+test('the relay says off when unset (CMX-387: never "(default)") and (unavailable) when the config cannot load', async () => {
   await openOn('collaboration');
-  expect(must(document.getElementById('collab-relay')).textContent).toBe('(default)');
+  expect(must(document.getElementById('collab-relay')).textContent).toBe('off');
   routes['GET /api/config'] = new Error('down');
   fireEvent.click(must(document.querySelector<HTMLElement>('.settings-modal-head [aria-label="Close"]')));
   await openOn('collaboration');
