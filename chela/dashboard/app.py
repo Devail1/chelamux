@@ -237,6 +237,27 @@ def api_version():
     return resp
 
 
+def _sharing_configured() -> bool:
+    """CMX-387: sharing is on when a relay is configured, the same test ``POST /share``
+    refuses on (no relay = "Sharing is off"). Configuration, not liveness."""
+    return bool(config.COLLAB_RELAY)
+
+
+def _telegram_configured() -> bool:
+    """CMX-387: the Telegram bridge is configured when the variables it refuses to start
+    without (``TELEGRAM_BOT_TOKEN`` and ``TELEGRAM_CHAT_ID``) resolve the way the bridge
+    resolves them (:func:`chela.telegram.senders.bridge_env`: env, then ``chela.env``, then
+    ``secrets.env``). Configuration, not ``pgrep``: a bridge mid-restart is still configured,
+    so the controls don't flicker. An unreadable env file reads as NOT configured."""
+    try:
+        from chela.telegram.senders import bridge_env
+        env = bridge_env()
+    except Exception:
+        log.warning("dashboard: could not read the Telegram bridge env", exc_info=True)
+        return False
+    return all((env.get(k) or "").strip() for k in ("TELEGRAM_BOT_TOKEN", "TELEGRAM_CHAT_ID"))
+
+
 @app.route("/")
 @require_auth
 def index():
@@ -247,7 +268,10 @@ def index():
         asset_path=asset_path,
         # CMX-217: the page's boot config, one JSON block (frontend/src/shared/api readBoot).
         boot={"assetVersion": ASSET_VERSION, "terminalsEnabled": config.TERMINALS_ENABLED,
-              "wallTileDispatched": config.WALL_TILE_DISPATCHED},
+              "wallTileDispatched": config.WALL_TILE_DISPATCHED,
+              # CMX-387: hide the Share / Telegram controls when the service is off.
+              "sharingConfigured": _sharing_configured(),
+              "telegramConfigured": _telegram_configured()},
         app_src=asset_path(APP_ENTRY) if APP_ENTRY else None,
         app_css=asset_path(APP_CSS) if APP_CSS else None,
     ))

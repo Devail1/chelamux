@@ -2,7 +2,7 @@
 // folder, the dispatcher agent's permission mode and model, Remote Control, file drop, the
 // Telegram topics (CMX-204) and the remote-access note.
 import { useState } from 'react';
-import { api } from '../../../shared/api/index.ts';
+import { api, BOOT } from '../../../shared/api/index.ts';
 import { useStore } from '../../../shared/store/index.ts';
 import { Button, FieldRow, Select, TextInput, Toggle } from '../../../shared/ui/index.ts';
 import { refreshLauncher } from '../../launcher/index.ts';
@@ -241,6 +241,17 @@ function AgentMode() {
 /** CMX-204: delete a topic when its window closes, and a one-shot cleanup. The bridge makes the
  * Telegram calls on its next tick; the dashboard only stores the ask. */
 function TelegramTopics() {
+  // CMX-387: no bridge configured, no topic controls: one line saying how to turn it on.
+  if (!BOOT.telegramConfigured) return (
+    <Section title="Telegram topics" id="settings-telegram-topics">
+      <p className="s-desc" id="telegram-off-note">Telegram is off: set <code>TELEGRAM_BOT_TOKEN</code> and{' '}
+        <code>TELEGRAM_CHAT_ID</code> to enable (see the Telegram part of <code>docs/CONFIG.md</code>, under Secrets).</p>
+    </Section>
+  );
+  return <TelegramTopicsOn />;
+}
+
+function TelegramTopicsOn() {
   const cfg = useStore(config);
   const [msg, setMsg] = useState('');
   const live = !!cfg && !cfg.error;
