@@ -84,6 +84,8 @@ class SpawnResult:
     wid: str | None = None
     cwd: str | None = None
     error: str | None = None
+    # CMX-389: the ``--session-id`` chela pinned AND recorded for this launch, else None.
+    session_id: str | None = None
 
 
 def _send(target: str, text: str) -> None:
@@ -332,6 +334,7 @@ def spawn_window(cwd: str | os.PathLike, *, command: str | None = None,
     if setup:
         _send(target, setup)
         _clear_history(target)
+    pinned_sid = None
     if command:
         to_send = command
         if have_wid:
@@ -343,6 +346,7 @@ def spawn_window(cwd: str | os.PathLike, *, command: str | None = None,
             pinned, session_id = _pin_session_id(command, str(uuid.uuid4()))
             if session_id and _record_session_id(wid, session_id):
                 to_send = pinned
+                pinned_sid = session_id
         if remote_control_name or config.remote_control_enabled():
             # Applied AFTER session-id pinning (on `to_send`, not `command`): both
             # insert right after the leading `claude` token regardless of what the
@@ -358,7 +362,8 @@ def spawn_window(cwd: str | os.PathLike, *, command: str | None = None,
 
     log.info("spawned window %s (%s) in %s%s", name, wid or "no-id", real,
              f" running {command!r}" if command else "")
-    return SpawnResult(ok=True, name=name, wid=wid if have_wid else None, cwd=real)
+    return SpawnResult(ok=True, name=name, wid=wid if have_wid else None, cwd=real,
+                       session_id=pinned_sid)
 
 
 def next_sandbox_name(existing: set[str], prefix: str = "sandbox") -> str:

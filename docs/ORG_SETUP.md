@@ -66,20 +66,22 @@ refuses to start a share (`Sharing is off`), so there are no guest links, no pre
 shared typing. There is no other way to let a second person into a session; anyone who needs
 the dashboard needs their own grant on the tailnet (section 3).
 
-### Controls the UI still shows with those services off
+### Controls the UI hides with those services off
 
-These stay visible, though none of them can reach anything:
+The dashboard reads both from configuration when the page loads, so they are hidden as long
+as the variables stay unset, and a bridge restart doesn't bring them back for a moment
+([CMX-387](https://linear.app/chelamux/issue/CMX-387)):
 
-- **Share current session** in the primary menu, in each pane's header menu, and in the
-  command palette. Choosing it shows the `Sharing is off` error.
-- Settings → **Collaboration**: the display name, the *Relay* row (which reads `(default)`
-  when the relay is unset, though the default is off), and the **Guest typing** toggle.
-- Settings → General → **Telegram topics**: the *delete a topic when its window closes*
-  toggle and the archived-topic cleanup.
+- With `CHELA_COLLAB_RELAY` unset, **Share current session** is gone from the primary menu,
+  each pane's header menu and the command palette. Settings → **Collaboration** is one line:
+  "Sharing is off: set `CHELA_COLLAB_RELAY` to enable (see docs/SHARE_SANDBOX.md)". Where a
+  relay is set, its *Relay* row names it, and an unset one reads `off`.
+- With `TELEGRAM_BOT_TOKEN` and `TELEGRAM_CHAT_ID` unset (in the environment, `chela.env` and
+  `secrets.env`), Settings → General → **Telegram topics** is one line pointing at
+  [CONFIG.md](CONFIG.md#secrets) instead of the delete-on-close toggle and the archived-topic
+  cleanup.
 
-Until [CMX-387](https://linear.app/chelamux/issue/CMX-387) lands, these controls still show
-but do nothing: hiding them when the matching service is off, and showing the Relay row as
-off, is not supported yet.
+Reload the dashboard after you set or unset either one.
 
 ## 2. Remote access over Tailscale
 

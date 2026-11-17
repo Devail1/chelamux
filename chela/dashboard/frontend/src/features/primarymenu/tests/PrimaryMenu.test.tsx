@@ -5,6 +5,7 @@
 // (agents.js / header.js before): the account-wide 5h / 7d usage from the freshest sample.
 import { act, cleanup, fireEvent, render, screen } from '@testing-library/react';
 import { afterEach, beforeEach, expect, test, vi } from 'vitest';
+import { BOOT } from '../../../shared/api/index.ts';
 import { context, loadContext, type ContextRow } from '../../../shared/store/context.ts';
 import { LaunchMenu, closeLaunchMenu } from '../../launcher/index.ts';
 import { closePalette, palette } from '../../palette/index.ts';
@@ -188,4 +189,22 @@ test('loadContext publishes a list, keeps the last on anything else, and reads /
   await loadContext();
   expect(urls).toEqual(['/api/agents/context']);
   expect(context.get()).toEqual([]);
+});
+
+// --- CMX-387: no relay configured, no Share item -------------------------------------------
+
+test.each([
+  [true, ['Jump to…', 'New…', 'Share current session', 'Notifications', 'Settings']],
+  [false, ['Jump to…', 'New…', 'Notifications', 'Settings']],
+])('sharing configured=%s: the gear menu lists %j', (on, labels) => {
+  const was = BOOT.sharingConfigured;
+  try {
+    cleanup();
+    BOOT.sharingConfigured = on;
+    render(<PrimaryMenu />);
+    open();
+    expect(items().map((i) => i.querySelector('.ov-label')?.textContent)).toEqual(labels);
+  } finally {
+    BOOT.sharingConfigured = was;
+  }
 });

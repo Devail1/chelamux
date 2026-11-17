@@ -8,6 +8,10 @@ export interface BootConfig {
   terminalsEnabled: boolean;
   /** CHELA_WALL_TILE_DISPATCHED: a dispatched worker opens as a full tile, not minimized. */
   wallTileDispatched: boolean;
+  /** CMX-387: CHELA_COLLAB_RELAY is set. Off hides every Share control. */
+  sharingConfigured: boolean;
+  /** CMX-387: the Telegram bridge's token and chat id resolve. Off hides Telegram topics. */
+  telegramConfigured: boolean;
   /** CMX-385: who the trusted proxy says you are (chela/dashboard/identity.py); null when
    * the identity header is off or the request was unattributed. */
   identity: BootIdentity | null;
@@ -38,6 +42,8 @@ export const BOOT_DEFAULTS: Readonly<BootConfig> = {
   assetVersion: '',
   terminalsEnabled: true,
   wallTileDispatched: false,
+  sharingConfigured: true,
+  telegramConfigured: true,
   identity: null,
 };
 
@@ -57,6 +63,10 @@ export function readBoot(doc: Document = document): BootConfig {
       typeof o.terminalsEnabled === 'boolean' ? o.terminalsEnabled : BOOT_DEFAULTS.terminalsEnabled,
     wallTileDispatched:
       typeof o.wallTileDispatched === 'boolean' ? o.wallTileDispatched : BOOT_DEFAULTS.wallTileDispatched,
+    sharingConfigured:
+      typeof o.sharingConfigured === 'boolean' ? o.sharingConfigured : BOOT_DEFAULTS.sharingConfigured,
+    telegramConfigured:
+      typeof o.telegramConfigured === 'boolean' ? o.telegramConfigured : BOOT_DEFAULTS.telegramConfigured,
     identity: readIdentity(o.identity),
   };
 }

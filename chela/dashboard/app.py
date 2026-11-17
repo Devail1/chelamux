@@ -29,7 +29,7 @@ from flask import abort, Flask, jsonify, render_template, request, Response, sen
 
 from chela import config
 from chela.config import DISPATCH_WORKFLOWS, CHELA_DIR, TMUX_SESSION, NOTIFY_INTERVAL
-from chela import agent_manager, capabilities, collab, concurrency, collab_host, collab_stream, context, diffsurface, discovery, dismissed_sessions, dispatcher, epoch, event_log, fleet, gateanswer, hold, hooks, inbox, judge, launcher, messenger, notify, okf, park, personas, pr_status, probecache, rc_rename, restore, rooms, sandbox_status, scheduler, sessionids, share_requests, share_sandbox, share_store, sidebar_archive, sidebar_layout, spawn, starter, tasklists, transcripts, update, usage, userconfig
+from chela import agent_manager, capabilities, collab, concurrency, collab_host, collab_stream, context, diffsurface, discovery, dismissed_sessions, dispatcher, epoch, event_log, fleet, gateanswer, hold, hooks, inbox, judge, launcher, messenger, notify, okf, parentage, park, personas, pr_status, probecache, rc_rename, restore, rooms, sandbox_status, scheduler, sessionids, share_requests, share_sandbox, share_store, sidebar_archive, sidebar_layout, spawn, starter, tasklists, transcripts, update, usage, userconfig
 from chela.dashboard import identity, resources, term_fonts, term_themes
 from chela import topic_ledger as tg_topics
 from chela.personas import autolaunch, lease
@@ -333,6 +333,27 @@ def _boot_identity() -> dict | None:
     return ident.public() if ident.login else None
 
 
+def _sharing_configured() -> bool:
+    """CMX-387: sharing is on when a relay is configured, the same test ``POST /share``
+    refuses on (no relay = "Sharing is off"). Configuration, not liveness."""
+    return bool(config.COLLAB_RELAY)
+
+
+def _telegram_configured() -> bool:
+    """CMX-387: the Telegram bridge is configured when the variables it refuses to start
+    without (``TELEGRAM_BOT_TOKEN`` and ``TELEGRAM_CHAT_ID``) resolve the way the bridge
+    resolves them (:func:`chela.telegram.senders.bridge_env`: env, then ``chela.env``, then
+    ``secrets.env``). Configuration, not ``pgrep``: a bridge mid-restart is still configured,
+    so the controls don't flicker. An unreadable env file reads as NOT configured."""
+    try:
+        from chela.telegram.senders import bridge_env
+        env = bridge_env()
+    except Exception:
+        log.warning("dashboard: could not read the Telegram bridge env", exc_info=True)
+        return False
+    return all((env.get(k) or "").strip() for k in ("TELEGRAM_BOT_TOKEN", "TELEGRAM_CHAT_ID"))
+
+
 @app.route("/")
 @require_auth
 def index():
@@ -344,6 +365,9 @@ def index():
         # CMX-217: the page's boot config, one JSON block (frontend/src/shared/api readBoot).
         boot={"assetVersion": ASSET_VERSION, "terminalsEnabled": config.TERMINALS_ENABLED,
               "wallTileDispatched": config.WALL_TILE_DISPATCHED,
+              # CMX-387: hide the Share / Telegram controls when the service is off.
+              "sharingConfigured": _sharing_configured(),
+              "telegramConfigured": _telegram_configured(),
               # CMX-385: who the header chip says you are (null when unattributed/off).
               "identity": _boot_identity()},
         app_src=asset_path(APP_ENTRY) if APP_ENTRY else None,
@@ -548,6 +572,12 @@ def api_agents():
     # the merge). Read the run rows ONCE per request for their terminal pr_state; anything
     # else goes through pr_status's cached gh lookup, never one gh spawn per pane per tick.
     pr_run_states = pr_status.runs_pr_states(runs)
+    # CMX-389: one read of session-parents.json per request, looked up by SESSION id.
+    try:
+        parent_table = parentage.parents()
+    except Exception:
+        log.exception("api_agents: session parents unreadable; every row reads top-level")
+        parent_table = {}
 
     agents = []
     for name, window_id in windows.items():
@@ -636,6 +666,8 @@ def api_agents():
             "session_name": entry["name"] if entry else None,
             # CMX-278: the session this window runs now, so Recent sessions never lists it
             "session_id": entry.get("session_id") if entry else None,
+            # CMX-389: who launched this session (or null), and how that was decided.
+            **parentage.row_fields(entry.get("session_id") if entry else None, parent_table),
             "session_moved": bool(entry and entry["moved"]),
             "has_schedules": name in scheduled_agents,
             "schedule_last_run": agent_schedule_summary.get(name, {}).get("last_run"),

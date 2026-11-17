@@ -64,7 +64,8 @@ function baseItems(h: PaletteHost, skip?: Set<string>): PaletteItem[] {
   }
   if (BOOT.terminalsEnabled) {
     // Share / Stop sharing per live session (the same server flag as the pane button).
-    for (const a of list) {
+    // CMX-387: none at all when no relay is configured.
+    for (const a of BOOT.sharingConfigured ? list : []) {
       const wid = a.window_id;
       if (!wid) continue;
       const shared = isShared(wid);

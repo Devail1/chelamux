@@ -67,7 +67,8 @@ export function PrimaryMenu() {
         setTimeout(() => gear.current && openLaunchMenu(gear.current), 0);
       } },
     'separator',
-    ...(BOOT.terminalsEnabled ? [{ label: 'Share current session', icon: icons.share, onSelect: () => { if (!shareActivePane()) openPalette(); } }] : []),
+    // CMX-387: no relay configured, no Share item (it could only answer "Sharing is off").
+    ...(BOOT.terminalsEnabled && BOOT.sharingConfigured ? [{ label: 'Share current session', icon: icons.share, onSelect: () => { if (!shareActivePane()) openPalette(); } }] : []),
     { label: 'Notifications', icon: icons.notifications, onSelect: () => toggleSettings('notify') },
     { label: 'Settings', icon: icons.settings, onSelect: () => toggleSettings() },
   ];
