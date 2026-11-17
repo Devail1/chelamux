@@ -612,7 +612,7 @@ def test_head_blobs_pins_its_git_call(tmp_path, monkeypatch):
     def run(argv, **kw):
         calls.append((argv, kw))
         return SimpleNamespace(returncode=0, stderr="",
-                               stdout="100644 blob abc\tfeat.py\0100644 blob def\tb c.py\0")
+                               stdout="100644 blob abc\tfeat.py\x00100644 blob def\tb c.py\x00")
 
     monkeypatch.setattr(sweep.subprocess, "run", run)
     assert sweep._head_blobs(tmp_path, ["feat.py", "b c.py"]) == (
