@@ -123,6 +123,9 @@ UNRUN, UNKNOWN = "unrun", "unknown"
 # CMX-371: why a run was SKIPPED, as a key — what the notice branches on, never the prose `why`.
 FLEET_PAUSED, JUDGE_OFF, ALREADY_RUNNING, NO_MERGES = (
     "fleet_paused", "judge_off", "already_running", "no_merges")
+# ⏳ CMX-400: a SKIPPED run for one of these swept nothing and the cause passes — it does not
+# end the idle day (the box reads busy meanwhile, so it is not retried in a loop).
+RETRY_REASONS = frozenset({FLEET_PAUSED, ALREADY_RUNNING})
 # A SKIPPED reason no human can act on: recorded and logged, never queued to the inbox.
 QUIET_REASONS = frozenset({NO_MERGES})
 # `chela doctor` reads a last recorded run older than this as a dead scheduler (a day plus slack).
@@ -409,6 +412,14 @@ def read_day(wf, day: str, chela_dir: Path | None = None) -> dict:
     return rec if rec and rec.get("date") == day else {}
 
 
+def _pending(wf, chela_dir: Path | None) -> dict:
+    """``wf``'s record while the daemon's spawn is pending, whatever its date — a run spawned
+    at 23:59 that starts after midnight is still charged to the day it was started for.
+    ``{}`` when none is pending; raises ``ValueError`` for an unreadable store."""
+    rec = _read_json(_day_path(chela_dir)).get(str(wf.path))
+    return rec if isinstance(rec, dict) and rec.get("pending") else {}
+
+
 def _used(rec: dict) -> float:
     used = rec.get("used")
     return float(used) if isinstance(used, (int, float)) and not isinstance(used, bool) else 0.0
@@ -458,7 +469,8 @@ def mark_day_started(wf, now: datetime, trigger: str, chela_dir: Path | None = N
 
 def finish_day(wf, result: dict, chela_dir: Path | None = None) -> None:
     """The run's report back to today's record: the seconds it used join the day's total, and
-    the day is DONE unless it yielded. Never raises: the record is not the work."""
+    the day is DONE unless it yielded or skipped for a passing cause (:data:`RETRY_REASONS`).
+    Never raises: the record is not the work."""
     path = _day_path(chela_dir)
     try:
         try:
@@ -471,7 +483,9 @@ def finish_day(wf, result: dict, chela_dir: Path | None = None) -> None:
                    "runs": 1}
         store[str(wf.path)] = {**rec, "used": _used(rec) + float(result.get("sweep_seconds")
                                                                   or 0.0),
-                               "pending": False, "done": not result.get("yielded_to"),
+                               "pending": False,
+                               "done": not (result.get("yielded_to")
+                                            or result.get("reason") in RETRY_REASONS),
                                "trigger": result.get("trigger"), "status": result["status"]}
         _write_json(path, store)
     except Exception:  # noqa: BLE001 — logged; a pending record ends the day, never repeats it
@@ -888,7 +902,8 @@ def run_budget(wf, trigger: str | None, now: float,
     budget = nightly_budget(wf)
     if trigger not in (IDLE, FALLBACK):
         return budget
-    rec = read_day(wf, datetime.fromtimestamp(now).date().isoformat(), chela_dir)
+    rec = _pending(wf, chela_dir) or read_day(wf, datetime.fromtimestamp(now).date().isoformat(),
+                                              chela_dir)
     seconds = budget.seconds - _used(rec)
     if trigger == FALLBACK:
         seconds = min(seconds, fallback_budget_seconds(wf))

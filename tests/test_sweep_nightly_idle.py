@@ -633,3 +633,37 @@ def test_the_cli_refuses_an_unknown_trigger(tmp_path, monkeypatch):
     with pytest.raises(SystemExit) as e:
         main_mod.main()
     assert e.value.code == 2
+
+
+# --- review fixes: a passing skip keeps the day open; a spawn across midnight ------------------
+
+
+@pytest.mark.parametrize("result, done", [
+    ({"status": "skipped", "reason": "fleet_paused"}, False),
+    ({"status": "skipped", "reason": "already_running"}, False),
+    ({"status": "skipped", "reason": "judge_off"}, True),
+    ({"status": "skipped", "reason": "no_merges"}, True),
+    ({"status": "cannot_verify"}, True),
+    ({"status": "clean"}, True),
+    ({"status": "unrun", "yielded_to": "CMX-12"}, False),
+])
+def test_finish_day_ends_the_day_unless_it_yielded_or_skipped_for_a_passing_cause(
+        tmp_path, result, done):
+    wf = parse_workflow(tmp_path / "WORKFLOW.md", _workflow_text(tmp_path))
+    chela = tmp_path / "chela"
+    sweep_nightly.mark_day_started(wf, NIGHT, "idle", chela)
+    sweep_nightly.finish_day(wf, {"at": NIGHT.timestamp(), **result}, chela)
+    assert sweep_nightly.read_day(wf, "2026-11-18", chela)["done"] is done
+
+
+def test_a_spawn_that_starts_after_midnight_is_charged_to_its_pending_day(tmp_path):
+    wf = parse_workflow(tmp_path / "WORKFLOW.md", _workflow_text(
+        tmp_path, extra="sweep:\n  budget_seconds: 3000\n"))
+    chela = tmp_path / "chela"
+    late = datetime(2026, 11, 18, 23, 59)
+    sweep_nightly.mark_day_started(wf, late, "idle", chela)
+    sweep_nightly.finish_day(wf, {"at": late.timestamp(), "status": "unrun",
+                                  "yielded_to": "x", "sweep_seconds": 1000.0}, chela)
+    sweep_nightly.mark_day_started(wf, late, "idle", chela)
+    after = datetime(2026, 11, 19, 0, 1).timestamp()
+    assert sweep_nightly.run_budget(wf, "idle", after, chela).seconds == 2000.0
