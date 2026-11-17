@@ -14,6 +14,7 @@ behind decisions that are otherwise invisible in the code.
 | [LINEAR_TRACKER.md](LINEAR_TRACKER.md) | Dispatching from a Linear team (`tracker: kind: linear`): setup, the API key, what chela reads |
 | [RISK_LEVELS.md](RISK_LEVELS.md) | `high` / `normal` / `low` tasks: what the level changes (judge search, rework cap) and what it never does |
 | [CONFIG.md](CONFIG.md) | Where configuration lives (`chela.env`), precedence, and PM2 |
+| [ORG_SETUP.md](ORG_SETUP.md) | Running chela at work: no Telegram, no shared sessions, one phone over Tailscale, and the tailnet policy |
 | [HOOKS.md](HOOKS.md) | The Claude Code hooks plugin — what it enables and what it costs |
 | [MODS_SPIKE.md](MODS_SPIKE.md) | Spike: the hook layer as a Claude Code Mod, measured side by side, and the go/no-go |
 | [EVENTS.md](EVENTS.md) | The event log: kinds, shape, rotation |

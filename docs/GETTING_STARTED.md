@@ -149,6 +149,8 @@ branch. What to do when a run stops for a human (retry, reopen, override, close)
 - **Remote access**: the dashboard binds `127.0.0.1` with no built-in auth by
   design. Put it behind Tailscale or an SSH tunnel; the tailnet is the trust
   boundary. See [Remote access & security](https://chela.pages.dev/docs#security).
+  Running it on a work machine? [ORG_SETUP.md](ORG_SETUP.md) covers a Tailscale-only
+  setup without Telegram or shared sessions.
 
 ## Recommended skills
 
