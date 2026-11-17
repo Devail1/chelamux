@@ -394,3 +394,18 @@ def test_cloudflare_approval_is_attributed_to_the_verified_login(client, cloudfl
     assert r.status_code == 200 and seen == [(WHO, "dashboard")]
     (action,) = _events("dashboard.action")
     assert action["payload"]["by"] == WHO and action["payload"]["verified"] is True
+
+
+def test_cloudflare_by_is_the_jwt_login_never_a_stray_tailscale_header(client, cloudflare, monkeypatch):
+    """With a mode on, ``by`` comes from the resolved identity only: a ``Tailscale-User-Login``
+    riding along a valid Cloudflare token must not leak in through the legacy (off-mode) read."""
+    from chela import share_requests
+    seen: list = []
+    monkeypatch.setattr(share_requests, "deny", lambda rid, by: seen.append(by) or (True, "denied"))
+    monkeypatch.setattr(overrides, "decide",
+                        lambda rid, approve, by, channel="terminal": seen.append(by)
+                        or {"ok": True, "state": overrides.DENIED})
+    h = {"Cf-Access-Jwt-Assertion": _token(), "Tailscale-User-Login": "evil@example.com"}
+    assert client.post("/api/share-requests/r1/deny", json={}, headers=h, environ_base=LOOP).status_code == 200
+    assert client.post("/api/override/override-x/deny", json={}, headers=h, environ_base=LOOP).status_code == 200
+    assert seen == [WHO, WHO]
