@@ -4,6 +4,7 @@
 // "@N", share) are driven through the real wall in tests/wallnav, window_id and share_dialog.
 import { act, cleanup, fireEvent, render, screen } from '@testing-library/react';
 import { afterEach, beforeAll, beforeEach, expect, test, vi } from 'vitest';
+import { BOOT } from '../../../shared/api/index.ts';
 import { agents } from '../../../shared/store/agents.ts';
 import { launcher } from '../../../shared/store/launcher.ts';
 import { Settings, closeSettings, openSettings, settings } from '../../settings/index.ts';
@@ -302,4 +303,23 @@ test('with no host yet the palette has no rows (it never throws)', async () => {
   const fresh = await import('../index.ts');
   expect(fresh.paletteRows('')).toEqual({ items: [], panes: 0 });
   expect(paletteRows('').items.length).toBeGreaterThan(0);
+});
+
+// --- CMX-387: no relay configured, no Share rows -------------------------------------------
+
+test.each([
+  [true, ['Share Alpha', 'Share bravo', 'Share charlie']],
+  [false, []],
+])('sharing configured=%s: the palette offers the share rows %j and keeps every other row', (on, shareRows) => {
+  const was = BOOT.sharingConfigured;
+  BOOT.sharingConfigured = on;
+  try {
+    open();
+    expect(titles().slice(2)).toEqual(['Wall', 'Work', 'charlie', ...shareRows, 'Launch fav', 'Launch /p/rec',
+      'New shell window', 'New task', 'Add scheduled task', 'Keyboard shortcuts', 'Settings']);
+    typeQ('share');
+    expect(titles().filter((t) => /^(Stop sharing|Share) /.test(t ?? ''))).toEqual(shareRows);
+  } finally {
+    BOOT.sharingConfigured = was;
+  }
 });

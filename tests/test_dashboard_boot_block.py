@@ -14,9 +14,11 @@ from chela.dashboard import app as dash
 _BLOCK = re.compile(r'<script type="application/json" id="chela-boot">(.*?)</script>', re.S)
 
 
-def _boot(monkeypatch, terminals: bool, wall_tile: bool) -> dict:
+def _boot(monkeypatch, terminals: bool, wall_tile: bool, *, sharing: bool = False, telegram: bool = False) -> dict:
     monkeypatch.setattr(dash.config, "TERMINALS_ENABLED", terminals)
     monkeypatch.setattr(dash.config, "WALL_TILE_DISPATCHED", wall_tile)
+    monkeypatch.setattr(dash, "_sharing_configured", lambda: sharing)
+    monkeypatch.setattr(dash, "_telegram_configured", lambda: telegram)
     html = dash.app.test_client().get("/").get_data(as_text=True)
     blocks = _BLOCK.findall(html)
     assert len(blocks) == 1, f"expected one boot block, found {len(blocks)}"
@@ -29,7 +31,16 @@ def test_the_boot_block_carries_each_flag_as_configured(monkeypatch, terminals, 
         "assetVersion": dash.ASSET_VERSION,
         "terminalsEnabled": terminals,
         "wallTileDispatched": wall_tile,
+        "sharingConfigured": False,
+        "telegramConfigured": False,
     }
+
+
+@pytest.mark.parametrize("sharing,telegram", [(True, False), (False, True), (False, False), (True, True)])
+def test_the_boot_block_carries_the_sharing_and_telegram_flags(monkeypatch, sharing, telegram):
+    """CMX-387: each reaches the page as computed, independently of the other."""
+    boot = _boot(monkeypatch, True, False, sharing=sharing, telegram=telegram)
+    assert (boot["sharingConfigured"], boot["telegramConfigured"]) == (sharing, telegram)
 
 
 def test_the_old_inline_globals_are_gone(monkeypatch):

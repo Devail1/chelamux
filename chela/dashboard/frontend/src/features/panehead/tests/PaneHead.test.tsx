@@ -4,6 +4,7 @@
 // controls, kill) .test.mjs, plus Liav's 10-19 ask: a plain shell reads `Shell · <cwd>`.
 import { act, fireEvent, render } from '@testing-library/react';
 import { expect, test, vi } from 'vitest';
+import { BOOT } from '../../../shared/api/index.ts';
 import { agents } from '../../../shared/store/agents.ts';
 import { pinnedPanes } from '../../../shared/store/wall.ts';
 import { noteShare, shares, type ShareEntry } from '../../share/index.ts';
@@ -627,4 +628,23 @@ test('noteShare is what the page publishes; the header reads it through its shar
   act(() => noteShare('@1', 'typing'));
   const h = head({ share: shares.get().get('@1') });
   expect(must(openMenu(h.tile).querySelector('.gs-share-btn')).getAttribute('data-mode')).toBe('typing');
+});
+
+// --- CMX-387: no relay configured, no Share row --------------------------------------------
+
+test.each([
+  [true, true, ['Wire to…', 'Share current session', 'Orchestrator', 'Pin']],
+  [false, true, ['Wire to…', 'Orchestrator', 'Pin']],
+  [true, false, ['Share current session', 'Orchestrator']],
+  [false, false, ['Orchestrator']],
+])('sharing configured=%s, wall=%s: the pane menu lists %j', (on, wall, labels) => {
+  const was = BOOT.sharingConfigured;
+  BOOT.sharingConfigured = on;
+  try {
+    const h = head({ wall });
+    expect([...openMenu(h.tile).querySelectorAll('.ov-label')].map(text)).toEqual(labels);
+    expect(document.querySelector('.gs-share-btn') !== null).toBe(on);
+  } finally {
+    BOOT.sharingConfigured = was;
+  }
 });
