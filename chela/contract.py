@@ -714,6 +714,7 @@ def _do_merge(run: dict, gate: dict, *, reason: str, actor: str | None,
         "event_seq": rec["seq"] if rec else None,
         "override": audit,
         "tier_shown": gate.get("tier_shown"),
+        "risk_tier_floor": gate.get("risk_tier_floor"),
     }
 
 

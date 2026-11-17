@@ -3642,8 +3642,6 @@ def cmd_merge(args) -> None:
         sys.exit(1)
     print(f"✅ Merged {result['task_id']} → {result['base']} "
           f"(sha {(result.get('merge_commit_sha') or '?')[:12]})")
-    if result.get("tier_shown"):     # CMX-396: why the tier is what it is
-        print(f"  risk tier: {result['tier_shown']}")
     if result.get("override"):
         audit = result["override"]
         print(f"  logged: event #{result.get('event_seq')} — OVERRIDE approved by "
@@ -3651,6 +3649,8 @@ def cmd_merge(args) -> None:
               f"{audit['head_sha'][:12]}), CI green, MERGEABLE")
     else:
         print(f"  logged: event #{result.get('event_seq')} — CI green, judge clean, MERGEABLE")
+    if result.get("risk_tier_floor"):     # CMX-396: the tracker's risk level set the tier
+        print(f"  risk tier: {result['tier_shown']}")
 
 
 def _print_override_request(result: dict) -> None:

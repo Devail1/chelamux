@@ -192,12 +192,17 @@ def test_a_merge_says_why_the_tier_is_what_it_is(wfrepo, capsys, risk, shown, fl
     assert payload["risk_tier_floor"] == floor
     with patch.object(contract, "merge", return_value=result):
         chela_main.cmd_merge(argparse.Namespace(run="t1", reason="", override=False))
-    assert f"  risk tier: {shown}\n" in capsys.readouterr().out
+    out = capsys.readouterr().out
+    if floor:
+        assert out.endswith(f"MERGEABLE\n  risk tier: {shown}\n"), out
+    else:
+        assert "risk tier" not in out, out
 
 
 def test_cmd_merge_prints_no_tier_line_when_the_gate_named_none(capsys):
     result = {"ok": True, "task_id": "t1", "base": "dev", "merge_commit_sha": "abc",
-              "event_seq": 1, "override": None}
+              "event_seq": 1, "override": None, "tier_shown": "STANDARD",
+              "risk_tier_floor": None}
     with patch.object(contract, "merge", return_value=result):
         chela_main.cmd_merge(argparse.Namespace(run="t1", reason="", override=False))
     assert "risk tier" not in capsys.readouterr().out
