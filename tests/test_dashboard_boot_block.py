@@ -29,6 +29,7 @@ def test_the_boot_block_carries_each_flag_as_configured(monkeypatch, terminals, 
         "assetVersion": dash.ASSET_VERSION,
         "terminalsEnabled": terminals,
         "wallTileDispatched": wall_tile,
+        "identity": None,   # CMX-385: the identity header is off unless configured
     }
 
 

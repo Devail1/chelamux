@@ -30,7 +30,7 @@ from flask import abort, Flask, jsonify, render_template, request, Response, sen
 from chela import config
 from chela.config import DISPATCH_WORKFLOWS, CHELA_DIR, TMUX_SESSION, NOTIFY_INTERVAL
 from chela import agent_manager, capabilities, collab, concurrency, collab_host, collab_stream, context, diffsurface, discovery, dismissed_sessions, dispatcher, epoch, event_log, fleet, gateanswer, hold, hooks, inbox, judge, launcher, messenger, notify, okf, park, personas, pr_status, probecache, rc_rename, restore, rooms, sandbox_status, scheduler, sessionids, share_requests, share_sandbox, share_store, sidebar_archive, sidebar_layout, spawn, starter, tasklists, transcripts, update, usage, userconfig
-from chela.dashboard import resources, term_fonts, term_themes
+from chela.dashboard import identity, resources, term_fonts, term_themes
 from chela import topic_ledger as tg_topics
 from chela.personas import autolaunch, lease
 from chela.backlog import _BULLET_RE, parse_backlog
@@ -82,9 +82,89 @@ def require_auth(f):
 
     Kept as a decorator so every route reads the same and a future deployment
     could reintroduce auth in one place. The security boundary is the network
-    (loopback bind + tailnet), not this function.
+    (loopback bind + tailnet), not this function. WHO is asking (CMX-385) is resolved
+    for every request — this decorator's routes and the ones without it — by
+    :func:`_resolve_identity` below.
     """
     return f
+
+
+# 🪪 CMX-385: who pressed it. ``identity.resolve`` reads the trusted proxy's header (opt-in,
+# CHELA_DASHBOARD_IDENTITY_HEADER) from a loopback peer only; off by default. It runs as a
+# ``before_request`` hook, not inside ``require_auth``, so no route can miss it.
+#
+# Routes local processes call with no proxy in front: the plugin's hooks, the Mod's denial
+# filing, and the share bridge's terminal socket (chela.collab_stream). In cloudflare mode
+# these alone may skip the JWT, and only from loopback.
+_MACHINE_ENDPOINTS = frozenset({"api_hooks", "api_inbox_denial", "term_ws"})
+# Methods that change something: each one is recorded with its ``by`` (``dashboard.action``).
+_MUTATING = frozenset({"POST", "PUT", "PATCH", "DELETE"})
+
+
+def _identity() -> identity.Identity:
+    """This request's resolved identity (``off``/unattributed outside a request)."""
+    from flask import g, has_request_context
+    return (g.get("identity") if has_request_context() else None) or identity.Identity(identity.OFF)
+
+
+def _actor(fallback: str) -> str:
+    """The ``by`` of an action: the attributed login, else ``fallback``. In ``off`` mode the
+    caller keeps its legacy spelling (``_override_decider`` / ``_granted_by``)."""
+    return _identity().login or fallback
+
+
+@app.before_request
+def _resolve_identity():
+    from flask import g
+    try:
+        result = identity.resolve(request.headers, request.remote_addr,
+                                  machine=request.endpoint in _MACHINE_ENDPOINTS)
+    except identity.ConfigError as exc:
+        # A trust-boundary setting that is set but unusable fails CLOSED.
+        log.error("dashboard identity is misconfigured: %s", exc)
+        return jsonify({"ok": False, "error": f"identity misconfigured: {exc}"}), 503
+    if isinstance(result, identity.Refusal):
+        log.warning("identity refused: %s (peer %s, %s %s)", result.reason,
+                    request.remote_addr, request.method, request.path)
+        event_log.append("dashboard.identity_refused",
+                         f"refused {request.method} {request.path}: {result.reason}",
+                         payload={"peer": request.remote_addr, "path": request.path,
+                                  "method": request.method, "status": result.status,
+                                  "claimed": result.claimed, "reason": result.reason})
+        return jsonify({"ok": False, "error": result.reason}), result.status
+    g.identity = result
+    if result.mode != identity.OFF and request.endpoint == "term_ws" and result.login:
+        # Keystrokes on a terminal socket are not requests; the attach is the record.
+        _record_action("WS", 101)
+    return None
+
+
+def _record_action(method: str, status: int) -> None:
+    ident = _identity()
+    by = ident.login
+    event_log.append("dashboard.action",
+                     f"{method} {request.path} by {by or 'unattributed'}",
+                     payload={"by": by, "verified": ident.verified, "mode": ident.mode,
+                              "endpoint": request.endpoint, "method": method,
+                              "path": request.path, "status": status,
+                              "peer": request.remote_addr})
+
+
+@app.after_request
+def _attribute_action(resp):
+    """Every mutating dashboard action records its ``by`` in the event log (CMX-385)."""
+    ident = _identity()
+    if (ident.mode != identity.OFF and request.method in _MUTATING
+            and request.endpoint not in _MACHINE_ENDPOINTS and resp.status_code < 400):
+        _record_action(request.method, resp.status_code)
+    return resp
+
+
+@app.route("/api/whoami")
+@require_auth
+def api_whoami():
+    """Who the dashboard thinks you are (the header chip reads the same in the boot JSON)."""
+    return jsonify(_identity().public())
 
 
 def _batched_probes(f):
@@ -247,7 +327,9 @@ def index():
         asset_path=asset_path,
         # CMX-217: the page's boot config, one JSON block (frontend/src/shared/api readBoot).
         boot={"assetVersion": ASSET_VERSION, "terminalsEnabled": config.TERMINALS_ENABLED,
-              "wallTileDispatched": config.WALL_TILE_DISPATCHED},
+              "wallTileDispatched": config.WALL_TILE_DISPATCHED,
+              # CMX-385: who the header chip says you are (null when unattributed/off).
+              "identity": _identity().public() if _identity().login else None},
         app_src=asset_path(APP_ENTRY) if APP_ENTRY else None,
         app_css=asset_path(APP_CSS) if APP_CSS else None,
     ))
@@ -1822,8 +1904,11 @@ def _window_name(wid: str) -> str | None:
 def _granted_by() -> str:
     """Who is granting, for the audit event. There is no built-in auth; a tailnet
     front (``tailscale serve``) names the user in a header, else the peer address."""
+    fallback = f"dashboard@{request.remote_addr or 'unknown'}"
+    if _identity().mode != identity.OFF:
+        return _actor(fallback)                  # CMX-385: the proxy's login, loopback only
     who = (request.headers.get("Tailscale-User-Login") or "").strip()
-    return who or f"dashboard@{request.remote_addr or 'unknown'}"
+    return who or fallback
 
 
 # The share dialog's copy for why "Allow typing" is disabled (CMX-403). The JS renders
@@ -4025,6 +4110,9 @@ def _override_decider() -> str:
     """Who decided, for the request's ``decided_by`` (CMX-103): the tailnet front's named
     user when there is one, else ``"dashboard"`` — the same audit the Telegram tap records
     as ``"telegram"``."""
+    if _identity().mode != identity.OFF:
+        # CMX-385: the login the proxy attributed, from a loopback peer only.
+        return _actor("dashboard")
     who = (request.headers.get("Tailscale-User-Login") or "").strip()
     return f"dashboard:{who}" if who else "dashboard"
 
