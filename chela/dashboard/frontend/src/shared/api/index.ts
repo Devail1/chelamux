@@ -15,6 +15,29 @@ export interface BootConfig {
   sharingConfigured: boolean;
   /** CMX-387: the Telegram bridge's token and chat id resolve. Off hides Telegram topics. */
   telegramConfigured: boolean;
+  /** CMX-385: who the trusted proxy says you are (chela/dashboard/identity.py); null when
+   * the identity header is off or the request was unattributed. */
+  identity: BootIdentity | null;
+}
+
+export interface BootIdentity {
+  login: string;
+  name: string | null;
+  /** `tailscale` (attribution only) or `cloudflare-access` (a verified JWT). */
+  mode: string;
+  verified: boolean;
+}
+
+function readIdentity(raw: unknown): BootIdentity | null {
+  if (!raw || typeof raw !== 'object') return null;
+  const o = raw as Record<string, unknown>;
+  if (typeof o.login !== 'string' || !o.login || typeof o.mode !== 'string') return null;
+  return {
+    login: o.login,
+    name: typeof o.name === 'string' && o.name ? o.name : null,
+    mode: o.mode,
+    verified: o.verified === true,
+  };
 }
 
 /** What a page without the block runs as: the values the legacy globals defaulted to. */
@@ -25,6 +48,7 @@ export const BOOT_DEFAULTS: Readonly<BootConfig> = {
   dispatchOffByChoice: false,
   sharingConfigured: true,
   telegramConfigured: true,
+  identity: null,
 };
 
 /** The page's boot config. A missing or unparsable block, or a field of the wrong type,
@@ -49,6 +73,7 @@ export function readBoot(doc: Document = document): BootConfig {
       typeof o.sharingConfigured === 'boolean' ? o.sharingConfigured : BOOT_DEFAULTS.sharingConfigured,
     telegramConfigured:
       typeof o.telegramConfigured === 'boolean' ? o.telegramConfigured : BOOT_DEFAULTS.telegramConfigured,
+    identity: readIdentity(o.identity),
   };
 }
 

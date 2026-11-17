@@ -2578,6 +2578,11 @@ summary.runs-section { cursor: pointer; }
 .sidebar-head-actions {
     margin-left: auto; flex: 0 0 auto; display: flex; align-items: center; gap: 2px;
 }
+/* CMX-385: who the trusted proxy says you are (App.tsx WhoAmI). */
+.sidebar-head .whoami {
+    max-width: 12ch; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    font-size: 11px; color: var(--text-dim); padding: 0 6px;
+}
 
 /* Phone-only floating trigger for the off-canvas drawer (CMX-377) — see the
    mobile media query below for when it shows. Desktop never needs it: the
@@ -3023,7 +3028,8 @@ body.sidebar-dragging iframe { pointer-events: none; }
     body.sidebar-collapsed .sidebar-foot { flex-direction: column; padding-left: 4px; padding-right: 4px; }
     body.sidebar-collapsed .sidebar-head-actions,
     body.sidebar-collapsed .sidebar-foot #btn-primary-menu { margin-left: 0; }
-    body.sidebar-collapsed .sidebar-head .brand span { display: none; }
+    body.sidebar-collapsed .sidebar-head .brand span,
+    body.sidebar-collapsed .sidebar-head .whoami { display: none; }
     body.sidebar-collapsed #resources-strip { display: none; }
     /* CMX-404: inside this desktop block, like every other rail rule. The class is
        persisted per browser, so an unscoped hide leaked into the phone drawer and
