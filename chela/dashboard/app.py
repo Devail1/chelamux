@@ -30,7 +30,7 @@ from flask import abort, Flask, jsonify, render_template, request, Response, sen
 from chela import config
 from chela.config import DISPATCH_WORKFLOWS, CHELA_DIR, TMUX_SESSION, NOTIFY_INTERVAL
 from chela import agent_manager, capabilities, collab, concurrency, collab_host, collab_stream, context, diffsurface, discovery, dismissed_sessions, dispatcher, epoch, event_log, fleet, gateanswer, hold, hooks, inbox, judge, launcher, messenger, notify, okf, park, personas, pr_status, probecache, rc_rename, restore, rooms, sandbox_status, scheduler, sessionids, share_requests, share_sandbox, share_store, sidebar_archive, sidebar_layout, spawn, starter, tasklists, transcripts, update, usage, userconfig
-from chela.dashboard import resources, term_fonts, term_themes
+from chela.dashboard import humanproof, resources, term_fonts, term_themes
 from chela import topic_ledger as tg_topics
 from chela.personas import autolaunch, lease
 from chela.backlog import _BULLET_RE, parse_backlog
@@ -261,6 +261,9 @@ def _telegram_configured() -> bool:
 @app.route("/")
 @require_auth
 def index():
+    # 🔐 CMX-392: this page's browser session — the cookie plus its token in the boot block,
+    # which every decide POST must return (chela.dashboard.humanproof).
+    sid = humanproof.session_for(request)
     resp = app.make_response(render_template(
         "index.html",
         terminals_enabled=config.TERMINALS_ENABLED,
@@ -271,12 +274,14 @@ def index():
               "wallTileDispatched": config.WALL_TILE_DISPATCHED,
               # CMX-387: hide the Share / Telegram controls when the service is off.
               "sharingConfigured": _sharing_configured(),
-              "telegramConfigured": _telegram_configured()},
+              "telegramConfigured": _telegram_configured(),
+              "sessionToken": humanproof.token_for(sid)},
         app_src=asset_path(APP_ENTRY) if APP_ENTRY else None,
         app_css=asset_path(APP_CSS) if APP_CSS else None,
     ))
     # The HTML names the versioned assets, so it must be revalidated on every load.
     resp.headers["Cache-Control"] = "no-cache"
+    humanproof.set_cookie(resp, sid)
     return resp
 
 
@@ -1939,6 +1944,11 @@ def api_share_requests():
 @app.route("/api/share-requests/<rid>/<action>", methods=["POST"])
 @require_auth
 def api_share_request_decide(rid, action):
+    # 🔐 CMX-392: approving grants a guest access on the operator's behalf — only the
+    # operator's browser session may (an agent on loopback is not one).
+    why = humanproof.refusal(request)
+    if why:
+        return jsonify({"ok": False, "error": why}), 403
     data = request.get_json(silent=True) or {}
     by = _granted_by()
     if action == "approve":
@@ -4012,10 +4022,12 @@ def _session_start_recap(body: dict, explicit_wid: str | None = None):
 # ---------------------------------------------------------------------------
 #
 # The request id is unguessable (overrides.new_request_id) and IS the URL, so a page can
-# only be opened by someone the CLI/notification told. A POST from another site is refused
-# (Origin / Sec-Fetch-Site), so a page in the operator's browser cannot approve on their
-# behalf. A Claude session curling this route is denied by the merge-gate hook
-# (chela.mergegate) — the approval is the operator's to press.
+# only be opened by someone the CLI/notification told. 🔐 CMX-392: a decision must prove the
+# operator's BROWSER SESSION (chela.dashboard.humanproof): the session cookie, the token the
+# page embedded, and an Origin naming this host. A POST from another site fails the Origin;
+# an agent's raw POST from loopback (no Origin, no session) fails all three. The merge-gate
+# hook (chela.mergegate) also denies a Claude session curling this route, but it only
+# string-matches argv: a speed bump, never the gate.
 
 _OVERRIDE_PAGE = """<!doctype html><html><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -4035,16 +4047,6 @@ button.no{{border-color:var(--no);color:var(--no)}}</style></head><body><main>
 {body}</main></body></html>"""
 
 
-def _override_same_origin() -> bool:
-    if request.headers.get("Sec-Fetch-Site", "same-origin") not in ("same-origin", "none"):
-        return False
-    origin = request.headers.get("Origin")
-    if origin and origin not in ("null",):
-        from urllib.parse import urlparse
-        return urlparse(origin).netloc == request.host
-    return True
-
-
 def _override_decider() -> str:
     """Who decided, for the request's ``decided_by`` (CMX-103): the tailnet front's named
     user when there is one, else ``"dashboard"`` — the same audit the Telegram tap records
@@ -4059,7 +4061,9 @@ def _override_decide(request_id: str, approve: bool) -> dict:
     ``chela merge-approve``'s path too): approve re-checks head / CI / MERGEABLE / expiry
     live and merges; deny merges nothing."""
     from chela import overrides
-    return overrides.decide(request_id, approve, by=_override_decider(), channel="dashboard")
+    # Every caller of this checked humanproof.refusal first (a 403 otherwise).
+    return overrides.decide(request_id, approve, by=_override_decider(), channel="dashboard",
+                            browser_proven=True)
 
 
 # 🔔 CMX-103 — "Pending approvals": the override (and, with CMX-87, release) requests waiting
@@ -4155,8 +4159,9 @@ def api_inbox_denial():
 @require_auth
 def api_override_decide(request_id, action):
     from chela import overrides
-    if not _override_same_origin():
-        abort(403)
+    why = humanproof.refusal(request)
+    if why:
+        return jsonify({"ok": False, "state": None, "detail": why}), 403
     if action not in ("approve", "deny"):
         abort(404)
     data = request.get_json(silent=True) or {}
@@ -4198,8 +4203,11 @@ def override_confirm(request_id):
     overrides.sweep()
     req = overrides.load(request_id)
     if request.method == "POST":
-        if not _override_same_origin():
-            abort(403)
+        why = humanproof.refusal(request)
+        if why:
+            body = (f"<h1>⛔ Not decided</h1><p>{escape(why)}.</p>"
+                    "<p>Open this page in your browser and press the button there.</p>")
+            return Response(_OVERRIDE_PAGE.format(body=body), status=403, mimetype="text/html")
         decision = request.form.get("decision", "")
         if decision not in ("approve", "deny"):
             abort(400)
@@ -4235,8 +4243,7 @@ def override_confirm(request_id):
         return Response(_OVERRIDE_PAGE.format(body=body), status=404, mimetype="text/html")
     left = max(0.0, (req.get("deadline") or 0) - time.time())
     if req.get("kind") == "release":
-        return Response(_OVERRIDE_PAGE.format(body=_release_confirm_body(req, left)),
-                        mimetype="text/html")
+        return _decide_form_page(_release_confirm_body(req, left))
     rows = "".join(
         f"<dt>{escape(k)}</dt><dd>{escape(str(v))}</dd>" for k, v in (
             ("Run", req.get("label")), ("PR", req.get("pr_url")),
@@ -4252,7 +4259,20 @@ def override_confirm(request_id):
             '<form method="post"><button class="ok" name="decision" value="approve">'
             'Approve override</button><button class="no" name="decision" value="deny">'
             "Deny</button></form>")
-    return Response(_OVERRIDE_PAGE.format(body=body), mimetype="text/html")
+    return _decide_form_page(body)
+
+
+def _decide_form_page(body: str) -> Response:
+    """The confirm page with its decide form bound to this browser's session (CMX-392): the
+    session cookie, and the session's token as a hidden field the form POSTs back."""
+    sid = humanproof.session_for(request)
+    field = (f'<input type="hidden" name="{humanproof.FORM_FIELD}" '
+             f'value="{humanproof.token_for(sid)}">')
+    resp = Response(_OVERRIDE_PAGE.format(body=body.replace(
+        '<form method="post">', f'<form method="post">{field}')), mimetype="text/html")
+    resp.headers["Cache-Control"] = "no-store"
+    humanproof.set_cookie(resp, sid)
+    return resp
 
 
 @app.route("/hooks/<event>", methods=["POST"])
@@ -5938,7 +5958,14 @@ def _merge_one(row: dict) -> dict:
 @app.route("/api/dispatcher/runs/<task_id>/merge", methods=["POST"])
 @require_auth
 def api_dispatcher_run_merge(task_id: str):
-    """Squash-merge a single run's PR + clean up. See ``_merge_one`` for detail."""
+    """Squash-merge a single run's PR + clean up. See ``_merge_one`` for detail.
+
+    🔐 CMX-392: this runs ``gh pr merge`` directly, so only the operator's browser session may
+    press it (:mod:`chela.dashboard.humanproof`): an agent's raw POST from loopback merging
+    its own PR is refused here, before any run is read."""
+    why = humanproof.refusal(request)
+    if why:
+        return jsonify({"ok": False, "error": why}), 403
     row = next((r for r in dispatcher.list_runs() if r.get("task_id") == task_id), None)
     if not row:
         return jsonify({"ok": False, "error": f"run {task_id} not found"}), 404

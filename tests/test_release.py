@@ -17,6 +17,7 @@ from types import SimpleNamespace
 import pytest
 
 from chela import config, inbox, overrides, release
+from tests._browser_session import as_browser
 
 PYPROJECT = '[project]\nname = "demo"\nversion = "0.1.0"\n'
 LOCK = ('version = 1\n\n[[package]]\nname = "click"\nversion = "8.0.0"\n\n'
@@ -253,7 +254,7 @@ def test_the_dashboard_confirm_page_shows_the_release_and_approves(world, pushes
     pytest.importorskip("flask")
     from chela.dashboard.app import app
     out = _prepare(world)
-    client = app.test_client()
+    client = as_browser(app.test_client())
     page = client.get(f"/override/{out['request_id']}")
     assert page.status_code == 200 and b"Approve release" in page.data
     assert b"CMX-5, CMX-7" in page.data and out["dev_sha"].encode() in page.data
@@ -1094,7 +1095,7 @@ def test_the_dashboard_approval_page_says_released_and_names_the_tag(world, push
     pytest.importorskip("flask")
     from chela.dashboard.app import app
     out = _prepare(world)
-    ok = app.test_client().post(f"/override/{out['request_id']}", data={"decision": "approve"})
+    ok = as_browser(app.test_client()).post(f"/override/{out['request_id']}", data={"decision": "approve"})
     assert ok.status_code == 200
     assert b"Approved and released" in ok.data and b"v0.2.0" in ok.data
     assert b"Not released" not in ok.data
@@ -1287,7 +1288,7 @@ def _reject_dev_pushes(world) -> None:
 def _post(rid: str, decision: str):
     pytest.importorskip("flask")
     from chela.dashboard.app import app
-    return app.test_client().post(f"/override/{rid}", data={"decision": decision})
+    return as_browser(app.test_client()).post(f"/override/{rid}", data={"decision": decision})
 
 
 def test_the_dashboard_page_for_a_release_that_failed_midway_says_what_reached_origin(
@@ -1342,7 +1343,7 @@ def test_the_dashboard_get_for_a_decided_release_offers_no_buttons(world, pushes
         _move_dev(world)
     else:
         overrides.decide(out["request_id"], how == "approve", "terminal:op")
-    client = app.test_client()
+    client = as_browser(app.test_client())
     page = client.get(f"/override/{out['request_id']}")
     text = page.get_data(as_text=True)
     assert page.status_code == 404 and f"It is {word}" in text
@@ -1423,7 +1424,7 @@ def test_the_approval_page_and_the_card_show_every_provenance_field(world):
     from chela.telegram.overridewatch import format_release_message
     out = release.prepare("0.2.0", "a calmer release", repo=world.work, actor="orch:x")
     rec = overrides.load(out["request_id"])
-    text = app.test_client().get(f"/override/{rec['id']}").get_data(as_text=True)
+    text = as_browser(app.test_client()).get(f"/override/{rec['id']}").get_data(as_text=True)
     card = format_release_message(rec)
     for shown in (text, card):
         for needle in ("v0.2.0", "a calmer release", "CMX-5, CMX-7", "orch:x"):
@@ -1446,7 +1447,7 @@ def test_the_release_approval_page_escapes_each_agent_supplied_field(world, fiel
     out = _prepare(world)
     value = [f"CMX-1{_PAYLOAD}", "CMX-2"] if field == "task_ids" else _PAYLOAD
     overrides.set_fields(out["request_id"], **{field: value})
-    page = app.test_client().get(f"/override/{out['request_id']}")
+    page = as_browser(app.test_client()).get(f"/override/{out['request_id']}")
     text = page.get_data(as_text=True)
     assert page.status_code == 200
     assert "<script>alert(1)" not in text and 'action="//evil"' not in text

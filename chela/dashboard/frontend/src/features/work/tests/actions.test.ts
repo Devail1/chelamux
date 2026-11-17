@@ -1,0 +1,21 @@
+// 🔐 CMX-392: a card action carries the page's session token. The server refuses the card's
+// Merge (it runs `gh pr merge` itself) without it, so an agent on loopback cannot press it.
+import { afterEach, expect, test, vi } from 'vitest';
+
+vi.mock('../../../shared/store/work.ts', () => ({ refreshWork: vi.fn() }));
+
+afterEach(() => vi.unstubAllGlobals());
+
+test('Merge posts to the run with the session-token header', async () => {
+  const calls: { url: string; opts: RequestInit }[] = [];
+  vi.stubGlobal('fetch', (url: string, opts: RequestInit) => {
+    calls.push({ url, opts });
+    return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve({ ok: true }) });
+  });
+  const { mergeRun } = await import('../lib/actions.ts');
+  expect(await mergeRun('CMX-1')).toBeNull();
+  expect(calls[0]?.url).toBe('/api/dispatcher/runs/CMX-1/merge');
+  const headers = calls[0]?.opts.headers as Record<string, string>;
+  expect(Object.keys(headers)).toContain('X-Chela-Session-Token');
+  expect(headers['Content-Type']).toBe('application/json');
+});

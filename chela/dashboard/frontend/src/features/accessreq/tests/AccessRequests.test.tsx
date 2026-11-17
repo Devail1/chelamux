@@ -10,12 +10,15 @@ import { DURATIONS, durLabel, durationChoices, pendingCount, timeLeft, who, type
 
 let listing: unknown;
 let posts: { path: string; body: { minutes?: number; rw?: boolean } }[] = [];
+// 🔐 CMX-392: each decide POST's headers (the session token rides in one).
+let heads: Record<string, string>[] = [];
 let postReply: unknown;
 let fail = false;
 
 beforeEach(() => {
   listing = { requests: [], share_typing: true, default_minutes: 60 };
   posts = [];
+  heads = [];
   postReply = { ok: true };
   fail = false;
   vi.stubGlobal('fetch', (url: string, opts?: RequestInit) => {
@@ -23,6 +26,7 @@ beforeEach(() => {
     let body = listing;
     if (opts?.method === 'POST') {
       posts.push({ path: url, body: JSON.parse(String(opts.body || '{}')) });
+      heads.push((opts.headers ?? {}) as Record<string, string>);
       body = postReply;
     }
     return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve(body) });
@@ -86,6 +90,9 @@ test('a refused request says why and offers no Approve, only Deny', async () => 
   expect(row?.querySelector('.ar-refused')?.textContent).toBe(" Can't be approved: /home/u/.ssh holds secrets or system state, it can never be mounted");
   await click(row?.querySelector('.ar-deny'));
   expect(posts).toEqual([{ path: '/api/share-requests/abcdefabcdef-0/deny', body: {} }]);
+  // 🔐 CMX-392: the server refuses a decision without the page's session token.
+  expect(Object.keys(heads[0] ?? {})).toContain('X-Chela-Session-Token');
+  expect(heads[0]?.['Content-Type']).toBe('application/json');
 });
 
 test('approve defaults to the server duration, read-only; write offered only when asked, starting off', async () => {

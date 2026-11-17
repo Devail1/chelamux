@@ -10,6 +10,8 @@ import { NOTIFY_KEY, durStr, notifyEnabled, safeHref, setApprovalNotify, whatTex
 
 let listing: unknown = { requests: [] };
 let posts: { path: string; body: unknown }[] = [];
+// 🔐 CMX-392: each decide POST's headers (the session token rides in one).
+let heads: Record<string, string>[] = [];
 let postReply: unknown = null;
 let fail = false;
 let notes: { title: string; opts: { body: string; tag: string } }[] = [];
@@ -26,6 +28,7 @@ class FakeNotification {
 beforeEach(() => {
   listing = { requests: [] };
   posts = [];
+  heads = [];
   postReply = null;
   fail = false;
   notes = [];
@@ -39,6 +42,7 @@ beforeEach(() => {
     let body: unknown = listing;
     if (opts?.method === 'POST') {
       posts.push({ path: url, body: JSON.parse(String(opts.body || '{}')) });
+      heads.push((opts.headers ?? {}) as Record<string, string>);
       body = postReply ?? { ok: true, state: 'denied' };
     }
     return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve(body) });
@@ -188,6 +192,14 @@ test('approve needs a second, confirming click and posts confirm:true', async ()
   expect(ap.classList.contains('pa-armed')).toBe(true);
   await click(ap);
   expect(posts).toEqual([{ path: `/api/override/${ID}/approve`, body: { confirm: true } }]);
+});
+
+test('a decision carries the session-token header (CMX-392: the server refuses one without it)', async () => {
+  listing = { requests: [req()] };
+  await open();
+  await click(q('.pa-deny'));
+  expect(Object.keys(heads[0] ?? {})).toContain('X-Chela-Session-Token');
+  expect(heads[0]?.['Content-Type']).toBe('application/json');
 });
 
 test('deny posts to the deny action, with an encoded id', async () => {
