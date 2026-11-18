@@ -313,3 +313,139 @@ def test_an_access_request_decision_without_a_browser_session_is_refused(action,
     browser = as_browser(app.test_client())
     assert browser.post(f"/api/share-requests/r-1/{action}", json={}).status_code == 200
     assert calls == [action]
+
+
+# --- EVERY decide route × EVERY missing proof (the invariant, not a sample of it) ----------
+#
+# The shapes table above drives one route. A guard pinned to one route lets a sibling route's
+# check be dropped, weakened, or made to always refuse without a test going red. Here every
+# route that decides on the operator's behalf is driven through every missing-proof shape
+# (refused 403 for THAT shape's reason, its side effect never reached) AND through the full
+# proof (side effect reached exactly once: a check that refuses everyone is a broken button).
+
+_EXTRA_SHAPES = {
+    # a sibling port on localhost is `same-site`, not `same-origin`: still not this page
+    "same-site fetch": "cross-site request",
+    "empty Origin": "no Origin header",
+    "truncated token": "missing or stale session token",
+    "token without its cookie's session": "no dashboard session",
+}
+
+
+def _all_shapes(sid: str, token: str) -> dict:
+    good = {"Origin": "http://localhost", "X-Chela-Session-Token": token}
+    return {**_shapes(sid, token),
+            "same-site fetch": ({**good, "Sec-Fetch-Site": "same-site"}, sid),
+            "empty Origin": ({**good, "Origin": ""}, sid),
+            "truncated token": ({**good, "X-Chela-Session-Token": token[:32]}, sid),
+            "token without its cookie's session": (good, None)}
+
+
+def _sinks(monkeypatch) -> list:
+    """Every decide route's side effect, recorded instead of performed."""
+    from chela.dashboard import app as dash
+    calls: list = []
+    monkeypatch.setattr(dash, "_override_decide", lambda rid, approve:
+                        calls.append(("override", rid, approve))
+                        or {"ok": True, "state": overrides.MERGED if approve else overrides.DENIED})
+    for name in ("approve", "deny"):
+        monkeypatch.setattr(dash.share_requests, name,
+                            lambda *a, _n=name, **k: calls.append(("share", _n)) or (True, "ok"))
+    monkeypatch.setattr(dash.share_requests, "revoke",
+                        lambda *a, **k: calls.append(("share", "revoke")) or True)
+    monkeypatch.setattr(dash.dispatcher, "list_runs", lambda: [{"task_id": "CMX-0"}])
+    monkeypatch.setattr(dash, "_merge_one", lambda row: calls.append(("merge", row["task_id"]))
+                        or {"ok": True})
+    monkeypatch.setattr(overrides, "sweep", lambda: None)
+    monkeypatch.setattr(overrides, "load", lambda rid: None)
+    return calls
+
+
+# route → (method kwargs, the call the full proof must reach, where the reason is reported)
+_ROUTES = {
+    "api override approve": ("/api/override/r-1/approve", {"json": {"confirm": True}},
+                             ("override", "r-1", True)),
+    "api override deny": ("/api/override/r-1/deny", {"json": {}}, ("override", "r-1", False)),
+    "confirm page approve": ("/override/r-1", {"data": {"decision": "approve"}},
+                             ("override", "r-1", True)),
+    "confirm page deny": ("/override/r-1", {"data": {"decision": "deny"}},
+                          ("override", "r-1", False)),
+    "access approve": ("/api/share-requests/q-1/approve", {"json": {}}, ("share", "approve")),
+    "access deny": ("/api/share-requests/q-1/deny", {"json": {}}, ("share", "deny")),
+    "access revoke": ("/api/share-requests/q-1/revoke", {"json": {}}, ("share", "revoke")),
+    "card merge": ("/api/dispatcher/runs/CMX-0/merge", {"json": {}}, ("merge", "CMX-0")),
+}
+
+
+def _drive(route: str, headers: dict, cookie: str | None):
+    path, kwargs, _ = _ROUTES[route]
+    client = app.test_client()
+    if cookie:
+        client.set_cookie(humanproof.COOKIE, cookie)
+    return client.post(path, headers=headers, **kwargs)
+
+
+@pytest.mark.parametrize("shape", [*_REASON, *_EXTRA_SHAPES])
+@pytest.mark.parametrize("route", list(_ROUTES))
+def test_every_decide_route_refuses_every_missing_proof(route, shape, monkeypatch):
+    calls = _sinks(monkeypatch)
+    sid = humanproof.new_session_id()
+    headers, cookie = _all_shapes(sid, humanproof.token_for(sid))[shape]
+    resp = _drive(route, headers, cookie)
+    assert resp.status_code == 403, (route, shape, resp.status_code)
+    assert calls == [], (route, shape, calls)
+    reason = {**_REASON, **_EXTRA_SHAPES}[shape]
+    assert reason in resp.get_data(as_text=True), (route, shape, resp.get_data(as_text=True))
+
+
+@pytest.mark.parametrize("route", list(_ROUTES))
+def test_every_decide_route_acts_once_for_the_full_proof(route, monkeypatch):
+    calls = _sinks(monkeypatch)
+    sid = humanproof.new_session_id()
+    resp = _drive(route, {"Origin": "http://localhost",
+                          "X-Chela-Session-Token": humanproof.token_for(sid)}, sid)
+    assert resp.status_code == 200, (route, resp.get_data(as_text=True))
+    assert calls == [_ROUTES[route][2]]
+
+
+def test_the_confirm_form_token_alone_without_a_cookie_is_refused(monkeypatch):
+    """The form-field path is the same proof as the header: the token alone is not a session."""
+    calls = _sinks(monkeypatch)
+    sid = humanproof.new_session_id()
+    resp = app.test_client().post("/override/r-1", headers={"Origin": "http://localhost"},
+                                  data={"decision": "approve",
+                                        humanproof.FORM_FIELD: humanproof.token_for(sid)})
+    assert resp.status_code == 403 and calls == []
+
+
+# --- one browser, many tabs: a page load never strands another tab's token -----------------
+
+def test_a_second_page_load_keeps_the_session_so_an_open_tab_still_decides(repo):  # noqa: F811
+    """The SPA tab holds the token it booted with. Opening the confirm page from the
+    notification (or reloading `/`) in the same browser must REUSE the session, or the open
+    tab's next Approve is refused with "stale token". Each page load returns the same token,
+    and the SPA's token still approves after the confirm page was opened."""
+    import re
+    _seed(repo)
+    rid = _request()["request_id"]
+    client = app.test_client()
+    first = client.get("/")
+    spa = re.search(rb'"sessionToken":\s*"([0-9a-f]{64})"', first.data).group(1).decode()
+    cookie = first.headers["Set-Cookie"]
+    assert "HttpOnly" in cookie and "SameSite=Strict" in cookie and "Path=/" in cookie
+    again = re.search(rb'"sessionToken":\s*"([0-9a-f]{64})"', client.get("/").data).group(1)
+    assert again.decode() == spa
+    assert _page_token(client.get(f"/override/{rid}").data) == spa
+    with _github() as squash:
+        ok = client.post(f"/api/override/{rid}/approve", json={"confirm": True},
+                         headers={"Origin": "http://localhost", humanproof.HEADER: spa})
+    assert ok.status_code == 200, ok.get_json()
+    squash.assert_called_once()
+
+
+def test_two_browsers_get_two_sessions_and_neither_token_works_in_the_other():
+    """Session reuse is per-cookie, never global: a fresh client is a fresh session."""
+    import re
+    tok = [re.search(rb'"sessionToken":\s*"([0-9a-f]{64})"', app.test_client().get("/").data)
+           .group(1).decode() for _ in range(2)]
+    assert tok[0] != tok[1]
