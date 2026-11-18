@@ -2656,6 +2656,18 @@ def cmd_task_finished(args) -> None:
         kwargs["base_sync"] = sync["record"]
     if review.get("record"):
         kwargs["review_gate"] = review["record"]
+    # 📌 CMX-394: LAST, after anything above that can commit (CMX-334's base merge): the PR
+    # must be on the HEAD that was just checked, never an older push.
+    pushed = dispatcher.ensure_pushed_head(args.task_id)
+    if not pushed.get("ok"):
+        print(f"task-finished: 📌 {pushed['error']}")
+        sys.exit(1)
+    if pushed.get("origin") is not None and pushed.get("requested"):
+        print(f"📌 {dispatcher.unpushed_message(pushed['local'], pushed['origin'])} — "
+              "push requested; chela pushes it before handing the run in.")
+    elif pushed.get("requested"):
+        print(f"📌 a push request is pending — chela pushes HEAD {pushed['local'][:12]} and "
+              "checks origin has it before handing the run in.")
     result = dispatcher.request_task_finished(args.task_id, **kwargs)
     if not result.get("ok"):
         print(f"task-finished: {result.get('error', 'unknown error')}")
@@ -2904,7 +2916,9 @@ def cmd_request_push(args) -> None:
         print(f"request-push: {result.get('error', 'unknown error')}")
         sys.exit(1)
     print(f"Task {result['task_id']}: push requested — chela will push the branch"
-          + (" and open the PR" if args.pr_title else "") + " on its next pass.")
+          + (" and open the PR" if args.pr_title else "") + " on its next pass, and checks "
+          "origin then has this worktree's HEAD (a mismatch is retried, then escalated). "
+          "Commit AFTER this? task-finished requests the push again.")
 
 
 def cmd_rework_disputed(args) -> None:
