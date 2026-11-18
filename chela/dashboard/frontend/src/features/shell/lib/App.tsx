@@ -61,6 +61,8 @@ function Sidebar() {
   return (
     <aside className="sidebar">
       <SidebarHead />
+      {/* CMX-395: which Claude account the CLI runs on (an org's, or a personal one) */}
+      <Slot id="claude-account-island" as="div" className="claude-account-slot" />
       <div className="sidebar-scroll">
         <div className="sidebar-quick">
           <Slot id="sidebar-new-island" />

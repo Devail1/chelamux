@@ -66,6 +66,8 @@ export interface AgentRow {
     last_activity?: string | number | null;
     recap_ts?: string | number | null;
     created?: string | number | null;
+    /** CMX-395: started before the latest Claude account switch (chela/claude_account.py). */
+    account_switch?: unknown;
     ai_title?: string | null;
     recap?: string | null;
     pr?: { url?: string; state?: string; draft?: boolean } | null;

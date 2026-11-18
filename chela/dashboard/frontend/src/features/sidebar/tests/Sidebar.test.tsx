@@ -650,3 +650,17 @@ test('CMX-388: dispatch off by choice draws no Dispatched section; its sessions 
   const { el: today } = draw(state(rows));
   expect(groupKeys(today)).toEqual(['/srv/code/alpha', DISPATCHED_KEY]);
 });
+
+// CMX-395: a session started before the Claude account switch chela observed MAY still use
+// the old account: a muted chip with that email. No switch, no chip. Placeholder emails only.
+test('the account-switch chip: shown with the old email and the honest wording, absent otherwise', () => {
+  const sw = { from: 'person-a@example.invalid', to: 'person-b@example.invalid', at: '2026-11-17T10:00:00+00:00', started_unknown: false };
+  const { el } = draw(state([win('old', { account_switch: sw }), win('new', { account_switch: null })]));
+  const chip = meta(rowOf(el, 'old'), 'account');
+  expect(chip?.className).toBe('ar-acct');
+  expect(chip?.textContent).toBe('person-a@example.invalid');
+  expect(chip?.querySelector('svg.lucide-circle-user')).toBeTruthy();
+  expect(chip?.title).toBe('May still use person-a@example.invalid: it started before the switch to person-b@example.invalid at 2026-11-17 10:00 UTC. Restart it to be sure.');
+  expect(rowOf(el, 'old').title).toContain('May still use person-a@example.invalid');
+  expect(meta(rowOf(el, 'new'), 'account')).toBeNull();
+});

@@ -29,7 +29,7 @@ from flask import abort, Flask, jsonify, render_template, request, Response, sen
 
 from chela import config
 from chela.config import DISPATCH_WORKFLOWS, CHELA_DIR, TMUX_SESSION, NOTIFY_INTERVAL
-from chela import agent_manager, capabilities, collab, concurrency, collab_host, collab_stream, context, diffsurface, discovery, dismissed_sessions, dispatcher, epoch, event_log, fleet, gateanswer, hold, hooks, inbox, judge, launcher, messenger, notify, okf, parentage, park, personas, pr_status, probecache, rc_rename, restore, rooms, sandbox_status, scheduler, sessionids, share_requests, share_sandbox, share_store, sidebar_archive, sidebar_layout, spawn, starter, tasklists, transcripts, update, usage, userconfig
+from chela import agent_manager, capabilities, claude_account, collab, concurrency, collab_host, collab_stream, context, diffsurface, discovery, dismissed_sessions, dispatcher, epoch, event_log, fleet, gateanswer, hold, hooks, inbox, judge, launcher, messenger, notify, okf, parentage, park, personas, pr_status, probecache, rc_rename, restore, rooms, sandbox_status, scheduler, sessionids, share_requests, share_sandbox, share_store, sidebar_archive, sidebar_layout, spawn, starter, tasklists, transcripts, update, usage, userconfig
 from chela.dashboard import humanproof, identity, resources, term_fonts, term_themes
 from chela import topic_ledger as tg_topics
 from chela.personas import autolaunch, lease
@@ -581,6 +581,13 @@ def api_agents():
     # the merge). Read the run rows ONCE per request for their terminal pr_state; anything
     # else goes through pr_status's cached gh lookup, never one gh spawn per pane per tick.
     pr_run_states = pr_status.runs_pr_states(runs)
+    # CMX-395: the latest Claude account switch chela observed: one file read per request,
+    # never a `claude auth status` spawn (that is the header's cached read, not this poll's).
+    try:
+        account_change = claude_account.last_change()
+    except Exception:
+        log.exception("api_agents: account change unreadable; no switch badges")
+        account_change = None
     # CMX-389: one read of session-parents.json per request, looked up by SESSION id.
     try:
         parent_table = parentage.parents()
@@ -627,6 +634,7 @@ def api_agents():
             and inbox.is_done(window_id)
         )
 
+        created = _window_started(window_id, cpid)
         agents.append({
             "name": name,
             "online": True,
@@ -686,7 +694,12 @@ def api_agents():
             # CMX-66: the sidebar's Last activity (the transcript's last write) and
             # Created (the window's Claude process start). Either may be None.
             "last_activity": transcript.get("last_activity"),
-            "created": _window_started(window_id, cpid),
+            "created": created,
+            # CMX-395: this session started before the account switch chela last observed,
+            # so it MAY still use the old account ({from, to, at, started_unknown}); None
+            # otherwise, and always None for a window with no Claude in it.
+            "account_switch": (claude_account.switch_badge(created, account_change)
+                               if claude_running else None),
             # {url, number, repository, ts, state, draft} — `state` is open/merged/closed/
             # unknown, and only a confirmed open + non-draft PR reads as reviewable.
             "pr": pr,
@@ -4661,6 +4674,21 @@ def api_resources():
     return jsonify(resources.sample())
 
 
+@app.route("/api/claude-account")
+@require_auth
+def api_claude_account():
+    """The Claude account the CLI is signed in to, for the header (CMX-395): the cached
+    `claude auth status --json` read (chela.claude_account). ``?fresh=1`` (a dashboard load)
+    re-reads it when the cache is older than claude_account.FRESH_MIN_S. Never a 500: a
+    failed read answers ``state: "unknown"``, which the header draws as such."""
+    fresh = request.args.get("fresh") == "1"
+    try:
+        return jsonify(claude_account.status(fresh=fresh))
+    except Exception:
+        log.exception("api_claude_account: read failed")
+        return jsonify({"state": "unknown", "reason": "the dashboard could not read the account"})
+
+
 @app.route("/api/agents/status_health")
 @require_auth
 def api_agents_status_health():
@@ -6583,6 +6611,9 @@ def main():
     # must pay the (up to config.status_cmd_timeout_s()) subprocess cost, on its own timer,
     # instead of an inbound request paying it inline.
     agent_manager.start_background_refresh()
+    # CMX-395: the header's Claude account, re-read every few minutes off the request path
+    # (and so an account switch is noticed while no dashboard is open).
+    claude_account.start_background_refresh()
     collab.start()  # P3: publish running agents as presence peers (to shared viewers)
     _start_share_restore()
     atexit.register(_shutdown_hosted_shares)
