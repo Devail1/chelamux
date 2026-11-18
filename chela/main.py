@@ -466,7 +466,8 @@ def cmd_run(args) -> None:
                 log.exception("Worktree GC spawn failed")
 
             # ⚖️🧹🌙 CMX-303: the nightly sweep of what the standard tier merged unjudged —
-            # spawned detached at `sweep.nightly_at`, one at a time, never waited on.
+            # spawned detached when the box is idle (CMX-400; or at the fallback / fixed time),
+            # one at a time, never waited on.
             try:
                 nightly_child = sweep_nightly.daemon_tick(DISPATCH_WORKFLOWS, nightly_child)
             except Exception:
@@ -3176,7 +3177,7 @@ def cmd_judge_nightly_sweep(args) -> None:
     except Exception as e:  # noqa: BLE001 — a WORKFLOW.md that does not parse
         print(f"nightly-sweep: {args.workflow} could not be read: {e}", file=sys.stderr)
         sys.exit(2)
-    result = sweep_nightly.run(wf)
+    result = sweep_nightly.run(wf, trigger=getattr(args, "trigger", None))
     line = f"nightly sweep: {result['status']}" + (f" — {result['why']}" if result.get("why")
                                                     else "")
     print(json.dumps(result, indent=2) if args.json else line)
@@ -4556,9 +4557,14 @@ def main() -> None:
     p_jnightly = judge_sub.add_parser(
         "nightly-sweep",
         help="⚖️🧹🌙 Mutation-sweep the lines STANDARD-tier PRs merged to the base branch in the "
-             "last 24h and file one tracker issue per surviving guard category (the daemon runs it at "
-             "sweep.nightly_at)",
+             "last 24h and file one tracker issue per surviving guard category (the daemon runs it when "
+             "the box is idle, or at the sweep.nightly_at fallback)",
     )
+    p_jnightly.add_argument(
+        "--trigger", choices=(sweep_nightly.IDLE, sweep_nightly.FALLBACK, sweep_nightly.FIXED),
+        default=None,
+        help="What started it (the daemon passes this; CMX-400). idle/fallback runs spend what is "
+             "left of the day's sweep.budget_seconds and record it; unset = a hand run, whole budget")
     p_jnightly.add_argument("--workflow", metavar="PATH", required=True,
                             help="The WORKFLOW.md whose base branch, judge suite and sweep "
                                  "settings to use")
