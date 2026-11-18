@@ -371,6 +371,11 @@ def test_blocked_hours_config(tmp_path, yaml_text, want):
     assert sweep_nightly.blocked_hours(_wf(tmp_path, yaml_text)) == want
 
 
+def test_unset_blocked_hours_is_the_default_without_a_warning(tmp_path, caplog):
+    assert sweep_nightly.blocked_hours(_wf(tmp_path)) == [(180, 270)]
+    assert "blocked_hours" not in caplog.text
+
+
 def test_a_malformed_blocked_hours_is_said(tmp_path, caplog):
     sweep_nightly.blocked_hours(_wf(tmp_path, "sweep:\n  blocked_hours: ['3-4']\n"))
     assert "is not a list of HH:MM-HH:MM — using ['03:00-04:30']" in caplog.text
@@ -399,6 +404,33 @@ def test_a_malformed_blocked_hours_is_said(tmp_path, caplog):
 ])
 def test_a_fallback_inside_a_blocked_window_moves_to_its_end(tmp_path, yaml_text, at):
     assert sweep_nightly.fallback_at(_wf(tmp_path, yaml_text)) == at
+
+
+def test_a_fallback_skipped_by_a_hold_fires_again_in_its_window(sched):
+    """The hold landed between the spawn and the start: the run swept nothing, so the day
+    still had no run and the fallback may fire again once the hold passes."""
+    sched.box.busy = "the suite slot is held by CMX-12"
+    child = sched.tick(datetime(2026, 11, 18, 5, 0))
+    assert child is not None
+    child.alive = False
+    wf = load_workflow(sched.path)
+    sweep_nightly.finish_day(wf, {"at": datetime(2026, 11, 18, 5, 0).timestamp(),
+                                  "status": "skipped", "reason": "dispatch_paused",
+                                  "trigger": "fallback"}, sched.chela)
+    assert sched.tick(datetime(2026, 11, 18, 5, 30), child) is not child
+    assert sched.spawned == [(sched.path, "fallback")] * 2
+
+
+def test_no_second_fallback_once_one_swept(sched):
+    sched.box.busy = "the suite slot is held by CMX-12"
+    child = sched.tick(datetime(2026, 11, 18, 5, 0))
+    child.alive = False
+    wf = load_workflow(sched.path)
+    sweep_nightly.finish_day(wf, {"at": datetime(2026, 11, 18, 5, 0).timestamp(),
+                                  "status": "unrun", "yielded_to": "CMX-12",
+                                  "sweep_seconds": 1.0, "trigger": "fallback"}, sched.chela)
+    assert sched.tick(datetime(2026, 11, 18, 5, 30), child) is child
+    assert len(sched.spawned) == 1
 
 
 def test_the_daemon_fires_a_moved_fallback_at_the_windows_end(sched):

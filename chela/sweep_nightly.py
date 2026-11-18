@@ -585,8 +585,10 @@ def start_reason(wf, now: datetime, quiet_for: float, chela_dir: Path | None = N
         return None             # CMX-436: a dispatch pause or blocked hours — no start at all
     if quiet_for >= quiet_seconds(wf):
         return IDLE
+    # Nothing RAN today: no record, or only runs that swept nothing — a fallback skipped by a
+    # hold that landed between its spawn and its start (CMX-436) may fire again in its window.
     win = fallback_window(wf)
-    if not rec and win is not None and win[0] <= now.hour * 60 + now.minute < win[1]:
+    if _used(rec) == 0 and win is not None and win[0] <= now.hour * 60 + now.minute < win[1]:
         return FALLBACK
     return None
 
