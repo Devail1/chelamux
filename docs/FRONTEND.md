@@ -35,6 +35,15 @@ on `static/app/`: the dispatcher's base merge (CMX-300, `chela/basemerge.py`) th
 the bundle on the merge, runs the stale-asset check and pushes it, instead of sending the PR
 back. A conflict on any other file, or a rebuild that fails, is still sent back.
 
+The same holds in your own worktree (CMX-437). Merge the base with `chela merge-base <task-id>`,
+not `git merge`: a conflict only in `static/app/` is rebuilt from the merged source and
+committed; a source conflict beside it leaves the merge in progress with only the source files
+conflicted and the bundle set to your branch's, to rebuild once you have resolved them.
+`chela task-finished` does the bundle-only case itself, so a frontend PR that merged meanwhile
+never refuses your hand-in. It is a step after `git merge`, not a `.gitattributes` merge driver,
+because the hash-named asset conflicts as rename/delete or rename/rename, and git hands those to
+no driver.
+
 What each test suite runs: the `tests/browser/` Playwright suites load the **committed
 bundle** (what Flask serves), so they see a source edit only after the rebuild; the jsdom
 suites (`tests/js_helpers/dashboard_dom.mjs`) boot `src/main.tsx`'s source, compiled by Vitest.

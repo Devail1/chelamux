@@ -17,7 +17,7 @@ import os
 import tempfile
 from pathlib import Path
 
-from chela import basesync, judge, judge_select, sweep
+from chela import basesync, generated, judge, judge_select, sweep
 
 CODE_SUFFIXES = (judge_select.PY_SUFFIXES + judge_select.JS_SUFFIXES
                  + judge_select.TS_SUFFIXES)
@@ -69,6 +69,21 @@ def _rerun_overlap(worktree: Path, workflow_path: str, experiments: str,
     return len(keep), ""
 
 
+def _merge_rebuilding(worktree: Path, base: str) -> str:
+    """:func:`chela.basemerge.merge_into` for a bundle-only conflict; ``""`` when merged."""
+    from chela import basemerge
+    try:
+        res = basemerge.merge_into(worktree, base)
+    except (RuntimeError, OSError) as e:
+        return f"the merge could not run: {e}"
+    if res["outcome"] in (basemerge.REBUILT, basemerge.MERGED):
+        return ""
+    if res["outcome"] == basemerge.CONFLICT:
+        basemerge.abort(worktree)
+    return (f"merging and rebuilding it failed ({res['outcome']}): "
+            f"{res['detail'] or ', '.join(res['files'])}")
+
+
 def reconcile(worktree: Path, wf, workflow_path: str, base: str, since: str,
               experiments: str | None) -> dict:
     """``{"ok": True, "moved": None | record}`` or ``{"ok": False, "error"}``. ``since`` is the
@@ -79,18 +94,27 @@ def reconcile(worktree: Path, wf, workflow_path: str, base: str, since: str,
         return {"ok": False, "error": f"could not re-check the base after the checks — {e}"}
     if state is None:
         return {"ok": True, "moved": None}
-    if state["conflicts"]:
+    bundle_only = bool(state["conflicts"]) and all(generated.is_rebuilt(f)
+                                                   for f in state["conflicts"])
+    if state["conflicts"] and not bundle_only:
         return {"ok": False, "error": "origin/" + base + " moved during the checks, and "
                 + basesync.refusal(base, state["behind"], state["conflicts"])}
     pr_files = judge._changed_files(worktree, base)
     if pr_files is None:
         return {"ok": False, "error": "could not list this PR's own files"}
     overlap = sorted(set(pr_files) & set(state["dev_files"]))
-    merge = basesync._git(worktree, "merge", "--no-edit", f"origin/{base}")
-    if merge.returncode != 0:
-        basesync._git(worktree, "merge", "--abort")
-        return {"ok": False, "error": f"`git merge origin/{base}` failed: "
-                                      f"{(merge.stderr or merge.stdout).strip()[:200]}"}
+    if bundle_only:
+        # 🔀 CMX-437: only the generated bundle conflicts — rebuilt from the merged source.
+        err = _merge_rebuilding(worktree, base)
+        if err:
+            return {"ok": False, "error": f"origin/{base} moved during the checks and "
+                                          f"conflicts only in the generated bundle, but {err}"}
+    else:
+        merge = basesync._git(worktree, "merge", "--no-edit", f"origin/{base}")
+        if merge.returncode != 0:
+            basesync._git(worktree, "merge", "--abort")
+            return {"ok": False, "error": f"`git merge origin/{base}` failed: "
+                                          f"{(merge.stderr or merge.stdout).strip()[:200]}"}
     tests = related_tests(worktree, state["dev_files"])
     cmd = judge.judge_test_cmd(wf)
     if not cmd and tests != []:

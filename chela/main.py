@@ -2941,6 +2941,42 @@ def cmd_request_push(args) -> None:
           "Commit AFTER this? task-finished requests the push again.")
 
 
+def cmd_merge_base(args) -> None:
+    """🔀 CMX-437: merge ``origin/<base>`` into this run's worktree, rebuilding the generated
+    dashboard bundle instead of leaving its conflict to be resolved by hand
+    (:func:`chela.basemerge.merge_into`). Exit 0: merged, rebuilt or already current; 1: source
+    conflicts left in progress for you (the bundle is set aside, to rebuild after), a failed
+    rebuild (merge aborted), uncommitted changes, or git could not say."""
+    from chela import basemerge
+    res = dispatcher.merge_base(args.task_id)
+    if not res.get("ok"):
+        print(f"merge-base: {res['error']}")
+        sys.exit(1)
+    base, outcome = res["base"], res["outcome"]
+    if outcome == basemerge.CURRENT:
+        print(f"merge-base: already contains origin/{base} ({res['base_sha'][:12]}).")
+    elif outcome == basemerge.MERGED:
+        print(f"merge-base: merged origin/{base} ({res['base_sha'][:12]}) cleanly → "
+              f"{res['merge_sha'][:12]}.")
+    elif outcome == basemerge.REBUILT:
+        print(f"merge-base: merged origin/{base} ({res['base_sha'][:12]}); it conflicted only "
+              f"in the generated bundle, rebuilt from the merged source and committed → "
+              f"{res['merge_sha'][:12]}.")
+    elif outcome == basemerge.CONFLICT:
+        print(f"merge-base: {basemerge.resume_hint(base, res['files'])}", end="")
+        sys.exit(1)
+    elif outcome == basemerge.DIRTY:
+        print("merge-base: commit your changes first; uncommitted: " + ", ".join(res["files"]))
+        sys.exit(1)
+    elif outcome == basemerge.BUILD_FAILED:
+        print(f"merge-base: origin/{base} conflicted only in the generated bundle, but the "
+              f"rebuild FAILED — the merge was aborted, nothing changed:\n{res['detail']}")
+        sys.exit(1)
+    else:
+        print(f"merge-base: unexpected outcome `{outcome}`")
+        sys.exit(1)
+
+
 def cmd_rework_disputed(args) -> None:
     """⏳🪤 CMX-248 (re-scope of CMX-244), 🔀 CMX-251. A rework agent's escape hatch for
     "there is nothing to push."
@@ -5061,6 +5097,14 @@ def main() -> None:
                      "(oldest first) — default: this worktree's / $CHELA_WID's own run")
     p_tshow.add_argument("task_id", nargs="?", default=None)
 
+    # merge-base — CMX-437: merge origin/<base> in, rebuilding the generated bundle itself
+    p_mb = sub.add_parser(
+        "merge-base",
+        help="Merge origin/<base> into this run's worktree; a conflict in the generated "
+             "dashboard bundle is rebuilt from the merged source, never resolved by hand",
+    )
+    p_mb.add_argument("task_id")
+
     # request-push — commit locally, then ask the DAEMON to push + open the PR
     # (issue #502 B2)
     p_rp = sub.add_parser(
@@ -5197,6 +5241,8 @@ def main() -> None:
         cmd_task(args)
     elif args.command == "request-push":
         cmd_request_push(args)
+    elif args.command == "merge-base":
+        cmd_merge_base(args)
     elif args.command == "rework-disputed":
         cmd_rework_disputed(args)
     elif args.command == "review":
