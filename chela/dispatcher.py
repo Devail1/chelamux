@@ -13,7 +13,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path, PurePosixPath
 from typing import NamedTuple
 
-from chela import basesync, concurrency, critic, envutil, epoch, event_log, fleet, flaky, generated, handinmove, hold, judge, memcap, mergegate, park, release_notes, reviewgate, risktier, sizegate, sweep, verdictcarry
+from chela import basesync, concurrency, critic, envutil, epoch, event_log, fleet, flaky, generated, handinmove, hold, judge, judge_timing, memcap, mergegate, park, release_notes, reviewgate, risktier, sizegate, sweep, verdictcarry
 from chela.config import (
     CHELA_DIR,
     TMUX_SESSION,
@@ -3382,7 +3382,8 @@ def verify_standard_hand_in(task_id: str) -> dict:
             steps.append({"name": name, "cmd": "", "passed": None,
                           "detail": "the workflow sets no `hand_in.lint_cmd` — skipped"})
             continue
-        res = judge.run_suite(cmd, Path(row["worktree_path"]), timeout=timeout)
+        with judge_timing.within(name):          # ⏱️ CMX-397: `lint` / `suite`
+            res = judge.run_suite(cmd, Path(row["worktree_path"]), timeout=timeout)
         passed = res.ok and res.exit_code == 0
         detail = res.detail or ("" if passed else f"exit {res.exit_code}\n{res.tail[-2000:]}")
         steps.append({"name": name, "cmd": cmd, "passed": passed, "detail": detail})

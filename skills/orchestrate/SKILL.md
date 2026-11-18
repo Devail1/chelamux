@@ -29,6 +29,7 @@ ids don't. Address siblings by `@N`, and re-derive them from `chela status` afte
 | `chela wait <task-id> --until done` | Block until a dispatched task reaches a state you must act on. |
 | `chela judge show <run>` | Rounds-to-clean, survival rates and per-phase timings for a run's judge rounds. |
 | `chela judge timings --since 7d` | Median and p90 wall-clock per judge phase across all tasks, slot wait included. |
+| `chela judge timings --hand-in` / `--nightly` | The same table for `chela task-finished` attempts (lint, suite, self-check, sweep, re-merge; `task_total` sums a task's attempts, refusals included) and for nightly sweeps. |
 | `chela events --type T --tail N` | The durable event log, i.e. the record of what actually happened. |
 | `chela escalate "…" --recommend "…"` | Hand a decision to the human, with your recommendation. |
 | `chela dispatch --pause` / `--resume` | **HOLD the queue** while you reorder the tracker: no new claims, judges or rework re-spawns until you release; running agents and judges finish. See the gotcha below. |
