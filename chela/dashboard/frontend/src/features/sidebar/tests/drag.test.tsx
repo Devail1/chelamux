@@ -362,6 +362,32 @@ describe('touch', () => {
     expect(after.defaultPrevented).toBe(false);
   });
 
+  // CMX-435: a finger that lands on a list still gliding from a flick gets an UNCANCELABLE
+  // touch sequence from the browser, so no drag could hold the list: its long press arms none.
+  // A cancelable touchstart (a list at rest) arms one as before.
+  for (const cancelable of [true, false]) {
+    test(`a long press whose touchstart is ${cancelable ? 'cancelable starts' : 'UNCANCELABLE (it caught a glide) starts no'} drag`, () => {
+      const { el, acts, head } = folders();
+      fireEvent.pointerDown(head('c'), touch(20, 90));
+      head('c').dispatchEvent(new Event('touchstart', { bubbles: true, cancelable }));
+      act(() => { vi.advanceTimersByTime(LONG_PRESS_DRAG_MS); });
+      expect(document.body.classList.contains('sidebar-dragging')).toBe(cancelable);
+      const tm = new Event('touchmove', { bubbles: true, cancelable: true });
+      head('c').dispatchEvent(tm);
+      expect(tm.defaultPrevented).toBe(cancelable);
+      fireEvent.pointerMove(window, touch(20, 10));
+      fireEvent.pointerUp(window, touch(20, 10));
+      expect(acts.dropGroup.mock.calls).toEqual(cancelable ? [['/srv/c', '/srv/a']] : []);
+      expect(document.body.classList.contains('sidebar-dragging')).toBe(false);
+      // the next touch, on a list at rest, is judged on its own
+      fireEvent.pointerDown(head('c'), touch(20, 90));
+      el.dispatchEvent(new Event('touchstart', { bubbles: true, cancelable: true }));
+      act(() => { vi.advanceTimersByTime(LONG_PRESS_DRAG_MS); });
+      expect(document.body.classList.contains('sidebar-dragging')).toBe(true);
+      fireEvent.pointerUp(window, touch(20, 90));
+    });
+  }
+
   test('a swipe never starts one: a finger that moves before the long press is a scroll', () => {
     const { acts, head } = folders();
     fireEvent.pointerDown(head('c'), touch(20, 90));
