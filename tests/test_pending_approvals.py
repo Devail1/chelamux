@@ -28,6 +28,7 @@ import pytest
 from chela import config, contract, dispatcher, overrides
 from chela.dispatcher import CI_FAILING, CI_PASSING, CI_PENDING, CIStatus
 from chela.judge import J_BLOCKED
+from tests._browser_session import as_browser
 
 pytest.importorskip("flask")
 
@@ -61,7 +62,7 @@ def repo(tmp_path: Path) -> Path:
 @pytest.fixture
 def client():
     from chela.dashboard.app import app
-    return app.test_client()
+    return as_browser(app.test_client())
 
 
 def _seed(repo: Path, **cols) -> None:
@@ -116,7 +117,7 @@ def test_the_list_shows_pending_and_hides_decided_and_expired(repo):
     """🔴 GUARD: only PENDING requests inside their TTL are listed — a denied one and one
     past its deadline (even unswept) never are."""
     live, denied, old = _bare(), _bare(), _bare()
-    assert overrides.decide(denied["id"], False, "dashboard", channel="dashboard")["ok"]
+    assert overrides.decide(denied["id"], False, "dashboard", channel="dashboard", browser_proven=True)["ok"]
     overrides.set_fields(old["id"], deadline=time.time() - 1)
     assert [r["id"] for r in overrides.listing()] == [live["id"]]
 
@@ -140,15 +141,18 @@ def test_list_approve_and_deny_call_the_shared_decide_path(repo, client, monkeyp
     """🔴 GUARD: the list's Approve/Deny land in `overrides.decide` on the dashboard channel —
     the very call the `/override/<id>` page makes. A second approve path → RED."""
     calls = []
-    monkeypatch.setattr(overrides, "decide", lambda rid, approve, by, channel="terminal", env=None:
-                        calls.append((rid, approve, by, channel))
+    monkeypatch.setattr(overrides, "decide", lambda rid, approve, by, channel="terminal", env=None,
+                        browser_proven=False:
+                        calls.append((rid, approve, by, channel, browser_proven))
                         or {"ok": True, "state": overrides.MERGED if approve else overrides.DENIED})
     rid = overrides.new_request_id()
     assert client.post(f"/api/override/{rid}/approve", json={"confirm": True}).status_code == 200
     assert client.post(f"/api/override/{rid}/deny", json={}).status_code == 200
     client.post(f"/override/{rid}", data={"decision": "approve"})
-    assert calls == [(rid, True, "dashboard", "dashboard"), (rid, False, "dashboard", "dashboard"),
-                     (rid, True, "dashboard", "dashboard")]
+    # CMX-392: each reaches decide as a PROVEN browser session (the routes checked it first)
+    assert calls == [(rid, True, "dashboard", "dashboard", True),
+                     (rid, False, "dashboard", "dashboard", True),
+                     (rid, True, "dashboard", "dashboard", True)]
 
 
 def test_approve_from_the_list_merges_once_and_records_decided_by(repo, client):
@@ -283,7 +287,7 @@ def test_the_sse_snapshot_tracks_the_pending_set(repo):
     assert dash._sse_overrides_snapshot() == ()
     rec = _bare()
     assert dash._sse_overrides_snapshot() == (rec["id"],)
-    overrides.decide(rec["id"], False, "dashboard", channel="dashboard")
+    overrides.decide(rec["id"], False, "dashboard", channel="dashboard", browser_proven=True)
     assert dash._sse_overrides_snapshot() == ()
 
 
@@ -423,6 +427,6 @@ def test_a_filed_request_pushes_an_sse_overrides_frame(monkeypatch):
     for _ in range(3):
         idle = next(stream)
         assert idle == ": keepalive\n\n", f"an unchanged pending set re-pushed {idle!r}"
-    overrides.decide(rec["id"], False, "dashboard", channel="dashboard")
+    overrides.decide(rec["id"], False, "dashboard", channel="dashboard", browser_proven=True)
     gone = next(stream)
     assert gone.startswith("event: overrides\n") and '"pending": 0' in gone, gone

@@ -11,13 +11,14 @@ from unittest.mock import patch
 import pytest
 
 from chela.dashboard import app as dash
+from tests._browser_session import as_browser
 
 INDEX_HTML = Path(dash.__file__).parent / "templates" / "index.html"
 
 
 @pytest.fixture
 def client():
-    return dash.app.test_client()
+    return as_browser(dash.app.test_client())
 
 
 def test_merge_all_route_is_gone(client):
@@ -47,3 +48,14 @@ def test_toolbar_has_no_seed_hint_line_but_keeps_init_button():
         assert not re.search(r'work-toolbar-hint">\s*Seed a starter', src)
     init = re.search(r"\{ label: 'Init a repo', icon: icons\.initRepo, onSelect: later\(\(\) => openInitRepo\(launcher\.get\(\)\)\) \}", head)
     assert init, "Init a repo must stay, in the header's ⋯"
+
+
+def test_the_per_card_merge_refuses_a_caller_without_a_browser_session():
+    """🔐 CMX-392: the card's Merge runs `gh pr merge` itself, so an agent's raw POST from
+    loopback (no Origin, no session) is refused before any run is even read."""
+    with patch.object(dash.dispatcher, "list_runs") as runs, \
+         patch.object(dash, "_merge_one") as merge:
+        resp = dash.app.test_client().post("/api/dispatcher/runs/CMX-0/merge", json={})
+    assert resp.status_code == 403 and resp.get_json()["ok"] is False
+    runs.assert_not_called()
+    merge.assert_not_called()

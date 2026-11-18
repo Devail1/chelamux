@@ -5,11 +5,23 @@
 // lands as TEXT; a failed fetch keeps what was known and never reads as "nothing is waiting".
 import { act, cleanup, fireEvent, render } from '@testing-library/react';
 import { afterEach, beforeEach, expect, test, vi } from 'vitest';
+
+// 🔐 CMX-392: the page's session token, seeded into the boot block BEFORE the modules under
+// test read it at import, so a test can pin the header's VALUE, not just its key.
+const TOKEN = vi.hoisted(() => {
+  const t = 'tok-approvals-7d21';
+  document.body.innerHTML = `<script type="application/json" id="chela-boot">{"sessionToken": "${t}"}</script>`;
+  return t;
+});
+// The imports above have read it; drop it so no test sees a stray <script> in the page.
+document.getElementById('chela-boot')?.remove();
 import { ARM_MS, ApprovalsPill, ApprovalsSheet, openApprovals, resetApprovals, tickApprovals } from '../index.ts';
 import { NOTIFY_KEY, durStr, notifyEnabled, safeHref, setApprovalNotify, whatText, type Request } from '../model.ts';
 
 let listing: unknown = { requests: [] };
 let posts: { path: string; body: unknown }[] = [];
+// 🔐 CMX-392: each decide POST's headers (the session token rides in one).
+let heads: Record<string, string>[] = [];
 let postReply: unknown = null;
 let fail = false;
 let notes: { title: string; opts: { body: string; tag: string } }[] = [];
@@ -26,6 +38,7 @@ class FakeNotification {
 beforeEach(() => {
   listing = { requests: [] };
   posts = [];
+  heads = [];
   postReply = null;
   fail = false;
   notes = [];
@@ -39,6 +52,7 @@ beforeEach(() => {
     let body: unknown = listing;
     if (opts?.method === 'POST') {
       posts.push({ path: url, body: JSON.parse(String(opts.body || '{}')) });
+      heads.push((opts.headers ?? {}) as Record<string, string>);
       body = postReply ?? { ok: true, state: 'denied' };
     }
     return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve(body) });
@@ -188,6 +202,16 @@ test('approve needs a second, confirming click and posts confirm:true', async ()
   expect(ap.classList.contains('pa-armed')).toBe(true);
   await click(ap);
   expect(posts).toEqual([{ path: `/api/override/${ID}/approve`, body: { confirm: true } }]);
+  // 🔐 CMX-392: the approve carries this page's token too, by value.
+  expect(heads.map((h) => h['X-Chela-Session-Token'])).toEqual([TOKEN]);
+});
+
+test('a decision carries the session-token header (CMX-392: the server refuses one without it)', async () => {
+  listing = { requests: [req()] };
+  await open();
+  await click(q('.pa-deny'));
+  expect(heads[0]?.['X-Chela-Session-Token']).toBe(TOKEN);
+  expect(heads[0]?.['Content-Type']).toBe('application/json');
 });
 
 test('deny posts to the deny action, with an encoded id', async () => {

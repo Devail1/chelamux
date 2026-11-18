@@ -26,7 +26,10 @@ approve, and each proves a human its own way:
 
 * the **Telegram button** — a callback query only a person pressing a button in the bound
   chat can produce (:mod:`chela.telegram.overridewatch`; a bot's tap is refused);
-* the **dashboard** confirm page — a same-origin POST behind the dashboard's auth;
+* the **dashboard** confirm page or approvals list — a POST that proves the operator's
+  browser session (CMX-392, :mod:`chela.dashboard.humanproof`: session cookie + page token +
+  Origin). "It came from loopback" proves nothing, since every agent is on loopback; a
+  dashboard call that did not prove the session is refused here too (``browser_proven``);
 * a **plain terminal** (``chela merge-approve``) — and here, where nothing about the call
   itself proves a human, :func:`decide` refuses a process carrying the orchestrator's
   ``$CHELA_ACTOR`` stamp or Claude Code's ``CLAUDECODE`` session marker
@@ -35,9 +38,14 @@ approve, and each proves a human its own way:
 
 On top of that the merge-gate hook (:mod:`chela.mergegate`) denies a session's
 ``chela merge-approve``, a ``curl`` to ``/override/``, and a ``python`` call into
-``chela.overrides.decide``. The env check is deliberately NOT applied to the two service
-channels: a pm2 service can inherit a Claude marker from the shell that started it (CMX-21),
-and that must not silently disable the one-tap button the operator relies on.
+``chela.overrides.decide``. That hook is a speed bump, never the gate: it string-matches
+argv, so any HTTP client it does not name walks past it (CMX-392).
+
+The env check is deliberately NOT applied to the two service channels: a pm2 service can
+inherit a Claude marker from the shell that started it (CMX-21), and that must not silently
+disable the one-tap button the operator relies on. The dashboard earns that exemption only
+with ``browser_proven``; an in-process caller can pass the flag too, which is why the hook's
+``python … decide`` match stays (see :mod:`chela.dashboard.humanproof` for the ceiling).
 
 🏷️ **Releases ride the same store (CMX-87).** ``chela release X.Y.Z`` (:mod:`chela.release`)
 records a request with ``kind: "release"``, bound (``head_sha``) to the ``dev`` commit the
@@ -553,17 +561,34 @@ def _public(rec: dict) -> dict:
 # The surfaces whose CALL proves a human pressed something (see the module docstring).
 SERVICE_CHANNELS = ("telegram", "dashboard")
 
+UNPROVEN_DASHBOARD = ("refused: a dashboard decision must come from the operator's browser "
+                      "session (CMX-392), and this caller did not prove one")
+
+
+def _service_refusal(channel: str, browser_proven: bool, env) -> str | None:
+    """Why this caller may not decide, or None. A service channel skips the env check
+    (CMX-21) only when its call is itself the proof: a Telegram tap always is; a dashboard
+    call only when the dashboard verified the browser session (CMX-392). An unproven
+    dashboard caller is an agent-reachable one, refused outright: the env it would be
+    checked against is the dashboard's, not the caller's."""
+    if channel == "dashboard":
+        return None if browser_proven else UNPROVEN_DASHBOARD
+    return None if channel in SERVICE_CHANNELS else agent_refusal(env)
+
 
 def decide(request_id: str, approve: bool, by: str, *, channel: str = "terminal",
-           env=None, reason: str | None = None) -> dict:
+           env=None, reason: str | None = None, browser_proven: bool = False) -> dict:
     """The operator's decision. ``{ok, state, detail, merge_commit_sha?}``.
 
     Approve ⇒ the merge happens HERE, now, via :func:`chela.contract.complete_override`
     (which re-checks head/CI/mergeable/base live). Exactly one caller ever moves a request
     out of ``pending`` — a second Approve (another button, another process) is told the
     request was already decided and merges nothing.
+
+    ``browser_proven`` is the dashboard's word that the request carried a verified browser
+    session (:mod:`chela.dashboard.humanproof`); ``channel="dashboard"`` without it is refused.
     """
-    why = None if channel in SERVICE_CHANNELS else agent_refusal(env)
+    why = _service_refusal(channel, browser_proven, env)
     if why:
         return {"ok": False, "state": None, "detail": why, "refused": True}
     by = (by or "").strip() or "unknown"
