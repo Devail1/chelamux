@@ -1264,6 +1264,15 @@ def _env_int(name: str, default: int, lo: int, hi: int) -> int:
     return max(lo, min(hi, v))
 
 
+CLAUDE_LOGIN_WARN_DAYS_DEFAULT = 3
+
+
+def claude_login_warn_days() -> int:
+    """How many days before ``claude auth status``'s ``loginExpiresAt`` the dashboard header
+    warns (``CHELA_CLAUDE_LOGIN_WARN_DAYS``, default 3, clamped to 0-90; CMX-395)."""
+    return _env_int("CHELA_CLAUDE_LOGIN_WARN_DAYS", CLAUDE_LOGIN_WARN_DAYS_DEFAULT, 0, 90)
+
+
 def upload_max_bytes() -> int:
     """Largest single file a Wall drop may upload (``CHELA_UPLOAD_MAX_MB``, default 25)."""
     return _env_int("CHELA_UPLOAD_MAX_MB", UPLOAD_MAX_MB_DEFAULT, 1, 1024) * 1024 * 1024

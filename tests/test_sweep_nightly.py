@@ -40,6 +40,8 @@ COVERED_TEST = ("from other import big_enough\n\n\ndef test_big_enough():\n"
 # A weak guard a NON-standard PR carries — judged (or human-gated) per PR, never swept here.
 CORE_WEAK = "def tick(y):\n    if y > 7:\n        return 3\n    return 4\n"
 WEAK_TITLE_KINDS = ["if-false"]
+# CMX-400: the clock-driven mode the daemon tests below were written for (idle is the default).
+FIXED_MODE = "sweep:\n  mode: fixed\n"
 
 
 @pytest.fixture(autouse=True)
@@ -1031,11 +1033,11 @@ def test_daemon_tick_spawns_one_due_workflow_at_a_time(tmp_path, monkeypatch):
     for name in ("a", "b"):
         (tmp_path / name).mkdir()
         p = tmp_path / name / "WORKFLOW.md"
-        p.write_text(_workflow_text(tmp_path))
+        p.write_text(_workflow_text(tmp_path, extra=FIXED_MODE))
         paths.append(p)
     spawned = []
     monkeypatch.setattr(sweep_nightly, "spawn",
-                        lambda p, d=None: spawned.append((p, d)) or _Child(True))
+                        lambda p, d=None, t=None: spawned.append((p, d)) or _Child(True))
     at = datetime(2026, 10, 21, 2, 30)
     child = sweep_nightly.daemon_tick(paths, None, at, chela)
     assert spawned == [(paths[0], chela)]
@@ -1054,12 +1056,12 @@ def test_daemon_tick_spawns_one_due_workflow_at_a_time(tmp_path, monkeypatch):
 def test_daemon_tick_spawns_a_paused_night_whose_run_then_skips(tmp_path, monkeypatch, pause):
     """The pause is read by the RUN (the child), not the tick: a paused night is spawned,
     skips, and does not move the covered window — so the next night catches it up."""
-    repo, chela = _repo(tmp_path), tmp_path / "chela"
+    repo, chela = _repo(tmp_path, extra=FIXED_MODE), tmp_path / "chela"
     chela.mkdir()
     if pause:
         (chela / "fleet-pause.json").write_text("{}")
     ran = []
-    monkeypatch.setattr(sweep_nightly, "spawn", lambda p, d=None: ran.append(
+    monkeypatch.setattr(sweep_nightly, "spawn", lambda p, d=None, t=None: ran.append(
         _run(repo, d, Filer())) or _Child(False))
     sweep_nightly.daemon_tick([repo / "WORKFLOW.md"], None, datetime.now().replace(
         hour=23, minute=59), chela)
@@ -1070,10 +1072,10 @@ def test_daemon_tick_spawns_a_paused_night_whose_run_then_skips(tmp_path, monkey
 def test_daemon_tick_marks_the_day_before_it_spawns(tmp_path, monkeypatch):
     """A spawn that blows up has still used today: never a retry storm, never a second."""
     chela, p = tmp_path / "chela", tmp_path / "WORKFLOW.md"
-    p.write_text(_workflow_text(tmp_path))
+    p.write_text(_workflow_text(tmp_path, extra=FIXED_MODE))
     seen = []
 
-    def boom(path, d=None):
+    def boom(path, d=None, t=None):
         seen.append(json.loads((sweep_nightly.state_dir(d) / "last.json").read_text()))
         raise OSError("no fork")
     monkeypatch.setattr(sweep_nightly, "spawn", boom)
@@ -1089,9 +1091,9 @@ def test_daemon_tick_skips_a_workflow_that_does_not_parse(tmp_path, monkeypatch)
     bad.parent.mkdir()
     bad.write_text("---\nproject_key: [\n---\n")
     good = tmp_path / "WORKFLOW.md"
-    good.write_text(_workflow_text(tmp_path))
+    good.write_text(_workflow_text(tmp_path, extra=FIXED_MODE))
     spawned = []
-    monkeypatch.setattr(sweep_nightly, "spawn", lambda p, d=None: spawned.append(p) or "child")
+    monkeypatch.setattr(sweep_nightly, "spawn", lambda p, d=None, t=None: spawned.append(p) or "child")
     assert sweep_nightly.daemon_tick([bad, good], None, datetime(2026, 10, 21, 3, 0),
                                      tmp_path / "chela") == "child"
     assert spawned == [good]
@@ -1167,7 +1169,7 @@ def test_the_daemon_loop_never_starts_a_second_sweep_while_one_runs(tmp_path, mo
     assignment re-hands ``None`` each tick and spawns three."""
     _quiet_loop(monkeypatch, n=3)
     p = tmp_path / "WORKFLOW.md"
-    p.write_text(_workflow_text(tmp_path))
+    p.write_text(_workflow_text(tmp_path, extra=FIXED_MODE))
     # The dispatcher reads DISPATCH_WORKFLOWS too, so only the sweep is pointed at `p`.
     real = sweep_nightly.daemon_tick
     monkeypatch.setattr(sweep_nightly, "daemon_tick", lambda workflows, prev: real([p], prev))
@@ -1175,14 +1177,14 @@ def test_the_daemon_loop_never_starts_a_second_sweep_while_one_runs(tmp_path, mo
     monkeypatch.setattr(sweep_nightly, "mark_started", lambda wf, now, d=None: None)
     spawned = []
     monkeypatch.setattr(sweep_nightly, "spawn",
-                        lambda path, d=None: spawned.append(path) or _Child(True))
+                        lambda path, d=None, t=None: spawned.append(path) or _Child(True))
     main_mod.cmd_run(argparse.Namespace())
     assert spawned == [p]
     # The other side: a child that has EXITED is replaced on the very next tick.
     _quiet_loop(monkeypatch, n=3)
     spawned.clear()
     monkeypatch.setattr(sweep_nightly, "spawn",
-                        lambda path, d=None: spawned.append(path) or _Child(False))
+                        lambda path, d=None, t=None: spawned.append(path) or _Child(False))
     main_mod.cmd_run(argparse.Namespace())
     assert spawned == [p, p, p]
 
@@ -1212,7 +1214,7 @@ def test_cli_exit_codes(tmp_path, monkeypatch, capsys, status, why, code, line):
     p = tmp_path / "WORKFLOW.md"
     p.write_text(_workflow_text(tmp_path))
     got = []
-    monkeypatch.setattr(sweep_nightly, "run", lambda wf: got.append(wf.path) or {
+    monkeypatch.setattr(sweep_nightly, "run", lambda wf, **kw: got.append(wf.path) or {
         "status": status, "why": why})
     with pytest.raises(SystemExit) as e:
         main_mod.cmd_judge_nightly_sweep(argparse.Namespace(workflow=str(p), json=False))
@@ -1223,7 +1225,7 @@ def test_cli_exit_codes(tmp_path, monkeypatch, capsys, status, why, code, line):
 def test_cli_json_prints_the_whole_result(tmp_path, monkeypatch, capsys):
     p = tmp_path / "WORKFLOW.md"
     p.write_text(_workflow_text(tmp_path))
-    monkeypatch.setattr(sweep_nightly, "run", lambda wf: {"status": "clean", "x": [1]})
+    monkeypatch.setattr(sweep_nightly, "run", lambda wf, **kw: {"status": "clean", "x": [1]})
     with pytest.raises(SystemExit) as e:
         main_mod.cmd_judge_nightly_sweep(argparse.Namespace(workflow=str(p), json=True))
     assert e.value.code == 0 and json.loads(capsys.readouterr().out) == {"status": "clean",

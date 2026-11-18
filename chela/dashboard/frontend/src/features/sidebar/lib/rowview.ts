@@ -1,12 +1,13 @@
 // CMX-276 (+ CMX-121's row redesign): what one sidebar row SHOWS, as data. The title gets
 // the width; state is the dot's SHAPE (Liav is red-weak), its word only in the dot's
 // aria-label and the row's tooltip; metadata is a short list of icon + text + tooltip.
+import { switchBadge } from '../../claudeaccount/model.ts';
 import { headLabel, type HeadAgent } from '../../panehead/model.ts';
 import {
   type AgentRow, type Battery, type Item, type SidebarState, itemLabel, primaryWindow, runDot, runState,
 } from '../model.ts';
 
-export type MetaKind = 'orchestrator' | 'pr' | 'judging' | 'context' | 'cwd';
+export type MetaKind = 'orchestrator' | 'pr' | 'judging' | 'account' | 'context' | 'cwd';
 
 export interface Meta {
   kind: MetaKind;
@@ -86,6 +87,9 @@ function metaOf(it: Item, a: AgentRow, s: SidebarState): Meta[] {
     const label = String(b.label ?? '').replace(/^\S+\s+/, '');
     out.push({ kind: 'judging', text: where, cls: 'ar-judge', title: `Judge ${label || `testing · ${where}`}` });
   }
+  // CMX-395: started before the Claude account switch chela observed; it MAY use the old one
+  const acct = switchBadge(a.account_switch);
+  if (acct) out.push({ kind: 'account', text: acct.text, cls: 'ar-acct', title: acct.title });
   const p = a.window_id ? s.ctx[a.window_id] : undefined;
   if (p != null && Math.round(p) >= CONTEXT_SHOWN_FROM) {
     const pct = Math.round(p);

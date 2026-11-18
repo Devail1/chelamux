@@ -946,7 +946,8 @@ def _rerun_failed_once(
     named = _failing_test_names(baseline.tail) if named is None else named
     if rerun_skip_reason(baseline, named):
         return baseline
-    rerun = run_suite(judge_select.extend(test_cmd, named), worktree, timeout)
+    with judge_timing.within("flake_rerun"):     # ⏱️ CMX-397: a hand-in / nightly phase
+        rerun = run_suite(judge_select.extend(test_cmd, named), worktree, timeout)
     if reruns is not None:
         reruns.append(rerun)
     if not rerun.green or rerun.passed < len(named):
@@ -1675,13 +1676,24 @@ def run_experiments(
     started = time.monotonic()
     timer = timer if timer is not None else judge_timing.RoundTimer()
     _run_ctx["timer"] = timer
+    queued = timer.now()
     try:
-        report = _run_experiments(worktree, test_cmd, raw, timeout=timeout,
-                                  base_branch=base_branch, select_tests=select_tests,
-                                  consistency_sample=consistency_sample,
-                                  max_experiments=max_experiments, risk=risk,
-                                  tool_config=tool_config, progress=progress,
-                                  heartbeat=heartbeat, held_out=held_out, timer=timer)
+        # 🧠 CMX-393: ONE suite slot for the whole battery — no other battery's suite runs
+        # between two of this one's mutations.
+        with suite_guard.battery(worktree, "judge", on_wait=_run_ctx.get("on_slot_wait"),
+                                 max_wait=suite_guard.battery_max_wait(timeout)):
+            timer.slot_wait(timer.now() - queued)
+            started = time.monotonic()
+            report = _run_experiments(worktree, test_cmd, raw, timeout=timeout,
+                                      base_branch=base_branch, select_tests=select_tests,
+                                      consistency_sample=consistency_sample,
+                                      max_experiments=max_experiments, risk=risk,
+                                      tool_config=tool_config, progress=progress,
+                                      heartbeat=heartbeat, held_out=held_out, timer=timer)
+    except suite_guard.SlotTimeout as e:
+        timer.slot_wait(timer.now() - queued)
+        started = time.monotonic()      # no battery ran: the wait is in the timings, not here
+        report = Report(cannot_verify=f"the battery could not be run: {e}")
     finally:
         _run_ctx.pop("timer", None)
     report.timings = timer
@@ -2645,9 +2657,15 @@ def self_check(
     budget = budget if budget is not None else sweep.SweepBudget(
         SELF_CHECK_BUDGET_SECONDS, SELF_CHECK_MAX_EXPERIMENTS)
     started = _now()
-    report = _self_check(worktree, test_cmd, raw, timeout=timeout, select_tests=select_tests,
-                         budget=budget, started=started, base_branch=base_branch,
-                         tool_config=tool_config)
+    try:
+        # 🧠 CMX-393: ONE suite slot for the whole self-check, not one per experiment.
+        with suite_guard.battery(worktree, "self-check",
+                                 max_wait=suite_guard.battery_max_wait(timeout)):
+            report = _self_check(worktree, test_cmd, raw, timeout=timeout,
+                                 select_tests=select_tests, budget=budget, started=started,
+                                 base_branch=base_branch, tool_config=tool_config)
+    except suite_guard.SlotTimeout as e:
+        report = Report(cannot_verify=f"the self-check could not be run: {e}")
     report.battery_seconds = _now() - started
     return report
 
@@ -2694,7 +2712,8 @@ def _self_check(
         report.cannot_verify = ts_problem
         return report
 
-    with tempfile.TemporaryDirectory(prefix="chela-judge-select-") as scratch:
+    with (judge_timing.within("baseline"),       # ⏱️ CMX-397: the hand-in's timings
+          tempfile.TemporaryDirectory(prefix="chela-judge-select-") as scratch):
         baseline, selector, report.selection = run_baseline(
             worktree, test_cmd, timeout, Path(scratch), select_tests=select_tests)
     report.baseline = baseline
@@ -2720,8 +2739,9 @@ def _self_check(
                                 f"{n} of {len(items)} experiment(s)")
             _mark_unrun(report, chosen[n:], report.exhausted)
             break
-        outcomes, contamination = _apply_experiments(
-            worktree, test_cmd, [raw_exp], baseline, timeout, selector)
+        with judge_timing.within("experiments"):
+            outcomes, contamination = _apply_experiments(
+                worktree, test_cmd, [raw_exp], baseline, timeout, selector)
         report.outcomes.extend(outcomes)
         if contamination:
             report.cannot_verify = contamination

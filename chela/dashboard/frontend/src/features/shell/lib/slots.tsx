@@ -5,6 +5,7 @@ import type { ReactNode } from 'react';
 import { AccessRequestsPill, AccessRequestsSheet } from '../../accessreq/index.ts';
 import { AgentDetail, SendMessage } from '../../agentdetail/index.ts';
 import { ApprovalsPill, ApprovalsSheet } from '../../approvals/index.ts';
+import { ClaudeAccount } from '../../claudeaccount/index.ts';
 import { DecisionsButton, DecisionsDialog } from '../../decisions/index.ts';
 import { DiffModal } from '../../diffmodal/index.ts';
 import { Keybar, paneKeybarActions } from '../../keybar/index.ts';
@@ -81,6 +82,7 @@ export const SLOTS: Readonly<Record<string, () => ReactNode>> = {
       <DecisionsDialog />
     </>
   ),
+  'claude-account-island': () => <ClaudeAccount />,
   'sidebar-new-island': () => <NewSessionButton />,
   'side-nav': () => <SidebarNav />,
   'sessions-count-island': () => <SessionsCount />,

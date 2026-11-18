@@ -6,7 +6,8 @@
 //   mouse / pen  the drag starts once the pointer moves DRAG_THRESHOLD_PX: a click under it
 //                still opens the row or folds the group
 //   touch        a long press (LONG_PRESS_DRAG_MS) starts it; a finger that moves first is a
-//                scroll and never starts one
+//                scroll and never starts one, nor does a finger that lands on a list still
+//                gliding from a flick (CMX-435: the browser will not let the drag hold it)
 //   Esc          cancels; so does a pointercancel
 //
 // CMX-381: under the Manual sort a session row also drags up or down WITHIN its group, with a
@@ -129,6 +130,8 @@ interface Session {
   x: number;
   y: number;
   active: boolean;
+  /** CMX-435: false once the touch's touchstart came uncancelable (see the list's effect). */
+  holdable: boolean;
   timer?: ReturnType<typeof setTimeout>;
   raf?: number;
   done(): void;
@@ -160,8 +163,20 @@ export function useSidebarDrag(drop: DragDrop) {
     const list = document.getElementById('sidebar-agents');
     if (!list) return undefined;
     const hold = (e: TouchEvent) => { if (cur.current?.active && e.cancelable) e.preventDefault(); };
+    // CMX-435: a finger that lands on the list while it still glides from a flick stops the
+    // glide, and Chrome sends that touch's touchstart and every touchmove UNCANCELABLE: `hold`
+    // cannot keep the list still, so the first move would pan it and pointercancel the drag
+    // (a drag that starts, then vanishes under the finger). Such a touch only stops the
+    // glide; its long press arms no drag. Pointerdown comes before touchstart, so the
+    // session is already there to mark. Passive: it only reads. A touch on a list at rest
+    // comes cancelable because `hold` above is a blocking (non-passive) touch listener.
+    const caught = (e: TouchEvent) => { if (cur.current && !e.cancelable) cur.current.holdable = false; };
     list.addEventListener('touchmove', hold, { passive: false });
-    return () => list.removeEventListener('touchmove', hold);
+    list.addEventListener('touchstart', caught, { passive: true });
+    return () => {
+      list.removeEventListener('touchmove', hold);
+      list.removeEventListener('touchstart', caught);
+    };
   }, []);
 
   useEffect(() => () => cur.current?.done(), []);
@@ -296,7 +311,7 @@ export function useSidebarDrag(drop: DragDrop) {
     };
 
     const s: Session = {
-      source, el, root, id: e.pointerId, touch, x0: e.clientX, y0: e.clientY, x: e.clientX, y: e.clientY, active: false,
+      source, el, root, id: e.pointerId, touch, x0: e.clientX, y0: e.clientY, x: e.clientX, y: e.clientY, active: false, holdable: true,
       done: () => {
         clearTimeout(s.timer);
         if (s.raf != null && typeof cancelAnimationFrame === 'function') cancelAnimationFrame(s.raf);
@@ -318,7 +333,7 @@ export function useSidebarDrag(drop: DragDrop) {
     window.addEventListener('keydown', key, true);
     window.addEventListener('contextmenu', menu, true);
     window.addEventListener('blur', lost);
-    if (touch) s.timer = setTimeout(() => { if (cur.current === s) begin(s); }, LONG_PRESS_DRAG_MS);
+    if (touch) s.timer = setTimeout(() => { if (cur.current === s && s.holdable) begin(s); }, LONG_PRESS_DRAG_MS);
   }, [setView]);
 
   return { view, bind };

@@ -5,6 +5,10 @@ path) needs ``chela merge --override`` even when judge-clean; CORE (any core pat
 own machinery, or an agent-instruction file) gets today's full judge; STANDARD (CMX-288,
 everything else: product and UI work) gets no judge round at all (CMX-296). ⛔ An unknown or empty file list is never prose
 and never standard: it takes the CORE path.
+
+CMX-396: the task's tracker risk level is a FLOOR on the tier. A ``risk:high`` task is at
+least CORE whatever its files are; ``normal``/``low`` (or none) add no floor. The level comes
+from the run row, copied from the tracker when the task was claimed — never from the diff.
 """
 from __future__ import annotations
 
@@ -28,7 +32,14 @@ DEFAULT_CORE = ("chela/dispatcher.py", "chela/judge*.py", "chela/workflow*.py", 
                 "chela/automerge.py", "chela/overrides.py", "chela/gateanswer.py",
                 "chela/reviewgate.py", "chela/sizegate.py", "chela/basesync.py",
                 "chela/sweep*.py", "chela/toolconfig.py", "chela/sandbox*.py",
-                "chela/procguard.py")
+                "chela/procguard.py",
+                # CMX-396: trust boundaries — who a dashboard request is, and what a sandboxed
+                # guest is granted. Their approval ROUTES live in the dashboard's app.py,
+                # which is mostly UI; a task touching them carries `risk:high` instead.
+                "chela/dashboard/identity.py", "chela/share_requests.py")
+
+# CMX-396: the tracker risk level that floors the tier, and the tier it floors it to.
+FLOOR_RISK, FLOOR_TIER = "high", CORE
 
 
 def is_prose(path: str) -> bool:
@@ -67,9 +78,42 @@ def core(workflow) -> tuple[str, ...]:
     return _with_workflow(DEFAULT_CORE, workflow, "core")
 
 
+def floor(tier: str, risk: object) -> tuple[str, str | None]:
+    """⚖️🪜 CMX-396: ``(tier, why)`` after the risk floor. A ``risk:high`` task lifts a PROSE
+    or STANDARD tier to CORE and says so (``why == "risk:high"``); every other case keeps
+    ``tier`` and ``why`` is None — the floor never lowers a tier, nor touches HUMAN."""
+    level = risk.strip().lower() if isinstance(risk, str) else None
+    if level == FLOOR_RISK and tier in (PROSE, STANDARD):
+        return FLOOR_TIER, f"risk:{FLOOR_RISK}"
+    return tier, None
+
+
+def describe(tier: str | None, why: str | None = None) -> str:
+    """The tier as a person reads it: ``CORE (floor: risk:high)``, or just ``STANDARD``."""
+    name = (tier or "unknown").upper()
+    return f"{name} (floor: {why})" if why else name
+
+
 def classify(files: list[str] | None, patterns: tuple[str, ...],
-             core_patterns: tuple[str, ...] = DEFAULT_CORE) -> tuple[str, str | None]:
-    """``(tier, trigger)`` — ``trigger`` is the first always-human path, for a ``HUMAN``."""
+             core_patterns: tuple[str, ...] = DEFAULT_CORE,
+             risk: object = None) -> tuple[str, str | None]:
+    """``(tier, trigger)`` — ``trigger`` is the first always-human path, for a ``HUMAN``.
+    ``risk`` (the run's tracker level) floors the tier: see :func:`floor`."""
+    tier, trigger, _why = explain(files, patterns, core_patterns, risk)
+    return tier, trigger
+
+
+def explain(files: list[str] | None, patterns: tuple[str, ...],
+            core_patterns: tuple[str, ...] = DEFAULT_CORE,
+            risk: object = None) -> tuple[str, str | None, str | None]:
+    """:func:`classify` plus ``why`` — ``"risk:high"`` when the risk floor set the tier."""
+    tier, trigger = _by_files(files, patterns, core_patterns)
+    tier, why = floor(tier, risk)
+    return tier, trigger, why
+
+
+def _by_files(files: list[str] | None, patterns: tuple[str, ...],
+              core_patterns: tuple[str, ...]) -> tuple[str, str | None]:
     if not files:
         return CORE, None
     hit = next((f for f in files for p in patterns if _matches(f, p)), None)

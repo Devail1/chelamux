@@ -178,10 +178,10 @@ def wfrepo(tmp_path) -> Path:
 @pytest.mark.parametrize("judge_state, files, says", [
     ("standard_no_judge", ["chela/app.py", "tests/test_app.py"], None),   # merges, no judge row
     ("clean", ["chela/dispatcher.py"], None),                             # control: core + clean
-    ("standard_no_judge", ["chela/app.py", "chela/dispatcher.py"], "'core'"),
-    ("standard_no_judge", ["server/auth/login.py"], "'core'"),           # workflow core path
+    ("standard_no_judge", ["chela/app.py", "chela/dispatcher.py"], "live tier is CORE"),
+    ("standard_no_judge", ["server/auth/login.py"], "live tier is CORE"),           # workflow core path
     ("standard_no_judge", ["docs/x.md"], None),         # prose is lighter than standard
-    ("standard_no_judge", ["chela/app.py", "CLAUDE.md"], "'core'"),     # agent instructions
+    ("standard_no_judge", ["chela/app.py", "CLAUDE.md"], "live tier is CORE"),     # agent instructions
     ("standard_no_judge", ["chela/app.py", "chela/contract.py"], "ALWAYS-HUMAN"),
     ("standard_no_judge", None, "could not be read"),
     ("blocked", ["chela/dispatcher.py"], "not 'clean'"),                 # core, no clean verdict

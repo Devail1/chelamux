@@ -465,11 +465,21 @@ describe('the folder line (CMX-377)', () => {
     expect(folderOf(rowOf(el, 'proj'))).toBe('alpha');
   });
 
-  test('a row with no cwd has no folder line, and keeps the one-line shape', () => {
-    const { el } = draw(ungrouped([win('nowhere', { cwd: null })]));
-    const row = rowOf(el, 'nowhere');
-    expect(folderOf(row)).toBeNull();
-    expect([...row.children].map(c => c.className)).toEqual(['term-status-dot idle', 'agent-row-name', 'ar-meta', 'row-more']);
+  // CMX-399: a live session whose Claude has no session-feed entry yet comes with cwd null
+  // ("Board layout for games" on 11-17). Its line says so, rather than silently missing.
+  test.each([['a session', (_n: number, o: Partial<AgentRow>) => win('nowhere', o)],
+    ['a run', (n: number, o: Partial<AgentRow>) => runWin(`CMX-${n}`, 'agent', {}, { name: 'nowhere', ...o })]] as const)(
+    '%s with no cwd says "folder unknown" on its folder line', (_kind, make) => {
+      const { el } = draw(ungrouped([make(7, { cwd: null }), make(8, { cwd: '' }), win('proj')]));
+      const rows = el.querySelectorAll<HTMLElement>('.agent-row[data-agent="nowhere"]');
+      expect([...rows].map(folderOf)).toEqual(['folder unknown', 'folder unknown']);
+      expect(folderOf(rowOf(el, 'proj'))).toBe('alpha');
+    });
+
+  test('grouped by folder, a row with no cwd draws no folder line (Other is its folder)', () => {
+    const { el } = draw(state([win('nowhere', { cwd: null }), win('n2', { cwd: null })],
+      { view: normalizeView({ activity: 'all', sort: 'name', groupBy: 'folder' }) }));
+    expect(el.querySelectorAll('.ar-folder-line')).toHaveLength(0);
   });
 
   test('the first line keeps the title, badges, crown and menu; the folder line comes after it', () => {
@@ -639,4 +649,18 @@ test('CMX-388: dispatch off by choice draws no Dispatched section; its sessions 
   // negative control: the same rows without the switch keep today's Dispatched section
   const { el: today } = draw(state(rows));
   expect(groupKeys(today)).toEqual(['/srv/code/alpha', DISPATCHED_KEY]);
+});
+
+// CMX-395: a session started before the Claude account switch chela observed MAY still use
+// the old account: a muted chip with that email. No switch, no chip. Placeholder emails only.
+test('the account-switch chip: shown with the old email and the honest wording, absent otherwise', () => {
+  const sw = { from: 'person-a@example.invalid', to: 'person-b@example.invalid', at: '2026-11-17T10:00:00+00:00', started_unknown: false };
+  const { el } = draw(state([win('old', { account_switch: sw }), win('new', { account_switch: null })]));
+  const chip = meta(rowOf(el, 'old'), 'account');
+  expect(chip?.className).toBe('ar-acct');
+  expect(chip?.textContent).toBe('person-a@example.invalid');
+  expect(chip?.querySelector('svg.lucide-circle-user')).toBeTruthy();
+  expect(chip?.title).toBe('May still use person-a@example.invalid: it started before the switch to person-b@example.invalid at 2026-11-17 10:00 UTC. Restart it to be sure.');
+  expect(rowOf(el, 'old').title).toContain('May still use person-a@example.invalid');
+  expect(meta(rowOf(el, 'new'), 'account')).toBeNull();
 });

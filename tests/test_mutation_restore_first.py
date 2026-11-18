@@ -8,6 +8,7 @@ pushes or hands in a mutation; and the daemon's boot scan restores what a reboot
 """
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import subprocess
@@ -290,15 +291,20 @@ def test_task_finished_refuses_before_any_other_gate_and_rechecks_before_handing
                         lambda tid: calls.append(f"mut:{tid}") or next(verdicts))
     monkeypatch.setattr(dispatcher, "check_base_sync",
                         lambda *a, **k: calls.append("sync") or {"ok": True, "record": None})
-    monkeypatch.setattr(dispatcher, "hand_in_tier", lambda tid: "core")
-    monkeypatch.setattr(dispatcher, "hand_in_checks", lambda tier, experiments: set())
+    monkeypatch.setattr(dispatcher, "hand_in_battery", lambda tid: contextlib.nullcontext())
+    monkeypatch.setattr(main, "_task_finished_checks",
+                        lambda *a: calls.append("checks") or (None, []))
+    monkeypatch.setattr(main.judge_timing, "record_hand_in", lambda *a: None)
+    monkeypatch.setattr(dispatcher, "ensure_pushed_head",
+                        lambda tid: calls.append("push") or {"ok": True})
     monkeypatch.setattr(dispatcher, "request_task_finished",
                         lambda *a, **k: calls.append("handed-in") or {"ok": True})
     args = SimpleNamespace(task_id="cmx-9", no_new_guards=True)
     with pytest.raises(SystemExit) as e:
         main.cmd_task_finished(args)
     assert e.value.code == 1
-    assert calls == ["mut:cmx-9", "sync", "mut:cmx-9"]
+    # restored first; checked again after the battery and BEFORE anything is pushed
+    assert calls == ["mut:cmx-9", "sync", "checks", "mut:cmx-9"]
     out = capsys.readouterr().out
     assert "⚠ task-finished: restored feat.py from a killed sweep's x" in out
     assert "task-finished: ⛔ feat.py:2 is a MUTATION" in out

@@ -113,6 +113,7 @@ CHANGED_TYPES = {
     "run_marker_unread": "agent marker unread",
     "run_park_overdue": "park overdue",
     "run_base_merge_infra": "base merge could not run tests",
+    "run_head_unpushed": "graded head is not the worktree's HEAD",
     "split_filed": "split",
     "ops_findings": "ops scan findings",
     "nightly_sweep": "nightly sweep",

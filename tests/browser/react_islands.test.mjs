@@ -89,31 +89,51 @@ test('the version island renders the real version in the Settings modal beside t
 });
 
 // CMX-276 (CMX-121): on the real page, at the default sidebar width, a row's TITLE keeps its
-// room and the metadata gives way first; with a short title the metadata shows in full.
-test('a sidebar row gives its title the width before its metadata', { skip: why }, async () => {
+// room and the metadata gives way first. CMX-399: but never below its chips: the strip used
+// to shrink to 0px beside a long title, which hid the orchestrator's crown and its context %
+// (64% blank while a short-titled 51% showed). Only a shell's cwd chip truncates (CMX-330).
+test('a sidebar row gives its title the width, and its crown and context % stay whole', { skip: why }, async () => {
     if (failed) throw failed;
     const page = await browser.newPage({ viewport: { width: 1440, height: 900 } });
     const errors = [];
     page.on('pageerror', e => errors.push(String(e)));
     await page.goto(`${base}/`);
     await page.waitForFunction(() => window.chelaBridge?.sidebarLayout.get().loaded === true, null, { timeout: 15_000 });
-    const measure = title => page.evaluate(t => {
-        const a = { name: 'w', window_id: '@1', cwd: '/srv/code/alpha', session_status: 'busy' };
+    const measure = (title, agent = {}) => page.evaluate(([t, extra]) => {
+        const a = { name: 'w', window_id: '@1', cwd: '/srv/code/alpha', session_status: 'busy', ...extra };
         window.chelaBridge.sidebar.set({
             agents: [a], wants: () => false, orchWid: '@1', order: [], archived: [], sessions: [],
             view: { status: 'active', env: ['interactive'], activity: 'all', groupBy: 'folder', sort: 'name', showEmpty: false, showPR: true },
             custom: { groups: [], assign: {} }, labels: { '@1': t }, now: Date.now(), collapsed: [],
             ctx: { '@1': 91 }, onWall: [], active: null, altHeld: false,
         });
-        const box = sel => document.querySelector(`#sidebar-agents .agent-row ${sel}`).getBoundingClientRect();
-        return { name: box('.agent-row-name').width, meta: box('.ar-meta').width, crown: box('.ar-orch').width };
-    }, title);
+        const q = sel => document.querySelector(`#sidebar-agents .agent-row ${sel}`);
+        const box = sel => q(sel)?.getBoundingClientRect() ?? null;
+        const meta = box('.ar-meta'), name = box('.agent-row-name');
+        // a chip is WHOLE when it lies inside the strip's visible box (the strip clips)
+        const whole = sel => { const b = box(sel); return !!b && b.width > 0 && b.left >= meta.left - 0.5 && b.right <= meta.right + 0.5; };
+        const cwd = q('[data-meta="cwd"] .ar-meta-text');
+        return {
+            name: name.width, meta: meta.width, crown: whole('.ar-orch'), ctx: whole('[data-meta="context"]'),
+            ctxText: q('[data-meta="context"]')?.textContent ?? null,
+            cwdClipped: cwd ? cwd.scrollWidth > cwd.clientWidth : null,
+            nameClipped: q('.agent-row-name').scrollWidth > q('.agent-row-name').clientWidth,
+            fits: q('.row-more').getBoundingClientRect().right <= document.querySelector('#sidebar-agents .agent-row').getBoundingClientRect().right + 0.5,
+        };
+    }, [title, agent]);
     const long = await measure('A very long session title that would never fit in a sidebar row at all');
     assert.ok(long.name >= 150, `the title got ${long.name}px at the default width`);
-    assert.ok(long.meta < 20, `the metadata kept ${long.meta}px beside a title that needs the room`);
+    assert.deepEqual([long.crown, long.ctx, long.ctxText, long.fits], [true, true, '91%', true],
+        `beside a long title the crown and context % are cut (strip ${long.meta}px)`);
     const short = await measure('Hi');
-    assert.ok(short.crown >= 10, `with a short title the crown shows (${short.crown}px)`);
-    assert.ok(short.meta > long.meta, 'the metadata has room once the title does not need it');
+    assert.deepEqual([short.crown, short.ctx], [true, true]);
+    assert.ok(short.name < long.name, 'a short title takes less room than a long one');
+    // a plain shell with a long cwd: the cwd chip is what gives way, the title keeps its room
+    const shell = await measure('Shell', { claude_running: false, cwd: null,
+        shell_cwd: '~/projects/an-extremely-long-folder-name/that-goes/on-and-on/and-on-and-on' });
+    assert.equal(shell.cwdClipped, true, 'the long cwd did not truncate');
+    assert.equal(shell.nameClipped, false, `the shell's title is cut (${shell.name}px)`);
+    assert.equal(shell.fits, true, 'the shell row overflows');
     assert.deepEqual(errors, []);
     await page.close();
 });

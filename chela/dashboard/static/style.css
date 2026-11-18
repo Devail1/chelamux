@@ -2533,6 +2533,33 @@ summary.runs-section { cursor: pointer; }
 .sidebar-head .brand .brand-mark { height: 20px; width: auto; display: block; flex: 0 0 auto; }
 .sidebar-head .brand span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .sidebar-scroll { flex: 1 1 auto; overflow-y: auto; padding: 8px 0; }
+/* CMX-395: the Claude account the CLI runs on, under the head. The account ellipsizes; a
+   warning beside it never does. Not logged in / unknown are words and a glyph, never a blank. */
+.claude-account-slot { flex: 0 0 auto; }
+.claude-account {
+    display: flex; align-items: center; gap: 6px; min-width: 0;
+    padding: 5px 14px; border-bottom: 1px solid var(--border);
+    font-size: 11.5px; line-height: 16px; color: var(--text-dim); white-space: nowrap;
+}
+.claude-account svg { flex: 0 0 auto; }
+.claude-account .ca-text { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.claude-account .ca-warn { flex: 0 0 auto; font-weight: 600; }
+.claude-account.ca-warn, .claude-account.ca-unknown { color: var(--yellow); }
+.claude-account.ca-out { color: var(--red); font-weight: 600; }
+/* CMX-395: a session that started before the account switch (may still use the old one) */
+.ar-acct {
+    flex: 0 1 auto; min-width: 0; max-width: 14ch; overflow: hidden; text-overflow: ellipsis;
+    display: inline-flex; align-items: center; gap: 3px; white-space: nowrap;
+    font-size: var(--card-font-size); line-height: 15px; color: var(--text-dim);
+    padding: 0 5px; border-radius: 999px; border: 1px dashed var(--border);
+}
+.ar-acct .ar-meta-text { overflow: hidden; text-overflow: ellipsis; }
+.gs-acct-badge {
+    flex: 0 1 auto; min-width: 0; max-width: 22ch; overflow: hidden; text-overflow: ellipsis;
+    padding: 1px 6px; border-radius: 4px; white-space: nowrap;
+    border: 1px dashed var(--border, #444); color: var(--text-dim); font-size: 11px;
+}
+.gs-acct-badge svg { vertical-align: -2px; }
 
 /* New session + jump-to search (CMX-377, mockup order — ahead of nav). */
 .sidebar-quick { padding: 6px 12px 8px; display: flex; flex-direction: column; gap: 8px; }
@@ -2761,10 +2788,17 @@ body.sidebar-resizing iframe { pointer-events: none; }
 /* CMX-278 + CMX-331: a long press (.show-full) shows the whole title, wrapped. A hover does
    not: it would grow the row and shift every row below, so the row's tooltip carries it. */
 .agent-row.rich.show-full .agent-row-name { white-space: normal; overflow-wrap: anywhere; }
+/* CMX-399: the strip may shrink first, but never below its chips (min-content): with
+   `min-width: 0` a long title squeezed it to nothing and clipped the crown and the context
+   % (orchestrator 64% blank while a short-titled 51% showed). The hover `@N` (CMX-417)
+   counts too, so a hover truncates the title a little further; the row's height never moves.
+   A shell's strip (.has-cwd: its cwd chip, CMX-330) keeps min-width 0, since a min-content
+   floor would count the whole cwd and push the title out. */
 .agent-row.rich .ar-meta {
-    flex-grow: 0; flex-shrink: 1000; flex-basis: auto; min-width: 0; overflow: hidden; display: inline-flex; align-items: center; gap: 6px;
+    flex-grow: 0; flex-shrink: 1000; flex-basis: auto; min-width: min-content; overflow: hidden; display: inline-flex; align-items: center; gap: 6px;
     font-size: 10.5px; color: var(--text-dim); white-space: nowrap;
 }
+.agent-row.rich .ar-meta.has-cwd { min-width: 0; }
 .agent-row.rich .ar-meta:empty { display: none; }
 .agent-row.rich .ar-meta > [data-meta] { flex: 0 0 auto; display: inline-flex; align-items: center; gap: 3px; }
 .agent-row.rich .ar-meta-text { font-variant-numeric: tabular-nums; }
@@ -3030,6 +3064,10 @@ body.sidebar-dragging iframe { pointer-events: none; }
     body.sidebar-collapsed .sidebar-foot #btn-primary-menu { margin-left: 0; }
     body.sidebar-collapsed .sidebar-head .brand span,
     body.sidebar-collapsed .sidebar-head .whoami { display: none; }
+    /* the rail keeps the glyph, so a warning still shows; the words come back on expand */
+    body.sidebar-collapsed .claude-account { justify-content: center; padding-left: 4px; padding-right: 4px; }
+    body.sidebar-collapsed .claude-account .ca-text,
+    body.sidebar-collapsed .claude-account .ca-warn { display: none; }
     body.sidebar-collapsed #resources-strip { display: none; }
     /* CMX-404: inside this desktop block, like every other rail rule. The class is
        persisted per browser, so an unscoped hide leaked into the phone drawer and

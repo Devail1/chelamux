@@ -66,6 +66,8 @@ export interface AgentRow {
     last_activity?: string | number | null;
     recap_ts?: string | number | null;
     created?: string | number | null;
+    /** CMX-395: started before the latest Claude account switch (chela/claude_account.py). */
+    account_switch?: unknown;
     ai_title?: string | null;
     recap?: string | null;
     pr?: { url?: string; state?: string; draft?: boolean } | null;
@@ -204,13 +206,18 @@ export function isSingleFolder(g: Group, groupBy: string): boolean {
     return groupBy === 'folder' && !g.flat && !!g.cwd && g.items.length === 1;
 }
 
+/** CMX-399: the folder line of a live row whose cwd the server does not know (`cwd` is null
+ * when its Claude has no entry in the session feed yet). Said, never left blank. */
+export const FOLDER_UNKNOWN = 'folder unknown';
+
 export function folderLines(items: Item[]): Record<string, string> {
     const out: Record<string, string> = {};
     const plain: [string, string][] = [];
     for (const it of items) {
         const a = primaryWindow(it);
-        const cwd = _norm(a?.cwd);
-        if (!a || !cwd) continue;
+        if (!a) continue;
+        const cwd = _norm(a.cwd);
+        if (!cwd) { out[it.key] = FOLDER_UNKNOWN; continue; }
         if (a.cwd_is_home) { out[it.key] = '~'; continue; }
         const at = cwd.indexOf(WORKTREE_SEG);
         if (at >= 0) {

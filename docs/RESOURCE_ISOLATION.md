@@ -298,8 +298,8 @@ run never strands a slot.
   measured anon peak, between 1 and 4. That is 2 on a 16 GB box. RAM that cannot be read is
   1. `0` turns admission control off.
 - **First come, first served.** A run that frees its slot and takes the next one a moment
-  later (a judge battery does this dozens of times) waits behind a run already queued. A
-  stopped waiter (a fleet pause) does not hold the line.
+  later waits behind a run already queued. A stopped waiter (a fleet pause) does not hold
+  the line.
 - **Visible.** The waiting run prints `⏳ waiting for a suite slot — all 2 busy: <worktree>
   (pid …, 4m), …`. A judge's `chela peek` badge says `⏳ waiting for a suite slot`.
 - **Never stuck.** A queued run is waiting, not stuck. The judge watchdog holds a run while
@@ -312,6 +312,68 @@ run never strands a slot.
 
 Every `run_suite` call takes a slot, including a judge's targeted subset runs, which are
 smaller than a full suite. That is the safe side of the trade.
+
+### A battery holds one slot from start to finish (CMX-393)
+
+Until CMX-393 a battery took a slot per suite run and freed it between mutations. With
+`suite_slots: 1` that still ran one suite at a time, but the queue's fairness rule handed the
+slot to the next battery after every mutation, so three agents' sweeps and self-checks ran
+interleaved, all of them mid-flight at once. When memory ran low, Claude Code's reaper
+killed all three (11-14: two runs; 11-17: three, at 16/51, 8/60 and 4/8).
+
+Now each battery takes ONE slot for its whole run, and every `run_suite` inside it
+re-enters that slot (`suite_guard.battery`; re-entry is per thread, so two judge threads in
+one daemon still queue):
+
+| battery | holds the slot across |
+|---|---|
+| `chela judge sweep` | provisioning, the baseline, every mutation's subset and confirmation run |
+| `chela judge self-check` | the same, per experiment |
+| a judge round (`run_experiments`) | the whole battery, the consistency re-runs included |
+| `chela task-finished` | ALL its checks: self-check, sweep, standard-tier lint + suite, the base-move re-run |
+
+A second agent's battery waits for the first one to finish, and its waiting line names the
+holder. Its budget is not charged for the wait (`busy_clock`). It waits at most 12 suite
+timeouts (`suite_slot_max_wait` overrides), then reports CANNOT VERIFY.
+
+**Stopped runs get one notice.** While a battery runs it keeps a record in
+`$CHELA_DIR/suite-slots/batteries/`. A battery that ends, raises or exits removes the record.
+One stopped by a signal or a SIGKILL leaves it. The daemon names every leftover record in
+ONE inbox notice (`suite_runs_stopped`), once no slot is held and `MemAvailable` is at least
+one suite's measured peak, so the orchestrator resumes them one at a time instead of
+handling separate stops.
+
+### The nightly sweep starts on idle and yields between mutations (CMX-400)
+
+The nightly sweep's battery is the longest one (`sweep.budget_seconds`, up to 3 h). A fixed
+start hour (`sweep.nightly_at`) collided with agents' hand-ins, which work around the clock.
+With `sweep.mode: idle` (the default) the daemon starts it only when:
+
+- no suite slot is held, so no hand-in, self-check, judge round or agent suite is running;
+- nobody is waiting for a slot (`suite_guard.waiters`, read from the wait ledgers);
+- no fleet pause is active;
+- `MemAvailable` is at least one suite's measured peak (the CMX-393 resume floor). Memory
+  that cannot be read counts as busy;
+- the above has held without a break for `sweep.quiet_seconds` (default 600), so the sweep
+  doesn't start between two hand-ins.
+
+**Yield.** While the sweep holds the slot it checks, after each measured mutation (its file
+already restored), whether another process is waiting for the slot. If one is, the sweep stops
+there and releases the slot to it. The run ends as yielded, and every mutation it didn't reach
+is owed (`owed.json`), so the next run starts with those. The first mutation always runs, so a
+busy box still makes progress.
+
+**Once a day.** A run that ends without yielding finishes the day. A yielded run may resume the
+same day when the box is idle again, until the day's `sweep.budget_seconds` (a daily total) is
+spent. The day record is `$CHELA_DIR/sweep-nightly/day.json`; a run that never reports back
+ends its day, and an unreadable record starts nothing.
+
+**Fallback.** If no idle window comes by `nightly_at` + `sweep.fallback_after_hours`
+(default 2, so 04:00) and nothing has run that day, the sweep runs once anyway, on
+`sweep.fallback_budget_seconds` (default 1800), still yielding. The inbox notice says
+"ran on fallback: the queue was never idle".
+
+`sweep.mode: fixed` keeps the old clock: one run a day from `nightly_at`, still yielding.
 
 ## Why chela cares (and does not fix all of it)
 

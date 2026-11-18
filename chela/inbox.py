@@ -1513,9 +1513,15 @@ def run_events(runs: list[dict], seen: dict[str, str],
             pr = run.get("pr_url")
             ref = f"{pr_ref(pr)} — {pr}" if pr else "no PR link"
             if judge_state == judge.J_CLEAN:
+                # CMX-396: say when the tracker's risk level, not the files, set the tier.
+                # (No parens: `_event` strips them from anything typed at a prompt.)
+                floor = run.get("risk_tier_floor")
+                payload["risk_tier_floor"] = floor
+                tier_note = (f" — {str(run.get('risk_tier') or 'core').upper()} tier, "
+                             f"floor {floor}" if floor else "")
                 out.append(_event(
                     "run_judge_clean",
-                    f"⚖️ {label} — every guard held, clean and MERGEABLE — {ref}"
+                    f"⚖️ {label} — every guard held, clean and MERGEABLE{tier_note} — {ref}"
                     f"{' · ' + snippet if snippet else ''}", payload, wid=wid))
             elif judge_state == judge.J_PROSE_ONLY:
                 out.append(_event(
@@ -1971,7 +1977,7 @@ def review_tiers(runs: list[dict]) -> dict[str, str]:
                 or run.get("pr_state") in ("merged", "closed") or not _judge_not_started(run)):
             continue
         try:   # the workflow's own `merge.core`/`merge.always_human` can change the tier
-            key = (str(wf_path), str(sha), os.stat(wf_path).st_mtime_ns)
+            key = (str(wf_path), str(sha), os.stat(wf_path).st_mtime_ns, run.get("risk"))
         except OSError as e:
             log.warning("inbox: %s: could not read the PR head's tier: %s", task, e)
             continue
@@ -1986,7 +1992,9 @@ def review_tiers(runs: list[dict]) -> dict[str, str]:
                 continue
             if files is None:
                 continue
-            tier = risktier.classify(files, risktier.always_human(wf), risktier.core(wf))[0]
+            # CMX-396: the run's tracker risk floors it, as the dispatcher's stamp does.
+            tier = risktier.classify(files, risktier.always_human(wf), risktier.core(wf),
+                                     risk=run.get("risk"))[0]
             if len(_TIER_CACHE) >= _TIER_CACHE_MAX:
                 _TIER_CACHE.clear()
             _TIER_CACHE[key] = tier
