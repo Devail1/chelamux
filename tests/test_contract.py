@@ -822,7 +822,7 @@ def test_control_repo_self_protection_still_forbids_its_own_declared_main(tmp_pa
 @pytest.mark.parametrize("judge_state, files, says", [
     ("prose_only", ["docs/x.md", "README.md"], None),             # no judge round, merges
     ("clean", ["chela/x.py"], None),                              # negative control
-    ("prose_only", ["docs/x.md", "chela/x.py"], "not prose-only"),
+    ("prose_only", ["docs/x.md", "chela/x.py"], "stamped prose-only, but its live tier is STANDARD"),
     ("clean", ["WORKFLOW.md"], "'WORKFLOW.md', an ALWAYS-HUMAN path"),
     ("clean", ["docs/x.md", ".github/workflows/ci.yml"], "'.github/workflows/ci.yml'"),
     ("clean", None, "could not be read"),                         # unknown never reads as OK
