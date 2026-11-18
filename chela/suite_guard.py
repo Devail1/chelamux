@@ -14,6 +14,14 @@ this is what that one choke point wraps it in.
    K ``flock`` slots in ``$CHELA_DIR/suite-slots``. A lock dies with its holder, so a crashed
    run never strands a slot. A run waiting for one says so, and its wait is credited back
    (:func:`busy_clock`, :func:`waits_in`) so the wait is never read as a stuck or slow run.
+4. **A battery holds ONE slot start to finish** (CMX-393) — :func:`battery` wraps a whole
+   sweep, self-check, judge battery or ``task-finished`` hand-in, and every ``run_suite``
+   inside it re-enters that slot instead of taking and freeing one per mutation. Per-call
+   slots let three agents' batteries interleave mutation by mutation: one suite at a time,
+   but all three batteries mid-flight, so one low-memory reap killed all three (11-14,
+   11-17). A battery killed anyway leaves its record, and the daemon names every such
+   stopped run in ONE notice once the slot is free and memory is back
+   (:func:`stopped_batteries`).
 
 ⛔ Never fix an OOM by raising the ceiling blindly: a fatter ceiling is a fatter target.
 """
@@ -170,12 +178,16 @@ SLOT_POLL_SECONDS = 1.0
 # A run waits at most this many of its own suite timeouts for a slot: every holder is itself
 # bounded by one, so a queue that has not moved in that long is not a queue any more.
 SLOT_WAIT_TIMEOUTS = 4
+# A whole battery waits this many suite timeouts: each holder is bounded by its own budget
+# (sweep/self-check ~ one suite timeout plus its baseline), so 12 covers a queue of several.
+BATTERY_WAIT_TIMEOUTS = 12
 # The share of RAM the default K lets full suites use at their measured peak. The rest is
 # the agents, judges, tmux and the dashboard themselves.
 SUITE_RAM_SHARE = 0.5
 DEFAULT_SLOTS_MAX = 4
 
 _waited = 0.0                     # seconds THIS process has spent waiting for a slot
+_held = threading.local()         # CMX-393: ``depth`` of this thread's hold — a nested slot re-enters
 _waited_lock = threading.Lock()
 _thread_waited: dict[tuple[int, str], float] = {}  # per (thread, cwd): what a ledger publishes
 
@@ -223,6 +235,16 @@ def max_wait(timeout: float) -> float:
     override = config.dashboard_setting("suite_slot_max_wait", "CHELA_SUITE_SLOT_MAX_WAIT",
                                         0.0, cast=float)
     return override if override > 0 else SLOT_WAIT_TIMEOUTS * timeout
+
+
+def battery_max_wait(timeout: float) -> float:
+    """How long a whole BATTERY waits for a slot (CMX-393): ``CHELA_SUITE_SLOT_MAX_WAIT`` >
+    ``suite_slot_max_wait`` in config.json (seconds, > 0) > ``BATTERY_WAIT_TIMEOUTS`` x
+    ``timeout``. Longer than one suite's :func:`max_wait`: the holder now keeps its slot for
+    its whole battery, so a queue of two or three batteries is hours, not minutes."""
+    override = config.dashboard_setting("suite_slot_max_wait", "CHELA_SUITE_SLOT_MAX_WAIT",
+                                        0.0, cast=float)
+    return override if override > 0 else BATTERY_WAIT_TIMEOUTS * timeout
 
 
 def busy_clock() -> float:
@@ -420,7 +442,7 @@ class SlotTimeout(TimeoutError):
 
 @contextlib.contextmanager
 def slot(cwd: str | Path, on_wait=None, max_wait: float | None = None,
-         poll: float = SLOT_POLL_SECONDS):
+         poll: float | None = None):
     """Hold one of the K suite slots for the ``with`` body; wait (visibly, first come first
     served) for one first, at most ``max_wait`` seconds (:class:`SlotTimeout`).
 
@@ -428,9 +450,24 @@ def slot(cwd: str | Path, on_wait=None, max_wait: float | None = None,
     ends (``None``). With ``K == 0`` the body runs at once. A slot dir that cannot be made
     raises ``OSError`` — :func:`chela.judge.run_suite` reports that as CANNOT VERIFY."""
     global _waited
+    if getattr(_held, "depth", 0):
+        # 🧠 CMX-393: this thread already holds a slot (its battery's) — a suite run inside
+        # the battery re-enters it. Taking a SECOND one would deadlock at K=1, and freeing
+        # the battery's between mutations is exactly how batteries interleaved.
+        _held.depth += 1
+        try:
+            yield
+        finally:
+            _held.depth -= 1
+        return
+    poll = SLOT_POLL_SECONDS if poll is None else poll
     k = slots()
     if k == 0:
-        yield
+        _held.depth = 1
+        try:
+            yield
+        finally:
+            _held.depth = 0
         return
     d = config.CHELA_DIR / SLOTS_DIRNAME
     d.mkdir(parents=True, exist_ok=True)
@@ -465,6 +502,113 @@ def slot(cwd: str | Path, on_wait=None, max_wait: float | None = None,
         os.ftruncate(fd, 0)
         os.pwrite(fd, json.dumps({"pid": os.getpid(), "cwd": str(cwd),
                                   "since": time.time()}).encode(), 0)
+        _held.depth = 1
         yield
     finally:
+        _held.depth = 0
         os.close(fd)
+
+
+# --- whole batteries: one slot for the battery, a record while it runs (CMX-393) ----------
+
+BATTERIES_DIRNAME = "batteries"
+# Memory that must be available before stopped runs are announced as resumable: one suite's
+# measured peak — less, and a resume would only be reaped again.
+RESUME_MEM_BYTES = SUITE_PEAK_BYTES
+
+
+def _batteries_dir() -> Path:
+    return config.CHELA_DIR / SLOTS_DIRNAME / BATTERIES_DIRNAME
+
+
+@contextlib.contextmanager
+def battery(cwd: str | Path, kind: str, on_wait=None, max_wait: float | None = None,
+            poll: float | None = None):
+    """Hold ONE suite slot for a whole battery (``kind``: ``"sweep"``, ``"self-check"``,
+    ``"judge"``, ``"task-finished"``), and keep a record of it while it runs.
+
+    Every :func:`slot` taken inside — each ``run_suite`` of each mutation — re-enters this
+    one, so no other battery can run a suite between two of ours. A nested ``battery`` (the
+    sweep inside ``task-finished``) re-enters too and keeps the outer record.
+
+    The record (``batteries/<pid>-<tid>.json``) is removed when the battery ends — by
+    returning, raising, or ``sys.exit`` — and KEPT when a signal stops it (an exception that
+    is not an ``Exception``/``SystemExit``, e.g. the sweep's own ``_Interrupted``) or nothing
+    runs at all (SIGKILL). A record whose process is gone is a stopped run:
+    :func:`stopped_batteries`."""
+    nested = bool(getattr(_held, "depth", 0))
+    with slot(cwd, on_wait=on_wait, max_wait=max_wait, poll=poll):
+        if nested:
+            yield
+            return
+        rec = _battery_record(cwd, kind)
+        try:
+            yield
+        except (Exception, SystemExit):
+            _drop(rec)
+            raise
+        except BaseException:
+            raise              # stopped by a signal — the record says so once we are gone
+        _drop(rec)
+
+
+def _battery_record(cwd: str | Path, kind: str) -> Path | None:
+    stat = _proc_stat(os.getpid())
+    path = _batteries_dir() / f"{os.getpid()}-{threading.get_ident()}.json"
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_suffix(".tmp")
+        tmp.write_text(json.dumps({"pid": os.getpid(), "start": stat[1] if stat else None,
+                                   "cwd": str(cwd), "kind": kind, "since": time.time()}))
+        tmp.replace(path)
+    except OSError:
+        log.debug("suite_guard: could not record the battery", exc_info=True)
+        return None
+    return path
+
+
+def _drop(path: Path | None) -> None:
+    if path is not None:
+        with contextlib.suppress(OSError):
+            path.unlink(missing_ok=True)
+
+
+def stopped_batteries() -> list[tuple[Path, dict]]:
+    """Every battery record whose process is gone (or whose pid was reused): a sweep,
+    self-check or hand-in that was killed before it could end — oldest first."""
+    try:
+        files = sorted(_batteries_dir().glob("*.json"))
+    except OSError:
+        return []
+    out = []
+    for path in files:
+        try:
+            rec = json.loads(path.read_text())
+            pid = int(rec["pid"])
+        except (OSError, ValueError, KeyError, TypeError):
+            continue
+        stat = _proc_stat(pid)
+        if stat is not None and stat[0] != "Z" and stat[1] == rec.get("start"):
+            continue                                   # still running
+        out.append((path, rec))
+    out.sort(key=lambda pr: float(pr[1].get("since") or 0))
+    return out
+
+
+def mem_available_bytes(meminfo: Path = Path("/proc/meminfo")) -> int | None:
+    """``MemAvailable`` in bytes, or None when it cannot be read."""
+    try:
+        for line in meminfo.read_text().splitlines():
+            if line.startswith("MemAvailable:"):
+                return int(line.split()[1]) * 1024
+    except (OSError, ValueError, IndexError):
+        pass
+    return None
+
+
+def resumable(locks: Path = Path("/proc/locks"),
+              meminfo: Path = Path("/proc/meminfo")) -> bool:
+    """Is it safe to resume a stopped run now? No slot held, and at least one suite's peak
+    of memory available. Memory that cannot be read is NOT safe — unknown never resumes."""
+    avail = mem_available_bytes(meminfo)
+    return not holders(locks) and avail is not None and avail >= RESUME_MEM_BYTES

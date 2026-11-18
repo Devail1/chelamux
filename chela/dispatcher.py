@@ -3251,6 +3251,65 @@ def hand_in_checks(tier: str, *, experiments: bool) -> tuple[str, ...]:
     return ("self_check", "sweep") if experiments else ("sweep",)
 
 
+def hand_in_battery(task_id: str):
+    """🧠 CMX-393: the ONE suite slot ``task-finished`` holds across ALL its checks — the
+    self-check, the sweep, the standard-tier lint + suite and the base-move re-run — so no
+    other agent's battery runs a suite between two of them. Waits at most
+    :func:`chela.suite_guard.battery_max_wait` of the workflow's suite timeout (the default timeout
+    when the run or its workflow cannot be read; the checks then report that themselves)."""
+    from chela import suite_guard
+
+    with _db() as conn:
+        row = conn.execute("SELECT * FROM runs WHERE task_id=?", (task_id,)).fetchone()
+    worktree = (row["worktree_path"] if row is not None else None) or os.getcwd()
+    timeout = judge.SUITE_TIMEOUT_SECONDS
+    if row is not None and row["workflow_path"]:
+        try:
+            timeout = judge.judge_suite_timeout(load_workflow(row["workflow_path"]))
+        except Exception as e:     # a WORKFLOW.md that does not parse — the checks say so
+            log.warning("hand-in slot: %s could not be read (%s) — waiting at most %d "
+                        "default suite timeouts", row["workflow_path"], e,
+                        suite_guard.BATTERY_WAIT_TIMEOUTS)
+    return suite_guard.battery(worktree, "task-finished",
+                               max_wait=suite_guard.battery_max_wait(timeout))
+
+
+STOPPED_BATTERIES_KIND = "suite_runs_stopped"
+
+
+def notice_stopped_batteries() -> dict | None:
+    """🧠 CMX-393: ONE inbox notice naming every battery (sweep, self-check, judge,
+    ``task-finished``) that was killed mid-run — the low-memory reaper takes them together,
+    and three separate stops each needing a hand-off is what 11-14 and 11-17 cost.
+
+    Posted only once the suite slot is FREE and one suite's peak of memory is available
+    (:func:`chela.suite_guard.resumable`) — resuming any earlier would only be reaped again —
+    and the records it names are consumed, so a run is announced once. Never raises: it
+    returns ``{"runs", "notified"}`` when it posted, else None."""
+    from chela import inbox, suite_guard
+
+    try:
+        stopped = suite_guard.stopped_batteries()
+        if not stopped or not suite_guard.resumable():
+            return None
+        runs = [{"worktree": Path(str(rec.get("cwd") or "?")).name,
+                 "kind": str(rec.get("kind") or "?"), "cwd": rec.get("cwd"),
+                 "pid": rec.get("pid"), "since": rec.get("since")} for _path, rec in stopped]
+        names = ", ".join(f"{r['worktree']} ({r['kind']})" for r in runs)
+        summary = (f"🧠 {len(runs)} suite run(s) were stopped mid-battery: {names}. The suite "
+                   "slot is free and memory is back; resume them ONE at a time (a re-run "
+                   "restores any leftover mutation first).")
+        notified = inbox.enqueue(STOPPED_BATTERIES_KIND, summary, {"runs": runs})
+        for path, _rec in stopped:
+            path.unlink(missing_ok=True)
+        log.warning("suite runs stopped mid-battery: %s (inbox notice %s)", names,
+                    "queued" if notified else "NOT queued — the inbox is off")
+        return {"runs": runs, "notified": notified}
+    except Exception:
+        log.exception("could not report the stopped suite runs")
+        return None
+
+
 def verify_standard_hand_in(task_id: str) -> dict:
     """⚖️🪜 CMX-296: a STANDARD run's hand-in — the workflow's ``hand_in.lint_cmd``, then its
     ``judge.test_cmd`` once, under ``judge.suite_timeout_seconds``, in the run's OWN worktree.
@@ -5897,6 +5956,7 @@ def tick(workflow_path: str | Path) -> dict:
         wf.path, [wf.get("workspace", "base_branch", default=None) or "dev"],
         env={"CHELA_DIR": str(CHELA_DIR)},
     )
+    notice_stopped_batteries()     # 🧠 CMX-393: box-wide, so any workflow's tick may post it
     blocked = status.error is not None
     source = get_source(wf)
     open_tasks = source.list_open_tasks()
