@@ -992,7 +992,9 @@ def _journal(worktree: Path, rel: str, line: int, mutated: str) -> None:
     try:
         if path.exists() and path.stat().st_size > JOURNAL_MAX_BYTES:
             keep = path.read_text().splitlines()[-JOURNAL_KEEP:]
-            path.write_text("".join(f"{k}\n" for k in keep))
+            tmp = path.with_suffix(".tmp")
+            tmp.write_text("".join(f"{k}\n" for k in keep))
+            os.replace(tmp, path)            # a kill mid-trim never leaves half a journal
         with path.open("a") as f:
             f.write(entry + "\n")
     except (OSError, UnicodeDecodeError) as e:
@@ -1006,7 +1008,13 @@ def _recorded(worktree: Path) -> tuple[list[dict], str]:
     path = journal_path(worktree)
     if path is not None and path.exists():
         try:
-            for raw in path.read_text().splitlines():
+            text = path.read_text()
+            lines = text.splitlines()
+            if lines and not text.endswith("\n"):
+                # A torn append (killed mid-write — this module's whole subject): every entry
+                # is written WITH its newline in one write, so only the last can be partial.
+                lines.pop()
+            for raw in lines:
                 e = json.loads(raw)
                 out.append({"file": str(e["file"]), "line": int(e["line"]),
                             "blob": str(e["blob"]), "text": str(e.get("text", ""))})
@@ -1059,6 +1067,7 @@ def mutation_blockers(worktree: Path, *, head_only: bool = False) -> list[str]:
         return [*out, err]
     if not recorded:
         return out
+    had = len(out)
     by_blob = {(r["file"], r["blob"]): r for r in recorded}
     files = sorted({r["file"] for r in recorded})
     head, err = _head_blobs(worktree, files)
@@ -1080,6 +1089,9 @@ def mutation_blockers(worktree: Path, *, head_only: bool = False) -> list[str]:
         if hit:
             out.append(f"{rel}:{hit['line']} is a sweep/self-check MUTATION "
                        f"(`{hit['text']}`) COMMITTED in HEAD — revert it before pushing")
+    if len(out) > had:
+        out.append(f"(only if that exact content is deliberate: remove its entry from "
+                   f"{journal_path(worktree)})")
     return out
 
 

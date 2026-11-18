@@ -8025,6 +8025,9 @@ def _launch_agent(
     Returns the window target (the ``@id``, or the bare name if the id was unreadable).
     """
     restored, err = sweep.recover(Path(worktree))
+    if err and sweep.live_owner(Path(worktree)):
+        # A sweep still running there is TRANSIENT — the ordinary retry path, not a human.
+        raise RuntimeError(f"not launching an agent into {worktree} yet: {err}")
     if err:
         raise sweep.MutationLeftover(f"⛔ not launching an agent into {worktree}: {err}")
     if restored:

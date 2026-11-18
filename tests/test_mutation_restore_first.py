@@ -126,8 +126,11 @@ def test_a_live_owner_refuses_the_launch(tmp_path, monkeypatch):
     data["pid"] = os.getppid()                      # alive, and not this process
     sweep.marker_path(root).write_text(json.dumps(data))
     (root / "feat.py").write_text(MUTATED)
-    with pytest.raises(sweep.MutationLeftover, match=f"another sweep \\(pid {os.getppid()}\\)"):
+    with pytest.raises(RuntimeError, match=f"another sweep \\(pid {os.getppid()}\\)") as e:
         _respawn(monkeypatch, tmp_path, root)
+    # transient — the ordinary retry, never the needs-a-human MutationLeftover
+    assert type(e.value) is RuntimeError
+    assert str(e.value).startswith(f"not launching an agent into {root} yet: ")
     assert (root / "feat.py").read_text() == MUTATED
 
 
@@ -190,7 +193,9 @@ def test_request_push_with_a_mutated_tracked_file_is_refused_naming_file_and_lin
     result = dispatcher.request_push("t1", pr_title="CMX-1: x", pr_body="b")
     assert result == {"ok": False, "task_id": "t1", "restored": "", "error": (
         "refusing to push — a sweep/self-check mutation: feat.py:2 is a sweep/self-check "
-        "MUTATION (`if False and (x == 3):`) in the working tree — restore it")}
+        "MUTATION (`if False and (x == 3):`) in the working tree — restore it"
+        "; (only if that exact content is deliberate: remove its entry from "
+        f"{sweep.journal_path(root)})")}
     assert not (root / ".chela-push-request.json").exists()
 
 
@@ -204,9 +209,8 @@ def test_request_push_refuses_a_mutation_already_committed(tmp_path):
     _running(root)
     result = dispatcher.request_push("t1")
     assert result["ok"] is False
-    assert result["error"].endswith("feat.py:2 is a sweep/self-check MUTATION "
-                                    "(`if False and (x == 3):`) COMMITTED in HEAD — revert it "
-                                    "before pushing")
+    assert ("feat.py:2 is a sweep/self-check MUTATION (`if False and (x == 3):`) COMMITTED in "
+            "HEAD — revert it before pushing; (only if") in result["error"]
 
 
 def test_request_push_restores_a_provable_mutation_first_then_proceeds(tmp_path):
@@ -246,7 +250,8 @@ def test_the_daemon_push_refuses_a_committed_mutation_and_never_runs_git_push(tm
     git.assert_not_called()
     assert out == {"ok": False, "error": "refusing to push a sweep/self-check mutation: "
                    "feat.py:2 is a sweep/self-check MUTATION (`if False and (x == 3):`) "
-                   "COMMITTED in HEAD — revert it before pushing"}
+                   "COMMITTED in HEAD — revert it before pushing; (only if that exact content "
+                   f"is deliberate: remove its entry from {sweep.journal_path(root)})"}
 
 
 def test_the_daemon_push_ignores_a_live_self_checks_marker_on_disk(tmp_path):
@@ -643,3 +648,34 @@ def test_head_blobs_fails_closed_when_git_cannot_run(tmp_path, monkeypatch):
     blobs, err = sweep._head_blobs(tmp_path, ["feat.py"])
     assert blobs == {} and err.startswith("could not read HEAD's tree to check it for a "
                                           "mutation: Command ")
+
+
+def test_a_torn_last_journal_line_is_skipped_but_a_corrupt_middle_one_blocks(tmp_path):
+    root = _repo(tmp_path / "r")
+    sweep._journal(root, "feat.py", 2, MUTATED)
+    j = sweep.journal_path(root)
+    j.write_text(j.read_text() + '{"file": "fe')            # killed mid-append
+    (root / "feat.py").write_text(MUTATED)
+    blockers = sweep.mutation_blockers(root)
+    assert blockers[0].startswith("feat.py:2 is a sweep/self-check MUTATION")
+    j.write_text('{"file": "fe\n' + j.read_text())          # not the last line: unknown
+    assert sweep.mutation_blockers(root)[0].startswith(f"the mutation journal {j} is unreadable")
+
+
+def test_no_hint_when_nothing_matched(tmp_path):
+    root = _repo(tmp_path / "r")
+    sweep.marker_path(root).write_text("{}")
+    out = sweep.mutation_blockers(root)
+    assert not any("remove its entry" in b for b in out)
+
+
+def test_the_trim_is_atomic(tmp_path, monkeypatch):
+    root = _repo(tmp_path / "r")
+    monkeypatch.setattr(sweep, "JOURNAL_MAX_BYTES", 10)
+    sweep._journal(root, "a.py", 1, "x\n")
+    replaced = []
+    real = sweep.os.replace
+    monkeypatch.setattr(sweep.os, "replace", lambda a, b: replaced.append((a, b)) or real(a, b))
+    sweep._journal(root, "b.py", 1, "y\n")
+    j = sweep.journal_path(root)
+    assert replaced == [(j.with_suffix(".tmp"), j)]
