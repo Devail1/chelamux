@@ -275,7 +275,8 @@ def summary_lines(summary: dict, label: str, title: str = "judge timings",
                      + f" — over {summary.get('tasks', '?')} task(s)")
     if not summary["phases"]:
         return lines
-    lines.append(f"  {'phase':14} {'n':>4} {'median':>9} {'p90':>9} {'max':>9}")
+    width = max(14, *(len(k) for k in summary["phases"]))   # CMX-397: dotted names
+    lines.append(f"  {'phase':{width}} {'n':>4} {'median':>9} {'p90':>9} {'max':>9}")
     # The biggest phase first — what the next optimisation targets. `run`/`total` (the whole
     # round) and `experiment` (one experiment) are not phases of the same round, so they
     # close the table instead of topping it.
@@ -284,7 +285,7 @@ def summary_lines(summary: dict, label: str, title: str = "judge timings",
                     key=lambda kv: -kv[1]["median"])
     ranked += [(k, summary["phases"][k]) for k in whole if k in summary["phases"]]
     for name, s in ranked:
-        lines.append(f"  {name:14} {s['n']:>4} {duration(s['median']):>9} "
+        lines.append(f"  {name:{width}} {s['n']:>4} {duration(s['median']):>9} "
                      f"{duration(s['p90']):>9} {duration(s['max']):>9}")
     return lines
 
@@ -401,8 +402,8 @@ def record_hand_in(task_id: str, timer: RoundTimer, outcome: str,
     """Append one ``chela task-finished`` attempt — handed in or refused, a refusal costs
     the slot too — to ``hand-in-timings/<task>.jsonl``. Never raises."""
     try:
-        rec = {"task_id": task_id, "at": utc_stamp(now), "outcome": outcome,
-               **timer.meta, "timings": timer.as_dict()}
+        rec = {**timer.meta, "task_id": task_id, "at": utc_stamp(now), "outcome": outcome,
+               "timings": timer.as_dict()}
     except Exception:  # noqa: BLE001 — the record is not the work
         log.exception("timings: could not build the hand-in record for %s", task_id)
         return False

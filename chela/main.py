@@ -3496,7 +3496,7 @@ def cmd_judge_timings(args) -> None:
         summary = judge_timing.summarize(
             judge_timing.read_records(sweep_nightly.timings_path()), since,
             names=judge_timing.NIGHTLY_PHASES)
-        title, unit = "nightly sweep timings", "night"
+        title, unit = "nightly sweep timings", "run"
     else:
         summary = judge_timing.summarize(judge.load_all_private(), since)
         title, unit = "judge timings", "round"

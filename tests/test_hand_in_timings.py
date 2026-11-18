@@ -181,6 +181,21 @@ def test_summary_lines_name_the_kind_and_the_outcomes():
     assert lines[0] == "⏱️ hand-in timings over all — 2 timed attempt(s)"
     assert lines[1] == "  outcomes: passed 1, refused 1 — over 1 task(s)"
     assert lines[-1].split()[0] == "task_total"
+    assert lines[2] == f"  {'phase':14} {'n':>4} {'median':>9} {'p90':>9} {'max':>9}"
+    wide = judge_timing.summary_lines(
+        {"rounds": 1, "untimed": 0, "phases": {"self_check.baseline.flake_rerun": {
+            "n": 1, "median": 5.0, "p90": 5.0, "max": 5.0}}}, "x")
+    assert wide[1] == "  phase" + " " * 26 + "    n    median       p90       max"
+    assert wide[2] == "  self_check.baseline.flake_rerun    1        5s        5s        5s"
+
+
+def test_a_note_never_overwrites_the_records_own_fields(chela_dir):
+    timer = judge_timing.RoundTimer(clock=Clock())
+    timer.meta.update(task_id="X", outcome="passed", at="never", tier="core")
+    judge_timing.record_hand_in("CMX-9", timer, "refused", now=0)
+    [rec] = judge_timing.read_records(judge_timing.hand_in_path("CMX-9"))
+    assert (rec["task_id"], rec["outcome"], rec["at"], rec["tier"]) == (
+        "CMX-9", "refused", "1970-01-01T00:00:00Z", "core")
     # The judge's table is unchanged.
     assert judge_timing.summary_lines({"rounds": 0, "untimed": 0, "phases": {}}, "x") == [
         "⏱️ judge timings x — 0 timed round(s)"]
@@ -418,7 +433,7 @@ def _judge_timings(*flags: str) -> None:
 @pytest.mark.parametrize("flags, title", [
     ((), "⏱️ judge timings over all recorded rounds — 0 timed round(s)"),
     (("--hand-in",), "⏱️ hand-in timings over all recorded rounds — 1 timed attempt(s)"),
-    (("--nightly",), "⏱️ nightly sweep timings over all recorded rounds — 1 timed night(s)"),
+    (("--nightly",), "⏱️ nightly sweep timings over all recorded rounds — 1 timed run(s)"),
 ])
 def test_judge_timings_reads_the_kind_asked_for(chela_dir, monkeypatch, capsys, flags, title):
     monkeypatch.setattr(judge, "load_all_private", lambda: [])
