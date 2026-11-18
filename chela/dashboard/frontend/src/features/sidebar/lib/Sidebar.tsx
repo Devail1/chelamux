@@ -19,6 +19,7 @@ const META_ICON: Partial<Record<MetaKind, (typeof icons)[keyof typeof icons]>> =
   orchestrator: icons.orchestrator,
   pr: icons.pullRequest,
   judging: icons.judging,
+  account: icons.account,
 };
 
 function MetaChip({ m }: { m: Meta }) {

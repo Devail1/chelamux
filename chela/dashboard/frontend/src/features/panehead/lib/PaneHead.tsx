@@ -13,6 +13,7 @@ import { orchestratorRelease, orchestratorSubscribe } from '../../../shared/orch
 import { agents } from '../../../shared/store/agents.ts';
 import { setPinned } from '../../../shared/store/wall.ts';
 import { IconButton, InlineEdit, Menu, TextButton, useMediaQuery, type MenuItem } from '../../../shared/ui/index.ts';
+import { switchBadge } from '../../claudeaccount/model.ts';
 import { toggleSidebar } from '../../sidebar/controller.ts';
 import { paneToast, SHARE_MODE_UI, shareSession, unsafeBannerText, type ShareEntry, type ShareMode } from '../../share/index.ts';
 import { dotState, headLabel, headState, type HeadAgent } from '../model.ts';
@@ -253,8 +254,15 @@ export function PaneHead({ wid, wall, agent, orchWid, share, pinned, now, host }
   );
   // the owner-presence facepile (collab/presence-owner.js draws into it)
   const presence = <span className="gs-presence" data-presence-for={wid} />;
+  const acct = switchBadge(agent?.account_switch);
   const badges = (
     <>
+      {/* CMX-395: started before the Claude account switch; it MAY still use the old account */}
+      {acct && (
+        <span className="gs-acct-badge" data-acct-for={wid} title={acct.title}>
+          <icons.account size={11} aria-hidden /> {acct.text}
+        </span>
+      )}
       <span className="gs-net-badge" data-net-for={wid} title={WEB_TITLE} hidden={agent?.share_net !== 'web'}>
         <icons.web size={11} aria-hidden /> web
       </span>
