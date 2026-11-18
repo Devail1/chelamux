@@ -15,6 +15,8 @@ export type HeadAgent = WallAgent & {
   share_net?: string | null;
   /** CMX-241: the pane's own working directory, home as `~`; sent only while no Claude runs. */
   shell_cwd?: string | null;
+  /** CMX-395: started before the latest Claude account switch (chela/claude_account.py). */
+  account_switch?: unknown;
 };
 
 type MaybeAgent = HeadAgent | null | undefined;

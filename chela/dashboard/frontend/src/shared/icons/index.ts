@@ -3,7 +3,7 @@
 // bundled by the build (no CDN). An icon is aria-hidden unless it is the only label.
 import {
   ArrowUpToLine, Ban, Bell, CalendarClock, Check, ChevronDown, ChevronRight, ChevronUp, Circle,
-  CircleDashed, CircleDot, CircleHelp, CircleMinus, Columns3, Crown, Ellipsis, EllipsisVertical, ExternalLink, Eye,
+  CircleDashed, CircleUser, CircleDot, CircleHelp, CircleMinus, Columns3, Crown, Ellipsis, EllipsisVertical, ExternalLink, Eye,
   Diamond, Flag, Hourglass, FlaskConical, FolderPlus, GitBranch, GitCompare, GitMerge, GitPullRequest, Globe, GripVertical, Hand, Inbox, Keyboard, LayoutGrid, Link2, Lock, LockOpen, Maximize2, Menu, Minimize2, Minus,
   NotebookPen, OctagonX, Pause, Pin, Play, Plug, Plus, RefreshCw, RotateCw, Scale, Search, Settings, Share2,
   SlidersHorizontal, Snowflake, SquareCheck, SquareTerminal, Star, Target, TriangleAlert, Workflow, X,
@@ -11,6 +11,8 @@ import {
 
 export const icons = {
   orchestrator: Crown,
+  /** CMX-395: the Claude account the CLI is signed in to. */
+  account: CircleUser,
   pullRequest: GitPullRequest,
   judging: FlaskConical,
   expand: ChevronRight,

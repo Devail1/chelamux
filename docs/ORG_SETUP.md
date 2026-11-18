@@ -230,6 +230,11 @@ which of your devices are let in, it does not prove a device is a phone.
       locally, use the `cloudflare-access` mode (a verified JWT). In `off` and `tailscale`
       mode a local process can also approve over the dashboard's HTTP API, which the
       merge-gate hook misses (CMX-392).
+- [ ] **Check the Claude account.** The line under the dashboard's sidebar head is the
+      account the `claude` CLI is signed in to (`claude auth status --json`): it should name
+      the org's account, not a personal one. It warns when the CLI is logged out or the login
+      expires within `CHELA_CLAUDE_LOGIN_WARN_DAYS` (default 3). After an account switch, a
+      session that started before it is badged "may still use" the old account: restart it.
 - [ ] **Keep the dashboard on loopback.** `CHELA_DASH_HOST` unset (it defaults to
       `127.0.0.1`), `CHELA_TERMINALS_EXPOSE` unset.
 
