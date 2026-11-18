@@ -2657,6 +2657,18 @@ def cmd_task_finished(args) -> None:
         kwargs["base_sync"] = sync["record"]
     if review.get("record"):
         kwargs["review_gate"] = review["record"]
+    # 📌 CMX-394: LAST, after anything above that can commit (CMX-334's base merge): the PR
+    # must be on the HEAD that was just checked, never an older push.
+    pushed = dispatcher.ensure_pushed_head(args.task_id)
+    if not pushed.get("ok"):
+        print(f"task-finished: 📌 {pushed['error']}")
+        sys.exit(1)
+    if pushed.get("origin") is not None and pushed.get("requested"):
+        print(f"📌 {dispatcher.unpushed_message(pushed['local'], pushed['origin'])} — "
+              "push requested; chela pushes it before handing the run in.")
+    elif pushed.get("requested"):
+        print(f"📌 a push request is pending — chela pushes HEAD {pushed['local'][:12]} and "
+              "checks origin has it before handing the run in.")
     result = dispatcher.request_task_finished(args.task_id, **kwargs)
     if not result.get("ok"):
         print(f"task-finished: {result.get('error', 'unknown error')}")
@@ -2905,7 +2917,9 @@ def cmd_request_push(args) -> None:
         print(f"request-push: {result.get('error', 'unknown error')}")
         sys.exit(1)
     print(f"Task {result['task_id']}: push requested — chela will push the branch"
-          + (" and open the PR" if args.pr_title else "") + " on its next pass.")
+          + (" and open the PR" if args.pr_title else "") + " on its next pass, and checks "
+          "origin then has this worktree's HEAD (a mismatch is retried, then escalated). "
+          "Commit AFTER this? task-finished requests the push again.")
 
 
 def cmd_rework_disputed(args) -> None:
@@ -3323,7 +3337,8 @@ def cmd_judge_show(args) -> None:
     print(f"⚖️ {task_id} — {m['rounds']} judge round(s)")
     # ⚖️🪜 CMX-288: the run's risk tier (stamped at judge spawn), else the latest round's.
     tier = (run or {}).get("risk_tier") or records[-1].get("tier") or "unknown"
-    print(f"  risk tier:              {tier}")
+    floor = (run or {}).get("risk_tier_floor")     # CMX-396
+    print(f"  risk tier:              {tier}" + (f" (floor: {floor})" if floor else ""))
     print(f"  rounds-to-clean:        {to_clean}")
     print(f"  visible survival rate:  {pct(m['visible'])}")
     print(f"  held-out survival rate: {pct(m['held_out'])}")
@@ -3666,6 +3681,8 @@ def cmd_merge(args) -> None:
               f"{audit['head_sha'][:12]}), CI green, MERGEABLE")
     else:
         print(f"  logged: event #{result.get('event_seq')} — CI green, judge clean, MERGEABLE")
+    if result.get("risk_tier_floor"):     # CMX-396: the tracker's risk level set the tier
+        print(f"  risk tier: {result['tier_shown']}")
 
 
 def _print_override_request(result: dict) -> None:

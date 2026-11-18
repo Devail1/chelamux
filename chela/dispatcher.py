@@ -1405,6 +1405,9 @@ def ensure_schema(conn: sqlite3.Connection) -> sqlite3.Connection:
         # ⚖️🪜 CMX-288: the `chela.risktier` tier of the head the judge was last spawned on —
         # `judge run` holds nothing out on a `standard` one. NULL ⇒ never stamped (full judge).
         ("risk_tier", "ALTER TABLE runs ADD COLUMN risk_tier TEXT"),
+        # ⚖️🪜 CMX-396: why `risk_tier` is what it is when the tracker's risk level set it
+        # (`risk:high`, a floor of CORE) rather than the files. NULL ⇒ the files decided.
+        ("risk_tier_floor", "ALTER TABLE runs ADD COLUMN risk_tier_floor TEXT"),
         # 🤫 CMX-97. The judge's OWN tmux window — `_spawn_judge` calls `_launch_agent` with
         # `judge_window=True` (the run's `window_id` must stay the RUN's window, not a
         # judge that will be gone in twenty minutes; see `_launch_agent`'s docstring), which
@@ -2578,7 +2581,11 @@ def _resolve_base_conflict(conn: sqlite3.Connection, wf: WorkflowDef, row, head:
     try:
         # 🔀 CMX-294: tagged free only when this round actually got a grant (the cap is MIN).
         free = (row["conflict_reworks"] or 0) < MAX_FREE_CONFLICT_REWORKS
-        result = request_changes(task_id, basemerge.rework_body(res, base),
+        body = basemerge.rework_body(res, base)
+        drift = _local_vs_pushed_note(row["worktree_path"], head)
+        if drift:
+            body += f"\n{drift}\n"
+        result = request_changes(task_id, body,
                                  cause=REWORK_CAUSE_CONFLICT if free else REWORK_CAUSE_REVIEW)
     except sqlite3.Error as e:
         result = {"ok": False, "error": str(e)}
@@ -2590,7 +2597,43 @@ def _resolve_base_conflict(conn: sqlite3.Connection, wf: WorkflowDef, row, head:
         return "none"
     log.warning("Task %s: PR conflicts with origin/%s (%s) — sent back, not charged: %s",
                 task_id, base, res["outcome"], ", ".join(res["files"]))
+    if drift:
+        log.warning("Task %s: %s", task_id, drift)
+        _notify_head_unpushed(row, head, drift)
     return "rework"
+
+
+def _local_vs_pushed_note(worktree_path: str | None, pushed: str) -> str:
+    """📌 CMX-394: a one-line warning when the worktree's local HEAD is not the pushed head the
+    conflict check graded (CMX-388: sent back to "merge dev", which the agent had already done
+    locally, unpushed). ``""`` when they match or the worktree's HEAD cannot be read — this
+    only adds a note, it never decides anything."""
+    if not worktree_path or not pushed:
+        return ""
+    try:
+        local = _local_head(worktree_path)
+    except RuntimeError:
+        return ""
+    if local == pushed:
+        return ""
+    return (f"⚠️ The worktree's local HEAD `{local[:12]}` is NOT the pushed PR head "
+            f"`{pushed[:12]}` that this check graded — local commits may already resolve it. "
+            "Push them with `chela request-push`, then `chela task-finished`.")
+
+
+def _notify_head_unpushed(row, pushed: str, drift: str) -> None:
+    """📌 CMX-394: tell the orchestrator, in the inbox, that the conflict check graded a pushed
+    head the worktree has moved past. Advisory: a failed enqueue only logs."""
+    from chela import inbox
+    try:
+        inbox.enqueue("run_head_unpushed",
+                      f"📌 {row['branch_name'] or row['task_id']}: sent back for a base conflict "
+                      f"on the PUSHED head — {drift}",
+                      {"task_id": row["task_id"], "branch_name": row["branch_name"],
+                       "pr_url": row["pr_url"], "pushed_sha": pushed})
+    except Exception:  # noqa: BLE001 — the inbox is advisory
+        log.warning("Task %s: could not queue the unpushed-head notice", row["task_id"],
+                    exc_info=True)
 
 
 def _base_merge_infra(conn: sqlite3.Connection, row, res: dict, base: str, head: str) -> str:
@@ -3239,7 +3282,9 @@ def hand_in_tier(task_id: str) -> str:
     except Exception as e:  # noqa: BLE001 — an unreadable tier is core, never a crash
         log.warning("hand-in: %s: could not read the tier: %s", task_id, e)
         return risktier.CORE
-    return risktier.classify(files, risktier.always_human(wf), risktier.core(wf))[0]
+    # CMX-396: the run's tracker risk floors it — a risk:high run gets the full hand-in.
+    return risktier.classify(files, risktier.always_human(wf), risktier.core(wf),
+                             risk=_row_risk(row))[0]
 
 
 def hand_in_checks(tier: str, *, experiments: bool) -> tuple[str, ...]:
@@ -3923,6 +3968,85 @@ def request_push(task_id: str, *, pr_title: str | None = None, pr_body: str | No
     return {"ok": True, "task_id": task_id, "requested": True}
 
 
+def _local_head(worktree_path: str | Path) -> str:
+    """📌 CMX-394: the worktree's HEAD sha. Raises RuntimeError when git cannot say."""
+    head = _git_out(_git(Path(worktree_path), "rev-parse", "--verify", "HEAD^{commit}"))
+    if not head:
+        raise RuntimeError(f"could not read HEAD in {worktree_path}")
+    return head
+
+
+def _origin_branch_head(worktree_path: str | Path, branch: str) -> str:
+    """📌 CMX-394: the sha ``origin`` has for ``refs/heads/<branch>`` RIGHT NOW (not a cached
+    remote-tracking ref), or ``""`` when origin has no such branch. Raises RuntimeError when
+    the remote cannot be read — an unknown origin never reads as "pushed"."""
+    out = _git(Path(worktree_path), "ls-remote", "origin", f"refs/heads/{branch}",
+               timeout=GIT_NET_TIMEOUT_SECONDS)
+    if not _git_ok(out):
+        detail = (out.stderr or out.stdout).strip() if out is not None else (
+            "git ls-remote timed out or git is missing")
+        raise RuntimeError(f"could not read origin/{branch}: {detail}"[:300])
+    for line in out.stdout.splitlines():
+        parts = line.split()
+        if len(parts) == 2 and parts[1] == f"refs/heads/{branch}":
+            return parts[0]
+    return ""
+
+
+def unpushed_message(local: str, origin: str) -> str:
+    """📌 CMX-394: the one wording for "the PR is not on this worktree's HEAD"."""
+    return f"HEAD {local[:12]} not pushed (origin has {origin[:12] if origin else 'nothing'})"
+
+
+def ensure_pushed_head(task_id: str) -> dict:
+    """📌 CMX-394: ``task-finished``'s last gate — the branch on origin must equal the
+    worktree's HEAD before the run is handed in, or the judge, CI and the conflict check all
+    grade an OLDER commit than the one the agent finished on (CMX-386, CMX-388: a
+    ``request-push`` made BEFORE the final commits, nothing pushed after).
+
+    * a push request is still pending → nothing to file: the daemon applies it BEFORE the
+      completion marker, pushes the branch as it stands then, and refuses (retried, then
+      escalated) unless origin landed on the worktree's HEAD;
+    * origin already has HEAD → nothing to do;
+    * origin is behind and the run has a PR → a push request is filed for HEAD (the same
+      mechanism ``request-push`` uses);
+    * origin is behind and there is no PR yet → refused: only ``request-push`` carries the
+      PR title.
+
+    ``{"ok", "local", "origin", "requested"}``, or ``{"ok": False, "error"}``. An unreadable
+    HEAD or origin fails closed."""
+    with _db() as conn:
+        row = conn.execute("SELECT * FROM runs WHERE task_id=?", (task_id,)).fetchone()
+    if row is None or not row["worktree_path"] or not row["branch_name"]:
+        return {"ok": False, "error": f"no run with a worktree and branch on record for {task_id}"}
+    wt = row["worktree_path"]
+    try:
+        local = _local_head(wt)
+    except RuntimeError as e:
+        return {"ok": False, "error": str(e)}
+    if _push_request_path(wt).exists():
+        return {"ok": True, "local": local, "origin": None, "requested": True}
+    try:
+        origin = _origin_branch_head(wt, row["branch_name"])
+    except RuntimeError as e:
+        return {"ok": False, "error": f"could not tell whether HEAD {local[:12]} is pushed: {e}"}
+    if origin == local:
+        return {"ok": True, "local": local, "origin": origin, "requested": False}
+    if origin and not _git_ok(_git(Path(wt), "merge-base", "--is-ancestor", origin, local)):
+        # A plain push only fast-forwards: origin has a commit HEAD lacks (CMX-262's automatic
+        # base merge, a hand push), so filing one would only fail and escalate later.
+        return {"ok": False, "error": f"{unpushed_message(local, origin)}, and origin has "
+                                      f"commits HEAD lacks: `git pull --no-rebase origin "
+                                      f"{row['branch_name']}`, then task-finished"}
+    if not row["pr_url"]:
+        return {"ok": False, "error": f"{unpushed_message(local, origin)}: run request-push"}
+    filed = request_push(task_id)
+    if not filed.get("ok"):
+        return {"ok": False, "error": f"{unpushed_message(local, origin)} — and its push "
+                                      f"could not be requested: {filed.get('error')}"}
+    return {"ok": True, "local": local, "origin": origin, "requested": True}
+
+
 def _apply_push_request(conn: sqlite3.Connection, wf: WorkflowDef, row: sqlite3.Row) -> dict:
     """Daemon-side (issue #502 B2): perform the `git push` — and, on a first dispatch, the
     `gh pr create` — a dispatched agent used to run itself. Runs here, in the dispatcher's
@@ -3950,6 +4074,18 @@ def _apply_push_request(conn: sqlite3.Connection, wf: WorkflowDef, row: sqlite3.
         detail = (push.stderr or push.stdout).strip() if push is not None else (
             "git push timed out or git is missing")
         return {"ok": False, "error": f"git push failed: {detail}"[:500]}
+    # 📌 CMX-394: a push that exits 0 is not proof origin has the worktree's HEAD ("Everything
+    # up-to-date" from a branch the worktree is not on, a commit made after the push ran).
+    # Read origin back and say plainly when it differs — the marker stays and is retried.
+    try:
+        local = _local_head(worktree_path)
+        origin = _origin_branch_head(worktree_path, branch)
+    except RuntimeError as e:
+        return {"ok": False, "error": f"pushed, but could not confirm origin has HEAD: {e}"}
+    if origin != local:
+        return {"ok": False, "error": f"git push exited 0 but origin/{branch} is at "
+                                      f"{origin[:12] if origin else 'nothing'}, not the "
+                                      f"worktree's HEAD {local[:12]}"}
 
     pr_url = row["pr_url"]
     pr_title = marker.get("pr_title")
@@ -9017,7 +9153,9 @@ def _spawn_judge(
     # merge-ready like `clean` on this head. Checked first; an unknown file list is not prose.
     # CMX-296: so does a STANDARD-tier one; an unknown file list is CORE, never standard.
     files = judge._changed_files(worktree, base)
-    tier = risktier.classify(files, risktier.always_human(wf), risktier.core(wf))[0]
+    # CMX-396: the run's tracker risk (copied at claim) floors the tier — risk:high ⇒ CORE.
+    tier, _trigger, floor = risktier.explain(files, risktier.always_human(wf),
+                                             risktier.core(wf), risk=_row_risk(row))
     skip = _stamp_tier_verdict(task_id, tier, sha)
     if not skip and judge.docs_only_diff(worktree, base) is True:
         skip = True
@@ -9032,8 +9170,9 @@ def _spawn_judge(
         return False
 
     # 🔁⚖️ CMX-263: from here to the clear below, a dead launcher means an interrupted launch.
-    conn.execute("UPDATE runs SET judge_launch_owner=?, risk_tier=? WHERE task_id=?",
-                 (json.dumps(judge.owner_identity(os.getpid())), tier, task_id))
+    conn.execute("UPDATE runs SET judge_launch_owner=?, risk_tier=?, risk_tier_floor=? "
+                 "WHERE task_id=?",
+                 (json.dumps(judge.owner_identity(os.getpid())), tier, floor, task_id))
     conn.commit()
     try:
         prompt = render_prompt(
@@ -9135,7 +9274,9 @@ def _stamp_prose_only(wf: WorkflowDef, row: sqlite3.Row) -> bool:
     except (OSError, ValueError) as e:   # git missing, a NUL in the sha: queue, never abort the tick
         log.warning("judge: %s: could not read the PR's files: %s", row["task_id"], e)
         return False
-    tier = risktier.classify(files, risktier.always_human(wf), risktier.core(wf))[0]
+    # CMX-396: a risk:high run is floored to CORE, so it is never stamped no-judge here.
+    tier = risktier.classify(files, risktier.always_human(wf), risktier.core(wf),
+                             risk=_row_risk(row))[0]
     return _stamp_tier_verdict(row["task_id"], tier, sha)
 
 
@@ -9155,7 +9296,8 @@ def _stamp_tier_verdict(task_id: str, tier: str, sha: str) -> bool:
     # The tier first: a crash between the two leaves a tier with no verdict, re-stamped next
     # tick — never a merge-ready verdict carrying another round's tier.
     with _db() as conn:
-        conn.execute("UPDATE runs SET risk_tier=? WHERE task_id=?", (tier, task_id))
+        conn.execute("UPDATE runs SET risk_tier=?, risk_tier_floor=NULL WHERE task_id=?",
+                     (tier, task_id))
     set_judge_state(task_id, state, detail, sha=sha)
     log.info("judge: %s: %s PR on %s — no judge round", task_id, tier, sha[:12])
     return True

@@ -285,7 +285,8 @@ A classifier or hook denial is final; never relaunch the same action in another 
    fix its survivors, (c) self-check your experiments.
    ⚖️🪜 **CMX-296: a STANDARD-tier diff** (it touches no core path — the dispatcher, the
    judge, the workflow loader, the sources, the merge/containment machinery, a `CLAUDE.md`
-   or `AGENTS.md`, or an always-human file; `chela/risktier.py`) gets no judge round: (b) and (c) are optional, and
+   or `AGENTS.md`, or an always-human file; `chela/risktier.py`), on a task NOT labelled
+   `risk:high` (CMX-396: that label floors the tier at core), gets no judge round: (b) and (c) are optional, and
    `task-finished` runs `hand_in.lint_cmd` plus ONE full suite instead of the battery. Do (a).
 
    **(a) 🧭 GUARD-CATEGORY CHECKLIST — walk your OWN diff before hand-in.** Cover each whole
