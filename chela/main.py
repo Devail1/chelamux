@@ -2949,9 +2949,12 @@ def cmd_merge_base(args) -> None:
     elif outcome == basemerge.DIRTY:
         print("merge-base: commit your changes first; uncommitted: " + ", ".join(res["files"]))
         sys.exit(1)
-    else:
+    elif outcome == basemerge.BUILD_FAILED:
         print(f"merge-base: origin/{base} conflicted only in the generated bundle, but the "
               f"rebuild FAILED — the merge was aborted, nothing changed:\n{res['detail']}")
+        sys.exit(1)
+    else:
+        print(f"merge-base: unexpected outcome `{outcome}`")
         sys.exit(1)
 
 

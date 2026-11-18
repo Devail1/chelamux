@@ -483,3 +483,27 @@ def test_reconcile_names_a_merge_that_could_not_run(two, monkeypatch):
         OSError("no git")))
     out = handinmove.reconcile(b, None, "W.md", "dev", _g(seed, "rev-parse", "HEAD~1"), None)
     assert out["ok"] is False and out["error"].endswith("but the merge could not run: no git")
+
+
+def test_a_rebuild_then_still_behind_with_allow_behind_keeps_the_rebuilt_record(run_b, steps,
+                                                                                monkeypatch):
+    real = basesync.check
+    seen = []
+
+    def check(wt, base):
+        seen.append(1)
+        res = real(wt, base)
+        return res if len(seen) == 1 else {**res, "behind": 2}     # the base moved again
+    monkeypatch.setattr(basesync, "check", check)
+    out = dispatcher.check_base_sync("cmx-88", True)
+    assert out["ok"] is True and "since" not in out
+    assert set(out["record"]) == {"base", "rebuilt", "behind", "allow_behind"}
+    assert (out["record"]["behind"], out["record"]["allow_behind"]) == (2, True)
+    assert "only in the generated bundle" in basesync.render(out["record"])
+
+
+def test_cli_merge_base_names_an_unexpected_outcome(run_b, monkeypatch, capsys):
+    monkeypatch.setattr(dispatcher, "merge_base", lambda t: {
+        "ok": True, "base": "dev", "outcome": "weird", "base_sha": "", "files": []})
+    assert _cli("merge-base", "cmx-88") == 1
+    assert capsys.readouterr().out == "merge-base: unexpected outcome `weird`\n"

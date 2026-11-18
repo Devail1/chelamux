@@ -3458,8 +3458,8 @@ def check_base_sync(task_id: str, allow_behind: bool = False) -> dict:
     if state["conflicts"] or (state["behind"] and not allow_behind):
         return {"ok": False, "error": basesync.refusal(base, state["behind"], state["conflicts"])}
     if state["behind"]:
-        return {"ok": True, "record": {"base": base, "behind": state["behind"],
-                                       "allow_behind": True}}
+        return {"ok": True, "record": {**(record or {}), "base": base,
+                                       "behind": state["behind"], "allow_behind": True}}
     try:
         since = basesync.base_sha(wt, base)
     except RuntimeError as e:
