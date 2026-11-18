@@ -550,7 +550,7 @@ def test_the_daemon_runs_the_boot_scan_before_its_first_tick():
 # --- the nightly sweep's own worktree --------------------------------------------------------
 
 
-def _nightly(tmp_path, monkeypatch, *, owner):
+def _nightly(tmp_path, monkeypatch, *, owner, recovered_as=("", "")):
     wf = SimpleNamespace(path=tmp_path / "repo" / "WORKFLOW.md")
     monkeypatch.setattr(sweep_nightly, "_git", lambda *a: "abc123")
     monkeypatch.setattr(sweep_nightly, "base_ref", lambda wf: "origin/dev")
@@ -566,7 +566,7 @@ def _nightly(tmp_path, monkeypatch, *, owner):
     monkeypatch.setattr(sweep_nightly, "_sweep_and_file", lambda *a: None)
     monkeypatch.setattr(sweep, "live_owner", lambda wt: owner)
     recovered = []
-    monkeypatch.setattr(sweep, "recover", lambda wt: recovered.append(wt) or ("", ""))
+    monkeypatch.setattr(sweep, "recover", lambda wt: recovered.append(wt) or recovered_as)
     result: dict = {}
     sweep_nightly._run(wf, 1e9, tmp_path, None, result)
     return result, checked_out, recovered
@@ -581,10 +581,23 @@ def test_the_nightly_sweep_never_resets_a_worktree_a_live_sweep_is_mutating(tmp_
     assert checked_out == [] and recovered == []
 
 
-def test_the_nightly_sweep_restores_first_then_checks_out(tmp_path, monkeypatch):
+def test_the_nightly_sweep_restores_first_then_checks_out(tmp_path, monkeypatch, caplog):
     result, checked_out, recovered = _nightly(tmp_path, monkeypatch, owner=None)
     assert recovered == [(tmp_path / "wts" / "nightly-sweep")]
     assert len(checked_out) == 1 and "status" not in result
+    assert "nightly sweep:" not in caplog.text
+
+
+@pytest.mark.parametrize("recovered_as, said", [
+    (("restored feat.py", ""), "nightly sweep: restored feat.py"),
+    (("", "three-way"), "nightly sweep: three-way — the checkout resets it"),
+])
+def test_the_nightly_sweep_says_what_it_restored_or_discarded(tmp_path, monkeypatch, caplog,
+                                                             recovered_as, said):
+    caplog.set_level("WARNING", logger=sweep_nightly.log.name)
+    result, checked_out, _ = _nightly(tmp_path, monkeypatch, owner=None,
+                                      recovered_as=recovered_as)
+    assert said in caplog.text and len(checked_out) == 1
 
 
 # --- the CLI entry points restore first too (judge self-check / sweep) ----------------------
