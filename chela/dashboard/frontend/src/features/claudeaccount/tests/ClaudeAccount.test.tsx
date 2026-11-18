@@ -156,6 +156,17 @@ test('the boot tick reads fresh; later ticks only after the poll period', async 
   expect(accountLane({ boot: false }, 1_000_000 + 300_001)).toBeUndefined();
 });
 
+test('a failed read is retried on the next tick, not after the poll period', async () => {
+  vi.spyOn(console, 'error').mockImplementation(() => {});
+  reply = () => Promise.reject(new Error('down'));
+  expect(await act(() => accountLane({ boot: true }, 1_000_000))).toBe(false);
+  reply = () => Promise.resolve(OK);
+  expect(await act(() => accountLane({ boot: false }, 1_000_000 + 30_000))).toBe(true);
+  expect(urls).toEqual(['/api/claude-account?fresh=1', '/api/claude-account']);
+  expect(words()).toBe('person-a@… · Example Org');
+  expect(accountLane({ boot: false }, 1_000_000 + 60_000)).toBeUndefined();
+});
+
 test('a page that missed the boot still reads on its first tick', async () => {
   await act(() => accountLane({ boot: false }, 5));
   expect(urls).toEqual(['/api/claude-account']);

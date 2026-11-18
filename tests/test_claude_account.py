@@ -49,7 +49,7 @@ def test_the_read_pins_argv_and_timeout_and_reads_every_field(monkeypatch):
     monkeypatch.setattr(ca.subprocess, "run", _cli(_logged_in(), calls=calls))
     got = ca.read_cli()
     assert calls == [(["claude", "auth", "status", "--json"],
-                      {"capture_output": True, "text": True, "timeout": 15})]
+                      {"stdin": subprocess.DEVNULL, "capture_output": True, "text": True, "timeout": 15})]
     assert got["state"] == "ok"
     assert (got["email"], got["org_name"], got["plan"], got["auth_method"]) == (A, "Example Org", "team", "claude.ai")
     assert got["expires_at"] is None and got["expires_in_s"] is None
@@ -163,6 +163,36 @@ def test_status_caches_for_the_ttl_and_fresh_rereads_past_the_floor(monkeypatch)
     clock[0] += ca.TTL_S
     ca.status()
     assert len(calls) == 3
+
+
+def test_an_unknown_answer_is_retried_after_the_short_ttl(monkeypatch):
+    calls = []
+    clock = [1000.0]
+    monkeypatch.setattr(ca.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(ca.subprocess, "run", _cli("garbage", 1, calls=calls))
+    assert ca.UNKNOWN_TTL_S == 30
+    assert ca.status()["state"] == "unknown"
+    clock[0] += 29
+    ca.status()
+    assert len(calls) == 1
+    clock[0] += 1
+    monkeypatch.setattr(ca.subprocess, "run", _cli(_logged_in(), calls=calls))
+    assert ca.status()["state"] == "ok" and len(calls) == 2
+    clock[0] += 30
+    ca.status()
+    assert len(calls) == 2, "an ok answer keeps the full TTL"
+
+
+def test_a_caller_with_a_cached_answer_never_waits_on_a_read_in_flight(monkeypatch):
+    monkeypatch.setattr(ca.subprocess, "run", _cli(_logged_in()))
+    first = ca.status()
+    monkeypatch.setattr(ca, "_cache_at", -1e9)          # stale: a read would be due
+    monkeypatch.setattr(ca, "read_cli", lambda: pytest.fail("must not read while one is in flight"))
+    assert ca._lock.acquire()
+    try:
+        assert ca.status() == first
+    finally:
+        ca._lock.release()
 
 
 def test_status_carries_the_check_time_and_no_change_on_first_sight(monkeypatch):
@@ -398,6 +428,22 @@ def test_the_background_refresh_survives_a_failing_read(monkeypatch, caplog):
         ca.start_background_refresh(stop).join(5)
     assert len(n) == 2
     assert "background refresh failed" in caplog.text
+
+
+@pytest.mark.parametrize("state, wait", [("unknown", 30), ("ok", 300)])
+def test_the_background_refresh_waits_less_after_an_unknown(monkeypatch, state, wait):
+    import threading
+    waits = []
+
+    class Stop(threading.Event):
+        def wait(self, timeout=None):
+            waits.append(timeout)
+            self.set()
+            return True
+    monkeypatch.setattr(ca, "status", lambda fresh=False: None)
+    monkeypatch.setattr(ca, "_cache", {"state": state})
+    ca.start_background_refresh(Stop()).join(5)
+    assert waits == [wait]
 
 
 def test_dashboard_main_starts_the_account_refresh():

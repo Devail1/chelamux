@@ -21,25 +21,31 @@ export function resetClaudeAccount(): void {
   claudeAccount.set(undefined);
 }
 
-/** Never throws out. A failed read keeps the last answer; with none yet it is unknown, never
- * an empty line that reads as fine. */
-export async function tickClaudeAccount(fresh = false): Promise<void> {
+/** Never throws out; resolves false when the read failed. A failed read keeps the last answer;
+ * with none yet it is unknown, never an empty line that reads as fine. */
+export async function tickClaudeAccount(fresh = false): Promise<boolean> {
   try {
     const answer = await api(`/api/claude-account${fresh ? '?fresh=1' : ''}`);
     claudeAccount.set(answer ?? null);
+    return true;
   } catch (e) {
     console.error('tickClaudeAccount', e);
     if (claudeAccount.get() === undefined) {
       claudeAccount.set({ state: 'unknown', reason: 'the dashboard did not answer' });
     }
+    return false;
   }
 }
 
-/** The lane: the boot tick reads fresh; later ticks read only once ACCOUNT_POLL_MS has passed. */
-export function accountLane(t: Pick<Tick, 'boot'>, now: number = Date.now()): Promise<void> | undefined {
+/** The lane: the boot tick reads fresh; later ticks read only once ACCOUNT_POLL_MS has passed.
+ * A failed read is retried on the next tick, not five minutes later. */
+export function accountLane(t: Pick<Tick, 'boot'>, now: number = Date.now()): Promise<boolean> | undefined {
   if (!t.boot && now - lastRead < ACCOUNT_POLL_MS) return undefined;
   lastRead = now;
-  return tickClaudeAccount(t.boot);
+  return tickClaudeAccount(t.boot).then((ok) => {
+    if (!ok) lastRead = -Infinity;
+    return ok;
+  });
 }
 
 export function ClaudeAccount() {

@@ -44,6 +44,9 @@ CMD_TIMEOUT_S = 15
 TTL_S = 300
 # A dashboard load's fresh read, at most this often (a reload storm spawns one CLI, not many).
 FRESH_MIN_S = 30
+# An "unknown" answer is retried this soon, not after the full TTL (a CLI briefly unavailable
+# at dashboard start must not read unknown for five minutes).
+UNKNOWN_TTL_S = 30
 
 _lock = threading.Lock()
 _cache: dict | None = None
@@ -129,7 +132,8 @@ def interpret(data: dict, returncode: int, now: float, warn_days: int) -> dict:
 def read_cli() -> dict:
     """One ``claude auth status --json``, interpreted. Never raises."""
     try:
-        r = subprocess.run(list(ARGV), capture_output=True, text=True, timeout=CMD_TIMEOUT_S)
+        r = subprocess.run(list(ARGV), stdin=subprocess.DEVNULL, capture_output=True, text=True,
+                           timeout=CMD_TIMEOUT_S)
     except FileNotFoundError:
         return _unknown("claude CLI not found")
     except subprocess.TimeoutExpired:
@@ -199,11 +203,17 @@ def last_change() -> dict | None:
 
 def status(fresh: bool = False) -> dict:
     """The header's answer: the cached read while younger than :data:`TTL_S`, else a new one.
-    ``fresh`` (a dashboard load) re-reads when the cache is older than :data:`FRESH_MIN_S`."""
+    ``fresh`` (a dashboard load) re-reads when the cache is older than :data:`FRESH_MIN_S`, and
+    an "unknown" answer is re-read after :data:`UNKNOWN_TTL_S`. While another caller is reading
+    the CLI (up to :data:`CMD_TIMEOUT_S`), a caller with a cached answer gets that answer at once
+    instead of waiting on the lock."""
     global _cache, _cache_at
-    with _lock:
+    if not _lock.acquire(blocking=_cache is None):
+        return dict(_cache or {})
+    try:
         age = time.monotonic() - _cache_at
-        if _cache is None or age >= TTL_S or (fresh and age >= FRESH_MIN_S):
+        ttl = UNKNOWN_TTL_S if _cache is not None and _cache.get("state") == "unknown" else TTL_S
+        if _cache is None or age >= ttl or (fresh and age >= FRESH_MIN_S):
             answer = read_cli()
             try:
                 change = observe(answer)
@@ -215,6 +225,8 @@ def status(fresh: bool = False) -> dict:
             if answer["state"] == "unknown":
                 log.warning("claude account: unknown (%s)", answer.get("reason"))
         return dict(_cache)
+    finally:
+        _lock.release()
 
 
 def _public_change(c: dict | None) -> dict | None:
@@ -247,7 +259,8 @@ def start_background_refresh(stop_event: threading.Event | None = None) -> threa
                 status()
             except Exception:
                 log.exception("claude account background refresh failed")
-            stop_event.wait(TTL_S)
+            unknown = (_cache or {}).get("state") == "unknown"
+            stop_event.wait(UNKNOWN_TTL_S if unknown else TTL_S)
 
     t = threading.Thread(target=_loop, name="chela-claude-account-refresh", daemon=True)
     t.start()
