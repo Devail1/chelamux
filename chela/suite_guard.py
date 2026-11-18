@@ -352,6 +352,23 @@ def waits_in(worktree: str | Path) -> dict | None:
     return {"waiting_since": since, "waited": found} if hit else None
 
 
+def waiters(exclude_pid: int | None = None) -> list[str]:
+    """⏳ CMX-400: who is asking for a suite slot RIGHT NOW — the worktree name of every live
+    process with an open wait (``waiting_since`` set), oldest first, except ``exclude_pid``.
+    A stopped waiter (a fleet pause, ``T``) is not asking, as in :func:`_must_queue`. What the
+    idle sweep reads to start only on a quiet box, and to yield the slot between mutations."""
+    out = []
+    for _path, rec in _ledgers():
+        opened = rec.get("waiting_since")
+        if opened is None or rec["state"] in ("T", "t") or rec.get("pid") == exclude_pid:
+            continue
+        try:
+            out.append((float(opened), Path(str(rec.get("cwd") or "?")).name))
+        except (TypeError, ValueError):
+            continue
+    return [name for _since, name in sorted(out)]
+
+
 def _take(d: Path, k: int) -> int | None:
     """An fd holding one of the ``k`` slot locks, or None when every one is held."""
     for i in range(k):

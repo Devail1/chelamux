@@ -6,12 +6,27 @@ CMX-299, landing in three slices): once a day nothing merged that way goes un-mu
 Slice 1/3 is the scheduler (CMX-303); slice 2/3 (CMX-304) groups the survivors and finds
 every same-shape site; slice 3/3 (CMX-305) files them in the tracker and tells the inbox.
 
-* **When.** ``sweep.nightly_at`` in WORKFLOW.md (``"HH:MM"`` local; default ``02:00``;
-  ``off``, ``never``, ``false`` or ``sweep.enabled: false`` turns it off). The daemon
-  (:func:`daemon_tick`) spawns ``chela judge nightly-sweep`` DETACHED, one at a time
-  (concurrency 1, and a lock file for a hand-run one), outside the dispatch slots, inside the
-  shared memory slice the judge and the agents launch into (:func:`chela.memcap.wrap_launch_cmd`).
-  A day is marked BEFORE the spawn, so a restart never sweeps the same day twice.
+* **When** (CMX-400). ``sweep.mode: idle`` (the default) starts the sweep when the box is
+  IDLE (:func:`box_idle`: no suite slot held — so no hand-in, self-check, judge or agent suite
+  running —, nobody waiting for one, no fleet pause, and at least one suite's peak of memory
+  available) and has stayed idle for ``sweep.quiet_seconds`` (default 600), so it never starts
+  between two hand-ins. At most ONE day's run per workflow: once it ends without yielding the
+  day is done; a run that YIELDED may resume the same day when idle again, until the day's
+  ``sweep.budget_seconds`` (a daily TOTAL) is spent. If no idle window came by the FALLBACK
+  time — ``sweep.nightly_at`` (default ``02:00``) plus ``sweep.fallback_after_hours`` (default
+  2: 04:00) — and nothing ran today, it runs anyway on ``sweep.fallback_budget_seconds``
+  (default 1800), still yielding, and the notice says so. ``sweep.mode: fixed`` is the old
+  clock: once a day from ``nightly_at``. ``nightly_at: off`` (``never``, ``false``, or
+  ``sweep.enabled: false``) turns either off. The daemon (:func:`daemon_tick`) spawns ``chela
+  judge nightly-sweep`` DETACHED, one at a time (concurrency 1, and a lock file for a hand-run
+  one), outside the dispatch slots, inside the shared memory slice the judge and the agents
+  launch into (:func:`chela.memcap.wrap_launch_cmd`). A day is marked BEFORE the spawn, so a
+  restart never sweeps the same day twice; a run that never reported back ends its day.
+* **Yields** (CMX-400). The sweep holds the one suite slot for its whole battery (CMX-393).
+  Between two mutations — the last one's file already restored — it asks who is waiting for
+  the slot (:func:`chela.suite_guard.waiters`); anyone stops it there: the slot goes to them,
+  the run ends as YIELDED, and every mutation it did not reach is OWED (below), so the next
+  run starts there. Both modes yield.
 * **What.** It fetches ``origin`` and reads ``origin/<workspace.base_branch>``. Every
   first-parent commit on it in the covered window whose files classify STANDARD (the same
   :func:`chela.risktier.classify` the merge gate uses — a core or always-human PR met the judge
@@ -31,7 +46,9 @@ every same-shape site; slice 3/3 (CMX-305) files them in the tracker and tells t
   owed) or no line of its file reads as it did any more (``line_gone``) — the notice says
   which. An unreadable store is CANNOT VERIFY, never "nothing owed".
 * **The covered window.** The last 24 h — or, after a night that could not look, back to the
-  last run that did (at most :data:`MAX_CATCHUP_SECONDS`). Only a run that looked and
+  last run that did (at most :data:`MAX_CATCHUP_SECONDS`). An idle run (CMX-400) that comes
+  more than 24 h after the last one is caught up the same way; a same-day resume measures its
+  OWED mutations first, so the window it repeats only gets what budget is left. Only a run that looked and
   finished (not CANNOT VERIFY, no refused filing, every UNRUN mutation owed) moves it, in ``$CHELA_DIR/sweep-nightly/
   covered.json``.
 * **Grouped.** One :class:`SurvivorGroup` per CATEGORY — mutation shape (its kind) plus target
@@ -106,10 +123,21 @@ UNRUN, UNKNOWN = "unrun", "unknown"
 # CMX-371: why a run was SKIPPED, as a key — what the notice branches on, never the prose `why`.
 FLEET_PAUSED, JUDGE_OFF, ALREADY_RUNNING, NO_MERGES = (
     "fleet_paused", "judge_off", "already_running", "no_merges")
+# ⏳ CMX-400: a SKIPPED run for one of these swept nothing and the cause passes — it does not
+# end the idle day (the box reads busy meanwhile, so it is not retried in a loop).
+RETRY_REASONS = frozenset({FLEET_PAUSED, ALREADY_RUNNING})
 # A SKIPPED reason no human can act on: recorded and logged, never queued to the inbox.
 QUIET_REASONS = frozenset({NO_MERGES})
 # `chela doctor` reads a last recorded run older than this as a dead scheduler (a day plus slack).
 STALE_SECONDS = 36 * 3600
+
+# ⏳ CMX-400: what started a run — the sweep.mode values and the fallback.
+IDLE, FIXED, FALLBACK = "idle", "fixed", "fallback"
+MODES = (IDLE, FIXED)
+DEFAULT_QUIET_SECONDS = 600            # the box stays idle this long before an idle start
+DEFAULT_FALLBACK_AFTER_HOURS = 2.0     # nightly_at + this: the fallback start (02:00 → 04:00)
+DEFAULT_FALLBACK_BUDGET_SECONDS = 1800.0
+BUDGET_SPENT = "budget_spent"
 
 _RE_AT = re.compile(r"^([01]?\d|2[0-3]):([0-5]\d)$")
 _RE_BLAME = re.compile(r"^([0-9a-f]{40}) \d+ (\d+)(?: \d+)?\Z")
@@ -253,40 +281,248 @@ def _record_covered(wf, now: float, chela_dir: Path | None) -> None:
     _write_json(path, covered)
 
 
-def spawn_argv(wf_path: Path) -> list[str]:
+def spawn_argv(wf_path: Path, trigger: str | None = None) -> list[str]:
     return [sys.executable, "-m", "chela.main", "judge", "nightly-sweep", "--workflow",
-            str(wf_path)]
+            str(wf_path)] + (["--trigger", trigger] if trigger else [])
 
 
-def spawn(wf_path: Path, chela_dir: Path | None = None) -> subprocess.Popen:
+def spawn(wf_path: Path, chela_dir: Path | None = None,
+          trigger: str | None = None) -> subprocess.Popen:
     """Start ``chela judge nightly-sweep`` detached, in the judge's shared memory slice."""
     from chela import memcap
 
     out = state_dir(chela_dir)
     out.mkdir(parents=True, exist_ok=True)
-    cmd = memcap.wrap_launch_cmd(shlex.join(spawn_argv(wf_path)))
+    cmd = memcap.wrap_launch_cmd(shlex.join(spawn_argv(wf_path, trigger)))
     with open(out / "nightly.log", "ab") as fh:
         return subprocess.Popen(["sh", "-c", cmd], stdin=subprocess.DEVNULL, stdout=fh,
                                 stderr=subprocess.STDOUT, start_new_session=True,
                                 close_fds=True)
 
 
+# --- when, in idle mode (CMX-400) -----------------------------------------------------------
+
+
+def _positive_number(wf, key: str, default: float) -> float:
+    """``sweep.<key>`` as a positive number, else ``default`` (said in the log when set)."""
+    raw = wf.get("sweep", key, default=None)
+    if raw is None:
+        return default
+    n = sweep._positive(raw, float)
+    if n is None:
+        log.warning("%s: sweep.%s %r is not a positive number — using %g", wf.path, key, raw,
+                    default)
+        return default
+    return n
+
+
+def sweep_mode(wf) -> str:
+    """``sweep.mode``: :data:`IDLE` (unset — the default) or :data:`FIXED`. Anything else is
+    idle, said in the log."""
+    raw = wf.get("sweep", "mode", default=None)
+    if raw is None:
+        return IDLE
+    mode = str(raw).strip().lower()
+    if mode in MODES:
+        return mode
+    log.warning("%s: sweep.mode %r is not idle|fixed — using idle", wf.path, raw)
+    return IDLE
+
+
+def quiet_seconds(wf) -> float:
+    return _positive_number(wf, "quiet_seconds", DEFAULT_QUIET_SECONDS)
+
+
+def fallback_budget_seconds(wf) -> float:
+    return _positive_number(wf, "fallback_budget_seconds", DEFAULT_FALLBACK_BUDGET_SECONDS)
+
+
+def fallback_at(wf) -> tuple[int, int] | None:
+    """``(hour, minute)`` of the fallback start: ``nightly_at`` + ``sweep.fallback_after_hours``,
+    at most 23:59 (a fallback never moves to the next day). ``None`` when the sweep is off."""
+    at = nightly_at(wf)
+    if at is None:
+        return None
+    raw = wf.get("sweep", "fallback_after_hours", default=None)
+    hours = DEFAULT_FALLBACK_AFTER_HOURS
+    if raw is not None:
+        # 0 is a valid choice here: the fallback at nightly_at itself.
+        if isinstance(raw, bool) or not isinstance(raw, (int, float)) or raw < 0:
+            log.warning("%s: sweep.fallback_after_hours %r is not a number >= 0 — using %g",
+                        wf.path, raw, DEFAULT_FALLBACK_AFTER_HOURS)
+        else:
+            hours = float(raw)
+    minute = min(at[0] * 60 + at[1] + int(hours * 60), 24 * 60 - 1)
+    return divmod(minute, 60)
+
+
+def box_idle(chela_dir: Path | None = None) -> tuple[bool, str]:
+    """``(idle, why not)``: is the box free for a sweep NOW? No suite slot held (no hand-in,
+    self-check, judge or agent suite running), nobody waiting for one, no fleet pause, and at
+    least one suite's measured peak of memory available (CMX-393's
+    :data:`chela.suite_guard.RESUME_MEM_BYTES`). Memory that cannot be read is NOT idle."""
+    from chela import suite_guard
+
+    if paused(Path(chela_dir or config.CHELA_DIR)):
+        return False, "a fleet pause is active"
+    held = suite_guard.holders()
+    if held:
+        return False, f"the suite slot is held by {', '.join(held)}"
+    waiting = suite_guard.waiters()
+    if waiting:
+        return False, f"{', '.join(waiting)} waiting for the suite slot"
+    avail = suite_guard.mem_available_bytes()
+    if avail is None or avail < suite_guard.RESUME_MEM_BYTES:
+        return False, "memory headroom is below one suite's peak"
+    return True, ""
+
+
+class IdleWatch:
+    """How long the box has been idle without a break — the quiet period an idle start
+    waits for. Any busy reading starts it over."""
+
+    def __init__(self):
+        self.since: float | None = None
+
+    def observe(self, idle: bool, now: float) -> float:
+        if not idle:
+            self.since = None
+            return 0.0
+        if self.since is None:
+            self.since = now
+        return now - self.since
+
+    def reset(self) -> None:
+        self.since = None
+
+
+_WATCH = IdleWatch()
+
+
+def _day_path(chela_dir: Path | None) -> Path:
+    return state_dir(chela_dir) / "day.json"
+
+
+def read_day(wf, day: str, chela_dir: Path | None = None) -> dict:
+    """``wf``'s record of ``day`` (``{used, runs, pending, done, …}``), or ``{}`` when it has
+    none for that day. Raises ``ValueError`` for a store that cannot be read."""
+    rec = _read_json(_day_path(chela_dir)).get(str(wf.path))
+    if rec is not None and not isinstance(rec, dict):
+        raise ValueError(f"{_day_path(chela_dir)} holds a malformed day for {wf.path}")
+    return rec if rec and rec.get("date") == day else {}
+
+
+def _pending(wf, chela_dir: Path | None) -> dict:
+    """``wf``'s record while the daemon's spawn is pending, whatever its date — a run spawned
+    at 23:59 that starts after midnight is still charged to the day it was started for.
+    ``{}`` when none is pending; raises ``ValueError`` for an unreadable store."""
+    rec = _read_json(_day_path(chela_dir)).get(str(wf.path))
+    return rec if isinstance(rec, dict) and rec.get("pending") else {}
+
+
+def _used(rec: dict) -> float:
+    used = rec.get("used")
+    return float(used) if isinstance(used, (int, float)) and not isinstance(used, bool) else 0.0
+
+
+def start_reason(wf, now: datetime, quiet_for: float, chela_dir: Path | None = None,
+                 ) -> str | None:
+    """Why ``wf``'s sweep starts at ``now`` — :data:`IDLE`, :data:`FALLBACK` or
+    :data:`FIXED` — or ``None``. ``quiet_for``: how long the box has been idle. An
+    unreadable day record starts nothing — never a second sweep on a guess."""
+    if sweep_mode(wf) == FIXED:
+        return FIXED if due(wf, now, chela_dir) else None
+    if not dispatch_enabled(wf) or nightly_at(wf) is None:
+        return None
+    try:
+        rec = read_day(wf, now.date().isoformat(), chela_dir)
+    except ValueError as e:
+        log.warning("nightly sweep: %s — not sweeping until it is fixed or removed", e)
+        return None
+    # A run still pending (or one that never reported back) and a day that ran to its end
+    # are both the day's one run; a yielded day goes on until its budget is spent.
+    if rec.get("pending") or rec.get("done") or \
+            (rec and _used(rec) >= nightly_budget(wf).seconds):
+        return None
+    if quiet_for >= quiet_seconds(wf):
+        return IDLE
+    fb = fallback_at(wf)
+    if not rec and fb is not None and (now.hour, now.minute) >= fb:
+        return FALLBACK
+    return None
+
+
+def mark_day_started(wf, now: datetime, trigger: str, chela_dir: Path | None = None) -> None:
+    """Record, BEFORE the spawn, that today's run of ``wf`` started (``pending`` until the
+    run reports back in :func:`finish_day`). An unreadable store is rewritten."""
+    path = _day_path(chela_dir)
+    try:
+        store = _read_json(path)
+        rec = read_day(wf, now.date().isoformat(), chela_dir)
+    except ValueError:
+        store, rec = {}, {}
+    store[str(wf.path)] = {"date": now.date().isoformat(), "used": _used(rec),
+                           "runs": int(rec.get("runs") or 0) + 1, "pending": True,
+                           "done": False, "trigger": trigger}
+    _write_json(path, store)
+
+
+def finish_day(wf, result: dict, chela_dir: Path | None = None) -> None:
+    """The run's report back to today's record: the seconds it used join the day's total, and
+    the day is DONE unless it yielded or skipped for a passing cause (:data:`RETRY_REASONS`).
+    Never raises: the record is not the work."""
+    path = _day_path(chela_dir)
+    try:
+        try:
+            store = _read_json(path)
+        except ValueError:
+            store = {}
+        rec = store.get(str(wf.path))
+        if not isinstance(rec, dict) or not rec.get("pending"):
+            rec = {"date": datetime.fromtimestamp(result["at"]).date().isoformat(),
+                   "runs": 1}
+        store[str(wf.path)] = {**rec, "used": _used(rec) + float(result.get("sweep_seconds")
+                                                                  or 0.0),
+                               "pending": False,
+                               "done": not (result.get("yielded_to")
+                                            or result.get("reason") in RETRY_REASONS),
+                               "trigger": result.get("trigger"), "status": result["status"]}
+        _write_json(path, store)
+    except Exception:  # noqa: BLE001 — logged; a pending record ends the day, never repeats it
+        log.exception("nightly sweep: could not record the day in %s", path)
+
+
 def daemon_tick(workflows, prev: subprocess.Popen | None, now: datetime | None = None,
-                chela_dir: Path | None = None) -> subprocess.Popen | None:
-    """The daemon's half, once per loop: spawn the first DUE workflow's sweep — never a second
-    while one is still running (concurrency 1). Returns the child to pass back next time."""
+                chela_dir: Path | None = None, probe=None,
+                watch: IdleWatch | None = None) -> subprocess.Popen | None:
+    """The daemon's half, once per loop: spawn the first workflow whose sweep should start
+    (:func:`start_reason`) — never a second while one is still running (concurrency 1).
+    ``probe`` reads whether the box is idle (:func:`box_idle`); ``watch`` keeps how long it
+    has been. Returns the child to pass back next time."""
+    watch = watch if watch is not None else _WATCH
     if prev is not None and prev.poll() is None:
+        watch.reset()               # our own sweep holds the slot: not a quiet box
         return prev
     from chela.workflow import load_workflow_cached
 
     now = now or datetime.now()
+    idle, why = (probe or box_idle)(chela_dir)
+    quiet_for = watch.observe(idle, now.timestamp())
     for wf_path in workflows:
         status = load_workflow_cached(wf_path)
-        if not status.ok or not due(status.workflow, now, chela_dir):
+        if not status.ok:
             continue
-        mark_started(status.workflow, now, chela_dir)
-        log.info("nightly sweep: starting for %s", wf_path)
-        return spawn(Path(wf_path), chela_dir)
+        trigger = start_reason(status.workflow, now, quiet_for, chela_dir)
+        if trigger is None:
+            continue
+        if trigger == FIXED:
+            mark_started(status.workflow, now, chela_dir)
+        else:
+            mark_day_started(status.workflow, now, trigger, chela_dir)
+        watch.reset()
+        log.info("nightly sweep: starting for %s (%s%s)", wf_path, trigger,
+                 f"; box busy: {why}" if why else "")
+        return spawn(Path(wf_path), chela_dir, trigger)
     return prev
 
 
@@ -657,17 +893,54 @@ def base_ref(wf) -> str:
     return f"origin/{wf.get('workspace', 'base_branch', default='dev')}"
 
 
+def run_budget(wf, trigger: str | None, now: float,
+               chela_dir: Path | None = None) -> sweep.SweepBudget:
+    """⏳ CMX-400: this run's budget. An idle or fallback run gets what is LEFT of the day's
+    ``sweep.budget_seconds`` (a yielded run may resume the same day); a fallback run at most
+    ``sweep.fallback_budget_seconds`` of it. A fixed or hand run gets the whole budget.
+    Raises ``ValueError`` for a day record that cannot be read."""
+    budget = nightly_budget(wf)
+    if trigger not in (IDLE, FALLBACK):
+        return budget
+    rec = _pending(wf, chela_dir) or read_day(wf, datetime.fromtimestamp(now).date().isoformat(),
+                                              chela_dir)
+    seconds = budget.seconds - _used(rec)
+    if trigger == FALLBACK:
+        seconds = min(seconds, fallback_budget_seconds(wf))
+    return sweep.SweepBudget(seconds=seconds, max_mutations=budget.max_mutations)
+
+
+def slot_wanted() -> str:
+    """Who, besides this process, is waiting for the suite slot (``""``: nobody) — the
+    sweep's yield check between two mutations."""
+    from chela import suite_guard
+
+    return ", ".join(suite_guard.waiters(exclude_pid=os.getpid()))
+
+
 def run(wf, *, now: float | None = None, chela_dir: Path | None = None,
-        filer: Filer | None = None) -> dict:
+        filer: Filer | None = None, trigger: str | None = None) -> dict:
     """One nightly sweep of ``wf``, then ONE inbox notice. ``filer`` is the filing seam
-    (:func:`default_filer` when None). Never raises an ``Exception``: a crash is a CANNOT
-    VERIFY result."""
+    (:func:`default_filer` when None). ``trigger`` (CMX-400): what started it — the daemon's
+    :data:`IDLE` / :data:`FALLBACK` / :data:`FIXED`, ``None`` for a hand run. Never raises an
+    ``Exception``: a crash is a CANNOT VERIFY result."""
     chela_dir = Path(chela_dir or config.CHELA_DIR)
     now = time.time() if now is None else now
     result = {"workflow": str(wf.path), "at": now, "filed": [], "would_file": [],
               "already_filed": 0, "failed": [], "survivors": 0, "prs": [], "groups": [],
-              "warnings": []}
-    if paused(chela_dir):
+              "warnings": [], "trigger": trigger}
+    try:
+        budget = run_budget(wf, trigger, now, chela_dir)
+    except ValueError as e:
+        # ⛔ Unknown is not "nothing used today": a guess could overspend the day.
+        budget = sweep.SweepBudget(seconds=0.0)
+        result.update(status=CANNOT_VERIFY, why=f"the day record: {e}")
+    if result.get("status"):
+        pass
+    elif budget.seconds <= 0:
+        result.update(status=SKIPPED, reason=BUDGET_SPENT,
+                      why="today's sweep budget is already spent")
+    elif paused(chela_dir):
         result.update(status=SKIPPED, reason=FLEET_PAUSED,
                       why="a fleet pause (`chela dispatch --pause --all`) is active")
     elif not judge.judge_enabled(wf):
@@ -686,7 +959,7 @@ def run(wf, *, now: float | None = None, chela_dir: Path | None = None,
                 timer = judge_timing.RoundTimer()
                 try:
                     with judge_timing.activate(timer):     # ⏱️ CMX-397: measure only
-                        _run(wf, now, chela_dir, filer, result)
+                        _run(wf, now, chela_dir, filer, result, budget)
                 except Exception as e:  # noqa: BLE001 — a crash is still ONE result, said
                     log.exception("nightly sweep crashed")
                     result.update(status=CANNOT_VERIFY,
@@ -701,6 +974,8 @@ def run(wf, *, now: float | None = None, chela_dir: Path | None = None,
                 record_timings(wf, result, timer, chela_dir)
     log.info("nightly sweep (%s): %s%s", wf.path, result["status"],
              f" — {result['why']}" if result.get("why") else "")
+    if trigger in (IDLE, FALLBACK):
+        finish_day(wf, result, chela_dir)
     if quiet(result):
         log_quiet(result)
     else:
@@ -709,7 +984,8 @@ def run(wf, *, now: float | None = None, chela_dir: Path | None = None,
     return result
 
 
-def _run(wf, now: float, chela_dir: Path, filer: Filer | None, result: dict) -> None:
+def _run(wf, now: float, chela_dir: Path, filer: Filer | None, result: dict,
+         budget: sweep.SweepBudget | None = None) -> None:
     from chela.workflow import resolve_workspace_root
     from chela.worktree import detached_worktree, remove_worktree
 
@@ -750,7 +1026,8 @@ def _run(wf, now: float, chela_dir: Path, filer: Filer | None, result: dict) -> 
         result.update(status=CANNOT_VERIFY, why=f"could not check out {head[:12]}: {e}")
         return
     try:
-        _sweep_and_file(wf, worktree, head, ref, standard, chela_dir, filer, result, owed)
+        _sweep_and_file(wf, worktree, head, ref, standard, chela_dir, filer, result, owed,
+                        budget)
     finally:
         try:
             remove_worktree(repo, worktree, root)
@@ -768,7 +1045,7 @@ def nightly_budget(wf) -> sweep.SweepBudget:
 
 def _sweep_and_file(wf, worktree: Path, head: str, ref: str, standard: list[dict],
                     chela_dir: Path, filer: Filer | None, result: dict,
-                    owed: list[dict]) -> None:
+                    owed: list[dict], budget: sweep.SweepBudget | None = None) -> None:
     try:
         lines, origin = blamed_lines(worktree, standard)
     except _Git as e:
@@ -804,14 +1081,18 @@ def _sweep_and_file(wf, worktree: Path, head: str, ref: str, standard: list[dict
         return
     prune_evidence(chela_dir)
     cfg = judge.judge_suite_config(wf)
-    budget = nightly_budget(wf)
+    budget = budget if budget is not None else nightly_budget(wf)
+    # ⏳ CMX-400: an agent waiting for the suite slot stops the battery between mutations.
     with judge_timing.within("sweep"):
         report = sweep.sweep(worktree, f"{ref}@{head[:12]} (standard-tier lines)",
                              cfg.test_cmd, timeout=cfg.suite_timeout_seconds,
                              select_tests=cfg.select_tests, provision=False, budget=budget,
                              lines=swept, keep=evidence_dir(wf, result["at"], chela_dir),
-                             order=lambda muts: owed_first(muts, first, lines))
+                             order=lambda muts: owed_first(muts, first, lines),
+                             should_yield=slot_wanted)
     unrun = [r.mutation.key for r in report._with(sweep.UNRUN)]
+    result.update(yielded_to=report.yielded, sweep_seconds=report.seconds,
+                  budget_seconds=budget.seconds)
     result.update(mutations=len(report.results), unrun=len(unrun),
                   measured=report.measured, battery_seconds=report.battery_seconds,
                   per_hour=report.per_hour,
@@ -854,6 +1135,9 @@ def _quiet_status(result: dict) -> str:
 
 
 def _quiet_why(result: dict) -> str:
+    if result.get("yielded_to"):
+        return (f"yielded the suite slot to {result['yielded_to']}; {result.get('unrun', 0)} "
+                "mutation(s) it did not reach are owed to the next run")
     if result.get("unrun"):
         return (f"{result['unrun']} mutation(s) the budget never reached are UNRUN — CANNOT "
                 "VERIFY for their lines, not clean")
@@ -928,7 +1212,7 @@ def summary(result: dict) -> str:
     if result["would_file"]:
         filing.append(f"{len(result['would_file'])} would be filed (the tracker cannot file "
                       "issues; see would-file.jsonl)")
-    line = f"🧹🌙 nightly sweep ({name}): {outcome} — {'; '.join(filing)}"
+    line = f"🧹🌙 nightly sweep ({name}){started(result)}: {outcome} — {'; '.join(filing)}"
     if "mutations" in result:
         line += (f" — {len(result['prs'])} standard-tier PR(s), {result['mutations']} "
                  f"mutation(s), {result.get('unrun', 0)} UNRUN")
@@ -945,6 +1229,12 @@ def summary(result: dict) -> str:
             line += ")"
     if "owed" in result:
         line += f" — {result['owed']} owed to the next night"
+    if result.get("yielded_to"):
+        line += f" — ⏳ yielded the suite slot to {result['yielded_to']}"
+    if result.get("trigger") and result.get("sweep_seconds"):
+        line += f" — {result['sweep_seconds'] / 60:.0f} min used"
+        if result.get("budget_seconds"):
+            line += f" of {result['budget_seconds'] / 60:.0f}"
     if result.get("baseline_flakes"):
         line += (f" — ⚠️ baseline flake: {', '.join(result['baseline_flakes'])} (red once, green "
                  "alone; deselected from the battery)"
@@ -952,6 +1242,19 @@ def summary(result: dict) -> str:
     if result["warnings"]:
         line += f" — ⚠️ {len(result['warnings'])} warning(s): {result['warnings'][0]}"
     return line
+
+
+def started(result: dict) -> str:
+    """⏳ CMX-400: `` — started HH:MM on idle`` / `` — ran on fallback: the queue was never
+    idle`` / `` — started HH:MM at the fixed time``; ``""`` for a hand run."""
+    trigger = result.get("trigger")
+    if trigger not in (IDLE, FALLBACK, FIXED):
+        return ""
+    at = datetime.fromtimestamp(result["at"]).strftime("%H:%M")
+    return {IDLE: f", started {at} on idle (queue and suite slot quiet)",
+            FALLBACK: f", started {at} — ran on fallback: the queue was never idle",
+            FIXED: f", started {at} at the fixed time (sweep.mode: fixed)",
+            }[trigger]
 
 
 def throughput(result: dict) -> str:

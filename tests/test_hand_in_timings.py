@@ -478,7 +478,7 @@ def test_a_nightly_run_records_its_provision_and_sweep_phases(chela_dir, monkeyp
         kept="", cannot_verify="the baseline is red")
     monkeypatch.setattr(sweep, "sweep", lambda *a, **k: (_wait(40), report)[1])
 
-    def fake_run(wf, now, chela_dir, filer, result):
+    def fake_run(wf, now, chela_dir, filer, result, budget=None):
         sweep_nightly._sweep_and_file(wf, tmp_path, "abc123", "origin/dev", [], chela_dir,
                                       filer, result, [])
     monkeypatch.setattr(sweep_nightly, "_run", fake_run)
