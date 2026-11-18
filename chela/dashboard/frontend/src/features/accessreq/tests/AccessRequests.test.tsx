@@ -5,6 +5,16 @@
 // disabled; an approved request shows its time left and a Revoke.
 import { act, cleanup, fireEvent, render, screen, within } from '@testing-library/react';
 import { afterEach, beforeEach, expect, test, vi } from 'vitest';
+
+// 🔐 CMX-392: the page's session token, seeded into the boot block BEFORE the modules under
+// test read it at import, so a test can pin the header's VALUE, not just its key.
+const TOKEN = vi.hoisted(() => {
+  const t = 'tok-accessreq-4b88';
+  document.body.innerHTML = `<script type="application/json" id="chela-boot">{"sessionToken": "${t}"}</script>`;
+  return t;
+});
+// The imports above have read it; drop it so no test sees a stray <script> in the page.
+document.getElementById('chela-boot')?.remove();
 import { AccessRequestsPill, AccessRequestsSheet, accessRequests, closeAccessRequests, openAccessRequests, tickAccessRequests } from '../index.ts';
 import { DURATIONS, durLabel, durationChoices, pendingCount, timeLeft, who, type AccessRequest } from '../model.ts';
 
@@ -91,7 +101,7 @@ test('a refused request says why and offers no Approve, only Deny', async () => 
   await click(row?.querySelector('.ar-deny'));
   expect(posts).toEqual([{ path: '/api/share-requests/abcdefabcdef-0/deny', body: {} }]);
   // 🔐 CMX-392: the server refuses a decision without the page's session token.
-  expect(Object.keys(heads[0] ?? {})).toContain('X-Chela-Session-Token');
+  expect(heads[0]?.['X-Chela-Session-Token']).toBe(TOKEN);
   expect(heads[0]?.['Content-Type']).toBe('application/json');
 });
 

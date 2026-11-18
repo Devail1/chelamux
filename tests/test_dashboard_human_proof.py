@@ -108,6 +108,8 @@ def test_the_real_confirm_page_with_its_token_approves_and_merges(repo):  # noqa
     assert humanproof.COOKIE in page.headers.get("Set-Cookie", "")
     assert "HttpOnly" in page.headers["Set-Cookie"]
     assert "SameSite=Strict" in page.headers["Set-Cookie"]
+    # the page embeds a live token: never cached, so a back-button copy can't replay a stale one
+    assert page.headers["Cache-Control"] == "no-store"
     token = _page_token(page.data)
     with _github() as squash:
         ok = client.post(f"/override/{rid}", data={"decision": "approve", "session_token": token},
@@ -186,9 +188,11 @@ def test_each_missing_proof_alone_refuses_the_approval(repo, shape):  # noqa: F8
     assert overrides.load(rid)["state"] == overrides.PENDING
 
 
-def test_the_positive_control_of_the_shapes_table_approves(repo):  # noqa: F811
+@pytest.mark.parametrize("fetch_site", [None, "same-origin", "none"])
+def test_the_positive_control_of_the_shapes_table_approves(repo, fetch_site):  # noqa: F811
     """Same headers as the table, nothing removed ⇒ approved: each refusal above is caused by
-    the ONE thing that shape removed."""
+    the ONE thing that shape removed. A real browser's fetch sends ``Sec-Fetch-Site:
+    same-origin`` (a typed-in navigation sends ``none``); both must still approve."""
     _seed(repo)
     rid = _request()["request_id"]
     sid = humanproof.new_session_id()
@@ -197,7 +201,8 @@ def test_the_positive_control_of_the_shapes_table_approves(repo):  # noqa: F811
     with _github() as squash:
         resp = client.post(f"/api/override/{rid}/approve", json={"confirm": True},
                            headers={"Origin": "http://localhost",
-                                    "X-Chela-Session-Token": humanproof.token_for(sid)})
+                                    "X-Chela-Session-Token": humanproof.token_for(sid),
+                                    **({"Sec-Fetch-Site": fetch_site} if fetch_site else {})})
     assert resp.status_code == 200, resp.get_json()
     squash.assert_called_once()
 
