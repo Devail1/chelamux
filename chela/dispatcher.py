@@ -1405,6 +1405,9 @@ def ensure_schema(conn: sqlite3.Connection) -> sqlite3.Connection:
         # ⚖️🪜 CMX-288: the `chela.risktier` tier of the head the judge was last spawned on —
         # `judge run` holds nothing out on a `standard` one. NULL ⇒ never stamped (full judge).
         ("risk_tier", "ALTER TABLE runs ADD COLUMN risk_tier TEXT"),
+        # ⚖️🪜 CMX-396: why `risk_tier` is what it is when the tracker's risk level set it
+        # (`risk:high`, a floor of CORE) rather than the files. NULL ⇒ the files decided.
+        ("risk_tier_floor", "ALTER TABLE runs ADD COLUMN risk_tier_floor TEXT"),
         # 🤫 CMX-97. The judge's OWN tmux window — `_spawn_judge` calls `_launch_agent` with
         # `judge_window=True` (the run's `window_id` must stay the RUN's window, not a
         # judge that will be gone in twenty minutes; see `_launch_agent`'s docstring), which
@@ -3279,7 +3282,9 @@ def hand_in_tier(task_id: str) -> str:
     except Exception as e:  # noqa: BLE001 — an unreadable tier is core, never a crash
         log.warning("hand-in: %s: could not read the tier: %s", task_id, e)
         return risktier.CORE
-    return risktier.classify(files, risktier.always_human(wf), risktier.core(wf))[0]
+    # CMX-396: the run's tracker risk floors it — a risk:high run gets the full hand-in.
+    return risktier.classify(files, risktier.always_human(wf), risktier.core(wf),
+                             risk=_row_risk(row))[0]
 
 
 def hand_in_checks(tier: str, *, experiments: bool) -> tuple[str, ...]:
@@ -9149,7 +9154,9 @@ def _spawn_judge(
     # merge-ready like `clean` on this head. Checked first; an unknown file list is not prose.
     # CMX-296: so does a STANDARD-tier one; an unknown file list is CORE, never standard.
     files = judge._changed_files(worktree, base)
-    tier = risktier.classify(files, risktier.always_human(wf), risktier.core(wf))[0]
+    # CMX-396: the run's tracker risk (copied at claim) floors the tier — risk:high ⇒ CORE.
+    tier, _trigger, floor = risktier.explain(files, risktier.always_human(wf),
+                                             risktier.core(wf), risk=_row_risk(row))
     skip = _stamp_tier_verdict(task_id, tier, sha)
     if not skip and judge.docs_only_diff(worktree, base) is True:
         skip = True
@@ -9164,8 +9171,9 @@ def _spawn_judge(
         return False
 
     # 🔁⚖️ CMX-263: from here to the clear below, a dead launcher means an interrupted launch.
-    conn.execute("UPDATE runs SET judge_launch_owner=?, risk_tier=? WHERE task_id=?",
-                 (json.dumps(judge.owner_identity(os.getpid())), tier, task_id))
+    conn.execute("UPDATE runs SET judge_launch_owner=?, risk_tier=?, risk_tier_floor=? "
+                 "WHERE task_id=?",
+                 (json.dumps(judge.owner_identity(os.getpid())), tier, floor, task_id))
     conn.commit()
     try:
         prompt = render_prompt(
@@ -9267,7 +9275,9 @@ def _stamp_prose_only(wf: WorkflowDef, row: sqlite3.Row) -> bool:
     except (OSError, ValueError) as e:   # git missing, a NUL in the sha: queue, never abort the tick
         log.warning("judge: %s: could not read the PR's files: %s", row["task_id"], e)
         return False
-    tier = risktier.classify(files, risktier.always_human(wf), risktier.core(wf))[0]
+    # CMX-396: a risk:high run is floored to CORE, so it is never stamped no-judge here.
+    tier = risktier.classify(files, risktier.always_human(wf), risktier.core(wf),
+                             risk=_row_risk(row))[0]
     return _stamp_tier_verdict(row["task_id"], tier, sha)
 
 
@@ -9287,7 +9297,8 @@ def _stamp_tier_verdict(task_id: str, tier: str, sha: str) -> bool:
     # The tier first: a crash between the two leaves a tier with no verdict, re-stamped next
     # tick — never a merge-ready verdict carrying another round's tier.
     with _db() as conn:
-        conn.execute("UPDATE runs SET risk_tier=? WHERE task_id=?", (tier, task_id))
+        conn.execute("UPDATE runs SET risk_tier=?, risk_tier_floor=NULL WHERE task_id=?",
+                     (tier, task_id))
     set_judge_state(task_id, state, detail, sha=sha)
     log.info("judge: %s: %s PR on %s — no judge round", task_id, tier, sha[:12])
     return True

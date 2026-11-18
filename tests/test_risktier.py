@@ -45,11 +45,14 @@ CORE = ["chela/dispatcher.py", "chela/judge.py", "chela/judge_select.py", "chela
         "chela/automerge.py", "chela/overrides.py", "chela/gateanswer.py", "chela/reviewgate.py",
         "chela/sizegate.py", "chela/basesync.py", "chela/sweep.py", "chela/sweep_github.py",
         "chela/toolconfig.py", "chela/sandbox.py", "chela/sandbox_status.py",
-        "chela/procguard.py", "CLAUDE.md", "AGENTS.md", "web/CLAUDE.md", "docs/sub/AGENTS.md"]
+        "chela/procguard.py",
+        # CMX-396: trust boundaries
+        "chela/dashboard/identity.py", "chela/share_requests.py", "CLAUDE.md", "AGENTS.md", "web/CLAUDE.md", "docs/sub/AGENTS.md"]
 STANDARD = ["app.py", "chela/dashboard/app.py", "web/src/App.tsx", "chela/judgement.txt",
             "chela/contexts.py", "chela/sources.py", "chela/dispatcher.pyi", "xchela/judge.py",
             "docs/helper.py", "LICENSE", "chela/automerge.pyi", "chela/sweeper.txt",
-            "CLAUDE.md.py", "web/CLAUDE.mdx"]
+            "CLAUDE.md.py", "web/CLAUDE.mdx", "chela/dashboard/identity.pyi",
+            "chela/share_requests.txt", "chela/dashboard/identity_ui.js"]
 
 
 # ⚖️🪜 CMX-288 — every category, and each membership rule's boundary.
@@ -95,7 +98,8 @@ def test_workflow_core_paths_add_to_never_replace_the_defaults(merge, extra):
                 "chela/sources/**", "chela/context.py", "chela/automerge.py",
                 "chela/overrides.py", "chela/gateanswer.py", "chela/reviewgate.py",
                 "chela/sizegate.py", "chela/basesync.py", "chela/sweep*.py",
-                "chela/toolconfig.py", "chela/sandbox*.py", "chela/procguard.py")
+                "chela/toolconfig.py", "chela/sandbox*.py", "chela/procguard.py",
+                "chela/dashboard/identity.py", "chela/share_requests.py")   # CMX-396
     assert risktier.core(wf) == defaults + extra and risktier.core(None) == defaults
     core = risktier.core(wf)
     assert risktier.classify(["web/api/a.ts"], D, core)[0] == ("core" if extra else "standard")

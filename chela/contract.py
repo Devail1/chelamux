@@ -628,8 +628,11 @@ def _gate(run: dict, *, override: bool, actor: str | None,
     #    override IS the human, so it only carries the always-human trigger into its question.
     files, wf = _read_pr_files(pr_url, repo_dir), load_workflow_cached(wf_path)
     workflow = wf.workflow if wf.ok else None
-    tier, trigger = (None, None) if files is None else risktier.classify(
-        files, risktier.always_human(workflow), risktier.core(workflow))
+    # CMX-396: the run's tracker risk (copied from the task at claim, never from the diff)
+    # floors the tier — a risk:high run is CORE however light its files look.
+    tier, trigger, floor = (None, None, None) if files is None else risktier.explain(
+        files, risktier.always_human(workflow), risktier.core(workflow), risk=run.get("risk"))
+    shown = risktier.describe(tier, floor)
     if not override:
         problem = None
         if tier is None:
@@ -637,16 +640,17 @@ def _gate(run: dict, *, override: bool, actor: str | None,
         elif tier == risktier.HUMAN:
             problem = f"this PR touches {trigger!r}, an ALWAYS-HUMAN path"
         elif judge_state == J_PROSE_ONLY and tier != risktier.PROSE:
-            problem = "the PR was stamped prose-only, but its live diff is not prose-only"
+            problem = f"the PR was stamped prose-only, but its live tier is {shown}"
         elif judge_state == J_STANDARD_NO_JUDGE and tier not in (risktier.STANDARD,
                                                                   risktier.PROSE):
             # CMX-296: no judge ran, so the live diff must still be standard (or the lighter
             # prose) — never core.
-            problem = (f"the PR was stamped standard-tier (no judge), but its live diff is "
-                       f"{tier!r}")
+            problem = (f"the PR was stamped standard-tier (no judge), but its live tier is "
+                       f"{shown}")
         if problem:
             return _refuse(
-                task_id, "escalate", risk_tier=tier, always_human_path=trigger,
+                task_id, "escalate", risk_tier=tier, risk_tier_floor=floor,
+                always_human_path=trigger,
                 error=f"{problem}. An autonomous merge needs a known, non-human tier. Refusing.",
                 recommendation="Review the diff yourself, then `chela merge --override --reason "
                                 f"\"…\"` — {problem}.",
@@ -655,7 +659,8 @@ def _gate(run: dict, *, override: bool, actor: str | None,
             )
     return {"ok": True, "base": base, "allowed_base": allowed_base, "judge_state": judge_state,
             "ci": ci, "mergeable": mergeable, "pr_url": pr_url, "repo_dir": repo_dir,
-            "always_human_path": trigger}
+            "always_human_path": trigger, "risk_tier": tier, "risk_tier_floor": floor,
+            "tier_shown": shown}
 
 
 def _do_merge(run: dict, gate: dict, *, reason: str, actor: str | None,
@@ -670,6 +675,7 @@ def _do_merge(run: dict, gate: dict, *, reason: str, actor: str | None,
         "allowed_base": gate["allowed_base"], "judge_state": judge_state,
         "ci_state": gate["ci"].state, "pr_mergeable": gate["mergeable"],
         "reason": reason.strip(), "actor": _actor(actor) or "human",
+        "risk_tier": gate.get("risk_tier"), "risk_tier_floor": gate.get("risk_tier_floor"),
     }
     if audit is not None:
         justification["override"] = audit
@@ -707,6 +713,8 @@ def _do_merge(run: dict, gate: dict, *, reason: str, actor: str | None,
         "branch_name": run.get("branch_name"),
         "event_seq": rec["seq"] if rec else None,
         "override": audit,
+        "tier_shown": gate.get("tier_shown"),
+        "risk_tier_floor": gate.get("risk_tier_floor"),
     }
 
 
@@ -765,6 +773,7 @@ def request_override(ident: str, *, reason: str, actor: str | None = None) -> di
     question = (f"Override-merge {label} into {gate['base']} past the judge ({shown!r} on "
                 f"{head_sha[:12]})?"
                 + (f" It touches ALWAYS-HUMAN path {trigger!r}." if trigger else "")
+                + (f" Tier: {gate['tier_shown']}." if gate.get("risk_tier_floor") else "")
                 + f" Reason: {reason}")
     meta = {"task_id": task_id, "label": label, "title": run.get("title"),
             "pr_url": gate["pr_url"], "base": gate["base"], "head_sha": head_sha,
