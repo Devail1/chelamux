@@ -519,6 +519,30 @@ def test_the_nightly_battery_is_handed_the_yield_check_and_the_days_budget(tmp_p
     assert seen["budget"].seconds == 2400.0
 
 
+@pytest.mark.parametrize("trigger, says", [
+    ("idle", "on idle (queue and suite slot quiet)"),
+    ("fallback", "ran on fallback: the queue was never idle"),
+])
+def test_an_idle_or_fallback_run_reports_back_to_the_day_and_says_why_it_started(
+        tmp_path, monkeypatch, notices, trigger, says):
+    """Driven end to end through ``run()`` for EACH trigger the daemon starts it with: the
+    trigger reaches the result and the notice, and the run's report lands in the day record
+    (seconds used, pending cleared, a yielded day still open, the trigger kept)."""
+    repo, chela = _repo(tmp_path), tmp_path / "chela"
+    wf = load_workflow(repo / "WORKFLOW.md")
+    sweep_nightly.mark_day_started(wf, datetime.now(), trigger, chela)
+    _yielding_battery(monkeypatch, {}, seconds=900.0)
+    res = _run(repo, chela, Filer(), trigger=trigger)
+    assert res["trigger"] == trigger
+    day = json.loads((sweep_nightly.state_dir(chela) / "day.json").read_text())[str(wf.path)]
+    assert (day["used"], day["pending"], day["done"], day["trigger"], day["runs"]) == (
+        900.0, False, False, trigger, 1)
+    assert len(notices) == 1
+    summary = notices[0][1]
+    assert says in summary and "15 min used" in summary
+    assert "yielded the suite slot to CMX-12" in summary
+
+
 def test_a_run_that_did_not_yield_ends_the_day(tmp_path, monkeypatch):
     repo, chela = _repo(tmp_path), tmp_path / "chela"
     wf = load_workflow(repo / "WORKFLOW.md")
