@@ -648,3 +648,21 @@ test.each([
     BOOT.sharingConfigured = was;
   }
 });
+
+// CMX-395: the pane header carries the same account-switch badge as the sidebar row.
+test('the account-switch badge shows only on a session started before the switch', () => {
+  const sw = { from: 'person-a@example.invalid', to: 'person-b@example.invalid', at: '2026-11-17T10:00:00+00:00', started_unknown: true };
+  const h = head({ agent: { ...SESSION, account_switch: sw } });
+  const badge = must(h.q('.gs-acct-badge'));
+  expect(text(badge)).toBe('person-a@example.invalid');
+  expect(badge.getAttribute('data-acct-for')).toBe('@1');
+  expect(badge.title).toBe('May still use person-a@example.invalid: its start time is unknown, and the account switched to person-b@example.invalid at 2026-11-17 10:00 UTC. Restart it to be sure.');
+  h.again({ agent: { ...SESSION, account_switch: null } });
+  expect(h.q('.gs-acct-badge')).toBeNull();
+});
+
+test('the account-switch badge is on a single pane (not on the wall) too', () => {
+  const sw = { from: 'person-a@example.invalid', to: 'person-b@example.invalid', at: '2026-11-17T10:00:00+00:00' };
+  const h = head({ wall: false, agent: { ...SESSION, account_switch: sw } });
+  expect(text(must(h.q('.gs-acct-badge')))).toBe('person-a@example.invalid');
+});
