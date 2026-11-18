@@ -465,3 +465,85 @@ def test_two_browsers_get_two_sessions_and_neither_token_works_in_the_other():
     tok = [re.search(rb'"sessionToken":\s*"([0-9a-f]{64})"', app.test_client().get("/").data)
            .group(1).decode() for _ in range(2)]
     assert tok[0] != tok[1]
+
+
+# --- the Origin must name THIS host:port, not merely this hostname -------------------------
+# Every request above reaches a portless "localhost", where host:port and hostname compare
+# equal, so a check loosened to the hostname (or to a substring) stayed green (DEFEAT_SHAPES
+# #392c). The dashboard really serves on a port (5005); a page on a SIBLING port of the same
+# host (another local service, an agent's own `python -m http.server`) is a different origin.
+# Sec-Fetch-Site is omitted so the Origin comparison is the ONLY check that can refuse.
+
+_HOST = "localhost:5005"
+
+_PORTED_ORIGINS = {
+    "sibling port": "http://localhost:5006",
+    "this hostname without the port": "http://localhost",
+    "a prefix of this host:port": "http://localhost:500",
+    "this host:port as a prefix": "http://localhost:50055",
+    "this host:port inside another host": "http://localhost.5005.evil.example",
+    "another hostname on this port": "http://127.0.0.1:5005",
+    "userinfo before this host:port": "http://evil@localhost:5005",
+}
+
+
+def _drive_ported(route: str, origin: str, sid: str):
+    path, kwargs, _ = _ROUTES[route]
+    client = app.test_client()
+    client.set_cookie(humanproof.COOKIE, sid, domain="localhost")
+    return client.post(path, base_url=f"http://{_HOST}",
+                       headers={"Origin": origin, humanproof.HEADER: humanproof.token_for(sid)},
+                       **kwargs)
+
+
+@pytest.mark.parametrize("shape", list(_PORTED_ORIGINS))
+@pytest.mark.parametrize("route", list(_ROUTES))
+def test_every_decide_route_refuses_an_origin_that_is_not_this_host_and_port(route, shape,
+                                                                             monkeypatch):
+    calls = _sinks(monkeypatch)
+    resp = _drive_ported(route, _PORTED_ORIGINS[shape], humanproof.new_session_id())
+    assert resp.status_code == 403, (route, shape, resp.status_code)
+    assert calls == [], (route, shape, calls)
+    assert "cross-origin request" in resp.get_data(as_text=True), (route, shape)
+
+
+@pytest.mark.parametrize("route", list(_ROUTES))
+def test_every_decide_route_accepts_the_origin_naming_this_host_and_port(route, monkeypatch):
+    """Positive control: the same cookie + token with Origin == this host:port decides, so
+    each refusal above is the Origin's alone."""
+    calls = _sinks(monkeypatch)
+    resp = _drive_ported(route, f"http://{_HOST}", humanproof.new_session_id())
+    assert resp.status_code == 200, (route, resp.get_data(as_text=True))
+    assert calls == [_ROUTES[route][2]]
+
+
+def test_the_agent_on_a_sibling_port_cannot_approve_over_a_real_socket(repo, server):  # noqa: F811
+    """End to end on a real port: a full browser session (page cookie + token) whose Origin
+    names a sibling port of the dashboard's own host is refused, and nothing merges."""
+    import http.cookiejar
+    import re
+    from urllib.parse import urlparse
+    _seed(repo)
+    rid = _request()["request_id"]
+    port = urlparse(server).port
+    jar = http.cookiejar.CookieJar()
+    opener = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(jar))
+    page = opener.open(f"{server}/override/{rid}", timeout=10).read()
+    token = re.search(rb'name="session_token" value="([0-9a-f]{64})"', page).group(1).decode()
+
+    def post(origin: str) -> int:
+        req = urllib.request.Request(f"{server}/api/override/{rid}/approve", method="POST",
+                                     data=json.dumps({"confirm": True}).encode(),
+                                     headers={"Content-Type": "application/json",
+                                              "Origin": origin, humanproof.HEADER: token})
+        try:
+            return opener.open(req, timeout=10).status
+        except urllib.error.HTTPError as e:
+            return e.code
+
+    with _github() as squash:
+        assert post(f"http://127.0.0.1:{port + 1}") == 403
+        squash.assert_not_called()
+        assert overrides.load(rid)["state"] == overrides.PENDING
+        assert post(f"http://127.0.0.1:{port}") == 200   # the same session, its own origin
+    squash.assert_called_once()
