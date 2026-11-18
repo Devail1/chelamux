@@ -37,12 +37,14 @@ function shown(a: AgentRow) {
     cwd: cwd?.textContent ?? null,
     cwdTip: cwd?.getAttribute('title') ?? null,
     label: s.labels[a.window_id ?? ''],
+    // CMX-399: only a shell's strip may shrink to nothing (style.css `.ar-meta.has-cwd`)
+    strip: row.querySelector('.ar-meta')?.className,
   };
 }
 
 test('a plain shell reads Shell with its cwd, never its tmux window name', () => {
   const a = win('liavedunix-3', { claude_running: false, shell_cwd: '~' });
-  expect(shown(a)).toEqual({ title: 'Shell', cwd: '~', cwdTip: 'Shell in ~', label: 'Shell' });
+  expect(shown(a)).toEqual({ title: 'Shell', cwd: '~', cwdTip: 'Shell in ~', label: 'Shell', strip: 'ar-meta has-cwd' });
 });
 
 test('a shell a human named keeps its name, and still shows its cwd', () => {
@@ -52,7 +54,7 @@ test('a shell a human named keeps its name, and still shows its cwd', () => {
 
 test('once Claude runs in the pane the row goes back to the session label, with no cwd chip', () => {
   const a = win('liavedunix-3', { claude_running: true, ai_title: 'Fix the sidebar', shell_cwd: null });
-  expect(shown(a)).toMatchObject({ title: 'Fix the sidebar', cwd: null, label: 'Fix the sidebar' });
+  expect(shown(a)).toMatchObject({ title: 'Fix the sidebar', cwd: null, label: 'Fix the sidebar', strip: 'ar-meta' });
   // a row that does not say whether Claude runs reads as a session, as the pane header does
   const b = win('liavedunix-4', { claude_running: undefined });
   expect(shown(b)).toMatchObject({ title: 'liavedunix-4', cwd: null });

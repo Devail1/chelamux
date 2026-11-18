@@ -2761,10 +2761,17 @@ body.sidebar-resizing iframe { pointer-events: none; }
 /* CMX-278 + CMX-331: a long press (.show-full) shows the whole title, wrapped. A hover does
    not: it would grow the row and shift every row below, so the row's tooltip carries it. */
 .agent-row.rich.show-full .agent-row-name { white-space: normal; overflow-wrap: anywhere; }
+/* CMX-399: the strip may shrink first, but never below its chips (min-content): with
+   `min-width: 0` a long title squeezed it to nothing and clipped the crown and the context
+   % (orchestrator 64% blank while a short-titled 51% showed). The hover `@N` (CMX-417)
+   counts too, so a hover truncates the title a little further; the row's height never moves.
+   A shell's strip (.has-cwd: its cwd chip, CMX-330) keeps min-width 0, since a min-content
+   floor would count the whole cwd and push the title out. */
 .agent-row.rich .ar-meta {
-    flex-grow: 0; flex-shrink: 1000; flex-basis: auto; min-width: 0; overflow: hidden; display: inline-flex; align-items: center; gap: 6px;
+    flex-grow: 0; flex-shrink: 1000; flex-basis: auto; min-width: min-content; overflow: hidden; display: inline-flex; align-items: center; gap: 6px;
     font-size: 10.5px; color: var(--text-dim); white-space: nowrap;
 }
+.agent-row.rich .ar-meta.has-cwd { min-width: 0; }
 .agent-row.rich .ar-meta:empty { display: none; }
 .agent-row.rich .ar-meta > [data-meta] { flex: 0 0 auto; display: inline-flex; align-items: center; gap: 3px; }
 .agent-row.rich .ar-meta-text { font-variant-numeric: tabular-nums; }
