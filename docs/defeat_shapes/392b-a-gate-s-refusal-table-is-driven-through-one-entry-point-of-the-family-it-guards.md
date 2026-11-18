@@ -7,13 +7,11 @@ cookie, token) is proven by a thorough-looking table: one row per missing proof,
 form POST, deny, the access-request approve/deny/revoke, the card's Merge) each get one
 "no proof at all" request, refused, and nothing else.
 
-**Mutations that defeat it** (each green against the old suite, hand-run 2026-11-18):
+**Mutation that defeats it:** five of them, each green against the old suite, hand-run 2026-11-18:
 
 - *a sibling narrows its own call* — the confirm page refuses only
   `decision == "approve"`, so an agent's raw form POST can still DENY the operator's request;
   the one sibling test sent an approve;
-- *a sibling refuses everyone* — `if why or True:` on the card's Merge is a broken button, and
-  a refusal-only test of that route is green by construction;
 - *a check loosened at its boundary* — `Sec-Fetch-Site` also accepting `same-site` (a sibling
   port on localhost), `if origin is None` instead of `if not origin` (an empty Origin), a
   prefix match instead of `compare_digest` (a truncated token): each row fed only the
