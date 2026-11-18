@@ -3391,31 +3391,89 @@ def verify_standard_hand_in(task_id: str) -> dict:
     return {"ok": True, "steps": steps}
 
 
-def check_base_sync(task_id: str, allow_behind: bool = False) -> dict:
-    """🔀 CMX-189: run FIRST in task-finished. Refuses a branch conflicting with, or (without
-    ``allow_behind``) behind, a fresh ``origin/<base>``; fails CLOSED when git cannot say.
-    ``{"ok", "record"}``; record is None unless ``allow_behind`` let a stale branch through."""
+def _run_worktree_base(task_id: str) -> tuple[str, str] | str:
+    """``(worktree, base branch)`` of ``task_id``'s run, or the error string."""
     with _db() as conn:
         row = conn.execute("SELECT * FROM runs WHERE task_id=?", (task_id,)).fetchone()
     if row is None or not row["worktree_path"] or not row["workflow_path"]:
-        return {"ok": False, "error": f"no run with a worktree on record for {task_id}"}
+        return f"no run with a worktree on record for {task_id}"
     try:
         base = load_workflow(row["workflow_path"]).get("workspace", "base_branch",
                                                        default="master")
-        state = basesync.check(row["worktree_path"], base)
+    except Exception as e:
+        return f"{row['workflow_path']} could not be read: {e}"
+    return row["worktree_path"], base
+
+
+def merge_base(task_id: str) -> dict:
+    """🔀 CMX-437: ``chela merge-base`` — :func:`chela.basemerge.merge_into` on the run's own
+    worktree. ``{"ok": True, **result}`` or ``{"ok": False, "error"}`` (git could not say)."""
+    from chela import basemerge
+    found = _run_worktree_base(task_id)
+    if isinstance(found, str):
+        return {"ok": False, "error": found}
+    wt, base = found
+    try:
+        return {"ok": True, "base": base, **basemerge.merge_into(wt, base)}
+    except (RuntimeError, OSError) as e:
+        return {"ok": False, "error": f"could not merge origin/{base}: {e}"}
+
+
+def check_base_sync(task_id: str, allow_behind: bool = False) -> dict:
+    """🔀 CMX-189: run FIRST in task-finished. Refuses a branch conflicting with, or (without
+    ``allow_behind``) behind, a fresh ``origin/<base>``; fails CLOSED when git cannot say.
+    ``{"ok", "record"}``; record is None unless ``allow_behind`` let a stale branch through, or
+    🔀 CMX-437 a conflict ONLY in the generated bundle was merged and rebuilt right here
+    (:func:`chela.basemerge.merge_into`), so it never costs the agent a round."""
+    found = _run_worktree_base(task_id)
+    if isinstance(found, str):
+        return {"ok": False, "error": found}
+    wt, base = found
+    try:
+        state = basesync.check(wt, base)
     except Exception as e:
         return {"ok": False, "error": f"could not check this branch against its base — {e}. "
                                       "Unknown is not in sync: fix the remote and re-run."}
+    record = None
+    if state["conflicts"] and all(generated.is_rebuilt(f) for f in state["conflicts"]):
+        merged = merge_base(task_id)
+        if merged.get("outcome") == "conflict":   # the base moved on to a source conflict
+            from chela import basemerge
+            basemerge.abort(Path(wt))               # a gate never leaves a merge half-done
+        if not merged["ok"] or merged["outcome"] != "rebuilt":
+            why = merged.get("error") or _bundle_merge_failure(merged)
+            return {"ok": False, "error": basesync.refusal(base, state["behind"],
+                                                           state["conflicts"])
+                    + f"   It conflicts only in the generated bundle, but merging and "
+                      f"rebuilding it here failed: {why}"}
+        record = {"base": base, "rebuilt": {"base_sha": merged["base_sha"][:12],
+                                            "merge_sha": merged["merge_sha"][:12]}}
+        print(f"🔀 origin/{base} conflicted only in the generated bundle: merged, rebuilt from "
+              f"the merged source and committed ({merged['merge_sha'][:12]}).", flush=True)
+        try:
+            state = basesync.check(wt, base)
+        except Exception as e:
+            return {"ok": False, "error": f"could not re-check this branch against its base "
+                                          f"after rebuilding the bundle — {e}"}
     if state["conflicts"] or (state["behind"] and not allow_behind):
         return {"ok": False, "error": basesync.refusal(base, state["behind"], state["conflicts"])}
     if state["behind"]:
         return {"ok": True, "record": {"base": base, "behind": state["behind"],
                                        "allow_behind": True}}
     try:
-        since = basesync.base_sha(row["worktree_path"], base)
+        since = basesync.base_sha(wt, base)
     except RuntimeError as e:
         return {"ok": False, "error": f"could not check this branch against its base — {e}"}
-    return {"ok": True, "record": None, "since": since}
+    return {"ok": True, "record": record, "since": since}
+
+
+def _bundle_merge_failure(res: dict) -> str:
+    """One line for a :func:`chela.basemerge.merge_into` result that is not ``rebuilt``."""
+    if res["outcome"] == "dirty":
+        return "the worktree has uncommitted changes: " + ", ".join(res["files"])
+    if res["outcome"] == "build_failed":
+        return f"the rebuild failed (merge aborted):\n{res['detail']}"
+    return f"the merge came out `{res['outcome']}`"
 
 
 def reconcile_base_move(task_id: str, since: str, experiments: str | None) -> dict:
