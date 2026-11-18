@@ -247,6 +247,11 @@ def battery_max_wait(timeout: float) -> float:
     return override if override > 0 else BATTERY_WAIT_TIMEOUTS * timeout
 
 
+def waited_seconds() -> float:
+    """⏱️ CMX-397: seconds THIS process has spent waiting for a suite slot so far."""
+    return _waited
+
+
 def busy_clock() -> float:
     """``time.monotonic()`` minus what this process spent waiting for a slot — the clock a
     wall-clock BUDGET reads, so a queued run is not charged for the queue."""
