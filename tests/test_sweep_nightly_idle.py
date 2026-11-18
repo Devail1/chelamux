@@ -28,6 +28,13 @@ NIGHT = datetime(2026, 11, 18, 1, 0)
 
 
 @pytest.fixture(autouse=True)
+def _no_default_blocked_hours(monkeypatch):
+    """The run() tests below start at the REAL time: with the default blocked hours (CMX-436,
+    covered in tests/test_sweep_nightly_hold.py) a suite that ran at 03:xx would skip them."""
+    monkeypatch.setattr(sweep_nightly, "DEFAULT_BLOCKED_HOURS", ())
+
+
+@pytest.fixture(autouse=True)
 def notices(monkeypatch):
     got: list[tuple[str, str, dict]] = []
     monkeypatch.setattr("chela.inbox.enqueue",
@@ -199,13 +206,13 @@ def test_a_record_that_is_not_an_object_is_unreadable(sched):
 
 def test_the_fallback_fires_once_when_never_idle(sched):
     sched.box.busy = "the suite slot is held by CMX-12"
-    for m in (0, 60, 179):                            # 01:00 .. 03:59
+    for m in (0, 60, 179, 239):                       # 01:00 .. 04:59
         assert sched.tick(_at(m)) is None
-    child = sched.tick(_at(180))                      # 04:00 = nightly_at 02:00 + 2 h
+    child = sched.tick(_at(240))                      # 05:00 = nightly_at 02:00 + 3 h
     assert child is not None and sched.spawned == [(sched.path, "fallback")]
     child.alive = False
     _finish(sched, yielded="CMX-12", seconds=300)
-    for m in (181, 240, 600, 1300):
+    for m in (241, 300, 600, 1300):
         assert sched.tick(_at(m), child) is child
     assert len(sched.spawned) == 1
 
@@ -221,14 +228,14 @@ def test_no_fallback_after_an_idle_run_today(sched):
 
 
 @pytest.mark.parametrize("yaml_text, at", [
-    ("", (4, 0)),
-    ("sweep:\n  nightly_at: '03:30'\n", (5, 30)),
+    ("", (5, 0)),
+    ("sweep:\n  nightly_at: '03:30'\n", (6, 30)),
     ("sweep:\n  fallback_after_hours: 0\n", (2, 0)),
     ("sweep:\n  fallback_after_hours: 0.5\n", (2, 30)),
     ("sweep:\n  nightly_at: '23:00'\n", (23, 59)),       # never the next day
-    ("sweep:\n  fallback_after_hours: -1\n", (4, 0)),    # garbage: the default, said
-    ("sweep:\n  fallback_after_hours: soon\n", (4, 0)),
-    ("sweep:\n  fallback_after_hours: true\n", (4, 0)),
+    ("sweep:\n  fallback_after_hours: -1\n", (5, 0)),    # garbage: the default, said
+    ("sweep:\n  fallback_after_hours: soon\n", (5, 0)),
+    ("sweep:\n  fallback_after_hours: true\n", (5, 0)),
     ("sweep:\n  nightly_at: 'off'\n", None),
 ])
 def test_fallback_at(tmp_path, yaml_text, at):
@@ -504,7 +511,7 @@ def test_the_nightly_battery_is_handed_the_yield_check_and_the_days_budget(tmp_p
     seen: dict = {}
     _yielding_battery(monkeypatch, seen)
     res = _run(repo, chela, Filer(), trigger="idle")
-    assert seen["should_yield"] is sweep_nightly.slot_wanted
+    assert isinstance(seen["should_yield"], sweep_nightly.YieldCheck)
     assert seen["budget"].seconds == 3600.0
     assert (res["status"], res["yielded_to"], res["owed"]) == ("unrun", "CMX-12", 1)
     assert res["why"] == ("yielded the suite slot to CMX-12; 1 mutation(s) it did not reach "
