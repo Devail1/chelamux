@@ -117,7 +117,8 @@ function Row({ it, s, actions, archived = false, altNum, folder, group, drag, ch
   if (!v) return null;
   const name = v.agent.name ?? '';
   // A plain shell already shows its live cwd as a chip (CMX-330): no second copy under it.
-  if (v.meta.some(m => m.kind === 'cwd')) folder = undefined;
+  const hasCwd = v.meta.some(m => m.kind === 'cwd');
+  if (hasCwd) folder = undefined;
   const cls = ['agent-row', 'rich', name === s.active && 'active', v.onWall && 'on-wall',
     v.runId && 'run-row', archived && 'archived', press.full && 'show-full', folder && 'has-folder',
     drag && 'draggable', drag?.dragging && 'dragging', drag?.drop && `drop-${drag.drop}`]
@@ -128,7 +129,8 @@ function Row({ it, s, actions, archived = false, altNum, folder, group, drag, ch
       {/* no title of its own (CMX-331): hovering the name shows the row's tooltip, which opens
           with the full title, then the window key */}
       <span className="agent-row-name" data-key={v.windowKey || undefined}>{v.label}</span>
-      <span className="ar-meta">
+      {/* CMX-399: only a shell's strip (its cwd chip) may shrink to nothing (style.css) */}
+      <span className={hasCwd ? 'ar-meta has-cwd' : 'ar-meta'}>
         {v.meta.map(m => <MetaChip key={m.kind} m={m} />)}
         {/* CMX-417: the `@N` that chela peek and the inbox use, shown on hover */}
         {v.agent.window_id && <span className="ar-more"><span className="ar-wid">{v.agent.window_id}</span></span>}
