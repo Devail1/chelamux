@@ -61,6 +61,16 @@ def _edit_and_build(wt: Path, rel: str, text: str, msg: str) -> str:
     return _g(wt, "rev-parse", "HEAD")
 
 
+@pytest.fixture(autouse=True)
+def _git_identity(monkeypatch):
+    """The code under test runs its own ``git merge``, which needs a committer. A CI runner has
+    no global ``user.name``/``user.email`` (a dev box does, which is how this passed locally
+    and failed in CI), so give every git call in these tests one through the environment."""
+    for who in ("AUTHOR", "COMMITTER"):
+        monkeypatch.setenv(f"GIT_{who}_NAME", "t")
+        monkeypatch.setenv(f"GIT_{who}_EMAIL", "t@example.com")
+
+
 @pytest.fixture
 def steps(monkeypatch):
     """The rebuild steps, faked: recorded; the build step runs :func:`_build`."""
