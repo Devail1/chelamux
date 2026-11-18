@@ -211,6 +211,9 @@ class SweepReport:
     battery_seconds: float = 0.0
     # Why the budget stopped the sweep ("" when every mutation was reached).
     exhausted: str = ""
+    # ⏳ CMX-400: who the sweep yielded the suite slot to between two mutations ("" when it
+    # did not) — every mutation after that point is UNRUN.
+    yielded: str = ""
     # ⚖️🧹 CMX-341: a baseline that was not green on its first run — "<id> — <first line>" per
     # failing test, the ids green on their isolated re-run (deselected from every mutation run),
     # what that re-run said, and the directory its evidence was kept in.
@@ -253,6 +256,7 @@ class SweepReport:
             "timeout": [r.as_dict() for r in self._with(TIMEOUT)],
             "measured": self.measured,
             "budget": self.budget.as_dict(), "exhausted": self.exhausted,
+            "yielded": self.yielded,
             "cannot_verify": self.cannot_verify, "recovered": self.recovered,
             "notes": list(self.notes), "selection": self.selection,
             "full_suite": [r.as_dict() for r in self.results if r.full_suite],
@@ -961,7 +965,7 @@ def sweep(
     timeout: float = judge.SUITE_TIMEOUT_SECONDS, select_tests: bool = True, progress=None,
     provision: bool = True, budget: SweepBudget | None = None,
     lines: dict[str, set[int]] | None = None, keep: Path | None = None,
-    order=None,
+    order=None, should_yield=None,
 ) -> SweepReport:
     """``provision=False`` standalone: the repo's env is its owner's (no ``uv sync``).
     ``lines`` (CMX-303, the nightly sweep): mutate exactly these lines of the checkout instead
@@ -969,7 +973,11 @@ def sweep(
     ``keep`` (CMX-341): the directory a baseline that was not green on its first run leaves
     its JUnit report and output tail in — they outlive the checkout.
     ``order`` (CMX-374, the nightly sweep): given the prioritised mutations, returns the ones
-    to measure in the order to measure them — the budget is spent on its head first."""
+    to measure in the order to measure them — the budget is spent on its head first.
+    ``should_yield`` (CMX-400, the nightly sweep): asked after each measured mutation (its
+    file already restored), returns who is waiting for the suite slot, or ``""``. A name
+    stops the battery there — the rest is UNRUN, ``report.yielded`` names it — and the slot is
+    released when this returns. The first mutation always runs, so a busy box still moves."""
     worktree = Path(worktree).resolve()
     budget = budget if budget is not None else SweepBudget()
     started = _now()
@@ -983,7 +991,8 @@ def sweep(
             report = _sweep(worktree, base, test_cmd, timeout=timeout,
                             select_tests=select_tests, progress=progress,
                             provision=provision, budget=budget, started=started,
-                            lines=lines, keep=keep, order=order)
+                            lines=lines, keep=keep, order=order,
+                            should_yield=should_yield)
     except suite_guard.SlotTimeout as e:
         report = SweepReport(cannot_verify=f"the sweep could not be run: {e}")
     except _Interrupted as e:
@@ -1001,7 +1010,7 @@ def sweep(
 def _sweep(worktree: Path, base: str, test_cmd: str, *, timeout: float, select_tests: bool,
            progress, budget: SweepBudget, started: float,
            provision: bool = True, lines: dict[str, set[int]] | None = None,
-           keep: Path | None = None, order=None) -> SweepReport:
+           keep: Path | None = None, order=None, should_yield=None) -> SweepReport:
     report = SweepReport(budget=budget)
     report.recovered, err = recover(worktree)
     if err:
@@ -1079,6 +1088,14 @@ def _sweep(worktree: Path, base: str, test_cmd: str, *, timeout: float, select_t
                 report.exhausted = (f"the {budget.seconds:g}s wall-clock budget ran out after "
                                     f"{n} of {len(muts)} mutation(s) ({elapsed:.0f}s spent)")
                 _mark_unrun(report, chosen[n:], report.exhausted)
+                break
+            # ⏳ CMX-400: between two mutations — the last one's file is restored — an agent
+            # waiting for the suite slot gets it now, not after the whole battery.
+            wanted = should_yield() if (n and should_yield is not None) else ""
+            if wanted:
+                report.yielded = wanted
+                _mark_unrun(report, chosen[n:], f"yielded the suite slot to {wanted} after "
+                                                f"{n} of {len(muts)} mutation(s)")
                 break
             if progress is not None:
                 progress(n, len(chosen), mut)
