@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import contextlib
 import json
+import os
+import stat
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -354,6 +356,7 @@ def test_a_passing_hand_in_records_every_phase(tf_run, chela_dir, monkeypatch, c
     out = capsys.readouterr().out
     assert "⏱️ hand-in (passed): total " in out
     assert "slot wait 33s" in out and "sweep 0s (20s slot wait)" in out
+    assert "self_check 0s (4s slot wait)" in out and "remerge 0s (2s slot wait)" in out
 
 
 def test_a_refused_hand_in_is_recorded_too(tf_run, chela_dir, monkeypatch, capsys):
@@ -489,3 +492,104 @@ def test_a_nightly_run_records_its_provision_and_sweep_phases(chela_dir, monkeyp
         "provision": 3.0, "sweep": 40.0}
     assert rec["timings"]["slot_wait"] == 43.0
     assert judge_timing.active() is None
+
+
+# --- the phase lists, pinned against INDEPENDENT literals --------------------------------
+#
+# ⛔ Never derive these from `judge_timing.HAND_IN_PHASES` / `NIGHTLY_PHASES`: a test that
+# reads the tuple it guards agrees with any corruption of it. Every phase is seeded at once,
+# so dropping ANY name from a tuple drops its row from what the user is shown.
+
+HAND_IN = ("lint", "suite",
+           "self_check", "self_check.baseline", "self_check.baseline.flake_rerun",
+           "self_check.experiments",
+           "sweep", "sweep.baseline", "sweep.baseline.flake_rerun", "sweep.mutations",
+           "remerge")
+NIGHTLY = ("provision", "sweep", "sweep.baseline", "sweep.baseline.flake_rerun",
+           "sweep.mutations")
+JUDGE = ("setup", "reprovision", "provision", "baseline", "visible", "held_out",
+         "consistency")
+WHOLE = ("slot_wait", "run", "total")
+
+
+def _seeded(names, at="2026-11-17T00:00:00Z", **extra):
+    """One record holding every phase in ``names`` plus one no table lists (``bogus``)."""
+    phases = {n: {"seconds": 60.0 * (i + 1), "slot_wait": 0.0}
+              for i, n in enumerate((*names, "bogus"))}
+    return {"at": at, **extra,
+            "timings": {"phases": phases, "slot_wait": 5.0, "run": 900.0, "total": 999.0}}
+
+
+def _table_rows(lines: list[str]) -> list[str]:
+    header = next(i for i, line in enumerate(lines) if line.split()[:2] == ["phase", "n"])
+    return [line.split()[0] for line in lines[header + 1:]]
+
+
+def test_the_hand_in_summary_shows_every_hand_in_phase_and_nothing_else():
+    s = judge_timing.summarize_hand_ins([_seeded(HAND_IN, task_id="A", outcome="passed")])
+    assert set(s["phases"]) == {*HAND_IN, *WHOLE, "task_total"}
+    rows = _table_rows(judge_timing.summary_lines(s, "x", "hand-in timings", "attempt"))
+    assert sorted(rows) == sorted({*HAND_IN, *WHOLE, "task_total"})
+
+
+def test_the_nightly_summary_shows_every_nightly_phase_and_nothing_else(chela_dir, capsys):
+    judge_timing.append_record(sweep_nightly.timings_path(), _seeded(NIGHTLY, status="clean"))
+    _judge_timings("--nightly")
+    rows = _table_rows(capsys.readouterr().out.splitlines())
+    assert sorted(rows) == sorted({*NIGHTLY, *WHOLE})
+
+
+def test_the_judge_summary_keeps_its_own_phases(chela_dir, monkeypatch, capsys):
+    monkeypatch.setattr(judge, "load_all_private", lambda: [_seeded(JUDGE)])
+    _judge_timings()
+    rows = _table_rows(capsys.readouterr().out.splitlines())
+    assert sorted(rows) == sorted({*JUDGE, *WHOLE})
+
+
+def test_the_hand_in_line_names_every_phase_in_run_order():
+    line = judge_timing.hand_in_line(_seeded(HAND_IN)["timings"], "passed")
+    named = [part.split()[0] for part in line.split(" · ")[2:]]
+    assert named == list(HAND_IN)
+    assert "bogus" not in line
+
+
+def test_a_record_exactly_at_the_since_edge_counts_in_every_figure():
+    now = 1_763_400_000.0      # 2025-11-17T17:20:00Z
+    rec = _rec("A", "2025-11-17T16:20:00Z", "passed", 100)
+    s = judge_timing.summarize_hand_ins([rec], since=3600, now=now)
+    assert s["rounds"] == 1 and s["tasks"] == 1 and s["outcomes"] == {"passed": 1}
+    assert s["phases"]["task_total"]["n"] == 1
+
+
+# --- every timings file is private to the user -------------------------------------------
+
+@pytest.fixture
+def open_umask():
+    """umask 0, so the mode is exactly what the code asked for — a 077 umask would hide a
+    0644 (or 0755) behind the mask."""
+    old = os.umask(0)
+    try:
+        yield
+    finally:
+        os.umask(old)
+
+
+def _mode(path: Path) -> int:
+    return stat.S_IMODE(path.stat().st_mode)
+
+
+def test_append_record_writes_0600_in_a_0700_directory(tmp_path, open_umask):
+    path = tmp_path / "new-dir" / "t.jsonl"
+    assert judge_timing.append_record(path, {"a": 1})
+    assert _mode(path) == 0o600
+    assert _mode(path.parent) == 0o700
+
+
+def test_every_timings_writer_writes_a_private_file(chela_dir, open_umask):
+    timer = judge_timing.RoundTimer(clock=Clock())
+    assert judge_timing.record_hand_in("CMX-9", timer, "passed", now=0)
+    wf = SimpleNamespace(path=Path("/repo/WORKFLOW.md"))
+    assert sweep_nightly.record_timings(wf, {"at": 0, "status": "clean"}, timer, chela_dir)
+    for path in (judge_timing.hand_in_path("CMX-9"), sweep_nightly.timings_path(chela_dir)):
+        assert _mode(path) == 0o600, path
+    assert _mode(judge_timing.hand_in_dir()) == 0o700
