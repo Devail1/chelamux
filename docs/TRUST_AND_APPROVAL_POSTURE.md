@@ -192,7 +192,7 @@ merge its own always-human PR, with one `urllib` POST: no Origin header read as 
 the merge-gate hook never saw a `curl`, and the dashboard channel skipped the agent check.
 Now (`chela/dashboard/humanproof.py`):
 
-- a page the browser loads (`/`, `/override/<id>`) sets an `HttpOnly`, `SameSite=Strict`
+- a page the browser loads (`/`, `/override/<id>`) sets an `HttpOnly`, `SameSite=Lax`
   session cookie and embeds that session's token, an HMAC under a key that exists only in
   the dashboard process's memory;
 - a decision must carry the cookie, the matching token (`X-Chela-Session-Token`, or the

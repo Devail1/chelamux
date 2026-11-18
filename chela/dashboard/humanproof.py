@@ -9,7 +9,7 @@ same-origin.
 The proof is a per-browser-session token, the standard synchronizer pattern bound to a cookie:
 
 * A page the browser loads (``/`` and the ``/override/<id>`` confirm page) gets a session id
-  in an ``HttpOnly``, ``SameSite=Strict`` cookie (:data:`COOKIE`) and, embedded in the page,
+  in an ``HttpOnly``, ``SameSite=Lax`` cookie (:data:`COOKIE`) and, embedded in the page,
   that session's token: an HMAC of the id under :data:`_SECRET`, a random key that exists only
   in this dashboard process's memory (never on disk, never in the env, rotated on restart).
 * A decide request must carry the cookie, the matching token (header :data:`HEADER`, or the
@@ -62,7 +62,12 @@ def session_for(request) -> str:
 
 
 def set_cookie(resp, session_id: str) -> None:
-    resp.set_cookie(COOKIE, session_id, httponly=True, samesite="Strict", path="/")
+    """``Lax``, not ``Strict``: the operator reaches ``/override/<id>`` from a Telegram or
+    notification link, a cross-site navigation. Under ``Strict`` that GET arrives without the
+    cookie, so a fresh session would be minted over it and every open tab's token would go
+    stale. ``Lax`` still withholds the cookie from a cross-site POST, and :func:`refusal`
+    refuses any POST whose Origin is not this host regardless."""
+    resp.set_cookie(COOKIE, session_id, httponly=True, samesite="Lax", path="/")
 
 
 def refusal(request) -> str | None:

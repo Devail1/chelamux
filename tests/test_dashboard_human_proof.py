@@ -8,7 +8,7 @@ is a SERVICE channel, so ``overrides.decide`` skipped its agent refusal. The alw
 merged on the agent's own say-so.
 
 The fix (``chela/dashboard/humanproof.py``): the page a browser loads sets an HttpOnly,
-SameSite=Strict session cookie and embeds that session's token (an HMAC under a secret that
+SameSite=Lax session cookie and embeds that session's token (an HMAC under a secret that
 lives only in the dashboard process's memory). A decide POST must carry the cookie, the
 matching token, and an Origin naming this host. Absent any of the three ⇒ 403, nothing decided.
 
@@ -107,7 +107,7 @@ def test_the_real_confirm_page_with_its_token_approves_and_merges(repo):  # noqa
     assert page.status_code == 200
     assert humanproof.COOKIE in page.headers.get("Set-Cookie", "")
     assert "HttpOnly" in page.headers["Set-Cookie"]
-    assert "SameSite=Strict" in page.headers["Set-Cookie"]
+    assert "SameSite=Lax" in page.headers["Set-Cookie"]
     # the page embeds a live token: never cached, so a back-button copy can't replay a stale one
     assert page.headers["Cache-Control"] == "no-store"
     token = _page_token(page.data)
@@ -448,7 +448,7 @@ def test_a_second_page_load_keeps_the_session_so_an_open_tab_still_decides(repo)
     first = client.get("/")
     spa = re.search(rb'"sessionToken":\s*"([0-9a-f]{64})"', first.data).group(1).decode()
     cookie = first.headers["Set-Cookie"]
-    assert "HttpOnly" in cookie and "SameSite=Strict" in cookie and "Path=/" in cookie
+    assert "HttpOnly" in cookie and "SameSite=Lax" in cookie and "Path=/" in cookie
     again = re.search(rb'"sessionToken":\s*"([0-9a-f]{64})"', client.get("/").data).group(1)
     assert again.decode() == spa
     assert _page_token(client.get(f"/override/{rid}").data) == spa
