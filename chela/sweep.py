@@ -59,7 +59,7 @@ import time
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
 
-from chela import generated, judge, judge_select, suite_guard
+from chela import generated, judge, judge_select, judge_timing, suite_guard
 
 RECOVERY_MARKER = ".chela-sweep-recovery.json"
 PY_SUFFIXES = (".py",)
@@ -1051,7 +1051,8 @@ def _sweep(worktree: Path, base: str, test_cmd: str, *, timeout: float, select_t
         return report
     failures: list[judge.SuiteResult] = []
     reruns: list[judge.SuiteResult] = []
-    with tempfile.TemporaryDirectory(prefix="chela-sweep-select-") as scratch:
+    with (judge_timing.within("baseline"),       # ⏱️ CMX-397: hand-in / nightly timings
+          tempfile.TemporaryDirectory(prefix="chela-sweep-select-") as scratch):
         baseline, selector, report.selection = judge.run_baseline(
             worktree, test_cmd, timeout, Path(scratch), select_tests=select_tests,
             failures=failures, flakes=report.baseline_flakes, reruns=reruns)
@@ -1099,8 +1100,9 @@ def _sweep(worktree: Path, base: str, test_cmd: str, *, timeout: float, select_t
                 break
             if progress is not None:
                 progress(n, len(chosen), mut)
-            result, contamination = _run_one(worktree, test_cmd, mut, baseline, timeout,
-                                             selector)
+            with judge_timing.within("mutations"):
+                result, contamination = _run_one(worktree, test_cmd, mut, baseline, timeout,
+                                                 selector)
             report.results.append(result)
             if contamination:
                 report.cannot_verify = contamination

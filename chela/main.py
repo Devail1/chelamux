@@ -2633,12 +2633,27 @@ def cmd_task_finished(args) -> None:
     # 🧠 CMX-393: ONE suite slot for every check below, start to finish — the self-check,
     # the sweep, the standard suite and the base-move re-run all re-enter it, so no other
     # agent's battery runs between two of them.
+    # ⏱️ CMX-397: every phase below, slot waits included, lands in
+    # `hand-in-timings/<task>.jsonl` — a refused attempt too (it held the slot all the same).
+    timer = judge_timing.RoundTimer()
+    outcome = "error"
     try:
-        with dispatcher.hand_in_battery(args.task_id):
-            partial, accepted = _task_finished_checks(args, experiments, no_new_guards, sync)
-    except suite_guard.SlotTimeout as e:
-        print(f"task-finished: 🧠 the hand-in checks could not start: {e}")
-        sys.exit(1)
+        with judge_timing.activate(timer):
+            try:
+                with dispatcher.hand_in_battery(args.task_id):
+                    partial, accepted = _task_finished_checks(args, experiments, no_new_guards,
+                                                              sync)
+            except suite_guard.SlotTimeout as e:
+                outcome = "slot_timeout"
+                print(f"task-finished: 🧠 the hand-in checks could not start: {e}")
+                sys.exit(1)
+        outcome = "passed"
+    except SystemExit:
+        outcome = "refused" if outcome == "error" else outcome
+        raise
+    finally:
+        judge_timing.record_hand_in(args.task_id, timer, outcome)
+        print(judge_timing.hand_in_line(timer.as_dict(), outcome), flush=True)
     kwargs = {"handoff": getattr(args, "handoff", None)}
     if accepted:
         kwargs["sweep_equivalents"] = accepted
@@ -2684,13 +2699,15 @@ def _task_finished_checks(args, experiments: str | None, no_new_guards: bool,
     # ⚖️🪜 CMX-296: what the hand-in checks follows the diff's risk tier.
     tier = dispatcher.hand_in_tier(args.task_id)
     checks = dispatcher.hand_in_checks(tier, experiments=bool(experiments))
+    judge_timing.note(tier=tier, checks=list(checks))
     partial = None
     accepted: list[dict] = []
     if "lint" in checks:
         _task_finished_standard(args.task_id, experiments,
                                 getattr(args, "sweep_equivalent", None) or [])
     elif "self_check" in checks:
-        check = dispatcher.verify_self_check(args.task_id, experiments)
+        with judge_timing.within("self_check"):
+            check = dispatcher.verify_self_check(args.task_id, experiments)
         if not check.get("ok"):
             print(f"task-finished: self-check could not run — {check.get('error', 'unknown error')}")
             sys.exit(1)
@@ -2733,12 +2750,14 @@ def _task_finished_checks(args, experiments: str | None, no_new_guards: bool,
               "no guards) next time.")
 
     if "sweep" in checks:
-        accepted = _task_finished_sweep(args.task_id,
-                                        getattr(args, "sweep_equivalent", None) or [])
+        with judge_timing.within("sweep"):
+            accepted = _task_finished_sweep(args.task_id,
+                                            getattr(args, "sweep_equivalent", None) or [])
     if sync.get("since"):
         # ⚖️🔀 CMX-334: the base moved while the checks ran — no second battery for it.
-        move = dispatcher.reconcile_base_move(
-            args.task_id, sync["since"], experiments if "self_check" in checks else None)
+        with judge_timing.within("remerge"):
+            move = dispatcher.reconcile_base_move(
+                args.task_id, sync["since"], experiments if "self_check" in checks else None)
         if not move.get("ok"):
             print(f"task-finished: 🔀 {move['error']}")
             sys.exit(1)
@@ -3468,12 +3487,25 @@ def cmd_judge_timings(args) -> None:
     except ValueError as e:
         print(f"judge timings: {e}", file=sys.stderr)
         sys.exit(2)
-    summary = judge_timing.summarize(judge.load_all_private(), since)
+    # ⏱️ CMX-397: the same table for `chela task-finished` hand-ins and nightly sweeps.
+    if getattr(args, "hand_in", False):
+        summary = judge_timing.summarize_hand_ins(judge_timing.load_hand_ins(), since)
+        title, unit = "hand-in timings", "attempt"
+    elif getattr(args, "nightly", False):
+        from chela import sweep_nightly
+
+        summary = judge_timing.summarize(
+            judge_timing.read_records(sweep_nightly.timings_path()), since,
+            names=judge_timing.NIGHTLY_PHASES)
+        title, unit = "nightly sweep timings", "run"
+    else:
+        summary = judge_timing.summarize(judge.load_all_private(), since)
+        title, unit = "judge timings", "round"
     if args.json:
         print(json.dumps(summary, indent=2))
         return
     label = f"over the last {args.since}" if args.since else "over all recorded rounds"
-    print("\n".join(judge_timing.summary_lines(summary, label)))
+    print("\n".join(judge_timing.summary_lines(summary, label, title, unit)))
 
 
 def cmd_judge_ack_blocked_race(args) -> None:
@@ -4591,6 +4623,13 @@ def main() -> None:
                             help="Only rounds recorded in the last DURATION (7d, 24h); "
                                  "default: all time")
     p_jtimings.add_argument("--json", action="store_true", help="Machine-readable output")
+    p_jtimings_kind = p_jtimings.add_mutually_exclusive_group()
+    p_jtimings_kind.add_argument(
+        "--hand-in", action="store_true",
+        help="⏱️ `chela task-finished` attempts instead (lint, suite, self-check, sweep, "
+             "re-merge, slot wait; task_total = all of one task's attempts)")
+    p_jtimings_kind.add_argument("--nightly", action="store_true",
+                                 help="⏱️ nightly sweeps instead")
     p_ops = sub.add_parser("ops", help="🔎 Fleet operations checks")
     ops_sub = p_ops.add_subparsers(dest="ops_cmd", required=True)
     p_oscan = ops_sub.add_parser(

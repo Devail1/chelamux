@@ -946,7 +946,8 @@ def _rerun_failed_once(
     named = _failing_test_names(baseline.tail) if named is None else named
     if rerun_skip_reason(baseline, named):
         return baseline
-    rerun = run_suite(judge_select.extend(test_cmd, named), worktree, timeout)
+    with judge_timing.within("flake_rerun"):     # ⏱️ CMX-397: a hand-in / nightly phase
+        rerun = run_suite(judge_select.extend(test_cmd, named), worktree, timeout)
     if reruns is not None:
         reruns.append(rerun)
     if not rerun.green or rerun.passed < len(named):
@@ -2711,7 +2712,8 @@ def _self_check(
         report.cannot_verify = ts_problem
         return report
 
-    with tempfile.TemporaryDirectory(prefix="chela-judge-select-") as scratch:
+    with (judge_timing.within("baseline"),       # ⏱️ CMX-397: the hand-in's timings
+          tempfile.TemporaryDirectory(prefix="chela-judge-select-") as scratch):
         baseline, selector, report.selection = run_baseline(
             worktree, test_cmd, timeout, Path(scratch), select_tests=select_tests)
     report.baseline = baseline
@@ -2737,8 +2739,9 @@ def _self_check(
                                 f"{n} of {len(items)} experiment(s)")
             _mark_unrun(report, chosen[n:], report.exhausted)
             break
-        outcomes, contamination = _apply_experiments(
-            worktree, test_cmd, [raw_exp], baseline, timeout, selector)
+        with judge_timing.within("experiments"):
+            outcomes, contamination = _apply_experiments(
+                worktree, test_cmd, [raw_exp], baseline, timeout, selector)
         report.outcomes.extend(outcomes)
         if contamination:
             report.cannot_verify = contamination

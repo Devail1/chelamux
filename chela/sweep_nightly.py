@@ -97,7 +97,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Protocol
 
-from chela import config, judge, risktier, sweep
+from chela import config, judge, judge_timing, risktier, sweep
 from chela.workflow import dispatch_enabled
 
 log = logging.getLogger(__name__)
@@ -956,8 +956,10 @@ def run(wf, *, now: float | None = None, chela_dir: Path | None = None,
                 result.update(status=SKIPPED, reason=ALREADY_RUNNING,
                               why="another nightly sweep is already running")
             else:
+                timer = judge_timing.RoundTimer()
                 try:
-                    _run(wf, now, chela_dir, filer, result, budget)
+                    with judge_timing.activate(timer):     # ⏱️ CMX-397: measure only
+                        _run(wf, now, chela_dir, filer, result, budget)
                 except Exception as e:  # noqa: BLE001 — a crash is still ONE result, said
                     log.exception("nightly sweep crashed")
                     result.update(status=CANNOT_VERIFY,
@@ -969,6 +971,7 @@ def run(wf, *, now: float | None = None, chela_dir: Path | None = None,
                 if result.get("covered") and result["status"] != CANNOT_VERIFY \
                         and not result["failed"]:
                     _record_covered(wf, now, chela_dir)
+                record_timings(wf, result, timer, chela_dir)
     log.info("nightly sweep (%s): %s%s", wf.path, result["status"],
              f" — {result['why']}" if result.get("why") else "")
     if trigger in (IDLE, FALLBACK):
@@ -1070,7 +1073,8 @@ def _sweep_and_file(wf, worktree: Path, head: str, ref: str, standard: list[dict
     # built it — no venv, no node_modules. Provision it HERE, before the battery: the sweep's
     # own provisioning runs only after it has collected the mutations, and collecting a
     # .ts/.tsx file's already needs `typescript` (the first night was CANNOT VERIFY on that).
-    env_problem = judge.provision_suite_env(worktree)
+    with judge_timing.within("provision"):
+        env_problem = judge.provision_suite_env(worktree)
     if env_problem:
         result.update(status=CANNOT_VERIFY,
                       why=f"the nightly worktree could not be PROVISIONED: {env_problem}")
@@ -1079,12 +1083,13 @@ def _sweep_and_file(wf, worktree: Path, head: str, ref: str, standard: list[dict
     cfg = judge.judge_suite_config(wf)
     budget = budget if budget is not None else nightly_budget(wf)
     # ⏳ CMX-400: an agent waiting for the suite slot stops the battery between mutations.
-    report = sweep.sweep(worktree, f"{ref}@{head[:12]} (standard-tier lines)",
-                         cfg.test_cmd, timeout=cfg.suite_timeout_seconds,
-                         select_tests=cfg.select_tests, provision=False, budget=budget,
-                         lines=swept, keep=evidence_dir(wf, result["at"], chela_dir),
-                         order=lambda muts: owed_first(muts, first, lines),
-                         should_yield=slot_wanted)
+    with judge_timing.within("sweep"):
+        report = sweep.sweep(worktree, f"{ref}@{head[:12]} (standard-tier lines)",
+                             cfg.test_cmd, timeout=cfg.suite_timeout_seconds,
+                             select_tests=cfg.select_tests, provision=False, budget=budget,
+                             lines=swept, keep=evidence_dir(wf, result["at"], chela_dir),
+                             order=lambda muts: owed_first(muts, first, lines),
+                             should_yield=slot_wanted)
     unrun = [r.mutation.key for r in report._with(sweep.UNRUN)]
     result.update(yielded_to=report.yielded, sweep_seconds=report.seconds,
                   budget_seconds=budget.seconds)
@@ -1317,6 +1322,23 @@ def record_run(wf, result: dict, chela_dir: Path | None = None) -> None:
             _write_json(path, runs)
     except Exception:  # noqa: BLE001 — logged; doctor then reads the last run as stale
         log.exception("nightly sweep: could not record the run in %s", path)
+
+
+def timings_path(chela_dir: Path | None = None) -> Path:
+    return state_dir(chela_dir) / judge_timing.NIGHTLY_TIMINGS_FILENAME
+
+
+def record_timings(wf, result: dict, timer: judge_timing.RoundTimer,
+                   chela_dir: Path | None = None) -> bool:
+    """⏱️ CMX-397: append this night's per-phase wall-clock (slot wait included) — what
+    ``chela judge timings --nightly`` summarises. Never raises: the record is not the work."""
+    try:
+        rec = {"workflow": str(wf.path), "at": judge_timing.utc_stamp(result["at"]),
+               "status": result.get("status"), "timings": timer.as_dict()}
+    except Exception:  # noqa: BLE001 — the record is not the work
+        log.exception("nightly sweep: could not build the timings record")
+        return False
+    return judge_timing.append_record(timings_path(chela_dir), rec)
 
 
 def notify(result: dict) -> None:
