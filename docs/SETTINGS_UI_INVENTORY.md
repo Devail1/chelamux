@@ -20,7 +20,7 @@ grep -rhoE 'os\.environ(\.get)?\(["'"'"']CHELA_[A-Z0-9_]+["'"'"']|os\.environ\[[
   | grep -oE 'CHELA_[A-Z0-9_]+' | sort -u | wc -l
 ```
 
-**68** (was 58, then 49 after CMX-217 wired the 9-strong "Daemon loop intervals" group
+**69** (was 58, then 49 after CMX-217 wired the 9-strong "Daemon loop intervals" group
 below through `chela.config.dashboard_setting()`, its precedence layer — CMX-220 then
 wired the 9-strong "Dispatch / judge / critic policy" group the same way (CMX-264 then
 added a tenth member, `memory_slice_budget_bytes`, straight onto that same registry, so it
@@ -40,7 +40,7 @@ until CMX-86 added the four orchestrator-inbox notice knobs, group 5 — then 66
 added `CHELA_SELFCHECK_ALERT_S`, group 5 — then 67, until CMX-103 added `CHELA_DASHBOARD_URL`,
 group 7 — then 66, until CMX-266 retired `CHELA_TERMINAL_TIMESTAMPS`, group 8 — then 67, until
 CMX-318 added `CHELA_PARK_MAX_S`, group 5 — then 68, until CMX-372 added `CHELA_RESTORE_ENV`,
-group 4) — every literal `CHELA_*` name a Python module in
+group 4 — then 69, until CMX-443 added `CHELA_STDIN_BLOCKED_ALERT_S`, group 5) — every literal `CHELA_*` name a Python module in
 `chela/` reads straight off `os.environ`.
 `tests/test_settings_inventory.py::test_inventory_matches_env_reads` re-runs this scan and
 diffs it against the table below on every `pytest` run, so the count can't go stale the way
@@ -237,7 +237,7 @@ one-line env edit — a checkbox implies casualness these should not have. If a 
 surfaces them at all, it should be **read-only status** (what the drawer's Connections &
 Status section already does for other facts), not a write control.
 
-### 5. Notifications / inbox (16) — mixed
+### 5. Notifications / inbox (17) — mixed
 
 | Variable | Default | Class | Notes |
 |---|---|---|---|
@@ -256,6 +256,7 @@ Status section already does for other facts), not a write control.
 | `CHELA_MARKER_UNREAD_ALERT_S` | `300` | `hot` | How long a task-finished/push-request marker may sit unapplied before one inbox notice (CMX-86) |
 | `CHELA_SELFCHECK_ALERT_S` | derived | `hot` | How long a `chela task-finished` / `chela judge sweep` / pytest may run in a running run's worktree (counted as activity, never "stuck") before one "self-check running for …" inbox notice (CMX-110). Unset: 1.5 × the run's own budget from its WORKFLOW.md (larger of `judge.self_check_budget_seconds` / `judge.sweep_budget_seconds`, plus `judge.suite_timeout_seconds`), else 5400 (CMX-365) |
 | `CHELA_PARK_MAX_S` | `21600` | `hot` | How long a run parked with `chela park` stays exempt from the stuck notice before one "parked … past the max" inbox notice (CMX-318) |
+| `CHELA_STDIN_BLOCKED_ALERT_S` | `300` | `hot` | How long a leaf process in a stuck run's worktree must have been alive, asleep reading its stdin, before the stuck notice names it as the thing to kill (CMX-443) |
 | `CHELA_INBOX_FILE` | `$CHELA_DIR/inbox.json` | `internal-path` | |
 | `CHELA_ORCHESTRATOR_WID` | empty | `identity` | Pins the inbox target window; env pin carries no epoch/session (see `chela/inbox.py`) |
 
