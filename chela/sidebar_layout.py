@@ -30,7 +30,8 @@ Store shape (``CHELA_DIR/sidebar-layout.json``)::
                 "seen": {"s:<session id>": <epoch ms>}},   # CMX-378, omitted while empty
      "view":   {"groupBy": "...", "sort": "...", ...},
      "width":  288,
-     "rows":   {"<group key>": {"keys": ["s:<session id>", ...], "at": <epoch ms>}}}
+     "rows":   {"<group key>": {"keys": ["s:<session id>", ...], "at": <epoch ms>}},
+     "pins":   ["s:<session id>", ...]}
 
 ``width`` (CMX-278) is the desktop sidebar's width in CSS px, clamped to
 [:data:`MIN_WIDTH`, :data:`MAX_WIDTH`]; ``None`` until someone drags it (the default).
@@ -38,7 +39,12 @@ Store shape (``CHELA_DIR/sidebar-layout.json``)::
 ``rows`` (CMX-381) is the Manual sort's order of the sessions inside each group: the rows'
 stable keys (CMX-378's ``s:<session id>``, else ``run:<task>`` / ``w:<window>``) top to
 bottom, and ``at``, when that group was last ordered (a session created after it goes to
-the top). A group nobody ordered by hand has no entry.
+the top). A group nobody ordered by hand has no entry. CMX-390: a parent's children are
+ordered under ``~kids:<the parent's key>`` the same way.
+
+``pins`` (CMX-390) are the sessions shown in the sidebar's Pinned section, by their SESSION
+key (``s:<session id>``, the CMX-378 lesson: a window id is renumbered by every restore). A
+pinned session is never archived (:func:`pinned_keys`, read by the archive route).
 """
 from __future__ import annotations
 
@@ -51,7 +57,7 @@ from chela.config import CHELA_DIR
 _STORE = CHELA_DIR / "sidebar-layout.json"
 _LOCK = threading.Lock()
 
-FIELDS = ("order", "custom", "view", "width", "rows")
+FIELDS = ("order", "custom", "view", "width", "rows", "pins")
 
 # Bounds — a layout is a few dozen keys; anything far larger is a bug or abuse, never a
 # sidebar. Over-long values are dropped, not truncated into something that half-means.
@@ -138,8 +144,13 @@ def _clean_rows(v: object) -> dict:
     return out
 
 
+def _clean_pins(v: object) -> list[str]:
+    """Session keys only: a pin on a window id would pin a stranger after a restore."""
+    return [k for k in _clean_order(v) if k.startswith("s:") and len(k) > 2]
+
+
 _CLEAN = {"order": _clean_order, "custom": _clean_custom, "view": _clean_view, "width": _clean_width,
-          "rows": _clean_rows}
+          "rows": _clean_rows, "pins": _clean_pins}
 
 
 def _read() -> dict | None:
@@ -199,3 +210,11 @@ def import_once(patch: object) -> tuple[bool, dict]:
         data.update(fields)
         _write(data)
         return True, state()
+
+
+def pinned_keys() -> frozenset[str]:
+    """CMX-390: the pinned sessions' keys (``s:<session id>``). The archive refuses each of
+    them, whether archived by hand or by a parent's cascade. Read per call, never cached:
+    an unpin on another device must count at once."""
+    data = _read()
+    return frozenset(data["pins"]) if data else frozenset()

@@ -8,7 +8,7 @@ import { icons } from '../../../shared/icons/index.ts';
 import { IconButton, Menu, type MenuItem } from '../../../shared/ui/index.ts';
 import {
   ENV_KINDS, GROUP_MODES, SORTS, VIEW_ACTIVITY, VIEW_STATUS, type Group, type Item, type SidebarState,
-  assignKey, isRunsRow, isArchivable, normalizeView,
+  PINNED_NO_ARCHIVE, assignKey, isArchivable, isRunsRow, isPinned, normalizeView, pinKey,
 } from '../model.ts';
 import type { SidebarActions } from './actions.ts';
 
@@ -40,7 +40,7 @@ export function GroupMenu({ g, index, count, s, actions, menu }: {
   g: Group; index: number; count: number; s: SidebarState; actions: SidebarActions; menu: Open;
 }) {
   // "Archive all" archives the group's FINISHED rows only (model isArchivable).
-  const n = g.items.filter(it => isArchivable(it, { wants: s.wants, orchWid: s.orchWid })).length;
+  const n = g.items.filter(it => isArchivable(it, { wants: s.wants, orchWid: s.orchWid, pins: s.pins })).length;
   const act = (a: string) => () => void actions.groupMenuAction(g.key, a);
   const items: MenuItem[] = [
     ...(g.cwd ? [{ label: 'New session', onSelect: () => void actions.groupNewSession(g.key) }, 'separator' as const] : []),
@@ -77,9 +77,10 @@ function folderItems({ g, index, count }: RowGroup, actions: SidebarActions): Me
   ];
 }
 
-/** A row's menu: a run's panes, Move to group… (under Custom groups only, CMX-74), Archive. */
-export function RowMenu({ it, s, actions, menu, group }: {
-  it: Item; s: SidebarState; actions: SidebarActions; menu: Open; group?: RowGroup;
+/** A row's menu: a run's panes, Move to group… (under Custom groups only, CMX-74), Pin / Unpin
+ * (CMX-390), Archive. */
+export function RowMenu({ it, s, actions, menu, group, archived = false }: {
+  it: Item; s: SidebarState; actions: SidebarActions; menu: Open; group?: RowGroup; archived?: boolean;
 }) {
   const [page, setPage] = useState<'main' | 'move'>('main');
   const onOpenChange = (o: boolean) => {
@@ -111,9 +112,18 @@ export function RowMenu({ it, s, actions, menu, group }: {
     // CMX-438: a dispatched run lives in Runs, never in a custom group
     const runs = isRunsRow(it, { orchWid: s.orchWid, dispatchOff: s.dispatchOff });
     if (s.view.groupBy === 'custom' && !runs) items.push({ label: 'Move to group…', keepOpen: true, onSelect: () => setPage('move') }, 'separator');
+    // CMX-390: only a session can be pinned (by its session id), and an archived row cannot.
+    const pins = s.pins ?? [];
+    const pinned = isPinned(it, pins);
+    if (pinKey(it) && !archived) {
+      items.push({ label: pinned ? 'Unpin' : 'Pin', icon: icons.pin, onSelect: () => void actions.rowMenuAction(it.key, pinned ? 'unpin' : 'pin') });
+    }
     // A row already in the Archived section is not archived twice (its way back is Unarchive).
-    const archivable = !s.archived.includes(it.key) && isArchivable(it, { wants: s.wants, orchWid: s.orchWid });
-    items.push({ label: 'Archive', disabled: !archivable, onSelect: () => void actions.rowMenuAction(it.key, 'archive') });
+    const archivable = !s.archived.includes(it.key) && isArchivable(it, { wants: s.wants, orchWid: s.orchWid, pins });
+    items.push(pinned
+      ? { label: 'Archive', disabled: true, title: PINNED_NO_ARCHIVE, onSelect: () => {},
+        trailing: <span className="menu-hint">{PINNED_NO_ARCHIVE}</span> }
+      : { label: 'Archive', disabled: !archivable, onSelect: () => void actions.rowMenuAction(it.key, 'archive') });
   }
   const label = it.kind === 'run' ? 'Run menu' : 'Row menu';
   return (

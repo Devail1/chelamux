@@ -38,6 +38,12 @@ Store shape (``CHELA_DIR/sidebar-archive.json``)::
                                                               # hide-only rows (runs)
      "sessions": {"s:<session id>": {<resume record>}, ...}}  # closed human sessions
 
+**A parent's archive cascades** (CMX-390, :func:`archive_tree` / :func:`unarchive_tree`):
+archiving a session archives the live sessions it launched (:mod:`chela.parentage`), and
+unarchiving it resumes the archived ones. **A pinned session is never archived**
+(:func:`chela.sidebar_layout.pinned_keys`): not by hand, not by a cascade, which also stops
+at it, so its own children stay with it.
+
 A hidden ``w:@N`` (only ever a migrated localStorage key) is stamped with the tmux epoch it
 was hidden under: after a tmux restart that ``@N`` is a stranger's window, so the key is
 dropped (:func:`state`) instead of hiding whatever window recycles the id.
@@ -136,12 +142,32 @@ def _drop_dangling_windows() -> dict:
     return data
 
 
+def _parents() -> dict:
+    """The session-parent table (:mod:`chela.parentage`); ``{}`` when it cannot be read."""
+    from chela import parentage   # deferred: parentage reads the session registry
+
+    try:
+        return parentage.parents()
+    except Exception:  # noqa: BLE001 — an unreadable table nests nothing; it hides nothing
+        log.warning("archive: session parents unreadable", exc_info=True)
+        return {}
+
+
 def state() -> dict:
     """What the sidebar renders: ``{"hidden": [keys], "sessions": [records]}``, sessions
-    newest-archived first."""
+    newest-archived first. Each record carries its session's ``parent_session_id`` (or None),
+    so the Archived section nests an archived subtree as the live list did (CMX-390)."""
     data = _drop_dangling_windows()
+    table = _parents()
     sessions = sorted(data["sessions"].values(), key=lambda r: -(r.get("archived_at") or 0))
+    sessions = [{**r, "parent_session_id": _parent_of(table, r.get("session_id"))} for r in sessions]
     return {"hidden": sorted(data["hidden"]), "sessions": sessions}
+
+
+def _parent_of(table: dict, sid: object) -> str | None:
+    entry = table.get(sid) if isinstance(sid, str) else None
+    parent = entry.get("parent") if isinstance(entry, dict) else None
+    return parent if isinstance(parent, str) and parent else None
 
 
 def archived_session_ids() -> set[str]:
@@ -263,7 +289,8 @@ def close_window(wid: str) -> str | None:
     return None
 
 
-def archive_window(wid: str, *, orch_wid: str | None, dispatched: set[str]) -> Outcome:
+def archive_window(wid: str, *, orch_wid: str | None, dispatched: set[str],
+                   pinned: frozenset[str] | set[str] = frozenset()) -> Outcome:
     """Archive the HUMAN session in ``wid``: record how to resume it, then close the window.
 
     ``orch_wid`` (the decisions-inbox holder) and ``dispatched`` (the window ids the
@@ -274,7 +301,8 @@ def archive_window(wid: str, *, orch_wid: str | None, dispatched: set[str]) -> O
     * is the orchestrator;
     * is a dispatched run's agent or judge (hide the RUN instead — :func:`hide`);
     * is busy, or waiting on a human — or runs Claude whose status cannot be read;
-    * has no session id chela can positively name with a transcript on disk.
+    * has no session id chela can positively name with a transcript on disk;
+    * runs a session ``pinned`` holds (its ``s:<session id>`` key, CMX-390).
 
     The record is written BEFORE the kill (a crash between the two leaves a record of a
     live window, which the next ``state`` read shows as already-resumable, never a lost
@@ -305,6 +333,8 @@ def archive_window(wid: str, *, orch_wid: str | None, dispatched: set[str]) -> O
     if not sid:
         return Outcome(False, f"{wid} ({name}): its Claude session id cannot be determined — "
                               "closing it could not be undone, so it is not archived", 409)
+    if session_key(sid) in pinned:
+        return Outcome(False, f"{wid} ({name}) is pinned: unpin to archive", 409)
     cwd = (pane.origin if pane is not None else None) or discovery.get_window_cwd_by_id(wid)
     if not cwd:
         return Outcome(False, f"{wid} ({name}): its working directory cannot be read — "
@@ -335,6 +365,75 @@ def archive_window(wid: str, *, orch_wid: str | None, dispatched: set[str]) -> O
         return Outcome(False, f"{wid} ({name}): closing the window failed — {err}", 500)
     log.info("archive: closed %s (%s), session %s in %s", wid, name, sid, cwd)
     return Outcome(True, record=record, wid=wid, name=name)
+
+
+# --- the cascade (CMX-390): a parent takes its subtree with it ---------------------------
+
+def archive_tree(wid: str, *, orch_wid: str | None, dispatched: set[str],
+                 pinned: frozenset[str] | set[str], parents: dict,
+                 wid_of) -> list[tuple[str, Outcome]]:
+    """Archive ``wid``, then every LIVE session below it (``parents``, the
+    :mod:`chela.parentage` table; ``wid_of(session id)`` -> its live window or None), parent
+    before child. ``[(wid, outcome), ...]``, the asked-for window first.
+
+    The walk goes down only through sessions it archived: nothing below a refused parent is
+    touched. A pinned child is not archived and neither is anything under it; a session with
+    no live window (already archived, or closed) ends its branch the same way, so an
+    archived subtree is always one connected piece, the one :func:`unarchive_tree` brings
+    back."""
+    first = archive_window(wid, orch_wid=orch_wid, dispatched=dispatched, pinned=pinned)
+    out = [(wid, first)]
+    root = (first.record or {}).get("session_id") if first.ok else None
+    if not root:
+        return out
+    kids = _children(parents)
+    todo = list(kids.get(root, []))
+    seen = {root}
+    while todo:
+        sid = todo.pop(0)
+        if sid in seen:
+            continue
+        seen.add(sid)
+        if session_key(sid) in pinned:
+            continue
+        child_wid = wid_of(sid)
+        if not child_wid:
+            continue
+        res = archive_window(child_wid, orch_wid=orch_wid, dispatched=dispatched, pinned=pinned)
+        out.append((child_wid, res))
+        if res.ok:
+            todo.extend(kids.get(sid, []))
+    return out
+
+
+def unarchive_tree(key: str, parents: dict) -> list[tuple[str, Outcome]]:
+    """Resume the archived session ``key``, then each archived session below it, parent
+    before child, through archived sessions only (the subtree the Archived section draws
+    under it). ``[(key, outcome), ...]``, ``key`` first; a failed resume ends its branch."""
+    first = unarchive_session(key)
+    out = [(key, first)]
+    if not first.ok:
+        return out
+    kids = _children(parents)
+    todo = list(kids.get(key[len("s:"):], []))
+    seen: set[str] = set()
+    while todo:
+        sid = todo.pop(0)
+        child = session_key(sid)
+        if child in seen or child not in _load()["sessions"]:
+            continue
+        seen.add(child)
+        res = unarchive_session(child)
+        out.append((child, res))
+        if res.ok:
+            todo.extend(kids.get(sid, []))
+    return out
+
+
+def _children(parents: dict) -> dict[str, list[str]]:
+    from chela import parentage   # deferred: parentage reads the session registry
+
+    return parentage.children_of(parents)
 
 
 # --- unarchive: resume it -----------------------------------------------------------------

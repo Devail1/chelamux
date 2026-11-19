@@ -63,6 +63,8 @@ export interface AgentRow {
     session_moved?: boolean;
     /** The Claude session this window runs now (CMX-278). */
     session_id?: string | null;
+    /** CMX-389: the session that launched this one, or null (CMX-390 nests it under that). */
+    parent_session_id?: string | null;
     last_activity?: string | number | null;
     recap_ts?: string | number | null;
     created?: string | number | null;
@@ -80,6 +82,9 @@ export interface SessionRecord {
     session_id?: string;
     cwd?: string;
     archived_at?: number;
+    /** CMX-390: its session's parent (chela/sidebar_archive.py `state`), so the Archived
+     * section nests an archived subtree. */
+    parent_session_id?: string | null;
 }
 
 export type Wants = (a: AgentRow) => boolean;
@@ -120,6 +125,8 @@ export const ARCHIVED_SECTION_KEY = '~archived';
 export const DISPATCHED_KEY = '~dispatched';
 /** The lifted "Needs you" section above the groups (not a group: it has no `data-g`). */
 export const NEEDS_YOU_KEY = '~needs-you';
+/** CMX-390: the Pinned section at the very top: fixed, never a drop target. */
+export const PINNED_KEY = '~pinned';
 // Where the dispatcher puts a run's worktree. A session sitting in one is dispatched
 // work, and must never get a group named after the worktree (one group per run).
 export const WORKTREE_SEG = '/.chela/worktrees/';
@@ -385,8 +392,10 @@ const RUN_SETTLED = new Set(['done', 'closed', 'failed']);
 // session's window is CLOSED (after recording how to resume it — and refused when its
 // session id is unknown), a settled run is only HIDDEN (its windows are the dispatcher's).
 export function isArchivable(item: Item | null | undefined,
-    { wants, orchWid }: { wants?: Wants; orchWid?: string | null } = {}): boolean {
+    { wants, orchWid, pins }: { wants?: Wants; orchWid?: string | null; pins?: readonly string[] | null } = {}): boolean {
     if (!item || !wants) return false;
+    // CMX-390: a pinned session is never archived (the server refuses it too)
+    if (pins && isPinned(item, pins)) return false;
     for (const a of item.windows || []) {
         if (!a) return false;
         if (orchWid && a.window_id === orchWid) return false;
@@ -702,7 +711,8 @@ export const ROW_ORDER_MODES: readonly string[] = ['folder', 'custom', 'none'];
  * in a pinned section (Needs you, Dispatched, Archived). */
 export function canOrderRows(view: Pick<View, 'groupBy' | 'sort'>, groupKey?: string | null): boolean {
     if (view.sort !== 'manual' || !ROW_ORDER_MODES.includes(view.groupBy)) return false;
-    return groupKey == null || (groupKey !== DISPATCHED_KEY && groupKey !== ARCHIVED_SECTION_KEY && groupKey !== NEEDS_YOU_KEY);
+    return groupKey == null || (groupKey !== DISPATCHED_KEY && groupKey !== ARCHIVED_SECTION_KEY
+        && groupKey !== NEEDS_YOU_KEY && groupKey !== PINNED_KEY);
 }
 
 /** The key a row is ordered by: its custom-group assignment key (a session id when it has one). */
@@ -743,6 +753,118 @@ export function placeRow(items: Item[], stored: RowOrder | null | undefined, key
     const hidden = (stored?.keys || []).filter(k => !drawn.includes(k) && !byKey.has(k) && keep(k));
     const dated = items.map(createdTs).filter((t): t is number => t != null);
     return { keys: [...drawn, ...hidden], at: dated.length ? Math.max(...dated) : now };
+}
+
+// --- Session parentage: the tree (CMX-390) ---------------------------------------------------
+//
+// A session another session launched (CMX-389's `parent_session_id`) is drawn ONLY under its
+// parent: indented, with a guide line. A parent row carries a chevron and its count; its
+// collapsed state is per device, keyed by its SESSION (`~tree:s:<sid>`), so a reboot that
+// renumbers every window keeps it. Siblings follow the active sort; under Manual they keep
+// their own order, under `~kids:<the parent's key>` in the layout's `rows`.
+//
+// A PINNED session (the layout's `pins`, by session key) sits in the Pinned section at the
+// top, its children under it, and is never archived. Needs you still lifts a row blocked on
+// a human: there it is a root (a triage list, never hidden under a collapsed parent).
+
+/** Deeper than this the parentage is not trusted (chela's own cap, CHELA_PARENT_MAX_DEPTH,
+ * tops out at 10): a deeper chain is cut into a new root. */
+export const MAX_TREE_DEPTH = 10;
+const TREE_PREFIX = '~tree:';
+const KIDS_PREFIX = '~kids:';
+
+/** The session a row IS: a live window's session, or an archived record's. Runs have none. */
+export function itemSid(it: Item): string | null {
+    if (it.kind === 'agent') return it.agent?.session_id || null;
+    if (it.kind === 'session') return it.record?.session_id || null;
+    return null;
+}
+
+/** The session that launched this row's session, or null. */
+export function itemParentSid(it: Item): string | null {
+    if (it.kind === 'agent') return it.agent?.parent_session_id || null;
+    if (it.kind === 'session') return it.record?.parent_session_id || null;
+    return null;
+}
+
+/** The key a row is pinned by (`s:<session id>`), or null: only a session can be pinned. */
+export function pinKey(it: Item): string | null {
+    const sid = itemSid(it);
+    return sid ? `${SESSION_KEY_PREFIX}${sid}` : null;
+}
+
+export function isPinned(it: Item, pins: readonly string[]): boolean {
+    const k = pinKey(it);
+    return !!k && pins.includes(k);
+}
+
+/** What a pinned row's disabled Archive says. */
+export const PINNED_NO_ARCHIVE = 'Pinned: unpin to archive';
+
+/** Indentation stops growing past this many levels, so a deep tree never pushes a row's ⋯
+ * off a phone (style.css caps `.tree-kids` the same way). */
+export const INDENT_LEVELS = 3;
+
+/** A parent row's collapsed-state key (per device), by its session. */
+export function treeKey(it: Item): string { return `${TREE_PREFIX}${assignKey(it)}`; }
+/** A parent's children's list key: their Manual row order in `rows`, and their drag list. */
+export function kidsKey(it: Item): string { return `${KIDS_PREFIX}${assignKey(it)}`; }
+
+/** `items` nested by session parentage: the roots, in input order, and each parent's
+ * children (by the parent's item key), in input order. A row's parent is the row in `items`
+ * whose session launched it; `forceRoot(it, ancestors)` (its parent chain within `items`,
+ * nearest first) keeps a row at the top instead. A loop in the data, or a chain deeper than
+ * MAX_TREE_DEPTH, is cut, never followed forever. */
+export function nestItems(items: Item[], forceRoot: (it: Item, ancestors: Item[]) => boolean = () => false):
+    { roots: Item[]; children: Map<string, Item[]> } {
+    const bySid = new Map<string, Item>();
+    for (const it of items) {
+        const sid = itemSid(it);
+        if (sid && !bySid.has(sid)) bySid.set(sid, it);
+    }
+    const rawParent = (it: Item): Item | null => {
+        const p = itemParentSid(it);
+        const at = p ? bySid.get(p) : undefined;
+        return at && at !== it ? at : null;
+    };
+    const chain = (it: Item): Item[] | null => {
+        const out: Item[] = [];
+        for (let p = rawParent(it); p; p = rawParent(p)) {
+            if (p === it || out.includes(p)) return null;   // a loop: no tree to trust
+            out.push(p);
+        }
+        return out;
+    };
+    // Every kept link is a link of a loop-free chain, so cutting some of them (a forced root,
+    // a chain too deep) can never close a loop.
+    const parent = new Map<Item, Item>();
+    for (const it of items) {
+        const up = chain(it);
+        const p = up?.[0];
+        if (!up || !p || up.length > MAX_TREE_DEPTH || forceRoot(it, up)) continue;
+        parent.set(it, p);
+    }
+    const roots: Item[] = [];
+    const children = new Map<string, Item[]>();
+    for (const it of items) {
+        const p = parent.get(it);
+        if (!p) roots.push(it);
+        else (children.get(p.key) ?? children.set(p.key, []).get(p.key) as Item[]).push(it);
+    }
+    return { roots, children };
+}
+
+/** Every row under `it` (children, theirs, ...), top to bottom. */
+export function descendants(it: Item, children: Record<string, Item[]>): Item[] {
+    const out: Item[] = [];
+    const walk = (x: Item) => { for (const c of children[x.key] ?? []) { if (!out.includes(c)) { out.push(c); walk(c); } } };
+    walk(it);
+    return out;
+}
+
+/** The rows a section draws top to bottom: each root, then its subtree unless folded. */
+export function visibleRows(roots: Item[], kids: Record<string, Item[]>, collapsed: readonly string[]): Item[] {
+    return roots.flatMap(it => [it, ...(collapsed.includes(treeKey(it)) ? [] : visibleRows(kids[it.key] ?? [], kids, collapsed))]);
 }
 
 // An archived (CLOSED) session's row (CMX-75): it has no window any more — only the
@@ -904,20 +1026,27 @@ export interface GroupOptions {
     rows?: Record<string, RowOrder>;
     /** CMX-388: CHELA_DISPATCH=off, so no Dispatched section (see plainFolderKey). */
     dispatchOff?: boolean;
+    /** CMX-390: the pinned sessions' keys (`s:<session id>`). */
+    pins?: readonly string[];
 }
 
 export interface SidebarModel {
     needsYou: Item[];
+    /** CMX-390: the pinned roots (the Pinned section, top of the sidebar). */
+    pinned: Item[];
     groups: Group[];
     archived: Item[];
     hidden: string[];
+    /** CMX-390: each parent row's children (by the parent's item key), in their sort. Every
+     * section's `items` / rows above are its ROOTS only. */
+    children: Record<string, Item[]>;
 }
 
 export function groupSidebar(agents: (AgentRow | null | undefined)[] | null | undefined, opts: GroupOptions): SidebarModel {
     const { mode = 'folder', wants, orchWid = null, order = [], archived = new Set<string>(),
         showArchived = false, env = null, activityDays = null, now = Date.now(),
         sort = 'name', labelOf = (it: Item) => it.key, showEmpty = false,
-        custom = { groups: [], assign: {} }, sessions = [], rows = {}, dispatchOff = false } = opts;
+        custom = { groups: [], assign: {} }, sessions = [], rows = {}, dispatchOff = false, pins = [] } = opts;
     const status = opts.status || (showArchived ? 'all' : 'active');
     if (!GROUP_MODES.includes(mode)) throw new Error(`unknown sidebar grouping mode: ${mode}`);
     const items = buildItems(agents);
@@ -932,15 +1061,19 @@ export function groupSidebar(agents: (AgentRow | null | undefined)[] | null | un
     const hidden: string[] = [];
     const archivedRows: Item[] = [];
     const kept: Item[] = [];
+    const pinnedRows: Item[] = [];
     const allFolders = new Set<string>();
     for (const it of items) {
         if (it.windows.some(a => wants(a))) { needsYou.push(it); continue; }
         if (mode === 'folder') allFolders.add(folderOf(it));
+        // CMX-390: a pinned session is never archived and never filtered out; Archived shows
+        // nothing else.
+        if (isPinned(it, pins)) { if (status !== 'archived') pinnedRows.push(it); continue; }
         if (orchWid && it.windows.some(a => a.window_id === orchWid)) { kept.push(it); continue; }
         // Archived only while it is still archivable: a row that wakes up (busy, waiting)
         // is shown again whatever the archive set says. An archived row goes to the ONE
         // Archived section at the bottom — never into a group.
-        if (archived.has(it.key) && isArchivable(it, { wants, orchWid })) {
+        if (archived.has(it.key) && isArchivable(it, { wants, orchWid, pins })) {
             hidden.push(it.key);
             archivedRows.push(it);
             continue;
@@ -954,6 +1087,19 @@ export function groupSidebar(agents: (AgentRow | null | undefined)[] | null | un
         kept.push(it);
     }
     for (const rec of sessions || []) if (rec && rec.key) archivedRows.push(sessionItem(rec));
+
+    // CMX-390: nest every live row under the row whose session launched it. Needs you is a
+    // triage list, so its rows stay roots there; a pinned row is a root of Pinned unless a
+    // pinned ancestor already holds it. Only the ROOTS go on to the sections below.
+    const lifted0 = new Set(needsYou);
+    const pinnedSet = new Set(pinnedRows);
+    const live = nestItems([...needsYou, ...pinnedRows, ...kept],
+        (it, up) => lifted0.has(it) || (pinnedSet.has(it) && !up.some(p => pinnedSet.has(p))));
+    const isRoot = new Set(live.roots);
+    const arch = nestItems(archivedRows);
+    const archRoots = new Set(arch.roots);
+    const keptRoots = kept.filter(it => isRoot.has(it));
+    const pinnedRoots = pinnedRows.filter(it => isRoot.has(it));
 
     // The candidate groups, in a mode's own fixed order (rank); folders are found.
     type Draft = { key: string; items: Item[]; label?: string; rank?: number; flat?: boolean };
@@ -991,11 +1137,11 @@ export function groupSidebar(agents: (AgentRow | null | undefined)[] | null | un
         }
         return folderOf(it);
     };
-    for (const it of kept) ensure(keyOf(it)).items.push(it);
+    for (const it of keptRoots) ensure(keyOf(it)).items.push(it);
     // In the State grouping, "Needs you" is a group like the others.
-    let lifted = needsYou;
+    let lifted = needsYou.filter(it => isRoot.has(it));
     if (mode === 'state') {
-        ensure('~state:needs').items.unshift(...needsYou);
+        ensure('~state:needs').items.unshift(...lifted);
         lifted = [];
     }
 
@@ -1013,11 +1159,21 @@ export function groupSidebar(agents: (AgentRow | null | undefined)[] | null | un
     let ordered = orderGroups(groups, order);
     // Grouped by Custom groups, Runs is pinned at the TOP (Dispatched stays last by folder).
     if (mode === 'custom') ordered = [...ordered.filter(g => g.key === DISPATCHED_KEY), ...ordered.filter(g => g.key !== DISPATCHED_KEY)];
+    // Siblings follow the active sort; under Manual, their own order (`~kids:<parent>`). The
+    // Archived section keeps its own order (newest archived first), nested or not.
+    const children: Record<string, Item[]> = Object.fromEntries(arch.children);
+    const itemOf = new Map(items.map(it => [it.key, it]));
+    for (const [k, list] of live.children) {
+        const lk = kidsKey(itemOf.get(k) as Item);
+        children[k] = _sortItems(list, sortOf(lk), labelOf, rows[lk]);
+    }
     return {
         needsYou: _sortItems(lifted, sortOf(NEEDS_YOU_KEY), labelOf),
+        pinned: _sortItems(pinnedRoots, sortOf(PINNED_KEY), labelOf),
         groups: ordered,
-        archived: archivedRows,
+        archived: archivedRows.filter(it => archRoots.has(it)),
         hidden,
+        children,
     };
 }
 
@@ -1029,7 +1185,11 @@ export function groupSidebar(agents: (AgentRow | null | undefined)[] | null | un
 export function sidebarWids(model: Partial<SidebarModel>): string[] {
     const out: string[] = [];
     const seen = new Set<string>();
-    const rows = [...(model.needsYou || []), ...(model.groups || []).flatMap(g => g.items), ...(model.archived || [])];
+    // CMX-390: a parent's subtree right under it, as drawn
+    const kids = model.children || {};
+    const tree = (list: Item[]) => list.flatMap(it => [it, ...descendants(it, kids)]);
+    const rows = tree([...(model.needsYou || []), ...(model.pinned || []), ...(model.groups || []).flatMap(g => g.items),
+        ...(model.archived || [])]);
     for (const it of rows) {
         const prim = primaryWindow(it);
         for (const a of [prim, ...(it.windows || [])]) {
@@ -1075,6 +1235,8 @@ export interface SidebarState {
     altHeld: boolean;
     /** CMX-388: BOOT.dispatchOffByChoice. */
     dispatchOff?: boolean;
+    /** CMX-390: the pinned sessions' keys (the server layout's `pins`). */
+    pins?: string[];
 }
 
 // An item's display label: a run reads `CMX-37 · <title>`; a window reads its CMX-62
@@ -1091,7 +1253,7 @@ export function modelOptions(s: SidebarState): GroupOptions {
         archived: new Set(s.archived), status: s.view.status, env: s.view.env,
         activityDays: VIEW_ACTIVITY[s.view.activity] ?? null, now: s.now, sort: s.view.sort,
         labelOf: it => itemLabel(it, s.labels), showEmpty: s.view.showEmpty, custom: s.custom,
-        sessions: s.sessions, rows: s.rows, dispatchOff: !!s.dispatchOff,
+        sessions: s.sessions, rows: s.rows, dispatchOff: !!s.dispatchOff, pins: s.pins ?? [],
     };
 }
 

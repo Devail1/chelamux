@@ -362,7 +362,7 @@ def test_a_window_key_routes_to_archive_window_with_the_dispatched_set(client, m
     monkeypatch.setattr(client, "_dispatched_wids", lambda windows, runs: {"@7"})
     seen = {}
 
-    def fake(wid, *, orch_wid, dispatched):
+    def fake(wid, *, orch_wid, dispatched, pinned=frozenset()):
         seen.update(wid=wid, dispatched=dispatched)
         return sa.Outcome(True, record={"key": f"s:{SID}"}, wid=wid)
     monkeypatch.setattr(sa, "archive_window", fake)

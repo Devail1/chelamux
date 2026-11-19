@@ -195,7 +195,7 @@ test('the nav rows, Recent and the width handle each repaint on their own store,
   expect($('#side-recent-island .agent-row-name')?.textContent).toBe('five');
   bridge.agents.set([{ window_id: '@9', session_id: 'sid' }]); // that session is live now
   expect(must('#side-recent-island').innerHTML).toBe('');
-  bridge.sidebarLayout.set({ order: [], custom: null, view: null, width: 400, rows: {}, loaded: true });
+  bridge.sidebarLayout.set({ order: [], custom: null, view: null, width: 400, rows: {}, pins: [], loaded: true });
   expect(must('.sidebar-resize').getAttribute('aria-valuenow')).toBe('400');
 });
 
