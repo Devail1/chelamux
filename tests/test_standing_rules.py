@@ -182,6 +182,7 @@ def test_the_seeded_rules_file_stays_under_the_length_cap():
     "Never put another issue's id in a PR title or body",
     "`[c]hela …`",
     "Reply to the orchestrator with SendMessage, not tmux",
+    "`git commit -F <file>`",
 ])
 def test_the_seeded_file_carries_each_rule_on_one_line(needle):
     rules = [ln for ln in _RULES_FILE.read_text(encoding="utf-8").splitlines()
