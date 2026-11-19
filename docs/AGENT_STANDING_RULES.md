@@ -13,3 +13,4 @@ These hold for every run. When the orchestrator corrects an agent, the fix lands
 - Never put another issue's id in a PR title or body; Linear auto-closes any issue a merged PR names.
 - Don't `pgrep -f "<literal>"`, since it matches your own shell; use a bracketed pattern like `[c]hela …`.
 - Reply to the orchestrator with SendMessage, not tmux, so the message carries who sent it.
+- Write commit and PR messages to a file and pass it with `git commit -F <file>` / `--pr-body-file` / `--body-file`, never a heredoc piped into `cat` (`$(cat <<'EOF' …)`): a quote or backtick in the message breaks the heredoc and `cat` blocks forever on a stdin that never closes.

@@ -379,6 +379,11 @@ there and releases the slot to it. The run ends as yielded, and every mutation i
 is owed (`owed.json`), so the next run starts with those. The first mutation always runs, so a
 busy box still makes progress.
 
+**Owed growth.** Each day's last owed count is kept in `owed-history.json`. The notice says how
+it moved since the day before ("620 owed to the next night (+121 since 2026-11-18)"), and when
+it has grown 3 days running it says that too: "⚠️ owed has grown 3 days running: 300 → 410 →
+499 → 620". A history that can't be read is a warning in the notice, never "no growth".
+
 **Once a day.** A run that ends without yielding finishes the day. A yielded run may resume the
 same day when the box is idle again, until the day's `sweep.budget_seconds` (a daily total) is
 spent. The day record is `$CHELA_DIR/sweep-nightly/day.json`; a run that never reports back
@@ -386,10 +391,19 @@ ends its day, and an unreadable record starts nothing.
 
 **Fallback.** If no idle window comes by `nightly_at` + `sweep.fallback_after_hours`
 (default 3, so 05:00) and nothing has run that day, the sweep runs once anyway, on
-`sweep.fallback_budget_seconds` (default 1800), still yielding. It fires only inside its own
+`sweep.fallback_budget_seconds` (default 1800). It fires only inside its own
 window, `sweep.fallback_window_hours` (default 2, so 05:00–07:00): a day that missed it has no
 fallback, rather than one that takes the slot from agents in working hours. The inbox notice
 says "ran on fallback: the queue was never idle".
+
+**The fallback's floor.** The fallback exists for days when the queue is never idle, so
+yielding after every mutation measured almost nothing on exactly those days (11-19: 1 of 620
+ran). A fallback run therefore keeps the slot, even with agents waiting, until it has measured
+`sweep.fallback_floor_mutations` (default 10) or held the slot `sweep.fallback_floor_seconds`
+(default 900) past its first mutation, whichever comes first. Only then does it yield to a
+waiter. A dispatch pause or blocked hours (below) still stop it at once. Agents wait at most
+that floor, once a day, and the notice names them: "held the suite slot for its floor
+(10 mutation(s) or 15 min) while CMX-12 waited".
 
 **Held off.** Two things keep the sweep from starting at all, and make a running one yield
 between two mutations exactly as it does for an agent (the rest is owed):
