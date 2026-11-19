@@ -185,6 +185,69 @@ inside a Claude Code session or the orchestrator's process, and the merge-gate h
 session's `python` call into the approval path (`chela/overrides.py`, `chela/release.py`).
 See `docs/RUNS.md` ("Overriding the judge", "Releasing").
 
+**A dashboard decision must prove the operator's browser, not loopback** (CMX-392). Every
+dispatched agent runs on the same machine as the dashboard, so "the request came from
+`127.0.0.1`" proves nothing. Before CMX-392 an agent could approve its own override, and so
+merge its own always-human PR, with one `urllib` POST: no Origin header read as same-origin,
+the merge-gate hook never saw a `curl`, and the dashboard channel skipped the agent check.
+Now (`chela/dashboard/humanproof.py`):
+
+- a page the browser loads (`/`, `/override/<id>`) sets an `HttpOnly`, `SameSite=Lax`
+  session cookie and embeds that session's token, an HMAC under a key that exists only in
+  the dashboard process's memory;
+- a decision must carry the cookie, the matching token (`X-Chela-Session-Token`, or the
+  confirm form's `session_token` field) and an `Origin` that is exactly the dashboard's
+  `host:port` (over `http` or `https`, since the tailnet proxy terminates TLS). A missing
+  Origin is refused, since every browser sends one on a POST, and a `Sec-Fetch-Site` other
+  than `same-origin` is refused too. Any miss is a 403 and nothing is decided;
+- `chela.overrides.decide` no longer exempts the `dashboard` channel by name: only a call
+  the dashboard verified (`browser_proven=True`) skips the agent check. An unproven dashboard
+  caller is refused outright. Telegram is unchanged: a button tap is its own proof.
+
+Why a token rather than a mandatory Telegram confirm: Telegram is optional, and a
+dashboard-only operator (CMX-103) would be left with no way to approve.
+
+⚠️ **What this does not stop.** A process running as the operator's Unix user can still
+emulate a browser on purpose: GET `/`, keep the cookie it sets, read the token from the
+page, forge the Origin. That is two plain HTTP requests, not a hard barrier. Nothing on
+loopback can tell that apart from a real browser; only an OS boundary can (the agent sandbox
+in §2, whose strict network allowlist does not include loopback). The token closes the blind single POST, and makes what
+remains an explicit impersonation of the operator's browser rather than an API call that
+happens to work. The same holds in-process: `browser_proven` is an argument any Python caller
+can pass. Until chelamux's own agents run sandboxed, or approval moves to a channel an agent
+cannot drive (a Telegram tap), that is the honest ceiling.
+
+**The merge-gate hook is a speed bump, never the gate.** `chela/mergegate.py` denies a
+session's `chela merge-approve` and `chela share-requests approve`, a `curl`/`wget`/`http`/`xh`
+to `/override/` or `/api/share-requests/…/approve`, and a `python` call into
+`chela.overrides.decide`. It matches strings in argv, so any HTTP client it does not name
+(`python -c 'urllib…'`, `node -e 'fetch(…)'`, a script file) walks past it, and it does not
+look at the card's Merge route at all. It stays because it catches the obvious attempt and
+says why; the server-side proof above is what refuses.
+
+**Which dashboard routes need the proof** (audit, CMX-392). Every mutating route in
+`chela/dashboard/app.py` was checked for the same shape: does it decide something on the
+operator's behalf that an agent is refused elsewhere?
+
+| Route | Status |
+|---|---|
+| `POST /api/override/<id>/approve\|deny`, `POST /override/<id>` (the confirm page) | **proof required.** Approving an override merges a PR past the judge, or ships a release |
+| `POST /api/share-requests/<id>/approve\|deny\|revoke` | **proof required.** An approval grants a guest access to a terminal |
+| `POST /api/dispatcher/runs/<id>/merge` (the card's Merge) | **proof required.** It runs `gh pr merge` itself, which the merge-gate hook denies an agent; without the proof an agent could merge its own PR through it |
+| `POST /api/config` (agent permission mode, model), `/api/config/dispatch`, `/api/config/concurrency`, `/api/config/timing` | **should get it next.** Setting the permission mode loosens every future dispatch |
+| `POST /api/update/apply` | **should get it next.** It pulls and restarts every chela service |
+| `POST /api/schedules`, `PATCH`/`DELETE /api/schedules/<id>` | **should get it next.** A schedule runs a prompt on a timer |
+| `POST /api/dispatcher/backlog/promote`, `/api/dispatcher/init`, `/api/dispatcher/linear/issue` | **should get it next.** Each writes to a repo or tracker as the operator |
+| `POST /api/term/<wid>/share`, `/api/term/<wid>/share-mode` | **should get it next.** The unsandboxed mode's typed-window-name confirm is readable by an agent |
+| `POST /api/dispatcher/pause\|resume`, `/api/dispatcher/runs/<id>/close`, `/api/dispatcher/delete`, `/api/orchestrator/subscribe\|release` | lower risk: disruptive, but no gate is skipped |
+| terminal input (`/term/<wid>/…`, `/api/term/key`, `/paste`, `/paste-image`, `/upload`, `/watch`, `/grid`, `/api/agents/msg`, `/broadcast`, `/trigger`) | **no added power:** an agent on the box can already type into any pane with `tmux` or `chela msg` |
+| agent lifecycle (`/api/agents/start`, `stop`, `restart`, `rediscover`, `spawn`, `spawn-sandboxed`, `kill`, `<wid>/rename`, `<wid>/title`, `suggest-names`) | **no added power:** the same `tmux` and `chela` CLI calls are open to an agent |
+| sidebar archive (`/api/sidebar/archive`, `unarchive`, `archive/migrate`) and layout (`/api/sidebar/layout`), launcher pins (`/api/launcher/pin`, `unpin`, `forget`), restore (`/api/restore/dismiss`, `undismiss`, `resume`), rooms (`/api/rooms/join\|leave`), knowledge export (`/api/knowledge/export`) | **no added power:** each edits the operator's own view or files an agent can already write |
+| `POST /hooks/<event>`, `POST /api/inbox/denial` | **agent-posted by design:** agents' own hooks post these, so no browser proof is possible |
+
+The "should get it next" rows are tracked as one follow-up issue; until it lands, treat each
+as reachable by any process on the box.
+
 **Two unattended paths exist, and both are strictly opt-in, off by default, and loud when
 on** (`capabilities.py`'s `warn_when_on` logs a WARNING, not an INFO, on every boot they
 are enabled): `CHELA_AUTO_MERGE` runs the *same* `contract.merge` gate above on a timer
@@ -209,6 +272,7 @@ migrates its tracker from `markdown` to `gh_issues`.
 | Who may trigger a dispatch | `chela/sources/gh_issues.py`, `chela/sources/markdown.py` | this doc §1 |
 | What a running agent may do | `chela/dispatcher.py::resolve_agent_cmd`, `chela/dispatcher.py::_strip_agent_env_cmd` + `chela/envutil.py::AGENT_ENV_ALLOW` (env allowlist), `chela/workflow.py::workspace_escape`, `chela/memcap.py`, `chela/sandbox.py` (opt-in, off for chelamux) | this doc §2, `RESOURCE_ISOLATION.md`, `SANDBOX_BOUNDARY.md` |
 | What approves a merge | `chela/risktier.py` (tier), `chela/judge.py` (core, before merge), `chela/sweep_nightly.py` (standard, after merge), `chela/verdictcarry.py` (carry), `chela/contract.py::merge` | this doc §3, `ESCALATION_CONTRACT.md` |
+| That a dashboard decision is a human's | `chela/dashboard/humanproof.py`, `chela/overrides.py::decide` (`browser_proven`); `chela/mergegate.py` is advisory only | this doc §3 |
 | What a human must decide instead of the orchestrator | `chela/contract.py::escalate` | `ESCALATION_CONTRACT.md`'s decision taxonomy |
 
 This is chela's answer to **SPEC 10.5** ("Each implementation MUST document its chosen
