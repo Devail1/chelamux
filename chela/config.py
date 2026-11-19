@@ -1352,6 +1352,12 @@ def stuck_agent_alert_s() -> int:
     return int(os.environ.get("CHELA_STUCK_AGENT_ALERT_S", "1200"))
 
 
+def stdin_blocked_alert_s() -> int:
+    """CMX-443: a leaf process in an agent's worktree blocked reading its stdin, alive at least
+    this long, is named in the 🧊 STUCK notice as the thing to kill."""
+    return int(os.environ.get("CHELA_STDIN_BLOCKED_ALERT_S", "300"))
+
+
 def park_max_s() -> int:
     """A run parked by ``chela park`` (CMX-318) is never called STUCK — until it has been
     parked this long (or past its ``--until``); then ONE notice says the park outlived itself."""
