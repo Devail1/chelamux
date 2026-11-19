@@ -545,16 +545,20 @@ test('a custom group SURVIVES a window rename — it is keyed on the window id, 
     assert.deepEqual(rowsUnder('Keep'), ['new-name'], 'the renamed window fell out of its custom group');
 });
 
-test('a custom-group assignment is dropped when its WINDOW is gone (a recycled @N must not inherit it); a run\'s is kept', async () => {
+// CMX-438: a run is never assigned to a custom group (it lives in the Runs group); a stored
+// `run:` key is still kept by reconcileAssign (assign.test.ts).
+test('a custom-group assignment is dropped when its WINDOW is gone (a recycled @N must not inherit it); a run is never assigned', async () => {
     const a = win('gone-soon');
     const r = win('liavacc/cmx-8-q', { cwd: `${WT}/CMX-8`, dispatched: true, run: runCard('CMX-8', 'Q', 'agent') });
     render([a, r]);
     const g = sidebar.newCustomGroup('G');
     sidebar.moveToGroup(`w:${a.window_id}`, g.id);
     sidebar.moveToGroup('run:CMX-8', g.id);
+    await flush();
+    assert.deepEqual(server.st.layout.custom.assign, { [`w:${a.window_id}`]: g.id });
     render([win('other')]);   // both windows closed
     await flush();
-    assert.deepEqual(server.st.layout.custom.assign, { 'run:CMX-8': g.id });
+    assert.deepEqual(server.st.layout.custom.assign, {});
 });
 
 // CMX-378 (Liav, 2026-11-14: "can we make the groups setup persist?"): a reboot resumes every

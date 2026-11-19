@@ -664,3 +664,13 @@ test('the account-switch chip: shown with the old email and the honest wording, 
   expect(rowOf(el, 'old').title).toContain('May still use person-a@example.invalid');
   expect(meta(rowOf(el, 'new'), 'account')).toBeNull();
 });
+
+// CMX-434: a title "Suggest names" queued (the session was busy or blocked) shows on its row.
+test('CMX-434: a queued title shows as a pending chip on the row, absent otherwise', () => {
+  const { el } = draw(state([win('busy', { title_pending: 'Tipstack billing' }), win('calm', { title_pending: null })]));
+  const chip = meta(rowOf(el, 'busy'), 'titlePending');
+  expect(chip?.className).toBe('ar-pending');
+  expect(chip?.textContent).toBe('title pending');
+  expect(chip?.title).toBe('Title pending: Tipstack billing (applied when the session is idle)');
+  expect(meta(rowOf(el, 'calm'), 'titlePending')).toBeNull();
+});

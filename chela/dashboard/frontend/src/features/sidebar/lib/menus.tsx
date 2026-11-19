@@ -8,7 +8,7 @@ import { icons } from '../../../shared/icons/index.ts';
 import { IconButton, Menu, type MenuItem } from '../../../shared/ui/index.ts';
 import {
   ENV_KINDS, GROUP_MODES, SORTS, VIEW_ACTIVITY, VIEW_STATUS, type Group, type Item, type SidebarState,
-  PINNED_NO_ARCHIVE, assignKey, isArchivable, isPinned, normalizeView, pinKey,
+  PINNED_NO_ARCHIVE, assignKey, isArchivable, isRunsRow, isPinned, normalizeView, pinKey,
 } from '../model.ts';
 import type { SidebarActions } from './actions.ts';
 
@@ -109,7 +109,9 @@ export function RowMenu({ it, s, actions, menu, group, archived = false }: {
       if (it.agent) items.push({ label: 'Open agent pane', onSelect: () => void actions.rowMenuAction(it.key, 'agent') });
       items.push({ label: 'Open judge pane', disabled: !it.judge, onSelect: () => void actions.rowMenuAction(it.key, 'judge') }, 'separator');
     }
-    if (s.view.groupBy === 'custom') items.push({ label: 'Move to group…', keepOpen: true, onSelect: () => setPage('move') }, 'separator');
+    // CMX-438: a dispatched run lives in Runs, never in a custom group
+    const runs = isRunsRow(it, { orchWid: s.orchWid, dispatchOff: s.dispatchOff });
+    if (s.view.groupBy === 'custom' && !runs) items.push({ label: 'Move to group…', keepOpen: true, onSelect: () => setPage('move') }, 'separator');
     // CMX-390: only a session can be pinned (by its session id), and an archived row cannot.
     const pins = s.pins ?? [];
     const pinned = isPinned(it, pins);
@@ -176,6 +178,9 @@ export function ViewMenu({ state, actions }: { state: SidebarState | null; actio
       'separator',
       toggle('Show empty groups', 'toggle:showEmpty', v.showEmpty),
       toggle('Show PR status', 'toggle:showPR', v.showPR),
+      'separator',
+      // CMX-434: a dialog of proposals; nothing is renamed until it applies them.
+      { label: 'Suggest names…', onSelect: () => actions.suggestNames() },
     ],
   };
   return (

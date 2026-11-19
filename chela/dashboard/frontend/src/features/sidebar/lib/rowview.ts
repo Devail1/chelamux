@@ -7,7 +7,7 @@ import {
   type AgentRow, type Battery, type Item, type SidebarState, itemLabel, primaryWindow, runDot, runState,
 } from '../model.ts';
 
-export type MetaKind = 'orchestrator' | 'pr' | 'judging' | 'account' | 'context' | 'cwd';
+export type MetaKind = 'orchestrator' | 'pr' | 'judging' | 'account' | 'context' | 'cwd' | 'titlePending';
 
 export interface Meta {
   kind: MetaKind;
@@ -87,6 +87,8 @@ function metaOf(it: Item, a: AgentRow, s: SidebarState): Meta[] {
     const label = String(b.label ?? '').replace(/^\S+\s+/, '');
     out.push({ kind: 'judging', text: where, cls: 'ar-judge', title: `Judge ${label || `testing · ${where}`}` });
   }
+  // CMX-434: a title "Suggest names" queued; it is typed in once the session is idle
+  if (a.title_pending) out.push({ kind: 'titlePending', text: 'title pending', cls: 'ar-pending', title: `Title pending: ${a.title_pending} (applied when the session is idle)` });
   // CMX-395: started before the Claude account switch chela observed; it MAY use the old one
   const acct = switchBadge(a.account_switch);
   if (acct) out.push({ kind: 'account', text: acct.text, cls: 'ar-acct', title: acct.title });
@@ -124,7 +126,7 @@ export function rowView(it: Item, s: SidebarState): RowView | null {
   const extra = run
     ? [it.agent && `agent ${it.agent.name} · ${it.agent.window_id}`,
       it.judge && `judge ${it.judge.name} · ${it.judge.window_id}`].filter(Boolean).join('\n')
-    : [a.ai_title, a.recap].filter(Boolean).join(', ');
+    : [a.custom_title || a.ai_title, a.recap].filter(Boolean).join(', ');
   const ts = a.recap_ts ? new Date(a.recap_ts).getTime() : NaN;
   const age = Number.isFinite(ts) ? `${ago(Math.max(0, (s.now - ts) / 1000))} ago` : '';
   const onWall = !!a.window_id && s.onWall.includes(a.window_id);

@@ -265,6 +265,9 @@ class Pane:
     # dashboard, so its name outranks Claude's title in the display. Read in the same
     # ``list-windows`` as the rest, so the flag costs the poll no extra spawn.
     manual_name: bool = False
+    # CMX-434: the title "Suggest names" queued on this window (``@chela_title_pending``),
+    # waiting for its session to go idle; None when nothing waits. Same ``list-windows``.
+    title_pending: str | None = None
 
     @property
     def origin(self) -> str | None:
@@ -854,7 +857,7 @@ def _load_panes() -> dict[str, Pane]:
         result = subprocess.run(
             ["tmux", "list-windows", "-t", config.current_session(), "-F",
              "#{window_id}\t#{pane_current_command}\t#{pane_current_path}\t#{pane_pid}\t"
-             "#{@chela_manual_name}"],
+             "#{@chela_manual_name}\t#{@chela_title_pending}"],
             capture_output=True, text=True, timeout=5,
         )
     except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
@@ -867,9 +870,12 @@ def _load_panes() -> dict[str, Pane]:
         rows = []
         for line in result.stdout.splitlines():
             parts = line.split("\t")
-            if len(parts) != 5:
+            # A 5-column row (no pending-title column) still reads: nothing pending.
+            if len(parts) == 5:
+                parts.append("")
+            if len(parts) != 6:
                 continue
-            wid, command, path, pane_pid, manual = (p.strip() for p in parts)
+            wid, command, path, pane_pid, manual, pending = (p.strip() for p in parts)
             if not wid:
                 continue
             pid = direct = None
@@ -879,12 +885,12 @@ def _load_panes() -> dict[str, Pane]:
                     direct = _direct_claude_pid(int(pane_pid))
             except ValueError:
                 pid = direct = None
-            rows.append((wid, command, path, pid, direct, manual == "1"))
+            rows.append((wid, command, path, pid, direct, manual == "1", pending or None))
         table = _PS.get()
         if table is not None:
             table.cwd = _lsof_cwds(sorted({r[3] for r in rows if r[3]}))
         out: dict[str, Pane] = {}
-        for wid, command, path, pid, direct, manual in rows:
+        for wid, command, path, pid, direct, manual, pending in rows:
             out[wid] = Pane(
                 wid=wid, path=path, command=command, claude_pid=pid,
                 launched_in=_proc_cwd(pid) if pid else None,
@@ -892,6 +898,7 @@ def _load_panes() -> dict[str, Pane]:
                 started=proc_started(pid) if pid else None,
                 direct_claude_pid=direct,
                 manual_name=manual,
+                title_pending=pending,
             )
         return out
     finally:

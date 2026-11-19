@@ -71,6 +71,10 @@ export interface AgentRow {
     /** CMX-395: started before the latest Claude account switch (chela/claude_account.py). */
     account_switch?: unknown;
     ai_title?: string | null;
+    /** CMX-434: the title set with `/rename` (the transcript's customTitle); outranks ai_title. */
+    custom_title?: string | null;
+    /** CMX-434: a title "Suggest names" queued until the session goes idle. */
+    title_pending?: string | null;
     recap?: string | null;
     pr?: { url?: string; state?: string; draft?: boolean } | null;
 }
@@ -157,6 +161,26 @@ export function folderKey(a: AgentRow | null | undefined): string {
 export function plainFolderKey(a: AgentRow | null | undefined): string {
     const cwd = a ? _norm(a.cwd) : '';
     return cwd || OTHER_KEY;
+}
+
+// --- The Runs group (CMX-438) ----------------------------------------------------------
+//
+// Grouped by Custom groups, every dispatched run lands in ONE automatic group, **Runs**,
+// pinned at the TOP, whether or not any custom group exists (Liav, 11-18). It is the
+// Dispatched section's key (`DISPATCHED_KEY`), so it is pinned everywhere that one is: no
+// drag, no Manual order, no drop. A run is never in Ungrouped nor in a custom group, and is
+// never assigned to one (Move to group, a drop): runs are short-lived, and the row goes when
+// the run ends. Its judge rides inside its row. The orchestrator is a session, not a run: it
+// stays where the user puts it. With dispatch off by choice (CMX-388) there is no Runs group.
+export const RUNS_LABEL = 'Runs';
+
+/** Is `it` a dispatched run's row, for the Runs group? A run row, or a session the
+ * dispatcher owns (a worktree, a `dispatched` window); never the orchestrator's, and none
+ * at all with dispatch off. */
+export function isRunsRow(it: Item, opts: { orchWid?: string | null; dispatchOff?: boolean }): boolean {
+    if (opts.dispatchOff || it.kind === 'session') return false;
+    if (opts.orchWid && it.windows.some(a => a.window_id === opts.orchWid)) return false;
+    return it.kind === 'run' || folderKey(primaryWindow(it)) === DISPATCHED_KEY;
 }
 
 // `{key: label}` for a set of folder keys. The label is the folder's basename; two
@@ -434,6 +458,8 @@ export function moveGroup(keys: string[], stored: string[] | null | undefined, k
     const i = order.indexOf(key);
     const j = i + dir;
     if (i < 0 || j < 0 || j >= order.length) return null;
+    // the pinned Dispatched / Runs group neither moves nor trades places (CMX-438)
+    if (key === DISPATCHED_KEY || order[j] === DISPATCHED_KEY) return null;
     [order[i], order[j]] = [order[j] as string, order[i] as string];
     return [...order, ...(stored || []).filter(k => !order.includes(k))];
 }
@@ -459,11 +485,15 @@ export function placeGroup(keys: string[], stored: string[] | null | undefined, 
     before: string | null): string[] | null {
     if (key === DISPATCHED_KEY || !keys.includes(key) || key === before) return null;
     if (before != null && !keys.includes(before)) return null;
-    const rest = keys.filter(k => k !== key);
-    const pinned = rest.indexOf(DISPATCHED_KEY);
-    let at = before == null || before === DISPATCHED_KEY ? (pinned < 0 ? rest.length : pinned) : rest.indexOf(before);
-    if (pinned >= 0 && at > pinned) at = pinned;
-    const order = [...rest.slice(0, at), key, ...rest.slice(at)];
+    // CMX-438: under Custom groups the pinned group is Runs, at the TOP; a group dropped
+    // "before" it lands first among the movable ones, never above it.
+    const top = keys[0] === DISPATCHED_KEY;
+    const rest = keys.filter(k => k !== key && k !== DISPATCHED_KEY);
+    const tail = before == null || (before === DISPATCHED_KEY && !top);
+    const at = tail ? rest.length : before === DISPATCHED_KEY ? 0 : rest.indexOf(before);
+    const moved = [...rest.slice(0, at), key, ...rest.slice(at)];
+    const pin = keys.includes(DISPATCHED_KEY) ? [DISPATCHED_KEY] : [];
+    const order = top ? [...pin, ...moved] : [...moved, ...pin];
     if (order.every((k, i) => k === keys[i])) return null;
     return [...order, ...(stored || []).filter(k => !order.includes(k))];
 }
@@ -1087,6 +1117,8 @@ export function groupSidebar(agents: (AgentRow | null | undefined)[] | null | un
     if (mode === 'state') STATE_GROUPS.forEach((g, i) => ensure(g.key, { label: g.label, rank: i }));
     if (mode === 'date') DATE_GROUPS.forEach((g, i) => ensure(g.key, { label: g.label, rank: i }));
     if (mode === 'custom') {
+        // labels the Runs group; drawn only when a run lands in it (never with dispatch off)
+        ensure(DISPATCHED_KEY, { label: RUNS_LABEL, rank: -1 });
         (custom.groups || []).forEach((g, i) => ensure(customKey(g.id), { label: g.name, rank: i }));
         ensure(UNGROUPED_KEY, { label: 'Ungrouped', rank: 1e6 });
     }
@@ -1101,6 +1133,7 @@ export function groupSidebar(agents: (AgentRow | null | undefined)[] | null | un
         if (mode === 'state') return `~state:${itemState(it, wants)}`;
         if (mode === 'date') return isLive(it, wants) ? '~date:today' : dateBucket(activityTs(it), now);
         if (mode === 'custom') {
+            if (isRunsRow(it, { orchWid, dispatchOff })) return DISPATCHED_KEY;
             // keyed on the row's STABLE identity (session id / run id), never its label —
             // nor its window id, which a restore renumbers (CMX-378)
             const id = (custom.assign || {})[assignKey(it)];
@@ -1125,7 +1158,11 @@ export function groupSidebar(agents: (AgentRow | null | undefined)[] | null | un
         const label = g.label != null ? g.label : (labels[g.key] ?? g.key);
         return { ...g, label, cwd, items: _sortItems(g.items, sortOf(g.key), labelOf, rows[g.key]) };
     });
-    if (!showEmpty) groups = groups.filter(g => g.items.length || g.flat);
+    // an empty Runs group never shows, even with Show empty groups on (CMX-438)
+    groups = groups.filter(g => g.items.length || g.flat || (showEmpty && !(mode === 'custom' && g.key === DISPATCHED_KEY)));
+    let ordered = orderGroups(groups, order);
+    // Grouped by Custom groups, Runs is pinned at the TOP (Dispatched stays last by folder).
+    if (mode === 'custom') ordered = [...ordered.filter(g => g.key === DISPATCHED_KEY), ...ordered.filter(g => g.key !== DISPATCHED_KEY)];
     // Siblings follow the active sort; under Manual, their own order (`~kids:<parent>`). The
     // Archived section keeps its own order (newest archived first), nested or not.
     const children: Record<string, Item[]> = Object.fromEntries(arch.children);
@@ -1137,7 +1174,7 @@ export function groupSidebar(agents: (AgentRow | null | undefined)[] | null | un
     return {
         needsYou: _sortItems(lifted, sortOf(NEEDS_YOU_KEY), labelOf),
         pinned: _sortItems(pinnedRoots, sortOf(PINNED_KEY), labelOf),
-        groups: orderGroups(groups, order),
+        groups: ordered,
         archived: archivedRows.filter(it => archRoots.has(it)),
         hidden,
         children,
