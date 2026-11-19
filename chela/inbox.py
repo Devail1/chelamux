@@ -126,7 +126,7 @@ from contextlib import contextmanager
 from pathlib import Path
 
 from chela import agent_manager, discovery, epoch, event_log, hooks, judge, messenger, notify, sessions, transcripts
-from chela import config, digest, park, risktier, stall_alerts, suite_guard
+from chela import config, digest, park, risktier, stall_alerts, stdin_blocked, suite_guard
 from chela.config import INBOX_ENABLED
 from chela.hold import human_duration
 from chela.tui_text import sanitize_prompt
@@ -2414,9 +2414,12 @@ def stuck_probes(runs: list[dict]) -> dict[str, dict]:
     ``/proc``) — so the tick does it OUTSIDE the store lock. Activity is the later of the
     worktree's last commit and its transcript's last write; a run with no worktree on disk
     has nothing to probe. ``selfcheck`` is a live ``chela task-finished`` / ``chela judge
-    sweep`` / pytest running in the worktree (CMX-110) — or None."""
+    sweep`` / pytest running in the worktree (CMX-110) — or None. ``stdin_blocked`` is every
+    leaf in the worktree blocked reading a stdin nobody writes (CMX-443), oldest first."""
     out: dict[str, dict] = {}
     procs: list | None = None
+    blocked: list | None = None
+    now, min_age = time.time(), config.stdin_blocked_alert_s()
     for run in runs:
         task, worktree = run.get("task_id"), run.get("worktree_path")
         if not task or run.get("status") not in STUCK_RUN_STATES or not worktree:
@@ -2433,7 +2436,10 @@ def stuck_probes(runs: list[dict]) -> dict[str, dict]:
         if procs is None:
             procs = _selfcheck_scan()
         selfcheck = _selfcheck_for(worktree, procs)
-        out[task] = {"activity": max(stamps) if stamps else None, "markers": markers,
+        if blocked is None:
+            blocked = stdin_blocked.scan()
+        out[task] = {"stdin_blocked": stdin_blocked.for_worktree(worktree, blocked, now, min_age),
+                     "activity": max(stamps) if stamps else None, "markers": markers,
                      "selfcheck": selfcheck,
                      "selfcheck_budget": selfcheck_budget_s(worktree) if selfcheck else None,
                      "slot_wait": suite_guard.waits_in(worktree)}
@@ -2656,13 +2662,20 @@ def stuck_events(runs: list[dict], store: dict, probes: dict[str, dict], now: fl
         if (activity is not None and not probe.get("markers") and quiet >= quiet_after
                 and entry.get("stuck_at") != activity):
             entry["stuck_at"] = activity
+            # CMX-443: name the process the agent is waiting on when it is a read of a stdin
+            # nobody writes — the fix is killing it, and finding it took a ps/pstree dig.
+            stuck_on = (stdin_blocked.stalled_since(probe.get("stdin_blocked") or [],
+                                                    activity) or [None])[0]
+            why = f" — {stdin_blocked.describe(stuck_on)}" if stuck_on else ""
             out.append(_event(
                 "run_stuck",
                 f"🧊 {_label(run)} looks STUCK — no commit and no transcript activity for "
-                f"{human_duration(quiet)} while {run.get('status')} — `chela peek "
+                f"{human_duration(quiet)} while {run.get('status')}{why} — `chela peek "
                 f"{wid or run.get('window_name') or task}` — {up}",
                 _run_payload(run, quiet_s=int(quiet), daemon_state=daemon, daemon_uptime_s=(
-                    int(uptime) if uptime is not None else None)), wid=wid))
+                    int(uptime) if uptime is not None else None),
+                    stdin_blocked_pid=stuck_on["pid"] if stuck_on else None,
+                    stdin_blocked_comm=stuck_on["comm"] if stuck_on else None), wid=wid))
         nxt[task] = entry
     store["stuck"] = nxt
     return out
