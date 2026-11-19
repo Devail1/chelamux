@@ -433,7 +433,7 @@ test('Group by State: Working / Needs you / Idle / Completed — the orchestrato
     // it groups by its state like any other row
     const m = groupSidebar([{ name: 'orch', window_id: '@1', session_status: 'busy' }, { name: 'w', window_id: '@2' }],
         { wants, mode: 'state', orchWid: '@1' });
-    assert.equal(m.pinned, undefined);
+    assert.deepEqual(m.pinned, []);   // CMX-390: Pinned holds only what a user pinned
     assert.deepEqual(m.groups.find(g => g.key === '~state:working').items.map(i => i.agent.name), ['orch']);
 });
 
