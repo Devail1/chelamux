@@ -157,14 +157,21 @@ judge:
 # starts when no suite slot is held or waited for, memory is above one suite's peak, and that
 # has lasted `quiet_seconds`. It yields the slot to an agent between two mutations (the rest
 # is owed). budget_seconds is the DAILY total: a yielded run resumes the same day when idle
-# again until it is spent. With no idle window by nightly_at + fallback_after_hours (04:00)
-# and nothing run today, it runs once on fallback_budget_seconds. `mode: fixed` = the old
-# clock at nightly_at. See docs/RESOURCE_ISOLATION.md.
+# again until it is spent. With no idle window by nightly_at + fallback_after_hours (05:00)
+# and nothing run today, it runs once on fallback_budget_seconds — only inside
+# fallback_window_hours after that (05:00-07:00), never later in the day. `mode: fixed` = the
+# old clock at nightly_at. See docs/RESOURCE_ISOLATION.md.
+# ⏳ CMX-436, Liav 2026-11-18: nothing starts while `chela dispatch --pause` holds the queue
+# (the box should be QUIET) or inside blocked_hours (local, may wrap midnight: ~25 nautilus
+# cron jobs run 03:03-04:17 under memcap); a running sweep yields to either between two
+# mutations (the rest is owed), and a fallback inside a window moves to the window's end.
 sweep:
   mode: idle                    # idle (default) | fixed
   quiet_seconds: 600            # idle this long, unbroken, before an idle start
   nightly_at: "02:00"           # the fallback is this + fallback_after_hours
-  fallback_after_hours: 2       # → 04:00
+  fallback_after_hours: 3       # → 05:00
+  fallback_window_hours: 2      # the fallback fires only 05:00-07:00
+  blocked_hours: ["03:00-04:30"]  # never starts in here; a running sweep yields at 03:00
   fallback_budget_seconds: 1800 # a fallback run's budget (out of the day's total)
   budget_seconds: 10800         # the day's total: 3 h, across every idle run of the day
   max_mutations: 400
