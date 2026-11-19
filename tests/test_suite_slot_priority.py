@@ -251,6 +251,25 @@ def test_yield_slot_keeps_the_slot_when_nobody_outranks_it(one_slot, monkeypatch
         assert suite_guard._held.fd == fd
 
 
+def _bounded(body, timeout=10.0):
+    """Run ``body`` in a daemon thread and fail — never hang — if it does not finish: a
+    re-acquire is unbounded, so a yield that never frees its slot would wait forever."""
+    out = []
+
+    def run():
+        try:
+            body()
+            out.append(None)
+        except BaseException as e:   # noqa: BLE001 — re-raised below
+            out.append(e)
+    t = threading.Thread(target=run, daemon=True)
+    t.start()
+    t.join(timeout)
+    assert out, "hung: the yield never got its slot back"
+    if out[0] is not None:
+        raise out[0]
+
+
 def test_yield_slot_asks_with_its_own_rank_and_requeues_at_it(one_slot, monkeypatch):
     seen = []
     real = suite_guard._acquire
@@ -260,11 +279,13 @@ def test_yield_slot_asks_with_its_own_rank_and_requeues_at_it(one_slot, monkeypa
     first = suite_guard._acquire
     monkeypatch.setattr(suite_guard, "_acquire",
                         lambda *a: claimed.append(a[7]) or first(*a))
-    with suite_guard.battery("/wt", "self-check", rank=4, poll=0.01, max_wait=7):
-        monkeypatch.setattr(suite_guard, "_acquire",
-                            lambda *a: seen.append(a[2:]) or real(*a))
-        assert suite_guard.yield_slot() == "CMX-1, CMX-2"
-        assert suite_guard.holders() == ["wt"]          # it holds the slot again
+    def body():
+        with suite_guard.battery("/wt", "self-check", rank=4, poll=0.01, max_wait=7):
+            monkeypatch.setattr(suite_guard, "_acquire",
+                                lambda *a: seen.append(a[2:]) or real(*a))
+            assert suite_guard.yield_slot() == "CMX-1, CMX-2"
+            assert suite_guard.holders() == ["wt"]          # it holds the slot again
+    _bounded(body)
     assert seen[0] == 4
     assert seen[1][:4] == ("/wt", 4, None, None)         # re-queued at its rank, unbounded
     assert seen[1][4] == 0.01 and seen[1][5] == claimed[0]   # ...at its ORIGINAL claim time
@@ -298,8 +319,11 @@ def test_a_failed_re_acquire_frees_cleanly(one_slot, monkeypatch):
 
 def test_yield_slot_says_who_it_yields_to(one_slot, monkeypatch, capsys):
     monkeypatch.setattr(suite_guard, "outranking", lambda *a, **k: ["CMX-440"])
-    with suite_guard.battery("/wt", "self-check", rank=3, poll=0.01, max_wait=5):
-        suite_guard.yield_slot()
+
+    def body():
+        with suite_guard.battery("/wt", "self-check", rank=3, poll=0.01, max_wait=5):
+            suite_guard.yield_slot()
+    _bounded(body)
     assert "yielding the suite slot to CMX-440 — it outranks this run (CMX-445)" in \
         capsys.readouterr().err
 
@@ -505,13 +529,17 @@ def test_the_re_acquire_waits_past_max_wait(one_slot, monkeypatch):
                 release.wait(5)
         except BaseException as e:   # noqa: BLE001
             errors.append(e)
-    with suite_guard.battery("/wt/CMX-443", "self-check", rank=3, poll=0.01, max_wait=0.2):
-        t = threading.Thread(target=judge_body, daemon=True)
-        t.start()
-        time.sleep(0.05)
-        timer = threading.Timer(0.6, release.set)       # holds 3x the battery's max_wait
-        timer.start()
-        assert suite_guard.yield_slot() == "CMX-440"
-        assert judge_in.is_set() and release.is_set()
+    t = threading.Thread(target=judge_body, daemon=True)
+
+    def body():
+        with suite_guard.battery("/wt/CMX-443", "self-check", rank=3, poll=0.01,
+                                 max_wait=0.2):
+            t.start()
+            time.sleep(0.05)
+            timer = threading.Timer(0.6, release.set)   # holds 3x the battery's max_wait
+            timer.start()
+            assert suite_guard.yield_slot() == "CMX-440"
+            assert judge_in.is_set() and release.is_set()
+    _bounded(body)
     t.join(5)
     assert not errors
