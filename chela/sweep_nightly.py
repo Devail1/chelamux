@@ -1401,14 +1401,18 @@ def _file(wf, worktree: Path, head: str, ref: str, survivors: list[sweep.Mutatio
         except Exception as e:  # noqa: BLE001 — unreadable, said below
             log.warning("nightly sweep: could not read the open issues: %s", e)
             still_open = None
+        # One comment per issue: sections the cap once folded into it share it.
+        by_issue: dict[str, list[Section]] = {}
         for s in known:
-            ident, group = issues[s.key]["issue"], IssueGroup((s,))
+            by_issue.setdefault(issues[s.key]["issue"], []).append(s)
+        for ident, secs in by_issue.items():
+            group = IssueGroup(tuple(secs))
             if still_open is None:
                 result["failed"].append(f"{group.mutation.key}: could not read whether "
                                         f"{ident} is still open — not filed")
                 continue
             if ident not in still_open:
-                to_file.append(s)           # closed since: a new issue
+                to_file.extend(secs)        # closed since: a new issue
                 continue
             try:
                 ok = filer.append(ident, group, ctx_for(group))
@@ -1421,7 +1425,7 @@ def _file(wf, worktree: Path, head: str, ref: str, survivors: list[sweep.Mutatio
                 continue
             result["appended"].append(ident)
             result["issues"].append({"issue": ident, "survivors": len(group.survivors),
-                                     "sources": [s.name], "appended": True})
+                                     "sources": [s.name for s in secs], "appended": True})
             record(ident, group)
     cap = max_issues(wf)
     groups = cap_issues(to_file, cap) if to_file else []
@@ -1475,7 +1479,7 @@ def summary(result: dict) -> str:
         filing.append(f"{result['folded']} more PR/file group(s) folded into the largest "
                       f"issues (cap {result.get('max_issues')} a night)")
     if result["already_filed"]:
-        filing.append(f"{result['already_filed']} group(s) already filed")
+        filing.append(f"{result['already_filed']} PR/file group(s) already filed")
     if result["failed"]:
         filing.append(f"{len(result['failed'])} NOT filed ({result['failed'][0]})")
     if result["would_file"]:

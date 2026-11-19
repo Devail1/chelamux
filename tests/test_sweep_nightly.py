@@ -1832,7 +1832,7 @@ def _res(**kw) -> dict:
      "🧹🌙 nightly sweep (repo): clean — nothing filed — 2 standard-tier PR(s), 4 mutation(s), "
      "0 UNRUN"),
     (dict(survivors=1, already_filed=1),
-     "🧹🌙 nightly sweep (repo): clean — nothing filed; 1 group(s) already filed — 2 "
+     "🧹🌙 nightly sweep (repo): clean — nothing filed; 1 PR/file group(s) already filed — 2 "
      "standard-tier PR(s), 4 mutation(s), 0 UNRUN"),
     (dict(status="unrun", unrun=2),
      "🧹🌙 nightly sweep (repo): UNRUN, not clean — nothing filed — 2 standard-tier PR(s), 4 "
@@ -1879,7 +1879,7 @@ def test_each_run_queues_exactly_one_notice(tmp_path, notices):
     assert payload == {k: v for k, v in res.items() if k != "summary"}
     _run(repo, chela, Filer())
     assert len(notices) == 2 and notices[1][1].startswith(
-        "🧹🌙 nightly sweep (repo): clean — nothing filed; 1 group(s) already filed")
+        "🧹🌙 nightly sweep (repo): clean — nothing filed; 1 PR/file group(s) already filed")
 
 
 @pytest.mark.parametrize("make", ["paused", "crash"])

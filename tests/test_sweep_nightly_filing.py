@@ -487,3 +487,28 @@ def _result(**kw):
 def test_the_notice_says_how_many_survivors_went_into_each_issue(kw, part):
     line = sweep_nightly.summary(_result(**kw))
     assert part in line + " —"
+
+
+def test_sections_folded_into_one_issue_get_one_comment_on_it(tmp_path, monkeypatch, notices):
+    """Night 1 folds PR 3 into PR 1's issue (cap 2). Night 2 has new survivors on both: ONE
+    comment on that issue holding both, counted once in the notice."""
+    repo, survivors = _four_prs(tmp_path, extra="sweep:\n  max_issues: 2\n")
+    by = {f: [m for m in survivors if m.file == f] for f in ("p1.py", "p2.py", "p3.py", "p4.py")}
+    chela = tmp_path / "chela"
+    _survive(monkeypatch, [m for ms in by.values() for m in ms[:4]])
+    first = Appender()
+    _run(repo, chela, first)
+    labels = _labels(repo)
+    assert [[s.label for s in g.sections] for g, _ in first.calls] == [
+        [labels["p1.py"], labels["p3.py"]], [labels["p2.py"], labels["p4.py"]]]
+    _survive(monkeypatch, [m for ms in by.values() for m in ms[:4]] + by["p1.py"][4:6]
+             + by["p3.py"][4:5])
+    again = Appender(open_ids={"CMX-901", "CMX-902"})
+    res = _run(repo, chela, again)
+    assert (again.calls, res["appended"]) == ([], ["CMX-901"])
+    (ident, group), = again.appends
+    assert ident == "CMX-901" and [s.label for s in group.sections] == [labels["p1.py"],
+                                                                       labels["p3.py"]]
+    assert [m.key for m in group.survivors] == [m.key for m in by["p1.py"][4:6]
+                                                + by["p3.py"][4:5]]
+    assert "appended to CMX-901 (3 survivor(s))" in notices[-1][1]
