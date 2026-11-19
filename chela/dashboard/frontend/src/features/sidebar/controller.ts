@@ -15,8 +15,9 @@ import { archiveLoaded, archivedKeys, archivedSessions, pruneHidden, refreshArch
 import { commitLayout, getLayout, refreshLayout, writeLayout } from './lib/layout.ts';
 import { isObj, lsJson, lsRead, lsSet, postJson, publish, say, sayRefused } from './lib/page.ts';
 import {
-  ARCHIVED_SECTION_KEY, type AgentRow, assignKey, buildItems, canOrderRows, clampWidth, type Custom, customKey, dismissKey,
-  dropAssignee, type Group, type Item, isArchivable, isSingleFolder, moveGroup, placeGroup, placeRow, type NavState,
+  ARCHIVED_SECTION_KEY, type AgentRow, assignKey, buildItems, canOrderRows, clampWidth, type Custom, customKey, descendants,
+  dismissKey, dropAssignee, type Group, type Item, isArchivable, isSingleFolder, kidsKey, moveGroup, pinKey, placeGroup,
+  placeRow, type NavState,
   normalizeView, reconcileAssign, type RecentRow, type RowOrder, SESSION_KEY_PREFIX, type RecentState, recentView,
   sidebarModel,
   sidebarOrder as modelSidebarOrder, type SidebarState, type View, type Wants,
@@ -180,9 +181,14 @@ const saveCustom = (c: Custom) => void writeLayout(customFields(c));
 const without = (assign: Record<string, string>, drop: (k: string, v: string) => boolean) =>
   Object.fromEntries(Object.entries(assign).filter(([k, v]) => !drop(k, v)));
 
+// CMX-390: the pinned sessions (`s:<session id>`), in the server layout like the rest.
+const pins = (): string[] => [...getLayout().pins];
+
 // --- What the island draws -----------------------------------------------------------------
-// The last render's model: what the menus act on (they open off what is on screen).
-let sb: { groups: Group[]; items: Map<string, Item> } = { groups: [], items: new Map() };
+// The last render's model: what the menus act on (they open off what is on screen). `lists`
+// are the row lists a drag may reorder: each group's rows, and (CMX-390) each parent's children.
+let sb: { groups: Group[]; items: Map<string, Item>; lists: Map<string, Item[]> } =
+  { groups: [], items: new Map(), lists: new Map() };
 let state: SidebarState | null = null;
 let activeRow: string | null = null;
 let altHeld = false;
@@ -222,6 +228,7 @@ export function renderSidebarAgents(agents: AgentRow[] | null | undefined): void
     ctx, onWall: TERMINALS_ON ? host.onWall() : [], active: activeRow, altHeld,
     // CMX-388: CHELA_DISPATCH=off, no Dispatched section (model.ts plainFolderKey).
     dispatchOff: BOOT.dispatchOffByChoice,
+    pins: pins(),
   };
   if (!rows.length) {
     // "No agents". One empty read must not unarchive every hidden row, nor drop every
@@ -242,8 +249,14 @@ export function renderSidebarAgents(agents: AgentRow[] | null | undefined): void
   const model = sidebarModel(state);
   pruneHidden(model.hidden);
   const items = new Map<string, Item>();
-  for (const it of [...model.needsYou, ...model.groups.flatMap(g => g.items), ...model.archived]) items.set(it.key, it);
-  sb = { groups: model.groups, items };
+  const roots = [...model.needsYou, ...model.pinned, ...model.groups.flatMap(g => g.items), ...model.archived];
+  for (const it of roots.flatMap(r => [r, ...descendants(r, model.children)])) items.set(it.key, it);
+  const lists = new Map<string, Item[]>(model.groups.map(g => [g.key, g.items]));
+  for (const [k, kids] of Object.entries(model.children)) {
+    const parent = items.get(k);
+    if (parent) lists.set(kidsKey(parent), kids);
+  }
+  sb = { groups: model.groups, items, lists };
   publish('sidebar', state);
   host.adoptDefault();
 }
@@ -317,7 +330,7 @@ export async function unarchiveRow(_btn: unknown, key: string): Promise<unknown>
 // --- The group, row and VIEW menus' commands (CMX-35, CMX-66, CMX-81) ------------------------
 // "Archive all" archives the group's FINISHED rows (model.isArchivable); a row working, blocked
 // on you, the orchestrator or a judge mid-battery is never archived.
-const archivable = (it: Item) => isArchivable(it, { wants: host.wants, orchWid: host.orchWid() });
+const archivable = (it: Item) => isArchivable(it, { wants: host.wants, orchWid: host.orchWid(), pins: pins() });
 
 export function groupMenuAction(key: string, act: string): unknown {
   const g = sb.groups.find(x => x.key === key);
@@ -356,6 +369,7 @@ export function rowMenuAction(key: string, act: string): unknown {
     if (archivedKeys().includes(it.key) || !archivable(it)) return null;
     return archiveKeys([it.key]);
   }
+  if (act === 'pin' || act === 'unpin') return setPinned(it, act === 'pin');
   const w = act === 'judge' ? it.judge : it.agent;
   if (w) host.openPane(w);
   return undefined;
@@ -381,6 +395,18 @@ function assignGroup(itemKey: string, id: string | null): Promise<boolean> {
   }
   c.seen = seen;
   const done = commitLayout(customFields(c), 'Moving the session', rerender);
+  rerender();
+  return done;
+}
+
+/** CMX-390: pin (or unpin) a row's SESSION: the Pinned section, and no archive while pinned.
+ * Optimistic, put back saying why when the write fails. False when the row has no session. */
+function setPinned(it: Item, on: boolean): Promise<boolean> | false {
+  const k = pinKey(it);
+  if (!k) return false;
+  const now = pins();
+  const next = on ? (now.includes(k) ? now : [...now, k]) : now.filter(x => x !== k);
+  const done = commitLayout({ pins: next }, on ? 'Pinning the session' : 'Unpinning the session', rerender);
   rerender();
   return done;
 }
@@ -415,8 +441,9 @@ export function dropOnGroup(itemKey: string, groupKey: string | null): boolean {
  * the same optimistic write and snap-back as a group move. False when it moved nothing: not
  * Manual, grouped by state or date, a pinned section, or no change. */
 export function dropRow(groupKey: string, itemKey: string, before: string | null): boolean {
-  const g = sb.groups.find(x => x.key === groupKey);
-  if (!g || !canOrderRows(view(), groupKey)) return false;
+  // CMX-390: `groupKey` may also name a parent's children (`~kids:<parent>`), reordered alike
+  const list = sb.lists.get(groupKey);
+  if (!list || !canOrderRows(view(), groupKey)) return false;
   const all = rowOrders();
   // a stored key is kept only while its session is still somewhere: live in a window (a
   // filter may hide it) or held in the archive. A gone one is dropped from the order.
@@ -425,7 +452,7 @@ export function dropRow(groupKey: string, itemKey: string, before: string | null
   for (const r of archivedSessions() ?? []) if (r?.session_id) known.add(`${SESSION_KEY_PREFIX}${r.session_id}`);
   // before the archive has answered, an archived session is not known yet: drop nothing
   const keep = archiveLoaded() ? (k: string) => known.has(k) : () => true;
-  const next = placeRow(g.items, all[groupKey], itemKey, before, Date.now(), keep);
+  const next = placeRow(list, all[groupKey], itemKey, before, Date.now(), keep);
   if (!next) return false;
   void commitLayout({ rows: { ...all, [groupKey]: next } }, 'Moving the session', rerender);
   rerender();

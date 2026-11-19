@@ -3200,6 +3200,21 @@ def api_sidebar_archive():
         log.exception("sidebar archive: list_runs failed")
         runs = None
     archived, closed, refused = [], [], []
+    # CMX-390: a pinned session is never archived, and a parent takes its live subtree along
+    # (sidebar_archive.archive_tree). Read once per request, only when a window is archived.
+    pinned: frozenset[str] = frozenset()
+    parents: dict = {}
+    wid_of = None
+    if any(k.startswith("w:") for k in keys) and config.TERMINALS_ENABLED:
+        pinned = sidebar_layout.pinned_keys()
+        parents = parentage.parents()
+        try:
+            from chela import sessions
+
+            pane_map = sessions.panes(force=True)
+            wid_of = lambda sid: sessions.wid_for_session(sid, pane_map)  # noqa: E731
+        except Exception:  # noqa: BLE001 — without it a parent's children cannot be found
+            log.exception("sidebar archive: the pane map is unreadable")
     for key in keys:
         kind, _, ref = key.partition(":")
         if kind == "run":
@@ -3217,15 +3232,23 @@ def api_sidebar_archive():
                 refused.append({"key": key, "error": "the runs table cannot be read, so a "
                                                      "dispatched window cannot be ruled out"})
                 continue
+            if ref in closed:
+                continue   # already archived by its parent's cascade, earlier in this request
+            if wid_of is None:
+                # fail closed: archiving it would leave its child sessions running unseen
+                refused.append({"key": key, "error": "the session list cannot be read, so its "
+                                                     "child sessions cannot be archived with it"})
+                continue
             windows = discovery.get_all_windows()
-            out = sidebar_archive.archive_window(
-                ref, orch_wid=inbox.orchestrator_wid(),
-                dispatched=_dispatched_wids(windows, runs))
-            if out.ok:
-                archived.append(out.record["key"])
-                closed.append(ref)
-            else:
-                refused.append({"key": key, "error": out.error})
+            for wid, out in sidebar_archive.archive_tree(
+                    ref, orch_wid=inbox.orchestrator_wid(),
+                    dispatched=_dispatched_wids(windows, runs), pinned=pinned,
+                    parents=parents, wid_of=wid_of):
+                if out.ok:
+                    archived.append(out.record["key"])
+                    closed.append(wid)
+                else:
+                    refused.append({"key": f"w:{wid}", "error": out.error})
         else:
             refused.append({"key": key, "error": "already archived"})
     return jsonify({"ok": not refused, "archived": archived, "closed": closed,
@@ -3245,17 +3268,21 @@ def api_sidebar_unarchive():
     hidden = [k for k in keys if not k.startswith("s:")]
     if hidden:
         sidebar_archive.unhide(hidden)
+    # CMX-390: a parent brings back its archived subtree (sidebar_archive.unarchive_tree)
+    parents = parentage.parents() if any(k.startswith("s:") for k in keys) else {}
+    done: set[str] = set()
     for key in keys:
-        if not key.startswith("s:"):
+        if not key.startswith("s:") or key in done:
             continue
         if not config.TERMINALS_ENABLED:
             refused.append({"key": key, "error": "terminals are off — cannot resume a session"})
             continue
-        out = sidebar_archive.unarchive_session(key)
-        if out.ok:
-            resumed.append({"key": key, "wid": out.wid, "name": out.name})
-        else:
-            refused.append({"key": key, "error": out.error})
+        for k, out in sidebar_archive.unarchive_tree(key, parents):
+            done.add(k)
+            if out.ok:
+                resumed.append({"key": k, "wid": out.wid, "name": out.name})
+            else:
+                refused.append({"key": k, "error": out.error})
     return jsonify({"ok": not refused, "unhidden": hidden, "resumed": resumed,
                     "refused": refused, "state": sidebar_archive.state()})
 

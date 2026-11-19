@@ -143,7 +143,8 @@ test('CMX-72: the orchestrator sits in its folder group — it is not pinned', (
         { name: 'orch', window_id: '@1', cwd: '/home/u', cwd_is_home: true },
         { name: 'home-2', window_id: '@2', cwd: '/home/u', cwd_is_home: true },
     ], { wants, orchWid: '@1' });
-    assert.equal(m.pinned, undefined, 'the model still lifts a "pinned" cluster');
+    // CMX-390's Pinned section holds what a USER pinned, never the orchestrator on its own
+    assert.deepEqual(m.pinned, [], 'the model lifts the orchestrator into a "pinned" cluster');
     assert.deepEqual(m.groups.map(g => g.key), ['/home/u']);
     assert.deepEqual(m.groups[0].items.map(i => i.agent.name).sort(), ['home-2', 'orch']);
 });
