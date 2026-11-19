@@ -297,13 +297,17 @@ run never strands a slot.
 - **K** = `CHELA_SUITE_SLOTS` > `suite_slots` in `config.json` > half the box's RAM over the
   measured anon peak, between 1 and 4. That is 2 on a 16 GB box. RAM that cannot be read is
   1. `0` turns admission control off.
-- **First come, first served.** A run that frees its slot and takes the next one a moment
-  later waits behind a run already queued. A stopped waiter (a fleet pause) does not hold
-  the line.
+- **Ranked, then first come, first served** (CMX-445). A free slot goes to a judge round
+  first, then to hand-ins by their issue's priority (Urgent, High, Medium, Low, then no
+  priority), then to the nightly sweep. Among equals, the oldest waiter goes first: a run
+  that frees its slot and takes the next one a moment later waits behind a run already
+  queued. A stopped waiter (a fleet pause) does not hold the line.
 - **Visible.** The waiting run prints `⏳ waiting for a suite slot — all 2 busy: <worktree>
   (pid …, 4m), …`. A judge's `chela peek` badge says `⏳ waiting for a suite slot`.
 - **Never stuck.** A queued run is waiting, not stuck. The judge watchdog holds a run while
-  it waits and leaves the queued time out of its wall. The inbox sends no stuck or
+  it waits and leaves the queued time out of its wall. `chela doctor` applies the same rule
+  (CMX-445): a queued judge is never reported past its wall, and the time it spent queued is
+  reported separately ("waited 73min for the suite slot"). The inbox sends no stuck or
   long-self-check notice while a run waits, and leaves queued time out of a self-check's
   running time (CMX-110). The self-check and sweep budgets (CMX-141) are not charged for it
   either.
@@ -333,7 +337,15 @@ one daemon still queue):
 | `chela task-finished` | ALL its checks: self-check, sweep, standard-tier lint + suite, the base-move re-run |
 
 A second agent's battery waits for the first one to finish, and its waiting line names the
-holder. Its budget is not charged for the wait (`busy_clock`). It waits at most 12 suite
+holder. The exception is a waiter that outranks the holder (CMX-445): between two
+experiments, with no file mutated, a self-check or a hand-in's sweep checks the queue
+(`suite_guard.yield_slot`). If a judge round or a higher-priority hand-in is waiting, it frees
+the slot, queues again at its own rank, and resumes once the slot comes back. A waiting judge
+therefore gets the slot within one experiment. On 11-19 a Medium self-check held the only slot
+for 2 h 08 m while an Urgent judge waited 1 h 13 m. A judge round never yields, because nothing
+outranks it. The run row stores the issue's priority at claim time (`runs.priority`). A
+standalone `chela judge self-check` or `chela judge sweep` has no run row, so it ranks as a
+hand-in with no priority. Its budget is not charged for the wait (`busy_clock`). It waits at most 12 suite
 timeouts (`suite_slot_max_wait` overrides), then reports CANNOT VERIFY.
 
 **Stopped runs get one notice.** While a battery runs it keeps a record in

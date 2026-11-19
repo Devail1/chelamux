@@ -1534,6 +1534,10 @@ def ensure_schema(conn: sqlite3.Connection) -> sqlite3.Connection:
         # before this, an adopted PR) reads as `normal` via `sources.run_risk`.
         ("risk", "ALTER TABLE runs ADD COLUMN risk TEXT"),
         ("risk_reason", "ALTER TABLE runs ADD COLUMN risk_reason TEXT"),
+        # ⏳ CMX-445. The tracker's priority number at claim time (Linear: 1 Urgent … 4 Low,
+        # 0 none); NULL for a tracker without one. Orders this run's hand-in in the suite
+        # slot queue (`hand_in_battery`, `suite_guard.handin_rank`).
+        ("priority", "ALTER TABLE runs ADD COLUMN priority INTEGER"),
         # 🧊 CMX-336. `_blocked_race_resolved` (chela/runtime_truth.py) clears a
         # `J_BLOCKED_RACE` row on exactly one condition — `judge_sha != pr_head_sha`, i.e.
         # the PR's head moved past the judged commit. That is unreachable once the PR is
@@ -3315,8 +3319,12 @@ def hand_in_battery(task_id: str):
             log.warning("hand-in slot: %s could not be read (%s) — waiting at most %d "
                         "default suite timeouts", row["workflow_path"], e,
                         suite_guard.BATTERY_WAIT_TIMEOUTS)
+    # ⏳ CMX-445: the hand-in queues by its issue's priority (Urgent first), behind any judge.
+    keys = row.keys() if row is not None else ()
+    priority = row["priority"] if "priority" in keys else None
     return suite_guard.battery(worktree, "task-finished",
-                               max_wait=suite_guard.battery_max_wait(timeout))
+                               max_wait=suite_guard.battery_max_wait(timeout),
+                               rank=suite_guard.handin_rank(priority))
 
 
 STOPPED_BATTERIES_KIND = "suite_runs_stopped"
@@ -7975,7 +7983,8 @@ def rework_cap_reached(row) -> bool:
 # `pr_url` here would point the new attempt's review at the old, closed PR).
 _REQUEUE_KEEP = frozenset({
     "task_id", "workflow_path", "title", "status", "attempt", "started_at", "task_number",
-    "brief", "risk", "risk_reason", "tracker_url", "review_history", "requeue_count",
+    "brief", "risk", "risk_reason", "priority", "tracker_url", "review_history",
+    "requeue_count",
     "last_error", "cap_requeues", "requeue_addendum",
 })
 
@@ -8070,8 +8079,8 @@ def _spawn(wf: WorkflowDef, task: Task, attempt: int, conn: sqlite3.Connection, 
     # conflict: leaving attempt 1's id would point the next run_review at a corpse
     # (or, worse, at whatever window tmux later recycled that id onto).
     conn.execute(
-        """INSERT INTO runs (task_id, workflow_path, title, status, window_name, worktree_path, branch_name, started_at, attempt, task_number, brief, risk, risk_reason, tracker_url)
-           VALUES (?, ?, ?, 'claimed', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """INSERT INTO runs (task_id, workflow_path, title, status, window_name, worktree_path, branch_name, started_at, attempt, task_number, brief, risk, risk_reason, tracker_url, priority)
+           VALUES (?, ?, ?, 'claimed', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
            ON CONFLICT(task_id) DO UPDATE SET
              status='claimed', window_name=excluded.window_name,
              worktree_path=excluded.worktree_path, branch_name=excluded.branch_name,
@@ -8079,10 +8088,11 @@ def _spawn(wf: WorkflowDef, task: Task, attempt: int, conn: sqlite3.Connection, 
              task_number=excluded.task_number, idle_nudged_at=NULL, window_id=NULL,
              window_epoch=NULL, brief=excluded.brief, risk=excluded.risk,
              risk_reason=excluded.risk_reason, tracker_url=excluded.tracker_url,
-             tracker_edge=NULL, parked_at=NULL, parked_reason=NULL, parked_until=NULL,
+             priority=excluded.priority, tracker_edge=NULL, parked_at=NULL, parked_reason=NULL, parked_until=NULL,
              parked_by=NULL, idle_clock_at=NULL""",
         (task.id, str(wf.path), task.title, window_name, str(worktree), branch, _now(), attempt,
-         task_number, _task_brief(task), run_risk(task.risk), task.risk_reason, task.url),
+         task_number, _task_brief(task), run_risk(task.risk), task.risk_reason, task.url,
+         getattr(task, "priority", None)),
     )
     if requeue:
         _clear_closed_attempt(conn, task.id,
@@ -9527,6 +9537,19 @@ def judge_wall_seconds(status: dict | None) -> float:
     budget = (judge_wall_base_seconds() + total * judge_wall_per_experiment_seconds()
               + confirmations * _judge_full_suite_budget(status))
     return min(max(judge_wall_ceiling_seconds(), floor), max(floor, budget))
+
+
+def judge_slot_wait(status: dict | None, now: float) -> tuple[bool, float]:
+    """⏳ CMX-445/CMX-119: ``(waiting, queued)`` for a judge run's live status — is it queued
+    for a suite slot right now (``slot_waiting_since`` set), and how many seconds it has spent
+    queued in all, an open wait included. The wall never counts that time (the watchdog and
+    ``chela doctor`` both subtract it), so a queued judge is not read as a runaway."""
+    status = status or {}
+    opened = _num(status.get("slot_waiting_since"))
+    queued = _num(status.get("slot_wait_seconds")) or 0.0
+    if opened is not None:
+        queued += max(0.0, now - opened)
+    return opened is not None, max(0.0, queued)
 
 
 def judge_run_completed(status: dict | None) -> bool:
