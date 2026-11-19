@@ -8,7 +8,7 @@ import { icons } from '../../../shared/icons/index.ts';
 import { IconButton, Menu, type MenuItem } from '../../../shared/ui/index.ts';
 import {
   ENV_KINDS, GROUP_MODES, SORTS, VIEW_ACTIVITY, VIEW_STATUS, type Group, type Item, type SidebarState,
-  assignKey, isArchivable, normalizeView,
+  assignKey, isRunsRow, isArchivable, normalizeView,
 } from '../model.ts';
 import type { SidebarActions } from './actions.ts';
 
@@ -108,7 +108,9 @@ export function RowMenu({ it, s, actions, menu, group }: {
       if (it.agent) items.push({ label: 'Open agent pane', onSelect: () => void actions.rowMenuAction(it.key, 'agent') });
       items.push({ label: 'Open judge pane', disabled: !it.judge, onSelect: () => void actions.rowMenuAction(it.key, 'judge') }, 'separator');
     }
-    if (s.view.groupBy === 'custom') items.push({ label: 'Move to group…', keepOpen: true, onSelect: () => setPage('move') }, 'separator');
+    // CMX-438: a dispatched run lives in Runs, never in a custom group
+    const runs = isRunsRow(it, { orchWid: s.orchWid, dispatchOff: s.dispatchOff });
+    if (s.view.groupBy === 'custom' && !runs) items.push({ label: 'Move to group…', keepOpen: true, onSelect: () => setPage('move') }, 'separator');
     // A row already in the Archived section is not archived twice (its way back is Unarchive).
     const archivable = !s.archived.includes(it.key) && isArchivable(it, { wants: s.wants, orchWid: s.orchWid });
     items.push({ label: 'Archive', disabled: !archivable, onSelect: () => void actions.rowMenuAction(it.key, 'archive') });

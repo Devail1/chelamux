@@ -209,6 +209,8 @@ function GroupView({ g, index, count, s, actions, alt, folders, drag }: GroupPro
   const rowDrag = (it: Item): Drag | undefined => {
     if (single) return movable ? handle(groupSrc) : undefined;
     if (s.view.groupBy !== 'custom' && !reorder) return undefined;
+    // CMX-438: a run in the pinned Runs / Dispatched group drags nowhere
+    if (g.key === DISPATCHED_KEY) return undefined;
     const d = handle({ kind: 'row', assign: assignKey(it), group: g.key, item: it.key, reorder });
     return rowLine?.key === it.key ? { ...d, drop: rowLine.side } : d;
   };
