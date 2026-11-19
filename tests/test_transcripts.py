@@ -175,7 +175,8 @@ def test_summary_for_path_includes_ai_title_distinct_from_recap(tmp_path):
     assert summary["ai_title"] == "Investigate flaky CI"
 
     assert transcripts.summary_for_path(None) == {
-        "recap": None, "recap_ts": None, "pr": None, "ai_title": None, "last_activity": None,
+        "recap": None, "recap_ts": None, "pr": None, "ai_title": None, "custom_title": None,
+        "last_activity": None,
     }
 
 

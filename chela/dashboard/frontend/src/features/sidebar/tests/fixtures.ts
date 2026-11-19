@@ -51,5 +51,6 @@ export function actions() {
     undoDismissRecent: vi.fn<SidebarActions['undoDismissRecent']>(),
     closeRecentUndo: vi.fn<SidebarActions['closeRecentUndo']>(),
     toggleDispatcherSessions: vi.fn<SidebarActions['toggleDispatcherSessions']>(),
+    suggestNames: vi.fn<SidebarActions['suggestNames']>(),
   };
 }

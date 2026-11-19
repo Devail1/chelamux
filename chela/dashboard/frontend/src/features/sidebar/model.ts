@@ -71,6 +71,10 @@ export interface AgentRow {
     /** CMX-395: started before the latest Claude account switch (chela/claude_account.py). */
     account_switch?: unknown;
     ai_title?: string | null;
+    /** CMX-434: the title set with `/rename` (the transcript's customTitle); outranks ai_title. */
+    custom_title?: string | null;
+    /** CMX-434: a title "Suggest names" queued until the session goes idle. */
+    title_pending?: string | null;
     recap?: string | null;
     pr?: { url?: string; state?: string; draft?: boolean } | null;
 }
