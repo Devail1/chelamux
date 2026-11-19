@@ -243,14 +243,23 @@ def test_a_failing_doctor_fails_the_check(fake):
     assert "PASS" not in out.stdout
 
 
-def test_the_image_tag_is_a_hash_of_the_dockerfiles(tmp_path):
+# One edit per Dockerfile: the tag (and so CI's cache key) must move when EITHER layer
+# changes. Editing only the apt layer left a hash of the apt Dockerfile alone passing
+# (DEFEAT_SHAPES #426: a hash over a set, proven with one member).
+@pytest.mark.parametrize("layer, before, after", [
+    ("apt", "git tmux curl", "git tmux curl jq"),
+    ("uv installer", "UV_NO_MODIFY_PATH=1 sh'", "UV_NO_MODIFY_PATH=1 sh -s -- --quiet'"),
+])
+def test_the_image_tag_is_a_hash_of_both_dockerfiles(tmp_path, layer, before, after):
     tag = _tag()
     assert re.fullmatch(r"chela-fresh-install-prereqs:[0-9a-f]{12}", tag), tag
+    text = SCRIPT.read_text()
+    assert text.count(before) == 1, (layer, before)
     edited = tmp_path / "check.sh"
-    edited.write_text(SCRIPT.read_text().replace("git tmux curl", "git tmux curl jq"))
+    edited.write_text(text.replace(before, after))
     other = subprocess.run(["bash", str(edited), "--image-tag"], capture_output=True,
                            text=True, check=True, timeout=30).stdout.strip()
-    assert other != tag and other.startswith("chela-fresh-install-prereqs:")
+    assert other != tag and other.startswith("chela-fresh-install-prereqs:"), layer
 
 
 # --- the CI job's retry step, EXECUTED against a scripted check ------------------------
