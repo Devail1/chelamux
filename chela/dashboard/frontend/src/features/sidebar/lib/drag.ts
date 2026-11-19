@@ -51,10 +51,10 @@ export interface DragView {
  * that would leave the order as it is shows no line and drops nothing. */
 export function groupSlot(groups: { key: string; top: number; bottom: number }[], dragged: string, y: number):
   { before: string | null; line: DragView['line'] } {
-  const at = groups.findIndex(g => y < (g.top + g.bottom) / 2);
-  const before = at < 0 ? null : groups[at]?.key ?? null;
+  // groups[-1] is undefined, so "below every middle" (-1) reads as null (at the end)
+  const before = groups[groups.findIndex(g => y < (g.top + g.bottom) / 2)]?.key ?? null;
   const i = groups.findIndex(g => g.key === dragged);
-  const next = i < 0 ? undefined : groups[i + 1]?.key ?? null;
+  const next = groups[i + 1]?.key ?? null; // read only when the dragged one is in the list
   if (before === dragged || (i >= 0 && before === next)) return { before, line: null };
   const last = groups[groups.length - 1];
   const line = before != null ? { key: before, side: 'before' as const } : last ? { key: last.key, side: 'after' as const } : null;
@@ -78,14 +78,13 @@ function movableGroups(root: Element) {
     });
 }
 
-/** The rows of group `key` in `root`, top to bottom, by item key: its top-level rows, or
- * (CMX-390) with `list`, the children drawn under that parent. */
-function groupRows(root: Element, key: string, list?: string) {
-  const sec = sections(root).find(el => el.dataset.g === key);
-  if (!sec) return [];
-  const box = list ? [...sec.querySelectorAll<HTMLElement>('.tree-kids')].find(el => el.dataset.list === list) : null;
-  const rows = box ? [...box.children].filter(el => el.matches('.agent-row[data-item]'))
-    : list ? [] : [...sec.querySelectorAll<HTMLElement>('.group-rows > .agent-row[data-item]')];
+/** The rows of section `sec` (the dragged row's own), top to bottom, by item key: its
+ * top-level rows, or (CMX-390) with `list`, the children drawn under that parent. */
+function groupRows(sec: Element, list?: string) {
+  const rows = list
+    ? [...([...sec.querySelectorAll<HTMLElement>('.tree-kids')].find(el => el.dataset.list === list)?.children ?? [])]
+      .filter(el => el.matches('.agent-row[data-item]'))
+    : [...sec.querySelectorAll<HTMLElement>('.group-rows > .agent-row[data-item]')];
   return (rows as HTMLElement[]).map(el => {
     const r = el.getBoundingClientRect();
     return { key: el.dataset.item as string, top: r.top, bottom: r.bottom };
@@ -130,6 +129,8 @@ const onRail = () => document.body.classList.contains('sidebar-collapsed')
 interface Session {
   source: DragSource;
   el: HTMLElement;
+  /** The section the drag started in: a row reorders among its rows. */
+  sec: Element;
   root: Element;
   id: number;
   touch: boolean;
@@ -195,8 +196,8 @@ export function useSidebarDrag(drop: DragDrop) {
     if (!touch && e.button !== 0) return;
     const el = e.currentTarget;
     const sec = el.closest('.side-group, .side-triage');
-    const root = sec?.parentElement;
-    if (!root) return;
+    if (!sec?.parentElement) return; // bound outside a section: nothing to drag over
+    const root = sec.parentElement;
 
     const paint = (s: Session) => {
       if (s.source.kind === 'group') {
@@ -206,7 +207,7 @@ export function useSidebarDrag(drop: DragDrop) {
       }
       const at = sectionAt(s.root, s.x, s.y);
       if (s.source.reorder && at?.key === s.source.group) {
-        const { line } = groupSlot(groupRows(s.root, s.source.group, s.source.list), s.source.item, s.y);
+        const { line } = groupSlot(groupRows(s.sec, s.source.list), s.source.item, s.y);
         setView({ source: s.source, line: null, over: null, rowLine: line });
         return;
       }
@@ -223,7 +224,7 @@ export function useSidebarDrag(drop: DragDrop) {
       if (!dy || typeof requestAnimationFrame !== 'function') return;
       s.raf = requestAnimationFrame(() => {
         s.raf = undefined;
-        if (cur.current !== s || !s.active) return;
+        if (cur.current !== s) return; // the drag ended with this frame queued
         sc.scrollTop += dy;
         paint(s);
         edge(s);
@@ -265,7 +266,7 @@ export function useSidebarDrag(drop: DragDrop) {
       }
       const at = sectionAt(s.root, s.x, s.y);
       if (s.source.reorder && at?.key === s.source.group) {
-        const { before, line } = groupSlot(groupRows(s.root, s.source.group, s.source.list), s.source.item, s.y);
+        const { before, line } = groupSlot(groupRows(s.sec, s.source.list), s.source.item, s.y);
         if (line) dropRef.current.reorder(s.source.list ?? s.source.group, s.source.item, before);
         return;
       }
@@ -273,9 +274,9 @@ export function useSidebarDrag(drop: DragDrop) {
       dropRef.current.row(s.source.assign, at.key);
     };
 
+    // Each listener below is the session `s`'s own: added with it, removed by its done().
     const move = (ev: PointerEvent) => {
-      const s = cur.current;
-      if (!s || ev.pointerId !== s.id) return;
+      if (ev.pointerId !== s.id) return; // another finger
       s.x = ev.clientX;
       s.y = ev.clientY;
       const far = Math.hypot(s.x - s.x0, s.y - s.y0);
@@ -288,8 +289,7 @@ export function useSidebarDrag(drop: DragDrop) {
       paint(s);
     };
     const up = (ev: PointerEvent) => {
-      const s = cur.current;
-      if (!s || ev.pointerId !== s.id) return;
+      if (ev.pointerId !== s.id) return;
       if (s.active) {
         s.x = ev.clientX;
         s.y = ev.clientY;
@@ -299,11 +299,10 @@ export function useSidebarDrag(drop: DragDrop) {
       s.done();
     };
     const cancel = (ev: PointerEvent) => {
-      if (cur.current && ev.pointerId === cur.current.id) cur.current.done();
+      if (ev.pointerId === s.id) s.done();
     };
     const key = (ev: KeyboardEvent) => {
-      const s = cur.current;
-      if (ev.key !== 'Escape' || !s?.active) return;
+      if (ev.key !== 'Escape' || !s.active) return;
       ev.preventDefault();
       ev.stopPropagation();
       swallowClick();
@@ -311,15 +310,15 @@ export function useSidebarDrag(drop: DragDrop) {
     };
     // A long press on a phone also asks for the row's context menu: not while it drags.
     // The window lost the pointer (a release over a terminal iframe, a tab switch): cancel.
-    const lost = () => cur.current?.done();
+    const lost = () => s.done();
     const menu = (ev: Event) => {
-      if (!cur.current?.active) return;
+      if (!s.active) return;
       ev.preventDefault();
       ev.stopPropagation();
     };
 
     const s: Session = {
-      source, el, root, id: e.pointerId, touch, x0: e.clientX, y0: e.clientY, x: e.clientX, y: e.clientY, active: false, holdable: true,
+      source, el, sec, root, id: e.pointerId, touch, x0: e.clientX, y0: e.clientY, x: e.clientX, y: e.clientY, active: false, holdable: true,
       done: () => {
         clearTimeout(s.timer);
         if (s.raf != null && typeof cancelAnimationFrame === 'function') cancelAnimationFrame(s.raf);
