@@ -1,6 +1,6 @@
 // The approvals list every copy of the pill and the sheet read: one /api/overrides read per
 // tick (the refresh loop) and per SSE `overrides` frame.
-import { BASE_PATH, api } from '../../../shared/api/index.ts';
+import { BASE_PATH, api, decideHeaders } from '../../../shared/api/index.ts';
 import { onEvent } from '../../../shared/events/index.ts';
 import { registerLane } from '../../../shared/scheduler/index.ts';
 import { createStore } from '../../../shared/store/index.ts';
@@ -70,7 +70,7 @@ export async function decide(id: string, action: 'approve' | 'deny'): Promise<st
   try {
     const res = await fetch(`${BASE_PATH}/api/override/${encodeURIComponent(id)}/${action}`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: decideHeaders(),
       body: JSON.stringify(action === 'approve' ? { confirm: true } : {}),
     });
     const resp = (await res.json()) as { ok?: boolean; detail?: string; error?: string; state?: string } | null;

@@ -85,3 +85,13 @@ test('api fetches under the base path with the caller\'s options and resolves to
   await expect(api('/api/agents/spawn', opts)).resolves.toEqual({ ok: true });
   expect(fetch.mock.calls).toEqual([['/chela/api/agents/spawn', opts]]);
 });
+
+test('the session token is read from the boot block and rides in the decide headers (CMX-392)', async () => {
+  const mod = await load('{"assetVersion": "v", "sessionToken": "tok-123"}');
+  expect(mod.SESSION_TOKEN).toBe('tok-123');
+  expect(mod.decideHeaders()).toEqual({ 'Content-Type': 'application/json', 'X-Chela-Session-Token': 'tok-123' });
+  // absent, unparsable or the wrong type: '' (the server then refuses, loudly), never a guess
+  expect((await load(null)).SESSION_TOKEN).toBe('');
+  expect((await load('{"sessionToken": 7}')).SESSION_TOKEN).toBe('');
+  expect((await load('{"sessionToken": "x"')).SESSION_TOKEN).toBe('');
+});
