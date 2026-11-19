@@ -26,7 +26,10 @@ approve, and each proves a human its own way:
 
 * the **Telegram button** — a callback query only a person pressing a button in the bound
   chat can produce (:mod:`chela.telegram.overridewatch`; a bot's tap is refused);
-* the **dashboard** confirm page — a same-origin POST behind the dashboard's auth;
+* the **dashboard** confirm page or approvals sheet — a POST that proves the operator's
+  browser session (CMX-392, :mod:`chela.dashboard.humanproof`: session cookie + page token
+  + Origin), which the dashboard states with ``browser_proven``. ``channel="dashboard"``
+  alone proves nothing (every agent is on loopback) and is refused;
 * a **plain terminal** (``chela merge-approve``) — and here, where nothing about the call
   itself proves a human, :func:`decide` refuses a process carrying the orchestrator's
   ``$CHELA_ACTOR`` stamp or Claude Code's ``CLAUDECODE`` session marker
@@ -35,8 +38,9 @@ approve, and each proves a human its own way:
 
 On top of that the merge-gate hook (:mod:`chela.mergegate`) denies a session's
 ``chela merge-approve``, a ``curl`` to ``/override/``, and a ``python`` call into
-``chela.overrides.decide``. The env check is deliberately NOT applied to the two service
-channels: a pm2 service can inherit a Claude marker from the shell that started it (CMX-21),
+``chela.overrides.decide``. That hook only string-matches argv, so it is a speed bump, never
+the gate. The env check is deliberately NOT applied to the two service
+channels (a dashboard call only when ``browser_proven``): a pm2 service can inherit a Claude marker from the shell that started it (CMX-21),
 and that must not silently disable the one-tap button the operator relies on.
 
 🏷️ **Releases ride the same store (CMX-87).** ``chela release X.Y.Z`` (:mod:`chela.release`)
@@ -554,16 +558,33 @@ def _public(rec: dict) -> dict:
 SERVICE_CHANNELS = ("telegram", "dashboard")
 
 
+UNPROVEN_DASHBOARD = ("refused: a dashboard decision must come from the operator's browser "
+                      "session (CMX-392), and this caller did not prove one")
+
+
+def _service_refusal(channel: str, browser_proven: bool, env) -> str | None:
+    """Why this caller may not decide, or None. A Telegram tap is its own proof (CMX-21: the
+    env check would read the service's env, not the presser's). A dashboard call skips it
+    only when the dashboard verified the browser session (CMX-392); unproven, it is refused
+    outright. Any other channel gets the agent check, ``browser_proven`` or not."""
+    if channel == "dashboard":
+        return None if browser_proven else UNPROVEN_DASHBOARD
+    return None if channel == "telegram" else agent_refusal(env)
+
+
 def decide(request_id: str, approve: bool, by: str, *, channel: str = "terminal",
-           env=None, reason: str | None = None) -> dict:
+           env=None, reason: str | None = None, browser_proven: bool = False) -> dict:
     """The operator's decision. ``{ok, state, detail, merge_commit_sha?}``.
 
     Approve ⇒ the merge happens HERE, now, via :func:`chela.contract.complete_override`
     (which re-checks head/CI/mergeable/base live). Exactly one caller ever moves a request
     out of ``pending`` — a second Approve (another button, another process) is told the
     request was already decided and merges nothing.
+
+    ``browser_proven`` is the dashboard's word that the request carried a verified browser
+    session (:mod:`chela.dashboard.humanproof`); ``channel="dashboard"`` without it is refused.
     """
-    why = None if channel in SERVICE_CHANNELS else agent_refusal(env)
+    why = _service_refusal(channel, browser_proven, env)
     if why:
         return {"ok": False, "state": None, "detail": why, "refused": True}
     by = (by or "").strip() or "unknown"

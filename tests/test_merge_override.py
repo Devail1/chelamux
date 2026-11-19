@@ -21,6 +21,7 @@ import pytest
 from chela import config, contract, dispatcher, event_log, inbox, overrides
 from chela.dispatcher import CI_FAILING, CI_PASSING, CIStatus
 from chela.judge import J_BLOCKED
+from tests._browser_session import as_browser
 
 HEAD = "a" * 40
 MOVED = "c" * 40
@@ -226,7 +227,7 @@ def test_approve_with_red_ci_or_a_conflict_fails_with_the_reason(repo, told, ci,
     _seed(repo)
     rid = _request()["request_id"]
     with _github(ci=ci, mergeable=mergeable) as squash:
-        out = overrides.decide(rid, True, "dashboard", channel="dashboard")
+        out = overrides.decide(rid, True, "dashboard", channel="dashboard", browser_proven=True)
     squash.assert_not_called()
     assert out["ok"] is False and out["state"] == overrides.FAILED
     rec = overrides.load(rid)
@@ -397,7 +398,8 @@ def test_a_service_channel_approves_despite_inherited_agent_markers(repo, channe
     _seed(repo)
     rid = _request()["request_id"]
     with _github() as squash:
-        out = overrides.decide(rid, True, channel, channel=channel, env=dict(_AGENT_MARKERS))
+        out = overrides.decide(rid, True, channel, channel=channel, env=dict(_AGENT_MARKERS),
+                               browser_proven=True)
     assert out["ok"] is True and out["state"] == overrides.MERGED, out
     squash.assert_called_once()
 
@@ -424,7 +426,7 @@ def test_the_dashboard_post_merges_in_a_process_with_agent_markers(repo, monkeyp
     for k, v in _AGENT_MARKERS.items():
         monkeypatch.setenv(k, v)
     with _github() as squash:
-        ok = app.test_client().post(f"/override/{rid}", data={"decision": "approve"})
+        ok = as_browser(app.test_client()).post(f"/override/{rid}", data={"decision": "approve"})
     assert ok.status_code == 200 and b"merged" in ok.data
     squash.assert_called_once()
 
@@ -647,7 +649,7 @@ def test_the_dashboard_confirm_page_approves_and_merges(repo):
     from chela.dashboard.app import app
     _seed(repo)
     rid = _request()["request_id"]
-    client = app.test_client()
+    client = as_browser(app.test_client())
     page = client.get(f"/override/{rid}")
     assert page.status_code == 200 and b"Approve override" in page.data
     with _github() as squash:
@@ -803,7 +805,7 @@ def test_a_failed_dashboard_approval_never_reads_as_merged_or_denied(repo):
     _seed(repo)
     rid = _request()["request_id"]
     with _github(ci=CI_FAILING) as squash:
-        resp = app.test_client().post(f"/override/{rid}", data={"decision": "approve"})
+        resp = as_browser(app.test_client()).post(f"/override/{rid}", data={"decision": "approve"})
     squash.assert_not_called()
     assert resp.status_code == 410
     assert b"Approved and merged" not in resp.data and b"Denied" not in resp.data
@@ -816,7 +818,7 @@ def test_the_dashboard_deny_denies_and_merges_nothing(repo):
     _seed(repo)
     rid = _request()["request_id"]
     with _github() as squash:
-        resp = app.test_client().post(f"/override/{rid}", data={"decision": "deny"})
+        resp = as_browser(app.test_client()).post(f"/override/{rid}", data={"decision": "deny"})
     squash.assert_not_called()
     assert resp.status_code == 200 and b"Denied" in resp.data
     assert overrides.load(rid)["state"] == overrides.DENIED
@@ -1003,7 +1005,7 @@ def test_a_denial_tells_the_orchestrator_denied_with_the_reason(repo, told):
     _seed(repo)
     rid = _request()["request_id"]
     with _github() as squash:
-        out = overrides.decide(rid, False, "dashboard", channel="dashboard",
+        out = overrides.decide(rid, False, "dashboard", channel="dashboard", browser_proven=True,
                                reason="wrong fix")
     squash.assert_not_called()
     assert out["state"] == overrides.DENIED and "wrong fix" in out["detail"]
@@ -1033,7 +1035,7 @@ def test_an_outcome_is_told_once_across_repeated_decisions_and_ticks(repo, told)
     rid = _request()["request_id"]
     with _github():
         overrides.decide(rid, True, "terminal:op")
-        overrides.decide(rid, True, "dashboard", channel="dashboard")
+        overrides.decide(rid, True, "dashboard", channel="dashboard", browser_proven=True)
         overrides.decide(rid, False, "terminal:op")
     for _ in range(3):
         overrides.sweep(head_of=lambda _t: MOVED)
