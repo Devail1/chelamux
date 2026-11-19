@@ -3,7 +3,7 @@
 // P11). /api/schedules is its own dataset, fetched only when the Work view asks (refreshSchedules():
 // the segment is showing, or a poll landed while it is).
 import { useEffect, useState } from 'react';
-import { api } from '../../../shared/api/index.ts';
+import { api, decideHeaders } from '../../../shared/api/index.ts';
 import { humanSchedule, relativeTime, shortTime } from '../../../shared/format/index.ts';
 import { icons } from '../../../shared/icons/index.ts';
 import { agents } from '../../../shared/store/agents.ts';
@@ -23,16 +23,15 @@ export function showAddSchedule() {
   adding.set(true);
 }
 
-const JSON_HEADERS = { 'Content-Type': 'application/json' };
 
 function ScheduleRow({ t }: { t: Schedule }) {
   async function toggle() {
-    await api(`/api/schedules/${t.id}`, { method: 'PATCH', headers: JSON_HEADERS, body: JSON.stringify({ enabled: !t.enabled }) });
+    await api(`/api/schedules/${t.id}`, { method: 'PATCH', headers: decideHeaders(), body: JSON.stringify({ enabled: !t.enabled }) });
     refreshSchedules();
   }
   async function remove() {
     if (!window.confirm(`Delete task ${t.id}?`)) return;
-    await api(`/api/schedules/${t.id}`, { method: 'DELETE' });
+    await api(`/api/schedules/${t.id}`, { method: 'DELETE', headers: decideHeaders() });
     refreshSchedules();
   }
   return (
@@ -115,7 +114,7 @@ function AddForm() {
   async function add() {
     const body = { agent_name: agentName, schedule_type: type, schedule_value: value.trim(), prompt: prompt.trim() };
     if (!body.agent_name || !body.schedule_value || !body.prompt) return;
-    await api('/api/schedules', { method: 'POST', headers: JSON_HEADERS, body: JSON.stringify(body) });
+    await api('/api/schedules', { method: 'POST', headers: decideHeaders(), body: JSON.stringify(body) });
     adding.set(false);
     refreshSchedules();
   }

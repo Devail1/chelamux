@@ -152,6 +152,18 @@ this host can send an approve request straight to the dashboard's HTTP API, and 
 gets past the merge-gate hook. The identity header does not close that gap; it is tracked in
 CMX-392. Cloudflare mode refuses such a caller unless it has a valid Access token.
 
+🔐 **Routes that act as the operator need the browser session** (CMX-392, CMX-447): the session
+cookie a dashboard page sets, that page's token in `X-Chela-Session-Token`, and an `Origin` naming
+the dashboard's own host and port (`chela/dashboard/humanproof.py`). Anything else gets a 403 and
+nothing happens. These are: override, share-request and card-Merge decisions; saving settings
+(`POST /api/config`, `/api/config/dispatch`, `/api/config/concurrency`, `/api/config/timing`;
+reading them needs no proof); `POST /api/update/apply`; adding, toggling and deleting schedules;
+`POST /api/dispatcher/backlog/promote`, `/api/dispatcher/init` and `/api/dispatcher/linear/issue`;
+and starting, stopping or changing a terminal share (`/api/term/<wid>/share`, `/share-mode`). The
+CLI equivalents (`chela schedule`, `chela update`) do not go through the dashboard
+and still work from a terminal. A process running as your own user can still drive a real browser
+session on purpose; this stops a single blind HTTP call, not that.
+
 ### `tailscale serve` (recommended)
 
 ```bash

@@ -13,6 +13,7 @@ from chela import collab_stream as cs
 from chela.dashboard import app as dash
 
 from tests.test_api_agents_done import _by_wid, _fleet
+from tests._browser_session import as_browser
 
 
 def _setup(monkeypatch):
@@ -31,7 +32,7 @@ def _setup(monkeypatch):
 
 def test_a_re_created_share_gets_a_new_epoch_on_every_surface(monkeypatch):
     _setup(monkeypatch)
-    c = dash.app.test_client()
+    c = as_browser(dash.app.test_client())
     try:
         first = c.post("/api/term/@9/share", json={"on": True}).get_json()
         info1 = c.get("/api/term/@9/share-info").get_json()

@@ -3,6 +3,7 @@
 import { act, cleanup, fireEvent, render, screen } from '@testing-library/react';
 import STYLE_CSS from '../../../../../static/style.css?raw';
 import { afterAll, afterEach, beforeAll, beforeEach, vi } from 'vitest';
+import { SESSION_TOKEN, SESSION_TOKEN_HEADER } from '../../../shared/api/index.ts';
 import { Settings, closeSettings, config, openSettings, selectSettingsTab } from '../index.ts';
 
 // Each test opens the whole modal (every tab renders, for the search): under a loaded machine
@@ -46,6 +47,11 @@ beforeEach(() => {
     const u = new URL(String(url), 'http://localhost/');
     const call = { path: u.pathname, url: u.pathname + u.search, method: init?.method ?? 'GET', body: init?.body ? JSON.parse(String(init.body)) : null };
     calls.push(call);
+    // 🔐 CMX-447: like the server, a write without the page's session token is refused (403).
+    const token = (init?.headers as Record<string, string> | undefined)?.[SESSION_TOKEN_HEADER];
+    if (call.method !== 'GET' && token !== SESSION_TOKEN) {
+      return { ok: false, status: 403, json: () => Promise.resolve({ ok: false, error: 'missing or stale session token' }) };
+    }
     let r = routes[`${call.method} ${call.path}`] ?? routes[call.path];
     if (typeof r === 'function') r = await (r as (c: Call) => unknown)(call);
     if (r instanceof Error) throw r;

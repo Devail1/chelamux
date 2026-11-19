@@ -32,6 +32,7 @@ import importlib
 import json
 
 import pytest
+from tests._browser_session import as_browser
 
 
 @pytest.fixture()
@@ -249,7 +250,7 @@ def no_live_state(monkeypatch):
 @pytest.fixture()
 def client(mods):
     from chela.dashboard import app as dash
-    return dash.app.test_client()
+    return as_browser(dash.app.test_client())
 
 
 def test_get_reports_stored_default_and_effective(mods, client):

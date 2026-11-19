@@ -25,6 +25,7 @@ import pytest
 from chela.sources import Task
 from chela.judge import judge_worktree_path
 from chela.workflow import WorkflowDef
+from tests._browser_session import as_browser
 
 
 @pytest.fixture()
@@ -331,7 +332,7 @@ def no_live_state(monkeypatch):
 @pytest.fixture()
 def client(mods):
     from chela.dashboard import app as dash
-    return dash.app.test_client()
+    return as_browser(dash.app.test_client())
 
 
 def _stored(config) -> dict:

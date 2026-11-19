@@ -3,6 +3,7 @@
 import { act, cleanup, fireEvent, render, screen } from '@testing-library/react';
 import { afterEach, beforeEach, expect, test, vi } from 'vitest';
 import { agents } from '../../../shared/store/agents.ts';
+import { SESSION_TOKEN } from '../../../shared/api/index.ts';
 import { Schedules, refreshSchedules, showAddSchedule } from '../index.ts';
 import { clip, scheduleHint } from '../model.ts';
 
@@ -89,6 +90,7 @@ test('Disable / Enable PATCH the flipped state and refetch', async () => {
   await act(async () => fireEvent.click(screen.getByRole('button', { name: 'Enable' })));
   const patches = calls.filter((c) => c.init?.method === 'PATCH').map((c) => [c.url, c.init?.body]);
   expect(patches).toEqual([['/api/schedules/3', '{"enabled":false}'], ['/api/schedules/4', '{"enabled":true}']]);
+  expect(calls.filter((c) => c.init?.method === 'PATCH').map((c) => (c.init?.headers as Record<string, string> | undefined)?.['X-Chela-Session-Token'])).toEqual([SESSION_TOKEN, SESSION_TOKEN]);
   expect(gets().filter((u) => u === '/api/schedules').length).toBe(2);
 });
 
@@ -101,6 +103,7 @@ test('Del asks first; declined, nothing is sent', async () => {
   confirmAnswer = true;
   await act(async () => fireEvent.click(screen.getAllByRole('button', { name: 'Del' })[1] as HTMLElement));
   expect(calls.filter((c) => c.init?.method).map((c) => [c.url, c.init?.method])).toEqual([['/api/schedules/4', 'DELETE']]);
+  expect(calls.filter((c) => c.init?.method).map((c) => (c.init?.headers as Record<string, string> | undefined)?.['X-Chela-Session-Token'])).toEqual([SESSION_TOKEN]);
   expect(gets()).toContain('/api/schedules');
 });
 
@@ -125,6 +128,7 @@ test('the add dialog: agents sorted by name, the value hint follows the type, an
   fireEvent.change(screen.getByRole('textbox', { name: 'Prompt' }), { target: { value: ' refresh ' } });
   await act(async () => fireEvent.click(screen.getByRole('button', { name: 'Add' })));
   const post = calls.find((c) => c.init?.method === 'POST');
+  expect((post?.init?.headers as Record<string, string> | undefined)?.['X-Chela-Session-Token']).toBe(SESSION_TOKEN);
   expect([post?.url, post?.init?.body]).toEqual(['/api/schedules', JSON.stringify({ agent_name: 'zeta', schedule_type: 'cron', schedule_value: '0 9 * * *', prompt: 'refresh' })]);
   expect(screen.queryByRole('dialog')).toBeNull();
   expect(gets()).toContain('/api/schedules');

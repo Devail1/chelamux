@@ -7,6 +7,14 @@ import { closeShareDialog, configureShareHost, followAgents, setShareMode, share
 import { INFO, resetShares, serve, settle } from './server.ts';
 import { must, stubFetch } from './setup.ts';
 
+// 🔐 CMX-447: the page's session token, seeded before the module under test reads it at import,
+// so the exact request pins the token VALUE the server checks (an empty one is refused).
+const TOKEN = vi.hoisted(() => {
+  const t = 'tok-share-actions';
+  document.body.innerHTML = `<script type="application/json" id="chela-boot">{"sessionToken": "${t}"}</script>`;
+  return t;
+});
+
 type Frame = { frame: HTMLIFrameElement; reload: ReturnType<typeof vi.fn> };
 
 /** A pane frame whose contentWindow is ours: `term` its live size, `reload` its reload. */
@@ -122,7 +130,7 @@ test('the agents poll is followed', () => {
   expect(shares.get().get('@2')?.mode).toBe('typing');
 });
 
-const JSON_POST = (body: unknown) => ({ method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+const JSON_POST = (body: unknown) => ({ method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Chela-Session-Token': TOKEN }, body: JSON.stringify(body) });
 
 test('the exact requests: Stop POSTs {on:false} to the share; a mode change POSTs to /share-mode', async () => {
   const calls = stubFetch(() => ({ ok: true, mode: 'typing' }));

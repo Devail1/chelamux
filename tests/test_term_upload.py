@@ -21,6 +21,7 @@ import pytest
 
 import chela.dashboard.app as app_mod
 from chela import event_log, uploads
+from tests._browser_session import as_browser
 
 RELAY = "wss://relay.example.workers.dev"
 
@@ -70,7 +71,7 @@ def ws(tmp_path, monkeypatch):
 
 def _post(name="notes.txt", data=b"hello", wid="@1", headers=None):
     body = {"agent": wid, "file": (io.BytesIO(data), name)}
-    return app_mod.app.test_client().post(
+    return as_browser(app_mod.app.test_client()).post(
         "/api/term/upload", data=body, content_type="multipart/form-data",
         headers=headers or {"Sec-Fetch-Site": "same-origin"})
 
@@ -284,7 +285,7 @@ def test_the_per_minute_count_cap_refuses_the_next_upload(ws, monkeypatch):
 
 def _post_image(headers, data=b"\x89PNG fake", wid="@1"):
     body = {"agent": wid, "image": (io.BytesIO(data), "shot.png", "image/png")}
-    return app_mod.app.test_client().post(
+    return as_browser(app_mod.app.test_client()).post(
         "/api/term/paste-image", data=body, content_type="multipart/form-data", headers=headers)
 
 
@@ -356,7 +357,7 @@ def test_an_unknown_window_is_refused(ws):
 
 def test_config_reports_file_drop_on_by_default_and_saves_a_toggle(monkeypatch):
     monkeypatch.delenv("CHELA_FILE_DROP", raising=False)
-    c = app_mod.app.test_client()
+    c = as_browser(app_mod.app.test_client())
     j = c.get("/api/config").get_json()
     assert j["file_drop"] is True and j["file_drop_source"] == "default"
     assert j["upload_max_mb"] == 25
@@ -378,7 +379,7 @@ def _served(monkeypatch) -> str:
     page = b"<!doctype html><html><head><title>ttyd</title></head><body></body></html>"
     monkeypatch.setattr(app_mod.urllib.request, "urlopen",
                         lambda *a, **k: _FakeTtydResponse(page))
-    return app_mod.app.test_client().get("/term/@1/").get_data(as_text=True)
+    return as_browser(app_mod.app.test_client()).get("/term/@1/").get_data(as_text=True)
 
 
 def test_the_served_pane_loads_the_upload_shim_before_the_legacy_paste_shim(monkeypatch):

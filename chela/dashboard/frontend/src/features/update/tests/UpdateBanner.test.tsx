@@ -6,6 +6,7 @@
 import { act, cleanup, fireEvent, render } from '@testing-library/react';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, test, vi } from 'vitest';
 import css from '../../../../../static/style.css?raw';
+import { SESSION_TOKEN } from '../../../shared/api/index.ts';
 import { UpdateBanner, applyStale, applyVersion, banner, checkForUpdate, reloadOffered, restartStale } from '../index.ts';
 import type { UpdateStatus } from '../flow.ts';
 
@@ -13,7 +14,7 @@ const PAGE = 'aaaaaaaaaaaa';
 let versionPayload: unknown;
 let statusPayload: unknown;
 let applyPayload: unknown;
-let calls: { url: string; method: string }[] = [];
+let calls: { url: string; method: string; token?: string }[] = [];
 let asked = '';
 let answer = true;
 const reload = vi.fn();
@@ -28,7 +29,7 @@ beforeEach(() => {
   answer = true;
   reload.mockClear();
   vi.stubGlobal('fetch', (url: string, opts?: RequestInit) => {
-    calls.push({ url, method: opts?.method ?? 'GET' });
+    calls.push({ url, method: opts?.method ?? 'GET', token: (opts?.headers as Record<string, string> | undefined)?.['X-Chela-Session-Token'] });
     const body = url.endsWith('/api/version') ? versionPayload : url.endsWith('/api/update/status') ? statusPayload : url.endsWith('/api/update/apply') ? applyPayload : new Error(`unexpected ${url}`);
     if (body instanceof Error) return Promise.reject(body);
     return Promise.resolve({ ok: true, json: () => Promise.resolve(body) });
@@ -159,6 +160,7 @@ test('Restart: confirm names the services, POSTs the existing route, ends in the
   const res = await act(() => restartStale(instant([{ ...STALE, applying: true }, { ...STALE, last_result: { run: 2, ok: true, behind_before: 0, restarted: ['chela-telegram', 'chela-collab'] } }])));
   expect(asked).toBe('Restart: chela-collab, chela-telegram? Running agents and judges keep running; the daemon restarts between ticks.');
   expect(posts().map((c) => c.method)).toEqual(['POST']);
+  expect(posts().map((c) => c.token)).toEqual([SESSION_TOKEN]); // CMX-447: the server refuses it without
   expect([res?.text, msg()]).toEqual(['Restarted chela-collab, chela-telegram', 'Restarted chela-collab, chela-telegram']);
   expect($('update-banner-msg')?.className).toBe('s-savemsg ok');
   expect($('update-banner-restart')).toBeNull();

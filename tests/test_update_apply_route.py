@@ -17,11 +17,12 @@ import pytest
 
 from chela import config, dispatcher, update
 from chela.dashboard import app as dash
+from tests._browser_session import as_browser
 
 
 @pytest.fixture
 def client():
-    return dash.app.test_client()
+    return as_browser(dash.app.test_client())
 
 
 def _wait_for_release_then_clear(lock, timeout=2):

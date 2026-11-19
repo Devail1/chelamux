@@ -21,6 +21,7 @@ import pytest
 from chela import collab_stream as cs
 from chela import config, event_log, share_sandbox
 from chela.dashboard import app as dash
+from tests._browser_session import as_browser
 
 UID, GID = os.getuid(), os.getgid()
 SID = "0123456789ab"
@@ -326,7 +327,7 @@ def share_app(monkeypatch):
 
 
 def _post(body):
-    return dash.app.test_client().post("/api/term/@9/share", json={"on": True, **body})
+    return as_browser(dash.app.test_client()).post("/api/term/@9/share", json={"on": True, **body})
 
 
 def test_override_without_typed_confirmation_is_not_granted(monkeypatch, share_app, typing_on):
@@ -385,7 +386,7 @@ def test_kill_switch_revokes_the_override(monkeypatch, typing_on):
     cs._bridges["@9"] = b
     dash._SHARED["@9"] = {"cols": 80, "rows": 24}
     try:
-        r = dash.app.test_client().post("/api/term/@9/share", json={"on": False})
+        r = as_browser(dash.app.test_client()).post("/api/term/@9/share", json={"on": False})
         assert r.status_code == 200
     finally:
         cs._bridges.pop("@9", None)
@@ -403,7 +404,7 @@ def test_shared_report_carries_the_mode(monkeypatch, typing_on):
     cs._bridges["@9"] = b
     dash._SHARED["@9"] = {"cols": 80, "rows": 24}
     try:
-        got = dash.app.test_client().get("/api/term/shared").get_json()
+        got = as_browser(dash.app.test_client()).get("/api/term/shared").get_json()
     finally:
         cs._bridges.pop("@9", None)
         dash._SHARED.clear()
@@ -415,17 +416,17 @@ def test_share_options_reasons(monkeypatch, typing_off):
     monkeypatch.setattr(dash, "_require_terminals", lambda: None)
     monkeypatch.setattr(dash, "_window_name", lambda wid: "shell-3")
     _not_sandboxed(monkeypatch)
-    o = dash.app.test_client().get("/api/term/@9/share-options").get_json()
+    o = as_browser(dash.app.test_client()).get("/api/term/@9/share-options").get_json()
     assert o["typing_allowed"] is False and o["typing_reason"] == dash.TYPING_OFF_REASON
     assert o["unsandboxed_offered"] is False
     monkeypatch.setenv("CHELA_SHARE_TYPING", "true")
-    o = dash.app.test_client().get("/api/term/@9/share-options").get_json()
+    o = as_browser(dash.app.test_client()).get("/api/term/@9/share-options").get_json()
     assert o["typing_reason"] == dash.NOT_SANDBOXED_REASON and o["unsandboxed_offered"] is True
 
 
 def test_config_api_round_trips_share_typing(monkeypatch):
     monkeypatch.delenv("CHELA_SHARE_TYPING", raising=False)
-    c = dash.app.test_client()
+    c = as_browser(dash.app.test_client())
     assert c.get("/api/config").get_json()["share_typing"] is False
     got = c.post("/api/config", json={"share_typing": True}).get_json()
     assert got["share_typing"] is True and got["share_typing_source"] == "dashboard"
@@ -486,7 +487,7 @@ def test_spawn_sandboxed_route_uses_the_launcher(monkeypatch, tmp_path):
     monkeypatch.setattr(spawn, "spawn_sandbox_window",
                         lambda cwd, net="none": seen.append(cwd) or spawn.SpawnResult(ok=True, name="sandbox-1", wid="@3", cwd=cwd))
     monkeypatch.setattr(dash.launcher, "record_recent", lambda p: None)
-    r = dash.app.test_client().post("/api/agents/spawn-sandboxed", json={"cwd": str(tmp_path)})
+    r = as_browser(dash.app.test_client()).post("/api/agents/spawn-sandboxed", json={"cwd": str(tmp_path)})
     assert r.status_code == 200 and seen == [str(tmp_path)]
 
 

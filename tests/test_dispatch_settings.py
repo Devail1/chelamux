@@ -30,6 +30,8 @@ import json
 
 import pytest
 
+from tests._browser_session import as_browser
+
 DISPATCH_ENV_VARS = (
     "CHELA_DISPATCH_WORKFLOWS", "CHELA_MAX_REWORKS", "CHELA_JUDGE",
     "CHELA_JUDGE_MAX_UNKNOWN_RETRIES", "CHELA_JUDGE_MAX_CONCURRENT", "CHELA_CRITIC",
@@ -461,7 +463,7 @@ def no_live_state(monkeypatch):
 @pytest.fixture()
 def client(mods):
     from chela.dashboard import app as dash
-    return dash.app.test_client()
+    return as_browser(dash.app.test_client())
 
 
 def test_get_reports_stored_default_and_effective(mods, client):

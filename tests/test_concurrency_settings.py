@@ -13,6 +13,7 @@ import pytest
 
 from chela import concurrency, dispatcher, event_log, userconfig
 from tests.test_dispatcher_claim_race import repo, spawns  # noqa: F401  (fixtures)
+from tests._browser_session import as_browser
 
 THIRD = "- [ ] third item\n"
 
@@ -165,7 +166,7 @@ def client(tmp_path, monkeypatch):
                   "concurrency:\n  max: 2\n---\nx\n")
     monkeypatch.setattr(dash, "_discover_dispatch_workflows", lambda runs: [wf])
     monkeypatch.setattr(dash, "_concurrency_available_bytes", lambda: (4 << 30, "test.slice"))
-    return dash.app.test_client(), wf
+    return as_browser(dash.app.test_client()), wf
 
 
 @pytest.mark.parametrize("payload", [

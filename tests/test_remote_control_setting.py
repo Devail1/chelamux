@@ -15,6 +15,7 @@ import pytest
 
 from chela import config, spawn, userconfig
 from chela.workflow import WorkflowDef
+from tests._browser_session import as_browser
 
 
 @pytest.fixture(autouse=True)
@@ -126,7 +127,7 @@ def client(monkeypatch):
     from chela.dashboard import app as dash
     monkeypatch.setattr(dash.dispatcher, "list_runs", lambda: [])
     monkeypatch.setattr(dash, "_discover_dispatch_workflows", lambda runs: [])
-    return dash.app.test_client()
+    return as_browser(dash.app.test_client())
 
 
 def _stored(path: Path) -> dict:

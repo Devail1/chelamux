@@ -6,6 +6,14 @@ import { expect, test, vi } from 'vitest';
 import { closeShareDialog, fetchShareOptions, mintShare, openShareDialog, ShareDialog, type ShareOptions } from '../index.ts';
 import { must, stubFetch } from './setup.ts';
 
+// 🔐 CMX-447: the page's session token, seeded before the module under test reads it at import,
+// so the exact request pins the token VALUE the server checks (an empty one is refused).
+const TOKEN = vi.hoisted(() => {
+  const t = 'tok-share-dialog';
+  document.body.innerHTML = `<script type="application/json" id="chela-boot">{"sessionToken": "${t}"}</script>`;
+  return t;
+});
+
 const SANDBOXED: ShareOptions = { share_typing: true, sandboxed: true, typing_allowed: true, window_name: 'shell-1' };
 const UNSAFE: ShareOptions = {
   share_typing: true, sandboxed: false, typing_allowed: false, unsandboxed_offered: true,
@@ -50,7 +58,7 @@ test('a labelled dialog; View only is the default and mints mode "view" with the
   expect(radio(/View only/).getAttribute('aria-checked')).toBe('true');
   expect(radio(/Allow typing/).getAttribute('aria-checked')).toBe('false');
   await clickShare();
-  expect(calls).toEqual([{ url: '/api/term/%401/share', init: { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ on: true, mode: 'view', cols: 80, rows: 24 }) } }]);
+  expect(calls).toEqual([{ url: '/api/term/%401/share', init: { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Chela-Session-Token': TOKEN }, body: JSON.stringify({ on: true, mode: 'view', cols: 80, rows: 24 }) } }]);
   expect(onClose).toHaveBeenCalledTimes(1);
   expect(onMinted.mock.calls).toEqual([[MINTED]]);
 });

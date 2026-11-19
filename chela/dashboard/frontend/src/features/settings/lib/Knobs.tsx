@@ -6,7 +6,7 @@
 // wins server-side, so an edit would be silently discarded, and Save never posts it (or every
 // Save would persist the env value as a dashboard value nobody chose).
 import { useState } from 'react';
-import { api } from '../../../shared/api/index.ts';
+import { api, decideHeaders } from '../../../shared/api/index.ts';
 import { Badge, Button, FieldRow, NumberInput, Select, TextInput } from '../../../shared/ui/index.ts';
 import { BOOL_DEFAULT, boolChoice, knobPayload, rejection, storedText, type Knob } from '../model.ts';
 import { SaveMsg, useLoad, type Msg } from './parts.tsx';
@@ -49,7 +49,7 @@ export function KnobRows({ path, kind, children }: { path: string; kind: 'timing
     setMsg({ cls: '', text: 'Saving…' });
     let body: { error?: string; knobs?: Knob[] } | null;
     try {
-      body = (await api(path, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(knobPayload(knobs, drafts)) })) as typeof body;
+      body = (await api(path, { method: 'POST', headers: decideHeaders(), body: JSON.stringify(knobPayload(knobs, drafts)) })) as typeof body;
     } catch {
       setMsg({ cls: 'err', text: 'Save failed. Nothing changed.' });
       return;

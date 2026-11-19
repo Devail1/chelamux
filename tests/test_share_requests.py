@@ -250,7 +250,7 @@ def test_stopping_the_share_revokes_the_sessions_approvals(typing_on, allowed, m
     monkeypatch.setattr(dash, "_require_terminals", lambda: None)
     monkeypatch.setattr(dash.collab_host, "stop_bridge", lambda wid: None)
     monkeypatch.setattr(dash.share_sandbox, "pane_identity", lambda wid: (4242, SID, allowed, "none"))
-    r = dash.app.test_client().post("/api/term/@9/share", json={"on": False})
+    r = as_browser(dash.app.test_client()).post("/api/term/@9/share", json={"on": False})
     assert r.status_code == 200
     assert sr.active_grants(SID, T0 + 1) == []
     assert sr.active_grants("ba9876543210", T0 + 1), "another session's approval is untouched"

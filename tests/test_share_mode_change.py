@@ -18,6 +18,7 @@ from chela import collab_stream as cs
 from chela.dashboard import app as dash
 from tests import test_share_typing_gate as gate
 from tests.test_share_typing_gate import _bridge, _events, _joiner, _not_sandboxed, _type
+from tests._browser_session import as_browser
 
 # The gate suite's fixtures, re-bound here so pytest finds them by name.
 sandbox, typing_on, typing_off = gate.sandbox, gate.typing_on, gate.typing_off
@@ -110,7 +111,7 @@ def live_share(monkeypatch):
     cs._bridges.pop("@9", None)
 
     def mint(mode="view"):
-        r = dash.app.test_client().post("/api/term/@9/share", json={"on": True, "mode": mode})
+        r = as_browser(dash.app.test_client()).post("/api/term/@9/share", json={"on": True, "mode": mode})
         assert r.status_code == 200, r.get_json()
         return r.get_json()
 
@@ -121,7 +122,7 @@ def live_share(monkeypatch):
 
 
 def _switch(mode, **extra):
-    return dash.app.test_client().post("/api/term/@9/share-mode", json={"mode": mode, **extra})
+    return as_browser(dash.app.test_client()).post("/api/term/@9/share-mode", json={"mode": mode, **extra})
 
 
 def _forwarded(b):
@@ -216,7 +217,7 @@ def test_unknown_mode_is_400(live_share, typing_on):
 
 def test_the_mint_route_still_never_re_mints_a_live_share(live_share, sandbox, typing_on):
     minted = live_share("view")
-    r = dash.app.test_client().post("/api/term/@9/share", json={"on": True, "mode": "typing"})
+    r = as_browser(dash.app.test_client()).post("/api/term/@9/share", json={"on": True, "mode": "typing"})
     assert r.status_code == 409
     assert dash._share_info["@9"]["pairing_code"] == minted["pairing_code"]
     assert _events("share.mode_changed") == []
@@ -305,7 +306,7 @@ def test_route_audits_the_requester_and_the_configured_expiry(monkeypatch, live_
     _not_sandboxed(monkeypatch)
     monkeypatch.setenv("CHELA_SHARE_UNSANDBOXED_MINUTES", "7")
     live_share("view")
-    r = dash.app.test_client().post("/api/term/@9/share-mode", json={"mode": "unsandboxed", "confirm": "shell-3"},
+    r = as_browser(dash.app.test_client()).post("/api/term/@9/share-mode", json={"mode": "unsandboxed", "confirm": "shell-3"},
                                     headers={"Tailscale-User-Login": "liav@example"})
     assert r.status_code == 200, r.get_json()
     (g,) = _events("share.unsandboxed_granted")
@@ -314,7 +315,7 @@ def test_route_audits_the_requester_and_the_configured_expiry(monkeypatch, live_
     assert r.get_json()["expires_at"] == g["payload"]["expires_at"]
     (ev,) = _events("share.mode_changed")
     assert ev["payload"]["by"] == "liav@example" and ev["payload"]["window"] == "shell-3"
-    r = dash.app.test_client().post("/api/term/@9/share-mode", json={"mode": "view"},
+    r = as_browser(dash.app.test_client()).post("/api/term/@9/share-mode", json={"mode": "view"},
                                     headers={"Tailscale-User-Login": "liav@example"})
     assert [(e["payload"]["by"], e["payload"]["window"]) for e in _events("share.mode_changed")] \
         == [("liav@example", "shell-3")] * 2, "a downgrade names who and which window too"
@@ -323,7 +324,7 @@ def test_route_audits_the_requester_and_the_configured_expiry(monkeypatch, live_
 def test_mode_change_on_an_unknown_window_is_404(live_share, sandbox, typing_on):
     live_share("view")
     dash._SHARED["@5"] = {"cols": 80, "rows": 24}   # shared on paper, but no such pane
-    r = dash.app.test_client().post("/api/term/@5/share-mode", json={"mode": "view"})
+    r = as_browser(dash.app.test_client()).post("/api/term/@5/share-mode", json={"mode": "view"})
     assert r.status_code == 404
 
 

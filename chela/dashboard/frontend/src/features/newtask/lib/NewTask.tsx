@@ -5,7 +5,7 @@
 // so the API key never reaches this page. Workflows and blockers come off the payload features/work
 // already polls. ⛔ A failed submit KEEPS every field and shows why; only a success clears.
 import { useState } from 'react';
-import { BASE_PATH } from '../../../shared/api/index.ts';
+import { BASE_PATH, decideHeaders } from '../../../shared/api/index.ts';
 import { createStore, useStore } from '../../../shared/store/index.ts';
 import { refreshWork, work } from '../../../shared/store/work.ts';
 import { Button, Dialog, DialogClose, FieldRow, MultiSelect, Select, TextArea, TextInput } from '../../../shared/ui/index.ts';
@@ -26,7 +26,7 @@ const EMPTY: Omit<Form, 'workflow'> = { title: '', desc: '', priority: '0', bloc
 async function create(f: Form): Promise<{ data: Created } | { error: string }> {
   const payload = { workflow_path: f.workflow, title: f.title.trim(), description: f.desc, priority: Number(f.priority) || 0, blocked_by: f.blocked };
   try {
-    const resp = await fetch(`${BASE_PATH}/api/dispatcher/linear/issue`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
+    const resp = await fetch(`${BASE_PATH}/api/dispatcher/linear/issue`, { method: 'POST', headers: decideHeaders(), body: JSON.stringify(payload) });
     let data: Created = {};
     try {
       data = ((await resp.json()) as Created | null) ?? {};

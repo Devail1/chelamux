@@ -1,7 +1,7 @@
 // CMX-221 (CMX-212 P17): the Dispatch tab: how many agents and judges run at once (CMX-164),
 // then the dispatcher, judge and critic policy knobs (CMX-220).
 import { useState } from 'react';
-import { api } from '../../../shared/api/index.ts';
+import { api, decideHeaders } from '../../../shared/api/index.ts';
 import { Badge, Button, FieldRow } from '../../../shared/ui/index.ts';
 import { memNote, stepPayload, workflowNote, type Concurrency as State } from '../model.ts';
 import { KnobRows } from './Knobs.tsx';
@@ -40,7 +40,7 @@ function Concurrency() {
   const step = async (kind: 'agents' | 'judges', idx: number, delta: number) => {
     if (!state || state === 'failed') return;
     try {
-      const body = (await api('/api/config/concurrency', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(stepPayload(state, kind, idx, delta)) })) as (State & { error?: string }) | null;
+      const body = (await api('/api/config/concurrency', { method: 'POST', headers: decideHeaders(), body: JSON.stringify(stepPayload(state, kind, idx, delta)) })) as (State & { error?: string }) | null;
       if (!body || body.error) {
         setMsg('Not saved: ' + (body?.error || 'rejected'));
         return;

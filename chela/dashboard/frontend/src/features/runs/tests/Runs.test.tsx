@@ -3,6 +3,7 @@
 import { act, cleanup, fireEvent, render, screen } from '@testing-library/react';
 import { afterEach, beforeEach, expect, test, vi } from 'vitest';
 import { setWorkPoll, work, type Run, type Workflow } from '../../../shared/store/work.ts';
+import { SESSION_TOKEN } from '../../../shared/api/index.ts';
 import { InitRepo, Runs, launcherPaths, openInitRepo, postWorkDelete } from '../index.ts';
 
 const URL = 'https://linear.app/acme/issue/CMX-12/tighten-top-row';
@@ -238,6 +239,7 @@ test('an empty path never POSTs', async () => {
 test('a seeded git repo reports what was created and refreshes Work; no git warning', async () => {
   await seed(' /srv/repo ', { ...INIT, skipped: ['TODO.md'], created: ['WORKFLOW.md'] });
   expect(calls.map((c) => [c.url, c.init?.method, c.init?.body])).toEqual([['/api/dispatcher/init', 'POST', JSON.stringify({ path: '/srv/repo' })]]);
+  expect(calls.map((c) => (c.init?.headers as Record<string, string> | undefined)?.['X-Chela-Session-Token'])).toEqual([SESSION_TOKEN]); // CMX-447: the server refuses it without
   expect(result().className).toBe('init-result ok');
   expect(lines()).toEqual(['created+icon: Created WORKFLOW.md', 'skipped+icon: Skipped (already exist): TODO.md',
     'next: Next: add /srv/repo/WORKFLOW.md to CHELA_DISPATCH_WORKFLOWS and restart the daemon, or run:  chela dispatch /srv/repo/WORKFLOW.md']);
