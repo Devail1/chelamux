@@ -27,6 +27,7 @@ import pytest
 
 from chela import config, event_log, mergegate, share_proxy, share_requests as sr, userconfig
 from chela import share_sandbox as sb
+from tests._browser_session import as_browser
 
 UID, GID = os.getuid(), os.getgid()
 SID = "0123456789ab"
@@ -260,7 +261,7 @@ def test_turning_guest_typing_off_revokes_every_approval(typing_on, allowed):
     from chela.dashboard import app as dash
     rec = _filed(target=allowed)
     assert sr.approve(rec["id"], by="op", now=T0)[0]
-    c = dash.app.test_client()
+    c = as_browser(dash.app.test_client())
     assert c.post("/api/config", json={"share_typing": False}).status_code == 200
     assert sr.active_grants(SID, T0 + 1) == []
 
@@ -348,7 +349,7 @@ def test_the_same_path_granted_both_ways_mounts_once_read_write(typing_on, allow
 def test_a_write_request_approved_without_write_is_read_only_everywhere(typing_on, allowed):
     from chela.dashboard import app as dash
     rec = _filed(target=allowed, access="rw")
-    c = dash.app.test_client()
+    c = as_browser(dash.app.test_client())
     # Only a JSON ``true`` allows write — a truthy string is not the operator ticking it.
     assert c.post(f"/api/share-requests/{rec['id']}/approve", json={"rw": "true"}).status_code == 200
     assert [s[2] for s in sr.mount_specs(SID)] == [False]
@@ -782,7 +783,7 @@ def test_the_cli_approves_read_only_unless_rw_is_passed(typing_on, allowed):
 
 def test_the_dashboard_route_approves_and_refuses(typing_on, allowed):
     from chela.dashboard import app as dash
-    c = dash.app.test_client()
+    c = as_browser(dash.app.test_client())
     _file(SID, target=allowed)
     _file(SID, target="~/.ssh")
     rows = c.get("/api/share-requests").get_json()["requests"]
