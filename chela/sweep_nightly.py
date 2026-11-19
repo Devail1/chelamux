@@ -14,8 +14,14 @@ every same-shape site; slice 3/3 (CMX-305) files them in the tracker and tells t
   day is done; a run that YIELDED may resume the same day when idle again, until the day's
   ``sweep.budget_seconds`` (a daily TOTAL) is spent. If no idle window came by the FALLBACK
   time — ``sweep.nightly_at`` (default ``02:00``) plus ``sweep.fallback_after_hours`` (default
-  2: 04:00) — and nothing ran today, it runs anyway on ``sweep.fallback_budget_seconds``
-  (default 1800), still yielding, and the notice says so. ``sweep.mode: fixed`` is the old
+  3: 05:00) — and nothing ran today, it runs anyway on ``sweep.fallback_budget_seconds``
+  (default 1800), still yielding, and the notice says so — but only inside its window
+  (``sweep.fallback_window_hours``, default 2: 05:00–07:00), never later in the day.
+* **Held off** (CMX-436). Never started while ``chela dispatch --pause`` holds the queue
+  (until its TTL), nor inside ``sweep.blocked_hours`` (local ``HH:MM-HH:MM``, wrapping past
+  midnight allowed; default ``03:00-04:30``, the host's cron window); a fallback that falls
+  inside a window moves to its end. A daemon-started run yields for either between two
+  mutations, as for an agent, and the notice says which. ``sweep.mode: fixed`` is the old
   clock: once a day from ``nightly_at``. ``nightly_at: off`` (``never``, ``false``, or
   ``sweep.enabled: false``) turns either off. The daemon (:func:`daemon_tick`) spawns ``chela
   judge nightly-sweep`` DETACHED, one at a time (concurrency 1, and a lock file for a hand-run
@@ -132,9 +138,12 @@ UNRUN, UNKNOWN = "unrun", "unknown"
 # CMX-371: why a run was SKIPPED, as a key — what the notice branches on, never the prose `why`.
 FLEET_PAUSED, JUDGE_OFF, ALREADY_RUNNING, NO_MERGES = (
     "fleet_paused", "judge_off", "already_running", "no_merges")
+# ⏳ CMX-436: what holds the sweep off (no start; a running one yields) — a dispatch pause
+# (`chela dispatch --pause`) or one of `sweep.blocked_hours`. Also SKIPPED reasons.
+DISPATCH_PAUSED, BLOCKED_HOURS = "dispatch_paused", "blocked_hours"
 # ⏳ CMX-400: a SKIPPED run for one of these swept nothing and the cause passes — it does not
 # end the idle day (the box reads busy meanwhile, so it is not retried in a loop).
-RETRY_REASONS = frozenset({FLEET_PAUSED, ALREADY_RUNNING})
+RETRY_REASONS = frozenset({FLEET_PAUSED, ALREADY_RUNNING, DISPATCH_PAUSED, BLOCKED_HOURS})
 # A SKIPPED reason no human can act on: recorded and logged, never queued to the inbox.
 QUIET_REASONS = frozenset({NO_MERGES})
 # `chela doctor` reads a last recorded run older than this as a dead scheduler (a day plus slack).
@@ -144,11 +153,20 @@ STALE_SECONDS = 36 * 3600
 IDLE, FIXED, FALLBACK = "idle", "fixed", "fallback"
 MODES = (IDLE, FIXED)
 DEFAULT_QUIET_SECONDS = 600            # the box stays idle this long before an idle start
-DEFAULT_FALLBACK_AFTER_HOURS = 2.0     # nightly_at + this: the fallback start (02:00 → 04:00)
+DEFAULT_FALLBACK_AFTER_HOURS = 3.0     # nightly_at + this: the fallback start (02:00 → 05:00)
+DEFAULT_FALLBACK_WINDOW_HOURS = 2.0    # the fallback fires only this long after its start
 DEFAULT_FALLBACK_BUDGET_SECONDS = 1800.0
 BUDGET_SPENT = "budget_spent"
+# ⏳ CMX-436: local hours the sweep never starts in (and yields at): the host's own cron load —
+# ~25 memory-capped nautilus jobs between 03:03 and 04:17 on the reference box.
+DEFAULT_BLOCKED_HOURS = ("03:00-04:30",)
+DAY_MINUTES = 24 * 60
+# ⚡ CMX-436: a mutations/hour figure only above this sample — n=1 in 0.0 h rates nothing.
+MIN_RATE_MUTATIONS = 10
+MIN_RATE_SECONDS = 600.0
 
 _RE_AT = re.compile(r"^([01]?\d|2[0-3]):([0-5]\d)$")
+_RE_SPAN = re.compile(r"^([01]?\d|2[0-3]):([0-5]\d)\s*-\s*([01]?\d|2[0-3]):([0-5]\d)\Z")
 _RE_BLAME = re.compile(r"^([0-9a-f]{40}) \d+ (\d+)(?: \d+)?\Z")
 _RE_DAY = re.compile(r"^\d{4}-\d{2}-\d{2}\Z")
 
@@ -348,7 +366,40 @@ def fallback_budget_seconds(wf) -> float:
 
 def fallback_at(wf) -> tuple[int, int] | None:
     """``(hour, minute)`` of the fallback start: ``nightly_at`` + ``sweep.fallback_after_hours``,
-    at most 23:59 (a fallback never moves to the next day). ``None`` when the sweep is off."""
+    at most 23:59 (a fallback never moves to the next day) — and, when that falls inside one of
+    ``sweep.blocked_hours``, moved to the window's END (CMX-436). ``None`` when the sweep is
+    off, or when the only end left is past midnight."""
+    start = _fallback_minute(wf)
+    if start is None:
+        return None
+    windows = blocked_hours(wf)
+    for _ in range(len(windows) + 1):       # a window's end may sit inside another one
+        hit = next((w for w in windows if _inside(w, start)), None)
+        if hit is None:
+            return divmod(start, 60)
+        if hit[1] <= start:
+            # Its end is tomorrow: a fallback never moves to the next day.
+            log.warning("%s: the sweep fallback falls in blocked hours %s that end after "
+                        "midnight — no fallback", wf.path, _span(hit))
+            return None
+        start = hit[1]
+    return None
+
+
+def fallback_window(wf) -> tuple[int, int] | None:
+    """⏳ CMX-436: ``(start, end)`` minutes since midnight — the fallback fires ONLY in here,
+    never "any time later on a day with no run" (11-18: a fallback fired at 16:35 and took the
+    slot from agents in working hours). Start: :func:`fallback_at`; end:
+    ``sweep.fallback_window_hours`` (default 2) later, at most midnight."""
+    at = fallback_at(wf)
+    if at is None:
+        return None
+    start = at[0] * 60 + at[1]
+    hours = _positive_number(wf, "fallback_window_hours", DEFAULT_FALLBACK_WINDOW_HOURS)
+    return start, min(start + int(hours * 60), DAY_MINUTES)
+
+
+def _fallback_minute(wf) -> int | None:
     at = nightly_at(wf)
     if at is None:
         return None
@@ -361,19 +412,101 @@ def fallback_at(wf) -> tuple[int, int] | None:
                         wf.path, raw, DEFAULT_FALLBACK_AFTER_HOURS)
         else:
             hours = float(raw)
-    minute = min(at[0] * 60 + at[1] + int(hours * 60), 24 * 60 - 1)
-    return divmod(minute, 60)
+    return min(at[0] * 60 + at[1] + int(hours * 60), DAY_MINUTES - 1)
+
+
+def _span(window: tuple[int, int]) -> str:
+    return "%02d:%02d-%02d:%02d" % (*divmod(window[0], 60), *divmod(window[1] % DAY_MINUTES, 60))
+
+
+def _parse_span(raw: object) -> tuple[int, int] | None:
+    m = _RE_SPAN.match(raw.strip()) if isinstance(raw, str) else None
+    if not m:
+        return None
+    start = int(m.group(1)) * 60 + int(m.group(2))
+    end = int(m.group(3)) * 60 + int(m.group(4))
+    return (start, end) if start != end else None
+
+
+def blocked_hours(wf) -> list[tuple[int, int]]:
+    """⏳ CMX-436: ``sweep.blocked_hours`` — local ``"HH:MM-HH:MM"`` windows, as ``(start, end)``
+    minutes since midnight; ``end < start`` wraps past midnight. Unset is
+    :data:`DEFAULT_BLOCKED_HOURS`; ``[]`` (or ``off``) is none. A list with an entry that does
+    not parse is the DEFAULT, said in the log — a typo must not quietly unblock the host's
+    heaviest hours."""
+    raw = wf.get("sweep", "blocked_hours", default=None)
+    if raw is None:
+        raw = list(DEFAULT_BLOCKED_HOURS)
+    elif raw is False or (isinstance(raw, str) and raw.strip().lower() in ("off", "never")):
+        return []
+    elif isinstance(raw, str):
+        raw = [raw]
+    spans = [_parse_span(r) for r in raw] if isinstance(raw, list) else [None]
+    if any(s is None for s in spans):
+        log.warning("%s: sweep.blocked_hours %r is not a list of HH:MM-HH:MM — using %s",
+                    wf.path, raw, list(DEFAULT_BLOCKED_HOURS))
+        return [_parse_span(r) for r in DEFAULT_BLOCKED_HOURS]
+    return spans
+
+
+def _inside(window: tuple[int, int], minute: int) -> bool:
+    start, end = window
+    if start < end:
+        return start <= minute < end
+    return minute >= start or minute < end            # wraps past midnight
+
+
+def blocked_window(wf, now: datetime) -> str:
+    """The ``sweep.blocked_hours`` window ``now`` (local) is in, as ``"HH:MM-HH:MM"``; ``""``
+    when none."""
+    minute = now.hour * 60 + now.minute
+    return next((_span(w) for w in blocked_hours(wf) if _inside(w, minute)), "")
+
+
+def dispatch_paused(chela_dir: Path | None = None, now: float | None = None) -> bool:
+    """⏳ CMX-436: is a ``chela dispatch --pause`` hold in force (until its TTL)? The operator
+    paused the queue to keep the box QUIET, and a quiet queue must not read as an invitation.
+    A hold file that cannot be read IS a pause here (fail closed, said in the log): unknown
+    never reads as "go ahead"."""
+    from chela import hold
+
+    path = Path(chela_dir or config.CHELA_DIR) / hold.HOLD_FILE_NAME
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        expires = float(data["expires_at"])
+    except FileNotFoundError:
+        return False
+    except (OSError, ValueError, TypeError, KeyError) as e:
+        log.warning("nightly sweep: the dispatch hold %s is unreadable (%s) — holding off", path,
+                    e)
+        return True
+    return expires > (time.time() if now is None else now)
+
+
+def hold_off(wf, now: datetime, chela_dir: Path | None = None) -> tuple[str, str]:
+    """⏳ CMX-436: ``(reason, what)`` — why the sweep must not run at ``now`` (no start; a
+    running one yields): :data:`DISPATCH_PAUSED` or :data:`BLOCKED_HOURS`, with the words
+    the notice uses. ``("", "")`` when nothing holds it off."""
+    if dispatch_paused(chela_dir, now.timestamp()):
+        return DISPATCH_PAUSED, "dispatch paused"
+    window = blocked_window(wf, now)
+    if window:
+        return BLOCKED_HOURS, f"blocked hours {window}"
+    return "", ""
 
 
 def box_idle(chela_dir: Path | None = None) -> tuple[bool, str]:
     """``(idle, why not)``: is the box free for a sweep NOW? No suite slot held (no hand-in,
-    self-check, judge or agent suite running), nobody waiting for one, no fleet pause, and at
+    self-check, judge or agent suite running), nobody waiting for one, no fleet or dispatch
+    pause (CMX-436: a released pause starts the quiet period over), and at
     least one suite's measured peak of memory available (CMX-393's
     :data:`chela.suite_guard.RESUME_MEM_BYTES`). Memory that cannot be read is NOT idle."""
     from chela import suite_guard
 
     if paused(Path(chela_dir or config.CHELA_DIR)):
         return False, "a fleet pause is active"
+    if dispatch_paused(chela_dir):
+        return False, "dispatch is paused"
     held = suite_guard.holders()
     if held:
         return False, f"the suite slot is held by {', '.join(held)}"
@@ -438,9 +571,13 @@ def start_reason(wf, now: datetime, quiet_for: float, chela_dir: Path | None = N
                  ) -> str | None:
     """Why ``wf``'s sweep starts at ``now`` — :data:`IDLE`, :data:`FALLBACK` or
     :data:`FIXED` — or ``None``. ``quiet_for``: how long the box has been idle. An
-    unreadable day record starts nothing — never a second sweep on a guess."""
+    unreadable day record starts nothing — never a second sweep on a guess. CMX-436: nothing
+    starts while :func:`hold_off` (a dispatch pause, blocked hours), and the fallback fires
+    only inside :func:`fallback_window`."""
     if sweep_mode(wf) == FIXED:
-        return FIXED if due(wf, now, chela_dir) else None
+        # CMX-436: a held-off fixed start waits (still due) until the hold passes.
+        return FIXED if due(wf, now, chela_dir) and not hold_off(wf, now, chela_dir)[0] \
+            else None
     if not dispatch_enabled(wf) or nightly_at(wf) is None:
         return None
     try:
@@ -453,10 +590,14 @@ def start_reason(wf, now: datetime, quiet_for: float, chela_dir: Path | None = N
     if rec.get("pending") or rec.get("done") or \
             (rec and _used(rec) >= nightly_budget(wf).seconds):
         return None
+    if hold_off(wf, now, chela_dir)[0]:
+        return None             # CMX-436: a dispatch pause or blocked hours — no start at all
     if quiet_for >= quiet_seconds(wf):
         return IDLE
-    fb = fallback_at(wf)
-    if not rec and fb is not None and (now.hour, now.minute) >= fb:
+    # Nothing RAN today: no record, or only runs that swept nothing — a fallback skipped by a
+    # hold that landed between its spawn and its start (CMX-436) may fire again in its window.
+    win = fallback_window(wf)
+    if _used(rec) == 0 and win is not None and win[0] <= now.hour * 60 + now.minute < win[1]:
         return FALLBACK
     return None
 
@@ -1103,6 +1244,21 @@ def slot_wanted() -> str:
     return ", ".join(suite_guard.waiters(exclude_pid=os.getpid()))
 
 
+class YieldCheck:
+    """⏳ CMX-436: a daemon-started sweep's yield check between two mutations — a dispatch
+    pause or blocked hours (:func:`hold_off`) first, then anyone waiting for the suite slot
+    (:func:`slot_wanted`). Returns what it yields to (``""``: go on); :attr:`reason` keeps
+    WHY — :data:`DISPATCH_PAUSED`, :data:`BLOCKED_HOURS`, or ``""`` for the slot."""
+
+    def __init__(self, wf, chela_dir: Path | None = None, clock=datetime.now):
+        self.wf, self.chela_dir, self.clock = wf, chela_dir, clock
+        self.reason = ""
+
+    def __call__(self) -> str:
+        self.reason, what = hold_off(self.wf, self.clock(), self.chela_dir)
+        return what or slot_wanted()
+
+
 def run(wf, *, now: float | None = None, chela_dir: Path | None = None,
         filer: Filer | None = None, trigger: str | None = None) -> dict:
     """One nightly sweep of ``wf``, then ONE inbox notice. ``filer`` is the filing seam
@@ -1129,6 +1285,10 @@ def run(wf, *, now: float | None = None, chela_dir: Path | None = None,
     elif paused(chela_dir):
         result.update(status=SKIPPED, reason=FLEET_PAUSED,
                       why="a fleet pause (`chela dispatch --pause --all`) is active")
+    elif trigger in (IDLE, FALLBACK, FIXED) and \
+            (held := hold_off(wf, datetime.fromtimestamp(now), chela_dir))[0]:
+        # CMX-436: the daemon checked before the spawn; this is the race in between.
+        result.update(status=SKIPPED, reason=held[0], why=_held_why(*held))
     elif not judge.judge_enabled(wf):
         result.update(status=SKIPPED, reason=JUDGE_OFF,
                       why="the judge is off for this workflow — nothing to mutate against")
@@ -1280,17 +1440,21 @@ def _sweep_and_file(wf, worktree: Path, head: str, ref: str, standard: list[dict
     prune_evidence(chela_dir)
     cfg = judge.judge_suite_config(wf)
     budget = budget if budget is not None else nightly_budget(wf)
-    # ⏳ CMX-400: an agent waiting for the suite slot stops the battery between mutations.
+    # ⏳ CMX-400: an agent waiting for the suite slot stops the battery between mutations —
+    # and (CMX-436) so does a dispatch pause or blocked hours, for a daemon-started run.
+    check = YieldCheck(wf, chela_dir) if result.get("trigger") in (IDLE, FALLBACK, FIXED) \
+        else None
     with judge_timing.within("sweep"):
         report = sweep.sweep(worktree, f"{ref}@{head[:12]} (standard-tier lines)",
                              cfg.test_cmd, timeout=cfg.suite_timeout_seconds,
                              select_tests=cfg.select_tests, provision=False, budget=budget,
                              lines=swept, keep=evidence_dir(wf, result["at"], chela_dir),
                              order=lambda muts: owed_first(muts, first, lines),
-                             should_yield=slot_wanted)
+                             should_yield=check or slot_wanted)
     unrun = [r.mutation.key for r in report._with(sweep.UNRUN)]
     result.update(yielded_to=report.yielded, sweep_seconds=report.seconds,
-                  budget_seconds=budget.seconds)
+                  budget_seconds=budget.seconds,
+                  yield_reason=check.reason if (check and report.yielded) else "")
     result.update(mutations=len(report.results), unrun=len(unrun),
                   measured=report.measured, battery_seconds=report.battery_seconds,
                   per_hour=report.per_hour,
@@ -1332,9 +1496,23 @@ def _quiet_status(result: dict) -> str:
     return CLEAN
 
 
+def _held_why(reason: str, what: str) -> str:
+    """CMX-436: a held-off skip, saying which hold."""
+    return {DISPATCH_PAUSED: "dispatch paused (`chela dispatch --pause`) — the box stays quiet",
+            BLOCKED_HOURS: f"inside {what} (`sweep.blocked_hours`)"}.get(reason, what)
+
+
+def _yielded(result: dict) -> str:
+    """``yielded: dispatch paused`` / ``yielded: blocked hours HH:MM-HH:MM`` (CMX-436), or
+    ``yielded the suite slot to CMX-12``."""
+    if result.get("yield_reason") in (DISPATCH_PAUSED, BLOCKED_HOURS):
+        return f"yielded: {result['yielded_to']}"
+    return f"yielded the suite slot to {result['yielded_to']}"
+
+
 def _quiet_why(result: dict) -> str:
     if result.get("yielded_to"):
-        return (f"yielded the suite slot to {result['yielded_to']}; {result.get('unrun', 0)} "
+        return (f"{_yielded(result)}; {result.get('unrun', 0)} "
                 "mutation(s) it did not reach are owed to the next run")
     if result.get("unrun"):
         return (f"{result['unrun']} mutation(s) the budget never reached are UNRUN — CANNOT "
@@ -1503,7 +1681,7 @@ def summary(result: dict) -> str:
     if "owed" in result:
         line += f" — {result['owed']} owed to the next night"
     if result.get("yielded_to"):
-        line += f" — ⏳ yielded the suite slot to {result['yielded_to']}"
+        line += f" — ⏳ {_yielded(result)}"
     if result.get("trigger") and result.get("sweep_seconds"):
         line += f" — {result['sweep_seconds'] / 60:.0f} min used"
         if result.get("budget_seconds"):
@@ -1533,11 +1711,16 @@ def started(result: dict) -> str:
 def throughput(result: dict) -> str:
     """⚡ CMX-383: `` — N measured in H h: R mutations/hour`` — the night's rate, so a
     selection regression shows up (11-16 ran 25 in 3.2 h: 7.8/h). ``""`` when the battery
-    measured nothing or recorded no time."""
+    measured nothing or recorded no time. CMX-436: below :data:`MIN_RATE_MUTATIONS` measured
+    AND :data:`MIN_RATE_SECONDS` of battery, `` — N measured: too few to rate`` (11-18: "1
+    measured in 0.0 h: 22885 mutations/hour")."""
     rate = result.get("per_hour")
     if not result.get("measured") or not rate:
         return ""
-    hours = result.get("battery_seconds", 0) / 3600
+    seconds = result.get("battery_seconds") or 0
+    if result["measured"] < MIN_RATE_MUTATIONS and seconds < MIN_RATE_SECONDS:
+        return f" — {result['measured']} measured: too few to rate"
+    hours = seconds / 3600
     return f" — {result['measured']} measured in {hours:.1f} h: {rate:g} mutations/hour"
 
 

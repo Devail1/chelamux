@@ -476,6 +476,17 @@ def _fresh_linear_caches():
 
 
 @pytest.fixture(autouse=True)
+def _no_default_sweep_blocked_hours(request, monkeypatch):
+    """CMX-436: the nightly sweep's default ``sweep.blocked_hours`` (03:00-04:30) would hold off
+    any test that drives the sweep at the REAL wall-clock time — a suite run at 03:xx would go
+    red. Off everywhere but the module that tests the default itself."""
+    if request.module.__name__.rsplit(".", 1)[-1] == "test_sweep_nightly_hold":
+        return
+    from chela import sweep_nightly
+    monkeypatch.setattr(sweep_nightly, "DEFAULT_BLOCKED_HOURS", ())
+
+
+@pytest.fixture(autouse=True)
 def _isolate_claude_config(tmp_path, monkeypatch):
     monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "claude-config"))
 
