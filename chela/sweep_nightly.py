@@ -73,17 +73,25 @@ every same-shape site; slice 3/3 (CMX-305) files them in the tracker and tells t
   same-shape site in the checkout: a FIXED-STRING ``git grep -F`` of the stripped line, so a
   regex metacharacter in it never drops a site. A group whose sites cannot be listed, or whose
   listing misses one of its own survivors, is not filed (fail closed; the next night retries).
-* **Filed.** Each group goes to the :class:`Filer` unless EVERY survivor in it was filed
-  before; a new site of a filed category files the group again. A survivor already filed is never
-  filed again on its own: its key — workflow, file, kind, line text before and after, no line number — is
-  kept in ``$CHELA_DIR/sweep-nightly/filed.json``, which outlives restarts and is written after
-  EACH filing. The default filer is :class:`TrackerFiler`: ONE tracker issue per group, labelled
-  :data:`LABELS` (``risk:normal``, ``sweep``), listing its survivors and its sites. A tracker that
-  cannot create issues gets :class:`WouldFile`, which files nothing and records what it would
-  have filed.
-* **Told.** ONE inbox notice per run (:func:`summary`): what was filed, clean, or skipped and
-  why, and the UNRUN / UNKNOWN counts. A run that filed nothing says so in that line. A night
-  with no standard-tier merge (:data:`NO_MERGES`) is the one exception (CMX-371): nobody can
+  🧹 CMX-433: the categories are then gathered by the merged PR their lines blame to — by file
+  when no PR is known — into one :class:`Section` each (the 11-18 night filed 29 issues, one
+  per category, for 4 PRs).
+* **Filed.** ONE issue per section (:class:`IssueGroup`), listing every mutation of it —
+  category, ``file:line``, before → after, same-shape sites — with the PR in the title. At most
+  ``sweep.max_issues`` (default 5) NEW issues a night: the largest sections lead one each and
+  every other is folded into them, round-robin from the largest, never dropped. A section
+  whose PR has an issue still OPEN gets a comment on it instead of a new issue; a tracker that
+  cannot say whether it is open files nothing for it (the next night retries). A category is
+  filed unless EVERY survivor in it was filed before; a new site of a filed category files it
+  again. A survivor already filed is never filed again on its own: its key — workflow, file,
+  kind, line text before and after, no line number — is kept in
+  ``$CHELA_DIR/sweep-nightly/filed.json`` with each section's issue, which outlives restarts
+  and is written after EACH filing. The default filer is :class:`TrackerFiler`, labelled
+  :data:`LABELS` (``risk:normal``, ``sweep``). A tracker that cannot create issues gets
+  :class:`WouldFile`, which files nothing and records what it would have filed.
+* **Told.** ONE inbox notice per run (:func:`summary`): what was filed or appended and how
+  many survivors went into each issue, clean, or skipped and why, and the UNRUN / UNKNOWN
+  counts. A run that filed nothing says so in that line. A night with no standard-tier merge (:data:`NO_MERGES`) is the one exception (CMX-371): nobody can
   act on it, so it is logged and appended to the event log, never queued to the inbox.
 * **Recorded.** EVERY run — quiet or not — writes its time, status and reason to
   ``$CHELA_DIR/sweep-nightly/runs.json`` (:func:`record_run`). ``chela doctor``'s
@@ -126,6 +134,7 @@ WINDOW_SECONDS = 24 * 3600
 MAX_CATCHUP_SECONDS = 7 * 24 * 3600
 LABELS = ("risk:normal", "sweep")
 MAX_SITES = 100           # same-shape sites listed in one issue; the rest are counted
+DEFAULT_MAX_ISSUES = 5    # 🧹 CMX-433: new issues one night files (`sweep.max_issues`)
 INBOX_KIND = "nightly_sweep"
 STATE_DIR_NAME = "sweep-nightly"
 FLEET_PAUSE_FILE = "fleet-pause.json"      # chela.fleet.STATE_FILE_NAME (CMX-214)
@@ -770,12 +779,12 @@ def blamed_lines(worktree: Path, commits: list[dict]) -> tuple[dict[str, set[int
 
 @dataclass(frozen=True)
 class FileContext:
-    """What a :class:`Filer` gets beside the surviving group: the run it came from."""
+    """What a :class:`Filer` gets beside the issue group: the run it came from."""
     workflow: Path
     worktree: Path           # the checkout at ``head`` — still there while the filer runs
     head: str
     ref: str
-    merged_in: str           # "`<sha12>` <subject>" of the PR the guard line blames to, or ""
+    merged_in: str           # the issue's own PR, "`<sha12>` <subject>", or "" when unknown
     chela_dir: Path
 
 
@@ -795,26 +804,79 @@ class SurvivorGroup:
                 "survived": [m.key for m in self.survivors], "sites": list(self.sites)}
 
 
-class Filer(Protocol):
-    """Files ONE :class:`SurvivorGroup`. Returns the tracker identifier, or ``None`` when
-    nothing was filed (the keys are then NOT recorded, so a later run files it). Raising
-    refuses this filing only."""
+@dataclass(frozen=True)
+class Section:
+    """🧹 CMX-433: the survivors of ONE merged PR — or, when no PR is known for them, of one
+    file — by category (:class:`SurvivorGroup`)."""
+    label: str                          # "`<sha12>` <subject>" of the PR; "" when unknown
+    file: str                           # its first survivor's file: the fallback identity
+    categories: tuple[SurvivorGroup, ...]
+    key: str                            # :func:`section_key`
 
-    def __call__(self, group: SurvivorGroup, ctx: FileContext) -> str | None: ...
+    @property
+    def survivors(self) -> tuple[sweep.Mutation, ...]:
+        return tuple(m for c in self.categories for m in c.survivors)
+
+    @property
+    def name(self) -> str:
+        """The PR (``sha12 subject``) or the file — plain text, for a title or a notice."""
+        return self.label.replace("`", "") if self.label else self.file
+
+
+@dataclass(frozen=True)
+class IssueGroup:
+    """🧹 CMX-433: what ONE tracker issue (or one comment on it) holds — its own
+    :class:`Section` first, then any the per-night cap folded into it
+    (:func:`cap_issues`)."""
+    sections: tuple[Section, ...]
+
+    @property
+    def survivors(self) -> tuple[sweep.Mutation, ...]:
+        return tuple(m for s in self.sections for m in s.survivors)
+
+    @property
+    def categories(self) -> tuple[SurvivorGroup, ...]:
+        return tuple(c for s in self.sections for c in s.categories)
+
+    @property
+    def mutation(self) -> sweep.Mutation:
+        """Its first survivor — what a refused or would-be filing is reported by."""
+        return self.sections[0].categories[0].mutation
+
+    @property
+    def key(self) -> str:
+        return self.sections[0].key
+
+
+class Filer(Protocol):
+    """Files ONE :class:`IssueGroup` as a new issue. Returns the tracker identifier, or
+    ``None`` when nothing was filed (the keys are then NOT recorded, so a later run files
+    it). Raising refuses this filing only.
+
+    A filer that can also add to an issue it filed before has ``open_issues(ids)`` (the open
+    ones among ``ids``, ``None`` when the tracker cannot say) and ``append(ident, group,
+    ctx)`` (``True`` once the comment is on the issue). One without them files every group
+    as a new issue."""
+
+    def __call__(self, group: IssueGroup, ctx: FileContext) -> str | None: ...
 
 
 class WouldFile:
     """The :class:`Filer` for a tracker that cannot create issues: files NOTHING, and appends
     what it would have filed to ``$CHELA_DIR/sweep-nightly/would-file.jsonl``."""
 
-    def __call__(self, group: SurvivorGroup, ctx: FileContext) -> None:
+    def __call__(self, group: IssueGroup, ctx: FileContext) -> None:
         path = state_dir(ctx.chela_dir) / "would-file.jsonl"
         path.parent.mkdir(parents=True, exist_ok=True)
         rec = {"at": time.time(), "workflow": str(ctx.workflow), "site": group.mutation.key,
-               "file": group.file, "key": group.key, "sites": list(group.sites),
-               "head": ctx.head, "merged_in": ctx.merged_in,
+               "key": group.key, "title": issue_title(group), "head": ctx.head,
+               "merged_in": ctx.merged_in,
+               "sources": [s.name for s in group.sections],
                "mutations": [{"site": m.key, "kind": m.kind, "before": m.before.strip(),
-                              "after": m.after.strip()} for m in group.survivors]}
+                              "after": m.after.strip(), "merged_in": s.label,
+                              "sites": list(c.sites)}
+                             for s in group.sections for c in s.categories
+                             for m in c.survivors]}
         with open(path, "a", encoding="utf-8") as fh:
             fh.write(json.dumps(rec, sort_keys=True) + "\n")
         return None
@@ -827,52 +889,101 @@ def _code(text: str) -> str:
     return f"{ticks}{pad}{text}{pad}{ticks}"
 
 
-def render_issue(group: SurvivorGroup, ctx: FileContext) -> tuple[str, str]:
-    """``(title, description)`` of the ONE issue for ``group``."""
-    first = group.mutation
-    text = first.before.strip()
-    more = len(group.survivors) - 1
-    title = f"Nightly sweep: {first.kind} survived at {first.key}" + (
-        f" and {more} more site(s)" if more else "")
+def issue_title(group: IssueGroup) -> str:
+    """The issue's title: how many survived, and the PR (or the file) they came from."""
+    host = group.sections[0]
+    title = f"Nightly sweep: {len(group.survivors)} surviving mutation(s) from " + (
+        f"PR {host.name}" if host.label else host.name)
+    if len(group.sections) > 1:
+        title += f" (+{len(group.sections) - 1} more PR/file group(s))"
+    return title
+
+
+def _section_lines(section: Section) -> list[str]:
+    """Every mutation of ``section``: category, ``file:line``, before → after, and every
+    same-shape site of its category."""
+    lines = [f"### Merged in: {section.label}" if section.label else
+             f"### In `{section.file}` (the merged PR is unknown)", ""]
+    for c in section.categories:
+        text = c.mutation.before.strip()
+        lines += [f"**Category:** `{c.mutation.kind}` on {_code(text)}", ""]
+        lines += [f"- `{m.key}`: {_code(m.before.strip())} → {_code(m.after.strip())}"
+                  for m in c.survivors]
+        lines += ["", f"Same-shape sites (every source line that reads exactly {_code(text)}):",
+                  ""]
+        survived = {m.key for m in c.survivors}
+        lines += [f"- `{s}`" + (" ← survived" if s in survived else "")
+                  for s in c.sites[:MAX_SITES]]
+        if len(c.sites) > MAX_SITES:
+            lines.append(f"- … and {len(c.sites) - MAX_SITES} more (`git grep -nF` the line)")
+        lines.append("")
+    return lines
+
+
+_ASK = ("Add a test that goes RED under each mutation above — not a weaker assertion — and "
+        "check every same-shape site for the same gap.")
+
+
+def render_issue(group: IssueGroup, ctx: FileContext) -> tuple[str, str]:
+    """``(title, description)`` of the ONE issue for ``group``: every mutation of every
+    section it holds."""
     lines = [
-        "⚖️🧹 The nightly mutation sweep found a guard on the base branch that no test can "
-        "tell apart from its corruption. It merged from a STANDARD-tier PR, which gets no "
+        "⚖️🧹 The nightly mutation sweep found guards on the base branch that no test can "
+        "tell apart from their corruption. They merged from STANDARD-tier PRs, which get no "
         "judge round.", "",
-        f"**Category:** `{first.kind}` on {_code(text)}",
         f"**Swept:** `{ctx.ref}` at `{ctx.head[:12]}`",
-    ]
-    if ctx.merged_in:
-        lines.append(f"**Merged in:** {ctx.merged_in}")
-    lines += ["", "**Mutations that survived:**", ""]
-    lines += [f"- `{m.key}`: {_code(m.before.strip())} → {_code(m.after.strip())}"
-              for m in group.survivors]
-    lines += ["", f"**Same-shape sites** (every source line that reads exactly {_code(text)}):",
-              ""]
-    survived = {m.key for m in group.survivors}
-    lines += [f"- `{s}`" + (" ← survived" if s in survived else "")
-              for s in group.sites[:MAX_SITES]]
-    if len(group.sites) > MAX_SITES:
-        lines.append(f"- … and {len(group.sites) - MAX_SITES} more (`git grep -nF` the line)")
-    lines += ["", "Add a test that goes RED under each mutation above — not a weaker "
-                  "assertion — and check every same-shape site for the same gap."]
-    return title, "\n".join(lines)
+        f"**Mutations that survived:** {len(group.survivors)}", ""]
+    if len(group.sections) > 1:
+        lines += [f"The nightly issue cap folded {len(group.sections) - 1} more PR/file "
+                  "group(s) into this one.", ""]
+    for section in group.sections:
+        lines += _section_lines(section)
+    lines.append(_ASK)
+    return issue_title(group), "\n".join(lines)
+
+
+def render_comment(group: IssueGroup, ctx: FileContext) -> str:
+    """The comment that adds ``group``'s new survivors to the issue already open for its PR."""
+    lines = [f"⚖️🧹 The nightly sweep of `{ctx.ref}` at `{ctx.head[:12]}` found "
+             f"{len(group.survivors)} more surviving mutation(s) here.", ""]
+    for section in group.sections:
+        lines += _section_lines(section)
+    lines.append(_ASK)
+    return "\n".join(lines)
 
 
 class TrackerFiler:
     """The tracker's :class:`Filer`: ONE issue per group through ``create_issue``, labelled
-    :data:`LABELS`. A label the tracker could not attach is kept in :attr:`warnings` — the
-    issue itself is filed."""
+    :data:`LABELS`; with ``comment`` and ``fetch`` (``fetch_by_ids``) it also adds a night's
+    new survivors to the issue still open for their PR. A label the tracker could not attach
+    is kept in :attr:`warnings` — the issue itself is filed."""
 
-    def __init__(self, create):
+    def __init__(self, create, comment=None, fetch=None):
         self.create = create
+        self.comment = comment
+        self.fetch = fetch
         self.warnings: list[str] = []
 
-    def __call__(self, group: SurvivorGroup, ctx: FileContext) -> str:
+    @property
+    def can_append(self) -> bool:
+        return self.comment is not None and self.fetch is not None
+
+    def __call__(self, group: IssueGroup, ctx: FileContext) -> str:
         title, body = render_issue(group, ctx)
         out = self.create(title, body, labels=LABELS)
         ident = out["identifier"]
         self.warnings += [f"{ident}: {w}" for w in out.get("warnings") or ()]
         return ident
+
+    def open_issues(self, idents: list[str]) -> set[str] | None:
+        """The ones among ``idents`` still open; ``None`` when the tracker cannot say."""
+        tasks = self.fetch(list(idents))
+        if tasks is None:
+            return None
+        return {t.id for t in tasks if t.terminal_state is None}
+
+    def append(self, ident: str, group: IssueGroup, ctx: FileContext) -> bool:
+        return self.comment(ident, render_comment(group, ctx)) == "set"
 
 
 def default_filer(wf) -> Filer:
@@ -880,8 +991,19 @@ def default_filer(wf) -> Filer:
     cannot create issues."""
     from chela.sources import get_source
 
-    create = getattr(get_source(wf), "create_issue", None)
-    return TrackerFiler(create) if create is not None else WouldFile()
+    src = get_source(wf)
+    create = getattr(src, "create_issue", None)
+    if create is None:
+        return WouldFile()
+    return TrackerFiler(create, comment=getattr(src, "comment", None),
+                        fetch=getattr(src, "fetch_by_ids", None))
+
+
+def can_append(filer) -> bool:
+    """Can ``filer`` add to an issue it filed before (see :class:`Filer`)?"""
+    return (callable(getattr(filer, "append", None))
+            and callable(getattr(filer, "open_issues", None))
+            and getattr(filer, "can_append", True) is True)
 
 
 def survivor_key(wf_path: str, mut: sweep.Mutation) -> str:
@@ -959,6 +1081,69 @@ def survivor_groups(wf_path: str, worktree: Path, survivors: list[sweep.Mutation
         groups.append(SurvivorGroup(file=first.file, mutation=first, survivors=tuple(members),
                                     sites=tuple(sites), key=category_key(wf_path, first)))
     return groups, failed
+
+
+_RE_LABEL_SHA = re.compile(r"^`([0-9a-f]{7,40})`")
+
+
+def section_key(wf_path: str, label: str, file: str) -> str:
+    """A section's identity across nights: workflow + the PR's sha (``label``), or — when no
+    PR is known — workflow + the file. What an open issue is found by."""
+    m = _RE_LABEL_SHA.match(label)
+    ident = ("pr", m.group(1) if m else label) if label else ("file", file)
+    return hashlib.sha256("\0".join((str(wf_path), *ident)).encode()).hexdigest()[:24]
+
+
+def by_pr(survivors: list[sweep.Mutation], merged: dict[str, str],
+          ) -> list[tuple[str, str, list[sweep.Mutation]]]:
+    """``[(label, file, members)]``: the survivors split by the PR their line blames to
+    (``merged``: ``"file:line"`` → its label) — or, with no PR known, by file — in the
+    sweep's priority order."""
+    parts: dict[tuple[str, str], tuple[str, str, list[sweep.Mutation]]] = {}
+    for m in survivors:
+        label = merged.get(m.key, "")
+        ident = ("pr", label) if label else ("file", m.file)
+        parts.setdefault(ident, (label, m.file, []))[2].append(m)
+    return list(parts.values())
+
+
+def survivor_sections(wf_path: str, worktree: Path, survivors: list[sweep.Mutation],
+                      merged: dict[str, str]) -> tuple[list[Section], list[str]]:
+    """``(sections, failed)``: one :class:`Section` per PR (:func:`by_pr`), its categories
+    from :func:`survivor_groups` — a category that cannot be listed is in ``failed``."""
+    sections, failed = [], []
+    for label, file, members in by_pr(survivors, merged):
+        groups, bad = survivor_groups(wf_path, worktree, members)
+        failed += bad
+        if groups:
+            sections.append(Section(label=label, file=file, categories=tuple(groups),
+                                    key=section_key(wf_path, label, file)))
+    return sections, failed
+
+
+def max_issues(wf) -> int:
+    """``sweep.max_issues``: the most NEW issues one night files (default
+    :data:`DEFAULT_MAX_ISSUES`). Anything but a positive whole number is the default, said in
+    the log."""
+    raw = wf.get("sweep", "max_issues", default=None)
+    if raw is None:
+        return DEFAULT_MAX_ISSUES
+    if isinstance(raw, int) and not isinstance(raw, bool) and raw > 0:
+        return raw
+    log.warning("%s: sweep.max_issues %r is not a positive whole number — using %d", wf.path,
+                raw, DEFAULT_MAX_ISSUES)
+    return DEFAULT_MAX_ISSUES
+
+
+def cap_issues(sections: list[Section], cap: int) -> list[IssueGroup]:
+    """At most ``cap`` issue groups: the ``cap`` largest sections (most survivors; the
+    sweep's order breaks a tie) each lead one, and every other section is FOLDED into them,
+    largest first, round-robin — never dropped."""
+    order = sorted(sections, key=lambda s: -len(s.survivors))
+    hosts = [[s] for s in order[:max(cap, 1)]]
+    for i, s in enumerate(order[len(hosts):]):
+        hosts[i % len(hosts)].append(s)
+    return [IssueGroup(tuple(h)) for h in hosts]
 
 
 # --- what is owed (CMX-374) -----------------------------------------------------------------
@@ -1209,7 +1394,8 @@ def run(wf, *, now: float | None = None, chela_dir: Path | None = None,
     now = time.time() if now is None else now
     result = {"workflow": str(wf.path), "at": now, "filed": [], "would_file": [],
               "already_filed": 0, "failed": [], "survivors": 0, "prs": [], "groups": [],
-              "warnings": [], "trigger": trigger}
+              "appended": [], "issues": [], "folded": 0, "warnings": [],
+              "trigger": trigger}
     try:
         budget = run_budget(wf, trigger, now, chela_dir)
     except ValueError as e:
@@ -1470,30 +1656,93 @@ def _quiet_why(result: dict) -> str:
 def _file(wf, worktree: Path, head: str, ref: str, survivors: list[sweep.Mutation],
           pr_of: dict[tuple[str, int], str], chela_dir: Path, filer: Filer | None,
           result: dict) -> None:
+    """🧹 CMX-433: file the night's survivors — ONE issue per merged PR (by file when the PR
+    is unknown), at most :func:`max_issues` new ones, the rest folded in; a PR whose issue is
+    still open gets a comment instead."""
     keys_path = state_dir(chela_dir) / "filed.json"
     try:
         store = _read_json(keys_path)
+        filed = store.setdefault("keys", {})
+        issues = store.setdefault("issues", {})
+        if not isinstance(filed, dict) or not isinstance(issues, dict) or not all(
+                isinstance(v, dict) and isinstance(v.get("issue"), str)
+                for v in issues.values()):
+            raise ValueError(f"{keys_path} holds a malformed key or issue map")
     except ValueError as e:
         # ⛔ Unknown is not "nothing filed yet": filing on a guess files duplicates.
         result.update(status=CANNOT_VERIFY, why=f"the filed-key store {e} — nothing filed")
         return
-    filed = store.setdefault("keys", {})
+    wf_path = str(wf.path)
     merged = {f"{f}:{ln}": pr for (f, ln), pr in pr_of.items()}
     filer = filer if filer is not None else default_filer(wf)
-    groups, unlisted = survivor_groups(str(wf.path), worktree, survivors)
+    sections, unlisted = survivor_sections(wf_path, worktree, survivors, merged)
     result["failed"].extend(unlisted)
-    result["groups"] = [g.as_dict() for g in groups]
+    result["groups"] = [c.as_dict() for s in sections for c in s.categories]
+    fresh = []
+    for s in sections:
+        # Per MUTATION: a category with one survivor not filed before is filed again.
+        cats = tuple(c for c in s.categories
+                     if not all(survivor_key(wf_path, m) in filed for m in c.survivors))
+        if cats:
+            fresh.append(Section(s.label, s.file, cats, s.key))
+        else:
+            result["already_filed"] += 1
+
+    def record(ident: str, group: IssueGroup) -> None:
+        for s in group.sections:
+            for m in s.survivors:
+                filed[survivor_key(wf_path, m)] = {"issue": ident, "at": result["at"],
+                                                   "site": group.mutation.key}
+            issues[s.key] = {"issue": ident, "at": result["at"], "pr": s.name}
+        _write_json(keys_path, store)       # per issue: a crash never files one twice
+
+    def ctx_for(group: IssueGroup) -> FileContext:
+        return FileContext(workflow=wf.path, worktree=worktree, head=head, ref=ref,
+                           merged_in=group.sections[0].label, chela_dir=chela_dir)
+
+    # An issue still open for the PR gets a comment; an unknown state files nothing.
+    known = [s for s in fresh if s.key in issues and can_append(filer)]
+    to_file = [s for s in fresh if s not in known]
+    if known:
+        try:
+            still_open = filer.open_issues(sorted({issues[s.key]["issue"] for s in known}))
+        except Exception as e:  # noqa: BLE001 — unreadable, said below
+            log.warning("nightly sweep: could not read the open issues: %s", e)
+            still_open = None
+        # One comment per issue: sections the cap once folded into it share it.
+        by_issue: dict[str, list[Section]] = {}
+        for s in known:
+            by_issue.setdefault(issues[s.key]["issue"], []).append(s)
+        for ident, secs in by_issue.items():
+            group = IssueGroup(tuple(secs))
+            if still_open is None:
+                result["failed"].append(f"{group.mutation.key}: could not read whether "
+                                        f"{ident} is still open — not filed")
+                continue
+            if ident not in still_open:
+                to_file.extend(secs)        # closed since: a new issue
+                continue
+            try:
+                ok = filer.append(ident, group, ctx_for(group))
+            except Exception as e:  # noqa: BLE001 — one refused comment never loses the others
+                result["failed"].append(f"{group.mutation.key}: {e}")
+                continue
+            if ok is not True:
+                result["failed"].append(f"{group.mutation.key}: {ident} did not take the "
+                                        "comment")
+                continue
+            result["appended"].append(ident)
+            result["issues"].append({"issue": ident, "survivors": len(group.survivors),
+                                     "sources": [s.name for s in secs], "appended": True})
+            record(ident, group)
+    cap = max_issues(wf)
+    groups = cap_issues(to_file, cap) if to_file else []
+    result["folded"] = len(to_file) - len(groups)
+    result["max_issues"] = cap
     for group in groups:
         site = group.mutation.key
-        keys = [survivor_key(str(wf.path), m) for m in group.survivors]
-        # Per MUTATION: a new survivor category on a guard line filed before is filed again.
-        if all(k in filed for k in keys):
-            result["already_filed"] += 1
-            continue
-        ctx = FileContext(workflow=wf.path, worktree=worktree, head=head, ref=ref,
-                          merged_in=merged.get(site, ""), chela_dir=chela_dir)
         try:
-            ident = filer(group, ctx)
+            ident = filer(group, ctx_for(group))
         except Exception as e:  # noqa: BLE001 — one refused filing never loses the others
             result["failed"].append(f"{site}: {e}")
             continue
@@ -1501,11 +1750,12 @@ def _file(wf, worktree: Path, head: str, ref: str, survivors: list[sweep.Mutatio
             result["would_file"].append(site)
             continue
         result["filed"].append(ident)      # before the write: an issue made is reported
-        for k in keys:
-            filed[k] = {"issue": ident, "at": result["at"], "site": site}
-        _write_json(keys_path, store)       # per issue: a crash never files one twice
+        result["issues"].append({"issue": ident, "survivors": len(group.survivors),
+                                 "sources": [s.name for s in group.sections],
+                                 "appended": False})
+        record(ident, group)
     result["warnings"].extend(getattr(filer, "warnings", ()))
-    if result["filed"] or result["failed"] or result["would_file"]:
+    if result["filed"] or result["appended"] or result["failed"] or result["would_file"]:
         # A night with survivors AND unmeasured lines says both: the count alone hides it.
         result.update(status=SURVIVORS, why=_quiet_why(result))
 
@@ -1524,9 +1774,20 @@ def summary(result: dict) -> str:
                           f"{len(result['groups'])} group(s)",
                CLEAN: "clean", UNRUN: "UNRUN, not clean", UNKNOWN: "UNKNOWN, not clean",
                }.get(status, status)
-    filing = [f"filed {', '.join(result['filed'])}" if result["filed"] else "nothing filed"]
+    counts = {(i["issue"], i["appended"]): i["survivors"] for i in result.get("issues") or ()}
+
+    def each(idents: list[str], appended: bool) -> str:
+        return ", ".join(f"{i} ({counts[(i, appended)]} survivor(s))"
+                         if (i, appended) in counts else i for i in idents)
+    filing = [f"filed {each(result['filed'], False)}" if result["filed"]
+              else "no new issue" if result.get("appended") else "nothing filed"]
+    if result.get("appended"):
+        filing.append(f"appended to {each(result['appended'], True)}")
+    if result.get("folded"):
+        filing.append(f"{result['folded']} more PR/file group(s) folded into the largest "
+                      f"issues (cap {result.get('max_issues')} a night)")
     if result["already_filed"]:
-        filing.append(f"{result['already_filed']} group(s) already filed")
+        filing.append(f"{result['already_filed']} PR/file group(s) already filed")
     if result["failed"]:
         filing.append(f"{len(result['failed'])} NOT filed ({result['failed'][0]})")
     if result["would_file"]:
