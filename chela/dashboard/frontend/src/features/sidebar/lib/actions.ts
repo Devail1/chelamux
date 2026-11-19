@@ -37,4 +37,6 @@ export interface SidebarActions {
   undoDismissRecent(sids: string[]): unknown;
   closeRecentUndo(): void;
   toggleDispatcherSessions(): void;
+  /** CMX-434: open the "Suggest names" dialog. */
+  suggestNames(): void;
 }

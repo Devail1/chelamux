@@ -179,7 +179,7 @@ test('the VIEW menu: a <button>; each submenu shows its value; a page opens by E
   open(btn);
   expect(screen.getByRole('menu').className).toContain('side-menu view-menu');
   expect(entries().map(i => i.querySelector('.ov-label')?.textContent)).toEqual([
-    'Status', 'Environment', 'Last activity', 'Group by', 'Sort by', 'Custom groups', 'Show empty groups', 'Show PR status']);
+    'Status', 'Environment', 'Last activity', 'Group by', 'Sort by', 'Custom groups', 'Show empty groups', 'Show PR status', 'Suggest names…']);
   expect([valueOf('Status'), valueOf('Environment'), valueOf('Last activity'), valueOf('Group by'), valueOf('Sort by'), valueOf('Custom groups')])
     .toEqual(['Active', '3 selected', 'All', 'State', 'Name', '1']);
   expect(rowOf('Status')?.getAttribute('aria-haspopup')).toBe('menu');
@@ -198,6 +198,16 @@ test('the VIEW menu: a <button>; each submenu shows its value; a page opens by E
     expect(acts.viewMenuAction.mock.calls.at(-1)).toEqual([act]);
     expect(rowOf('Status')).toBeTruthy();
   }
+});
+
+test('CMX-434: the VIEW menu\'s Suggest names… opens the dialog (its action) and closes the menu', () => {
+  const { acts, btn } = drawView(state([win('a')]));
+  open(btn);
+  expect(acts.suggestNames).not.toHaveBeenCalled();
+  pick('Suggest names…');
+  expect(acts.suggestNames).toHaveBeenCalledTimes(1);
+  expect(acts.viewMenuAction).not.toHaveBeenCalled();
+  expect(menuOpen()).toBe(false);
 });
 
 test('the VIEW menu: Environment and the toggles are multi-selects that stay where they are', () => {

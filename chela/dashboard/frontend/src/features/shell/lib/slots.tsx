@@ -20,6 +20,7 @@ import { Nav, Recent, ResizeHandle, Sidebar, ViewMenu, type SidebarActions } fro
 import * as sb from '../../sidebar/controller.ts';
 import type { AgentRow } from '../../sidebar/model.ts';
 import { StatusHealth } from '../../statushealth/index.ts';
+import { SuggestNames, openSuggestNames } from '../../suggestnames/index.ts';
 import { TaskModal } from '../../taskmodal/index.ts';
 import { UpdateBanner } from '../../update/index.ts';
 import { WorkToasts, WorkView } from '../../work/index.ts';
@@ -37,6 +38,7 @@ export const sidebarActions: SidebarActions = {
   setSidebarWidth: sb.setSidebarWidth, resumeSession: sb.resumeSession, dismissRecentSession: sb.dismissRecentSession,
   clearRecentSessions: sb.clearRecentSessions, undoDismissRecent: sb.undoDismissRecent, closeRecentUndo: sb.closeRecentUndo,
   toggleDispatcherSessions: sb.toggleDispatcherSessions,
+  suggestNames: openSuggestNames,
 };
 
 // The sidebar's stores repaint before a publish returns: its controller reads the rows back.
@@ -71,6 +73,7 @@ function Overlays() {
       <ApprovalsSheet />
       <AccessRequestsSheet />
       <UpdateBanner />
+      <SuggestNames />
     </>
   );
 }

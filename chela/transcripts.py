@@ -211,6 +211,19 @@ def latest_ai_title(path: Path) -> str | None:
     return title.strip() if isinstance(title, str) and title.strip() else None
 
 
+def latest_custom_title(path: Path) -> str | None:
+    """Return the latest `{"type": "custom-title"}.customTitle`, or None (CMX-434).
+
+    Claude Code writes one each time the session is renamed with `/rename <title>`; the
+    latest is the title it shows, and it outranks the auto-generated `ai-title`.
+    """
+    rec = latest_record(path, lambda o: o.get("type") == "custom-title")
+    if not rec:
+        return None
+    title = rec.get("customTitle")
+    return title.strip() if isinstance(title, str) and title.strip() else None
+
+
 # ---------------------------------------------------------------------------
 # Dashboard-facing helpers
 # ---------------------------------------------------------------------------
@@ -422,7 +435,7 @@ def _resolve_agent_transcript(agent_name: str, window_id: str | None = None) -> 
 
 
 def summary_for_path(path: Path | None) -> dict:
-    """`{"recap", "recap_ts", "pr", "ai_title", "last_activity"}` for a transcript path
+    """`{"recap", "recap_ts", "pr", "ai_title", "custom_title", "last_activity"}` for a transcript path
     (or all None).
 
     ``last_activity`` is the transcript's last write (ISO, UTC) — Claude Code appends on
@@ -430,7 +443,8 @@ def summary_for_path(path: Path | None) -> dict:
     activity filter, Date grouping and sort). One ``stat``; None when it cannot be read.
     """
     if path is None:
-        return {"recap": None, "recap_ts": None, "pr": None, "ai_title": None, "last_activity": None}
+        return {"recap": None, "recap_ts": None, "pr": None, "ai_title": None,
+                "custom_title": None, "last_activity": None}
     rec = _latest_recap_record(path)
     pr = latest_pr(path)
     return {
@@ -438,6 +452,7 @@ def summary_for_path(path: Path | None) -> dict:
         "recap_ts": rec.get("timestamp") if rec else None,
         "pr": pr.to_dict() if pr else None,
         "ai_title": latest_ai_title(path),
+        "custom_title": latest_custom_title(path),
         "last_activity": _mtime_iso(path),
     }
 

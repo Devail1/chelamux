@@ -178,6 +178,9 @@ export function ViewMenu({ state, actions }: { state: SidebarState | null; actio
       'separator',
       toggle('Show empty groups', 'toggle:showEmpty', v.showEmpty),
       toggle('Show PR status', 'toggle:showPR', v.showPR),
+      'separator',
+      // CMX-434: a dialog of proposals; nothing is renamed until it applies them.
+      { label: 'Suggest names…', onSelect: () => actions.suggestNames() },
     ],
   };
   return (
