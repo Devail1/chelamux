@@ -525,12 +525,15 @@ class SlotTimeout(TimeoutError):
 
 
 def _acquire(d: Path, k: int, cwd: str, rank: int, on_wait, max_wait: float | None,
-             poll: float) -> int:
+             poll: float, since: float | None = None) -> int:
     """Wait (visibly, in :func:`queue_key` order) for one of the ``k`` slots and return its
-    fd, at most ``max_wait`` seconds (:class:`SlotTimeout`); the wait is credited."""
+    fd, at most ``max_wait`` seconds (:class:`SlotTimeout`); the wait is credited. ``since``
+    is where it stands among equals (default: now)."""
     global _waited
     ledger = _Ledger(cwd, rank)
-    since, started, fd = time.time(), None, None
+    opened = time.time()
+    since = opened if since is None else since
+    started, fd = None, None
     try:
         while True:
             if not _must_queue(ledger.path, since, rank) and (fd := _take(d, k)) is not None:
@@ -542,7 +545,7 @@ def _acquire(d: Path, k: int, cwd: str, rank: int, on_wait, max_wait: float | No
                       f"(CMX-119; CHELA_SUITE_SLOTS)", file=sys.stderr, flush=True)
                 if on_wait is not None:
                     on_wait(since)
-            elif max_wait is not None and time.time() - since >= max_wait:
+            elif max_wait is not None and time.time() - opened >= max_wait:
                 raise SlotTimeout(f"no suite slot came free in {max_wait:.0f}s "
                                   f"(all {k} busy: {_holders(d, k)})")
             time.sleep(poll)
@@ -598,8 +601,9 @@ def slot(cwd: str | Path, on_wait=None, max_wait: float | None = None,
         return
     d = config.CHELA_DIR / SLOTS_DIRNAME
     d.mkdir(parents=True, exist_ok=True)
-    _held.fd = _acquire(d, k, str(cwd), rank, on_wait, max_wait, poll)
-    _held.hold = (d, k, str(cwd), rank, on_wait, max_wait, poll)
+    claimed = time.time()
+    _held.fd = _acquire(d, k, str(cwd), rank, on_wait, max_wait, poll, claimed)
+    _held.hold = (d, k, str(cwd), rank, on_wait, claimed, poll)
     try:
         _held.depth = 1
         yield
@@ -616,13 +620,15 @@ def yield_slot() -> str:
     self-check — free the slot, queue for it again at this hold's own rank, and return once
     it is back. Returns who it yielded to (``""``: nobody outranked it, the slot was kept).
 
-    A slot that cannot be taken back in the hold's ``max_wait`` raises
-    :class:`SlotTimeout`, exactly as the first wait would — the battery reports it as
-    CANNOT VERIFY. Not holding a slot (``K == 0``, or outside a battery) is a no-op."""
+    It queues again at its ORIGINAL claim time, so only a strictly better rank — never an
+    equal that came after it — goes ahead, and it waits for the slot without a bound: every
+    run ahead of it is bounded by its own budget, and a timeout here would throw away the
+    experiments this battery already measured. Not holding a slot (``K == 0``, or outside a
+    battery) is a no-op."""
     hold, fd = getattr(_held, "hold", None), getattr(_held, "fd", None)
     if hold is None or fd is None:
         return ""
-    d, k, cwd, rank, on_wait, max_wait, poll = hold
+    d, k, cwd, rank, on_wait, claimed, poll = hold
     better = outranking(rank)
     if not better:
         return ""
@@ -631,7 +637,7 @@ def yield_slot() -> str:
           "resuming once it is free again", file=sys.stderr, flush=True)
     _held.fd = None
     os.close(fd)
-    _held.fd = _acquire(d, k, cwd, rank, on_wait, max_wait, poll)
+    _held.fd = _acquire(d, k, cwd, rank, on_wait, None, poll, claimed)
     return names
 
 

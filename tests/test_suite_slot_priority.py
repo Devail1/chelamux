@@ -244,7 +244,7 @@ def test_yield_slot_outside_a_hold_is_a_no_op(one_slot, monkeypatch):
 
 
 def test_yield_slot_keeps_the_slot_when_nobody_outranks_it(one_slot, monkeypatch):
-    with suite_guard.battery("/wt", "self-check", rank=3):
+    with suite_guard.battery("/wt", "self-check", rank=3, max_wait=5):
         monkeypatch.setattr(suite_guard, "_acquire", lambda *a: pytest.fail("re-queued"))
         fd = suite_guard._held.fd
         assert suite_guard.yield_slot() == ""
@@ -256,12 +256,18 @@ def test_yield_slot_asks_with_its_own_rank_and_requeues_at_it(one_slot, monkeypa
     real = suite_guard._acquire
     monkeypatch.setattr(suite_guard, "outranking",
                         lambda rank, exclude_pid=None: seen.append(rank) or ["CMX-1", "CMX-2"])
+    claimed = []
+    first = suite_guard._acquire
+    monkeypatch.setattr(suite_guard, "_acquire",
+                        lambda *a: claimed.append(a[7]) or first(*a))
     with suite_guard.battery("/wt", "self-check", rank=4, poll=0.01, max_wait=7):
         monkeypatch.setattr(suite_guard, "_acquire",
                             lambda *a: seen.append(a[2:]) or real(*a))
         assert suite_guard.yield_slot() == "CMX-1, CMX-2"
         assert suite_guard.holders() == ["wt"]          # it holds the slot again
-    assert seen == [4, ("/wt", 4, None, 7, 0.01)]
+    assert seen[0] == 4
+    assert seen[1][:4] == ("/wt", 4, None, None)         # re-queued at its rank, unbounded
+    assert seen[1][4] == 0.01 and seen[1][5] == claimed[0]   # ...at its ORIGINAL claim time
     assert not suite_guard.holders()
 
 
@@ -277,14 +283,13 @@ def test_yield_slot_frees_the_slot_for_the_waiter(one_slot, monkeypatch):
     assert seen == [[]]
 
 
-def test_a_slot_not_taken_back_in_time_is_a_slot_timeout_and_frees_cleanly(one_slot,
-                                                                          monkeypatch):
+def test_a_failed_re_acquire_frees_cleanly(one_slot, monkeypatch):
     monkeypatch.setattr(suite_guard, "outranking", lambda *a, **k: ["CMX-1"])
 
     def never(*_a):
         raise suite_guard.SlotTimeout("no suite slot came free in 1s")
     with pytest.raises(suite_guard.SlotTimeout):
-        with suite_guard.battery("/wt", "self-check", rank=3):
+        with suite_guard.battery("/wt", "self-check", rank=3, max_wait=5):
             monkeypatch.setattr(suite_guard, "_acquire", never)
             suite_guard.yield_slot()
     assert suite_guard._held.fd is None and suite_guard._held.depth == 0
@@ -309,7 +314,7 @@ def test_a_battery_queues_by_its_kind_or_its_explicit_rank(one_slot, monkeypatch
     got = []
     real = suite_guard._acquire
     monkeypatch.setattr(suite_guard, "_acquire", lambda *a: got.append(a[3]) or real(*a))
-    with suite_guard.battery("/wt", kind, rank=rank):
+    with suite_guard.battery("/wt", kind, rank=rank, max_wait=5):
         pass
     assert got == [want]
 
@@ -473,3 +478,40 @@ def test_a_short_wait_is_not_announced():
 ])
 def test_judge_slot_wait(status, want):
     assert dispatcher.judge_slot_wait(status, 1000.0) == want
+
+
+def test_a_yielded_holder_goes_back_ahead_of_an_equal_that_came_after_it(waits):
+    """Re-queued at its ORIGINAL claim time: a Medium that yielded to a judge is not sent
+    behind a Medium that arrived while it held the slot."""
+    later = _ledger(waits, "later", 50.0, 3)
+    me = _ledger(waits, "me", 10.0, 3)                       # claimed at 10, re-queued
+    assert suite_guard._must_queue(me, 10.0, 3) is False
+    assert suite_guard._must_queue(later, 50.0, 3) is True
+
+
+def test_the_re_acquire_waits_past_max_wait(one_slot, monkeypatch):
+    """A slow judge ahead of it does not time the yielded battery out: its experiments are
+    kept, it just waits."""
+    monkeypatch.setenv("CHELA_SUITE_SLOTS", "1")
+    seq = iter([["CMX-440"]])
+    monkeypatch.setattr(suite_guard, "outranking", lambda *a, **k: next(seq, []))
+    release, judge_in = threading.Event(), threading.Event()
+    errors = []
+
+    def judge_body():
+        try:
+            with suite_guard.battery("/wt/CMX-440", "judge", poll=0.01, max_wait=5):
+                judge_in.set()
+                release.wait(5)
+        except BaseException as e:   # noqa: BLE001
+            errors.append(e)
+    with suite_guard.battery("/wt/CMX-443", "self-check", rank=3, poll=0.01, max_wait=0.2):
+        t = threading.Thread(target=judge_body, daemon=True)
+        t.start()
+        time.sleep(0.05)
+        timer = threading.Timer(0.6, release.set)       # holds 3x the battery's max_wait
+        timer.start()
+        assert suite_guard.yield_slot() == "CMX-440"
+        assert judge_in.is_set() and release.is_set()
+    t.join(5)
+    assert not errors

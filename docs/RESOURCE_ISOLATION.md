@@ -337,16 +337,20 @@ one daemon still queue):
 | `chela task-finished` | ALL its checks: self-check, sweep, standard-tier lint + suite, the base-move re-run |
 
 A second agent's battery waits for the first one to finish, and its waiting line names the
-holder. The exception is a waiter that outranks the holder (CMX-445): between two
+holder. Its budget is not charged for the wait (`busy_clock`). It waits at most 12 suite
+timeouts (`suite_slot_max_wait` overrides), then reports CANNOT VERIFY.
+
+**A better-ranked waiter does not wait for the whole battery** (CMX-445). Between two
 experiments, with no file mutated, a self-check or a hand-in's sweep checks the queue
 (`suite_guard.yield_slot`). If a judge round or a higher-priority hand-in is waiting, it frees
-the slot, queues again at its own rank, and resumes once the slot comes back. A waiting judge
-therefore gets the slot within one experiment. On 11-19 a Medium self-check held the only slot
-for 2 h 08 m while an Urgent judge waited 1 h 13 m. A judge round never yields, because nothing
-outranks it. The run row stores the issue's priority at claim time (`runs.priority`). A
-standalone `chela judge self-check` or `chela judge sweep` has no run row, so it ranks as a
-hand-in with no priority. Its budget is not charged for the wait (`busy_clock`). It waits at most 12 suite
-timeouts (`suite_slot_max_wait` overrides), then reports CANNOT VERIFY.
+the slot, queues again at its original claim time, and resumes once the slot comes back. That
+re-queue has no time limit: every run ahead of it is bounded by its own budget, and a timeout
+would throw away the experiments already measured. A waiting judge therefore gets the slot
+within one experiment. On 11-19 a Medium self-check held the only slot for 2 h 08 m while an
+Urgent judge waited 1 h 13 m. A judge round never yields, because nothing outranks it. The run
+row stores the issue's priority at claim time (`runs.priority`). A standalone
+`chela judge self-check` or `chela judge sweep` has no run row, so it ranks as a hand-in with
+no priority.
 
 **Stopped runs get one notice.** While a battery runs it keeps a record in
 `$CHELA_DIR/suite-slots/batteries/`. A battery that ends, raises or exits removes the record.
