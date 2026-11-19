@@ -369,9 +369,29 @@ spent. The day record is `$CHELA_DIR/sweep-nightly/day.json`; a run that never r
 ends its day, and an unreadable record starts nothing.
 
 **Fallback.** If no idle window comes by `nightly_at` + `sweep.fallback_after_hours`
-(default 2, so 04:00) and nothing has run that day, the sweep runs once anyway, on
-`sweep.fallback_budget_seconds` (default 1800), still yielding. The inbox notice says
-"ran on fallback: the queue was never idle".
+(default 3, so 05:00) and nothing has run that day, the sweep runs once anyway, on
+`sweep.fallback_budget_seconds` (default 1800), still yielding. It fires only inside its own
+window, `sweep.fallback_window_hours` (default 2, so 05:00–07:00): a day that missed it has no
+fallback, rather than one that takes the slot from agents in working hours. The inbox notice
+says "ran on fallback: the queue was never idle".
+
+**Held off.** Two things keep the sweep from starting at all, and make a running one yield
+between two mutations exactly as it does for an agent (the rest is owed):
+
+- a dispatch pause (`chela dispatch --pause`), until it is released or its TTL runs out. The
+  queue looks idle while it is paused, but the point of a pause is a quiet box. A hold file
+  that can't be read counts as a pause;
+- `sweep.blocked_hours`: a list of local `"HH:MM-HH:MM"` windows (one may wrap past midnight,
+  `"23:00-01:00"`), default `["03:00-04:30"]`, the host's own cron window. `[]` turns it off;
+  a list that doesn't parse is the default, said in the log. A fallback that falls inside a
+  window moves to the window's end (02:00 + 2 h = 04:00 → 04:30).
+
+The notice says which: "skipped — dispatch paused …", "skipped — inside blocked hours
+03:00-04:30 …", "yielded: dispatch paused", "yielded: blocked hours 03:00-04:30". A hand run
+(`chela judge nightly-sweep` without `--trigger`) is not held off: someone asked for it.
+
+**Throughput.** The notice rates the battery (mutations/hour) only above a minimum sample, 10
+mutations or 10 minutes; below it, it says "too few to rate".
 
 `sweep.mode: fixed` keeps the old clock: one run a day from `nightly_at`, still yielding.
 
