@@ -198,8 +198,10 @@ Now (`chela/dashboard/humanproof.py`):
 - a decision must carry the cookie, the matching token (`X-Chela-Session-Token`, or the
   confirm form's `session_token` field) and an `Origin` that is exactly the dashboard's
   `host:port` (over `http` or `https`, since the tailnet proxy terminates TLS). A missing
-  Origin is refused, since every browser sends one on a POST, and a `Sec-Fetch-Site` other
-  than `same-origin` is refused too. Any miss is a 403 and nothing is decided;
+  Origin is refused, since every browser sends one on a POST. A `Sec-Fetch-Site` header,
+  when present, must be `same-origin` or `none`; a missing one is tolerated (an older browser
+  or a stripping proxy), so the Origin and the token are the real check. Any miss is a 403
+  and nothing is decided;
 - `chela.overrides.decide` no longer exempts the `dashboard` channel by name: only a call
   the dashboard verified (`browser_proven=True`) skips the agent check. An unproven dashboard
   caller is refused outright. Telegram is unchanged: a button tap is its own proof.
@@ -211,7 +213,7 @@ dashboard-only operator (CMX-103) would be left with no way to approve.
 emulate a browser on purpose: GET `/`, keep the cookie it sets, read the token from the
 page, forge the Origin. That is two plain HTTP requests, not a hard barrier. Nothing on
 loopback can tell that apart from a real browser; only an OS boundary can (the agent sandbox
-in §2, whose strict network allowlist does not include loopback). The token closes the blind single POST, and makes what
+in §2, whose `strictAllowlist` in `chela/sandbox.py` names no loopback host). The token closes the blind single POST, and makes what
 remains an explicit impersonation of the operator's browser rather than an API call that
 happens to work. The same holds in-process: `browser_proven` is an argument any Python caller
 can pass. Until chelamux's own agents run sandboxed, or approval moves to a channel an agent
