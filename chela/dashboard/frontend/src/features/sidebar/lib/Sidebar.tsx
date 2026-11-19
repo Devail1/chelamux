@@ -1,12 +1,14 @@
-// CMX-276: the sidebar's session list (#sidebar-agents): Needs you, the groups in their
-// order (Dispatched last), the Archived group, and their menus (CMX-277). What an action
-// DOES is controller.ts's (through `actions`, CMX-278).
-import { useEffect, useRef, useState, type MouseEvent, type PointerEvent, type ReactNode } from 'react';
+// CMX-276: the sidebar's session list (#sidebar-agents): Needs you, (CMX-390) Pinned, the
+// groups in their order (Dispatched last), the Archived group, and their menus (CMX-277). What
+// an action DOES is controller.ts's (through `actions`, CMX-278). CMX-390: a child session is
+// drawn under its parent (`model.children`), in a `.tree-kids` box with a guide line.
+import { useEffect, useRef, useState, type CSSProperties, type MouseEvent, type PointerEvent, type ReactNode } from 'react';
 import { icons } from '../../../shared/icons/index.ts';
 import { TextButton } from '../../../shared/ui/index.ts';
 import {
-  ARCHIVED_SECTION_KEY, DISPATCHED_KEY, type Group, type Item, NEEDS_YOU_KEY, type SidebarState, assignKey, canDragGroup,
-  canOrderRows, dropAssignee, folderLines, isSingleFolder, showsFolderLine, sidebarModel,
+  ARCHIVED_SECTION_KEY, DISPATCHED_KEY, type Group, INDENT_LEVELS, type Item, NEEDS_YOU_KEY, PINNED_KEY, type SidebarState,
+  assignKey, canDragGroup, canOrderRows, descendants, dropAssignee, folderLines, isSingleFolder, kidsKey, showsFolderLine,
+  sidebarModel, treeKey, visibleRows,
 } from '../model.ts';
 import type { SidebarActions } from './actions.ts';
 import { type DragSource, type DragView, useSidebarDrag } from './drag.ts';
@@ -101,7 +103,26 @@ interface RowProps {
   group?: RowGroup;
   /** CMX-380: what dragging this row moves (its folder's place, or itself to a group). */
   drag?: Drag;
+  /** CMX-390: how far under its top-level ancestor this row is (0: a top-level row). */
+  depth?: number;
+  /** CMX-390: a parent row's chevron: its subtree's size, whether it is shown, the toggle. */
+  tree?: TreeToggle;
   children?: ReactNode;
+}
+
+/** CMX-390: a parent row's chevron and child count. */
+interface TreeToggle { count: number; open: boolean; toggle: () => void }
+
+// CMX-390: the chevron that folds a parent's children (per device, keyed by its session).
+function TreeButton({ t }: { t: TreeToggle }) {
+  const what = `${t.open ? 'Hide' : 'Show'} ${t.count} child session${t.count === 1 ? '' : 's'}`;
+  return (
+    <TextButton className="tree-toggle" aria-expanded={t.open} aria-label={what} title={what}
+      onClick={(e: MouseEvent) => { e.stopPropagation(); t.toggle(); }}>
+      <span className="tree-count">{t.count}</span>
+      <span className="tree-caret"><icons.expand size={12} aria-hidden="true" /></span>
+    </TextButton>
+  );
 }
 
 /** CMX-380: a draggable row or header's pointerdown, and whether it is the one being dragged.
@@ -111,7 +132,7 @@ interface Drag { onPointerDown: (e: PointerEvent<HTMLElement>) => void; dragging
 // Shown on hover (style.css), never on the folded icon rail.
 const Grip = () => <span className="drag-grip" aria-hidden="true"><icons.grip size={12} /></span>;
 
-function Row({ it, s, actions, archived = false, altNum, folder, group, drag, children }: RowProps) {
+function Row({ it, s, actions, archived = false, altNum, folder, group, drag, depth = 0, tree, children }: RowProps) {
   const menu = useMenuOpen();
   const press = useLongPress();
   const v = rowView(it, s);
@@ -122,8 +143,8 @@ function Row({ it, s, actions, archived = false, altNum, folder, group, drag, ch
   if (hasCwd) folder = undefined;
   const cls = ['agent-row', 'rich', name === s.active && 'active', v.onWall && 'on-wall',
     v.runId && 'run-row', archived && 'archived', press.full && 'show-full', folder && 'has-folder',
-    drag && 'draggable', drag?.dragging && 'dragging', drag?.drop && `drop-${drag.drop}`]
-    .filter(Boolean).join(' ');
+    drag && 'draggable', drag?.dragging && 'dragging', drag?.drop && `drop-${drag.drop}`, depth > 0 && 'nested',
+    tree && 'tree-parent'].filter(Boolean).join(' ');
   const line = (
     <>
       <span className={`term-status-dot ${v.dotCls}`} role="img" aria-label={v.dotLabel} title={v.dotLabel} />
@@ -136,7 +157,8 @@ function Row({ it, s, actions, archived = false, altNum, folder, group, drag, ch
         {/* CMX-417: the `@N` that chela peek and the inbox use, shown on hover */}
         {v.agent.window_id && <span className="ar-more"><span className="ar-wid">{v.agent.window_id}</span></span>}
       </span>
-      <RowMenu it={it} s={s} actions={actions} menu={menu} group={group} />
+      {tree && <TreeButton t={tree} />}
+      <RowMenu it={it} s={s} actions={actions} menu={menu} group={group} archived={archived} />
       {children}
     </>
   );
@@ -154,19 +176,50 @@ function Row({ it, s, actions, archived = false, altNum, folder, group, drag, ch
 }
 
 // A CLOSED session's row (CMX-75): no window to open, only its resume record.
-function SessionRow({ it, s, actions }: { it: Item; s: SidebarState; actions: SidebarActions }) {
+function SessionRow({ it, s, actions, depth = 0, tree }: {
+  it: Item; s: SidebarState; actions: SidebarActions; depth?: number; tree?: TreeToggle;
+}) {
   const r = it.record ?? { key: it.key };
   const label = r.name || r.session_id || it.key;
   const folder = String(r.cwd || '').replace(/\/+$/, '').split('/').pop() || r.cwd || '';
   const when = r.archived_at ? `archived ${ago(Math.max(0, s.now / 1000 - r.archived_at))} ago` : '';
   const title = [`${label}: archived (closed)`, r.cwd, when].filter(Boolean).join('\n');
   return (
-    <div className="agent-row rich archived session-row" data-item={it.key} title={title}>
+    <div className={`agent-row rich archived session-row${depth > 0 ? ' nested' : ''}${tree ? ' tree-parent' : ''}`}
+      data-item={it.key} title={title}>
       <span className="term-status-dot idle" role="img" aria-label="Session: archived" title="Session: archived" />
       <span className="agent-row-name">{label}</span>
       {folder && <span className="ar-meta"><span className="ar-folder">{folder}</span></span>}
+      {tree && <TreeButton t={tree} />}
       <Unarchive itemKey={it.key} resume actions={actions} />
     </div>
+  );
+}
+
+/** How a tree draws one of its rows: the row, its depth, its chevron (a parent), and its
+ * parent (a child; null for a top-level row). */
+type DrawRow = (it: Item, depth: number, tree: TreeToggle | undefined, parent: Item | null) => ReactNode;
+
+// CMX-390: a row and, unless folded, its children under it (and theirs, one level further in).
+function Tree({ it, depth, s, actions, kids, draw, parent = null }: {
+  it: Item; depth: number; s: SidebarState; actions: SidebarActions; kids: Record<string, Item[]>; draw: DrawRow;
+  parent?: Item | null;
+}) {
+  const list = kids[it.key] ?? [];
+  if (!list.length) return <>{draw(it, depth, undefined, parent)}</>;
+  const key = treeKey(it);
+  const open = !s.collapsed.includes(key);
+  const tree = { count: descendants(it, kids).length, open, toggle: () => actions.toggleGroup(key) };
+  return (
+    <>
+      {draw(it, depth, tree, parent)}
+      {open && (
+        <div className="tree-kids" data-list={kidsKey(it)} data-depth={Math.min(depth + 1, INDENT_LEVELS)}
+          style={{ '--tree-depth': Math.min(depth + 1, INDENT_LEVELS) } as CSSProperties}>
+          {list.map(k => <Tree key={k.key} it={k} depth={depth + 1} s={s} actions={actions} kids={kids} draw={draw} parent={it} />)}
+        </div>
+      )}
+    </>
   );
 }
 
@@ -179,6 +232,15 @@ interface GroupProps {
   alt: Map<string, number>;
   folders: Record<string, string>;
   drag: ReturnType<typeof useSidebarDrag>;
+  kids: Record<string, Item[]>;
+}
+
+/** CMX-377's folder line, for a child (CMX-390): shown when the section shows them, else only
+ * when it is not its parent's folder (grouped by folder, the header names the parent's). */
+function childFolder(it: Item, parent: Item | null, lines: boolean, folders: Record<string, string>): string | undefined {
+  const f = folders[it.key];
+  if (lines || !parent) return lines ? f : undefined;
+  return f !== folders[parent.key] ? f : undefined;
 }
 
 const sameSource = (a: DragSource | undefined, b: DragSource) =>
@@ -193,7 +255,16 @@ function dropCls(key: string, v: DragView | null): string {
   return out.map(c => ` ${c}`).join('');
 }
 
-function GroupView({ g, index, count, s, actions, alt, folders, drag }: GroupProps) {
+/** CMX-390: a child row drags only among its siblings, under Manual (same modes as a group's rows). */
+function childDrag(it: Item, parent: Item, section: string, s: SidebarState, kids: Record<string, Item[]>,
+  handle: (src: DragSource) => Drag, rowLine: DragView['rowLine']): Drag | undefined {
+  const list = kidsKey(parent);
+  if (!canOrderRows(s.view, list) || (kids[parent.key]?.length ?? 0) < 2) return undefined;
+  const d = handle({ kind: 'row', assign: assignKey(it), group: section, item: it.key, reorder: true, list });
+  return rowLine?.key === it.key ? { ...d, drop: rowLine.side } : d;
+}
+
+function GroupView({ g, index, count, s, actions, alt, folders, drag, kids }: GroupProps) {
   const menu = useMenuOpen();
   // CMX-379: a folder with one session is one bare row naming its folder, never collapsed.
   const single = isSingleFolder(g, s.view.groupBy);
@@ -212,10 +283,13 @@ function GroupView({ g, index, count, s, actions, alt, folders, drag }: GroupPro
     const d = handle({ kind: 'row', assign: assignKey(it), group: g.key, item: it.key, reorder });
     return rowLine?.key === it.key ? { ...d, drop: rowLine.side } : d;
   };
-  const rows = g.items.map(it => (
-    <Row key={it.key} it={it} s={s} actions={actions} altNum={alt.get(it.key)}
-      folder={lines ? folders[it.key] : undefined} group={single ? { g, index, count } : undefined} drag={rowDrag(it)} />
-  ));
+  const draw: DrawRow = (it, depth, tree, parent) => (
+    <Row key={it.key} it={it} s={s} actions={actions} altNum={alt.get(it.key)} depth={depth} tree={tree}
+      folder={depth ? childFolder(it, parent, lines && !single, folders) : lines ? folders[it.key] : undefined}
+      group={single && !depth ? { g, index, count } : undefined}
+      drag={parent ? childDrag(it, parent, g.key, s, kids, handle, rowLine) : rowDrag(it)} />
+  );
+  const rows = g.items.map(it => <Tree key={it.key} it={it} depth={0} s={s} actions={actions} kids={kids} draw={draw} />);
   if (g.flat) {
     // Group by ▸ None: one flat list, no header.
     return <div className={`side-group flat${dropCls(g.key, drag.view)}`} data-g={g.key}><div className="group-rows">{rows}</div></div>;
@@ -257,11 +331,12 @@ function GroupView({ g, index, count, s, actions, alt, folders, drag }: GroupPro
 // CMX-85: Alt+1..9 numbers the first nine rows a user can see, top to bottom: Needs you,
 // then each group that is not collapsed (a single-session folder row never is, CMX-379).
 // The Archived section is not numbered.
-function altNumbers(needsYou: Item[], groups: Group[], s: SidebarState): Map<string, number> {
+// CMX-390: then Pinned, and a parent's children under it unless it is folded.
+function altNumbers(needsYou: Item[], pinned: Item[], groups: Group[], kids: Record<string, Item[]>, s: SidebarState): Map<string, number> {
   const out = new Map<string, number>();
   if (!s.altHeld) return out;
   const shown = (g: Group) => g.flat || isSingleFolder(g, s.view.groupBy) || !s.collapsed.includes(g.key);
-  const visible = [...needsYou, ...groups.filter(shown).flatMap(g => g.items)];
+  const visible = visibleRows([...needsYou, ...pinned, ...groups.filter(shown).flatMap(g => g.items)], kids, s.collapsed);
   for (const it of visible.filter(it => rowView(it, s)).slice(0, 9)) out.set(it.key, out.size + 1);
   return out;
 }
@@ -277,28 +352,48 @@ export function Sidebar({ state: s, actions }: { state: SidebarState | null; act
   });
   if (!s || !s.agents.length) return <div className="side-empty">No agents</div>;
   const model = sidebarModel(s);
-  const alt = altNumbers(model.needsYou, model.groups, s);
+  const kids = model.children;
+  const alt = altNumbers(model.needsYou, model.pinned, model.groups, kids, s);
   const showArchived = s.view.status !== 'active';
   const archivedOpen = s.view.status === 'archived' || s.collapsed.includes(`${ARCHIVED_SECTION_KEY}:open`);
   const nArch = model.archived.length;
   const drawsArchive = showArchived && nArch > 0;
   // Every row's folder line; grouped by folder only a single-session folder's row draws its
   // own (CMX-379), so Needs you and Archived draw theirs only when not grouped by folder.
-  const all = folderLines([...model.needsYou, ...model.groups.flatMap(g => g.items), ...model.archived]);
-  const folders = showsFolderLine(s.view.groupBy) ? all : {};
+  const roots = [...model.needsYou, ...model.pinned, ...model.groups.flatMap(g => g.items), ...model.archived];
+  const all = folderLines(roots.flatMap(it => [it, ...descendants(it, kids)]));
+  const lines = showsFolderLine(s.view.groupBy);
+  const folders = lines ? all : {};
+  // Needs you and Pinned: a row and its subtree, no drag but a child's among its siblings
+  const triage = (section: string): DrawRow => (it, depth, tree, parent) => {
+    const rowLine = drag.view?.rowLine;
+    const handle = (src: DragSource): Drag => ({ onPointerDown: drag.bind(src), dragging: sameSource(drag.view?.source, src) });
+    return (
+      <Row key={it.key} it={it} s={s} actions={actions} altNum={alt.get(it.key)} depth={depth} tree={tree}
+        folder={depth ? childFolder(it, parent, lines, all) : folders[it.key]}
+        drag={parent && section === PINNED_KEY ? childDrag(it, parent, section, s, kids, handle, rowLine) : undefined} />
+    );
+  };
+  const nPinned = model.pinned.reduce((n, it) => n + 1 + descendants(it, kids).length, 0);
   return (
     <>
       {model.needsYou.length > 0 && (
         <div className={`side-triage side-needs-you${dropCls(NEEDS_YOU_KEY, drag.view)}`}>
           <div className="triage-head">Needs you <span className="triage-count">{model.needsYou.length}</span></div>
-          {model.needsYou.map(it => (
-            <Row key={it.key} it={it} s={s} actions={actions} altNum={alt.get(it.key)} folder={folders[it.key]} />
-          ))}
+          {model.needsYou.map(it => <Tree key={it.key} it={it} depth={0} s={s} actions={actions} kids={kids} draw={triage(NEEDS_YOU_KEY)} />)}
+        </div>
+      )}
+      {model.pinned.length > 0 && (
+        <div className={`side-triage side-pinned${dropCls(PINNED_KEY, drag.view)}`} data-g={PINNED_KEY}>
+          <div className="triage-head">
+            <icons.pin size={12} aria-hidden="true" /> Pinned <span className="triage-count">{nPinned}</span>
+          </div>
+          {model.pinned.map(it => <Tree key={it.key} it={it} depth={0} s={s} actions={actions} kids={kids} draw={triage(PINNED_KEY)} />)}
         </div>
       )}
       {model.groups.map((g, i) => (
         <GroupView key={g.key} g={g} index={i} count={model.groups.length} s={s} actions={actions} alt={alt}
-          folders={all} drag={drag} />
+          folders={all} drag={drag} kids={kids} />
       ))}
       {drawsArchive && (
         <div className={`side-group side-archived${archivedOpen ? '' : ' collapsed'}${dropCls(ARCHIVED_SECTION_KEY, drag.view)}`}
@@ -310,17 +405,18 @@ export function Sidebar({ state: s, actions }: { state: SidebarState | null; act
             <span className="group-caret"><icons.expand size={12} aria-hidden="true" /></span>
           </div>
           <div className="group-rows">
-            {model.archived.map(it => it.kind === 'session'
-              ? <SessionRow key={it.key} it={it} s={s} actions={actions} />
-              : (
-                <Row key={it.key} it={it} s={s} actions={actions} archived folder={folders[it.key]}>
-                  <Unarchive itemKey={it.key} resume={false} actions={actions} />
-                </Row>
-              ))}
+            {model.archived.map(r => <Tree key={r.key} it={r} depth={0} s={s} actions={actions} kids={kids} draw={(it, depth, tree) => (
+              it.kind === 'session'
+                ? <SessionRow key={it.key} it={it} s={s} actions={actions} depth={depth} tree={tree} />
+                : (
+                  <Row key={it.key} it={it} s={s} actions={actions} archived folder={folders[it.key]} depth={depth} tree={tree}>
+                    <Unarchive itemKey={it.key} resume={false} actions={actions} />
+                  </Row>
+                ))} />)}
           </div>
         </div>
       )}
-      {!model.needsYou.length && !model.groups.length && !drawsArchive
+      {!model.needsYou.length && !model.pinned.length && !model.groups.length && !drawsArchive
         && <div className="side-empty">No sessions match this view</div>}
     </>
   );

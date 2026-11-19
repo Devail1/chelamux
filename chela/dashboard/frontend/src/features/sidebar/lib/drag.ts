@@ -11,7 +11,9 @@
 //   Esc          cancels; so does a pointercancel
 //
 // CMX-381: under the Manual sort a session row also drags up or down WITHIN its group, with a
-// drop line between rows (dropRow, the group's persisted row order).
+// drop line between rows (dropRow, the group's persisted row order). CMX-390: a child session
+// drags only among its siblings (its `list`, the parent's `~kids:` key), never onto a group:
+// it goes where its parent goes.
 //
 // The pinned sections (Needs you, Dispatched, Archived) are not draggable and take no drop.
 // While a drag runs, the list takes no click: the click that ends a drag opens nothing.
@@ -29,7 +31,9 @@ export type DragSource =
   | { kind: 'group'; key: string }
   /** A session row: its assignment key (model.assignKey), the group it sits in now, and
    * (CMX-381) whether it may be put in a new place within that group. */
-  | { kind: 'row'; assign: string; group: string; item: string; reorder?: boolean };
+  | { kind: 'row'; assign: string; group: string; item: string; reorder?: boolean;
+      /** CMX-390: a child's sibling list (`~kids:<parent>`): it reorders there and drops on no group. */
+      list?: string };
 
 /** What the list draws while a drag runs. */
 export interface DragView {
@@ -74,11 +78,15 @@ function movableGroups(root: Element) {
     });
 }
 
-/** The rows of group `key` in `root`, top to bottom, by item key. */
-function groupRows(root: Element, key: string) {
+/** The rows of group `key` in `root`, top to bottom, by item key: its top-level rows, or
+ * (CMX-390) with `list`, the children drawn under that parent. */
+function groupRows(root: Element, key: string, list?: string) {
   const sec = sections(root).find(el => el.dataset.g === key);
   if (!sec) return [];
-  return [...sec.querySelectorAll<HTMLElement>('.group-rows > .agent-row[data-item]')].map(el => {
+  const box = list ? [...sec.querySelectorAll<HTMLElement>('.tree-kids')].find(el => el.dataset.list === list) : null;
+  const rows = box ? [...box.children].filter(el => el.matches('.agent-row[data-item]'))
+    : list ? [] : [...sec.querySelectorAll<HTMLElement>('.group-rows > .agent-row[data-item]')];
+  return (rows as HTMLElement[]).map(el => {
     const r = el.getBoundingClientRect();
     return { key: el.dataset.item as string, top: r.top, bottom: r.bottom };
   });
@@ -198,11 +206,11 @@ export function useSidebarDrag(drop: DragDrop) {
       }
       const at = sectionAt(s.root, s.x, s.y);
       if (s.source.reorder && at?.key === s.source.group) {
-        const { line } = groupSlot(groupRows(s.root, s.source.group), s.source.item, s.y);
+        const { line } = groupSlot(groupRows(s.root, s.source.group, s.source.list), s.source.item, s.y);
         setView({ source: s.source, line: null, over: null, rowLine: line });
         return;
       }
-      const ok = !!at && !at.pinned && at.key !== s.source.group && dropRef.current.accepts(at.key);
+      const ok = !s.source.list && !!at && !at.pinned && at.key !== s.source.group && dropRef.current.accepts(at.key);
       setView({ source: s.source, line: null, over: at ? { key: at.key, ok } : null });
     };
 
@@ -257,11 +265,11 @@ export function useSidebarDrag(drop: DragDrop) {
       }
       const at = sectionAt(s.root, s.x, s.y);
       if (s.source.reorder && at?.key === s.source.group) {
-        const { before, line } = groupSlot(groupRows(s.root, s.source.group), s.source.item, s.y);
-        if (line) dropRef.current.reorder(s.source.group, s.source.item, before);
+        const { before, line } = groupSlot(groupRows(s.root, s.source.group, s.source.list), s.source.item, s.y);
+        if (line) dropRef.current.reorder(s.source.list ?? s.source.group, s.source.item, before);
         return;
       }
-      if (!at || at.pinned || at.key === s.source.group || !dropRef.current.accepts(at.key)) return;
+      if (s.source.list || !at || at.pinned || at.key === s.source.group || !dropRef.current.accepts(at.key)) return;
       dropRef.current.row(s.source.assign, at.key);
     };
 
