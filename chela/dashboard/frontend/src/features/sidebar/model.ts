@@ -980,8 +980,9 @@ export function reconcileAssign(
         }
     }
     for (const [wid, sid] of sidOfWid) {
+        // No session there last render (`from` is `s:undefined`, which no assignment is
+        // keyed by) or the same one (`to` is `from`, so it already holds `g`): nothing moves.
         const was = prevSid.get(wid);
-        if (!was || was === sid) continue;
         const from = `${SESSION_KEY_PREFIX}${was}`, to = `${SESSION_KEY_PREFIX}${sid}`;
         const g = assign.get(from);
         if (g == null || assign.has(to) || liveS.has(from)) continue;
