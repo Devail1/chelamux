@@ -29,7 +29,10 @@ def _boot(monkeypatch, terminals: bool, wall_tile: bool, *, sharing: bool = Fals
 
 @pytest.mark.parametrize("terminals,wall_tile", [(True, False), (False, True), (False, False), (True, True)])
 def test_the_boot_block_carries_each_flag_as_configured(monkeypatch, terminals, wall_tile):
-    assert _boot(monkeypatch, terminals, wall_tile) == {
+    boot = _boot(monkeypatch, terminals, wall_tile)
+    # CMX-392: the page's browser-session token (a 64-hex HMAC) rides in the block too.
+    assert re.fullmatch(r"[0-9a-f]{64}", boot.pop("sessionToken"))
+    assert boot == {
         "assetVersion": dash.ASSET_VERSION,
         "terminalsEnabled": terminals,
         "wallTileDispatched": wall_tile,

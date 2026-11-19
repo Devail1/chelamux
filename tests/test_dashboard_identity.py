@@ -19,6 +19,7 @@ from cryptography.hazmat.primitives.asymmetric import rsa
 from chela import config, contract, dispatcher, event_log, overrides
 from chela.dashboard import identity
 from tests import test_pending_approvals as pa
+from tests._browser_session import as_browser
 
 pytest.importorskip("flask")
 
@@ -56,7 +57,7 @@ def repo(tmp_path):
 @pytest.fixture
 def client():
     from chela.dashboard.app import app
-    return app.test_client()
+    return as_browser(app.test_client())  # CMX-392: decisions need the browser session
 
 
 @pytest.fixture
@@ -162,7 +163,7 @@ def test_tailscale_header_from_a_non_loopback_peer_is_refused(repo, client, tail
 def test_tailscale_without_the_header_is_unattributed_not_refused(client, tailscale, monkeypatch):
     seen: list = []
     monkeypatch.setattr(overrides, "decide",
-                        lambda rid, approve, by, channel="terminal": seen.append(by)
+                        lambda rid, approve, by, channel="terminal", browser_proven=False: seen.append(by)
                         or {"ok": True, "state": overrides.DENIED})
     resp = client.post("/api/override/override-x/deny", json={}, environ_base=TAILNET)
     assert resp.status_code == 200
@@ -249,7 +250,7 @@ def test_off_mode_is_todays_behaviour(client, monkeypatch):
     """🔴 GUARD: no refusal, no new events, and the legacy ``dashboard:<who>`` spelling."""
     seen: list = []
     monkeypatch.setattr(overrides, "decide",
-                        lambda rid, approve, by, channel="terminal": seen.append(by)
+                        lambda rid, approve, by, channel="terminal", browser_proven=False: seen.append(by)
                         or {"ok": True, "state": overrides.DENIED})
     for env in (LOOP, TAILNET):
         r = client.post("/api/override/override-x/deny", json={},
@@ -387,7 +388,7 @@ def test_cloudflare_machine_endpoints_skip_the_jwt_from_loopback_only(client, cl
 def test_cloudflare_approval_is_attributed_to_the_verified_login(client, cloudflare, monkeypatch):
     seen: list = []
     monkeypatch.setattr(overrides, "decide",
-                        lambda rid, approve, by, channel="terminal": seen.append((by, channel))
+                        lambda rid, approve, by, channel="terminal", browser_proven=False: seen.append((by, channel))
                         or {"ok": True, "state": overrides.DENIED})
     r = client.post("/api/override/override-x/deny", json={},
                     headers={"Cf-Access-Jwt-Assertion": _token()}, environ_base=LOOP)
@@ -403,7 +404,7 @@ def test_cloudflare_by_is_the_jwt_login_never_a_stray_tailscale_header(client, c
     seen: list = []
     monkeypatch.setattr(share_requests, "deny", lambda rid, by: seen.append(by) or (True, "denied"))
     monkeypatch.setattr(overrides, "decide",
-                        lambda rid, approve, by, channel="terminal": seen.append(by)
+                        lambda rid, approve, by, channel="terminal", browser_proven=False: seen.append(by)
                         or {"ok": True, "state": overrides.DENIED})
     h = {"Cf-Access-Jwt-Assertion": _token(), "Tailscale-User-Login": "evil@example.com"}
     assert client.post("/api/share-requests/r1/deny", json={}, headers=h, environ_base=LOOP).status_code == 200
