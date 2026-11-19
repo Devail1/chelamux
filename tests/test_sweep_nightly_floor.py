@@ -158,6 +158,8 @@ def test_a_waiter_is_named_once(tmp_path, monkeypatch):
     ("sweep:\n  fallback_floor_mutations: 4\n  fallback_floor_seconds: 30\n", (4, 30.0)),
     ("sweep:\n  fallback_floor_mutations: 0\n", (10, 900.0)),
     ("sweep:\n  fallback_floor_seconds: nope\n", (10, 900.0)),
+    ("sweep:\n  fallback_floor_mutations: 0.5\n", (1, 900.0)),
+    ("sweep:\n  fallback_floor_mutations: 2.7\n", (2, 900.0)),
 ])
 def test_fallback_floor_config(tmp_path, extra, want):
     floor = sweep_nightly.fallback_floor(_wf(tmp_path, extra))
@@ -232,6 +234,12 @@ def _hist(*counts: int) -> list[tuple[str, int]]:
     (_hist(1, 5, 6, 6, 9), (3, 1)),           # a flat day breaks the run
     (_hist(9, 8), (-1, 0)),
     (_hist(2, 3, 9, 8), (-1, 0)),             # a drop today: no run
+    ([("2026-11-10", 100), ("2026-11-14", 150), ("2026-11-17", 200), ("2026-11-19", 260)],
+     (60, 0)),                                # gaps between records: no calendar-day run
+    ([("2026-11-16", 1), ("2026-11-17", 2), ("2026-11-19", 3), ("2026-11-20", 4)],
+     (1, 1)),                                 # a missing day breaks the run
+    ([("2026-10-30", 1), ("2026-10-31", 2), ("2026-11-01", 3), ("2026-11-02", 4)],
+     (1, 3)),                                 # across a month end
 ])
 def test_owed_growth(history, want):
     assert sweep_nightly.owed_growth(history) == want
@@ -246,6 +254,24 @@ def test_record_owed_keeps_the_days_last_count_and_other_workflows(tmp_path):
         ("2026-11-18", 3), ("2026-11-19", 6)]
     data = json.loads((tmp_path / "sweep-nightly" / "owed-history.json").read_text())
     assert data[str(other.path)] == {"2026-11-18": 7}
+
+
+def test_record_owed_holds_its_lock_while_it_writes(tmp_path, monkeypatch):
+    import fcntl
+    wf, seen = _wf(tmp_path), []
+    real = sweep_nightly._write_json
+
+    def write(path, data):
+        lock = tmp_path / "sweep-nightly" / "owed-history.lock"
+        with open(lock, "a") as fh:            # a second taker is refused while it is held
+            try:
+                fcntl.flock(fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except OSError:
+                seen.append("held")
+        real(path, data)
+    monkeypatch.setattr(sweep_nightly, "_write_json", write)
+    sweep_nightly.record_owed(wf, "2026-11-19", 1, tmp_path)
+    assert seen == ["held"]
 
 
 def test_record_owed_keeps_the_newest_fourteen_days(tmp_path):

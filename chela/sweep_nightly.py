@@ -388,8 +388,9 @@ def fallback_floor(wf) -> Floor:
     """``sweep.fallback_floor_mutations`` / ``sweep.fallback_floor_seconds``, each a positive
     number or its default (said in the log when set wrong)."""
     return Floor(
-        mutations=int(_positive_number(wf, "fallback_floor_mutations",
-                                       DEFAULT_FALLBACK_FLOOR_MUTATIONS)),
+        # At least 1: a fractional setting (0.5) must not truncate the floor away.
+        mutations=max(1, int(_positive_number(wf, "fallback_floor_mutations",
+                                              DEFAULT_FALLBACK_FLOOR_MUTATIONS))),
         seconds=_positive_number(wf, "fallback_floor_seconds", DEFAULT_FALLBACK_FLOOR_SECONDS))
 
 
@@ -1072,26 +1073,32 @@ def record_owed(wf, day: str, owed: int, chela_dir: Path | None = None) -> list[
     return its history, oldest day first (the newest :data:`OWED_HISTORY_DAYS`). Raises
     ``ValueError`` for a history that cannot be read — it is then left as it is."""
     path = _owed_history_path(chela_dir)
-    data = _read_json(path)
-    days = data.get(str(wf.path), {})
-    if not isinstance(days, dict) or not all(
-            isinstance(v, int) and not isinstance(v, bool) for v in days.values()):
-        raise ValueError(f"{path} holds a malformed owed history for {wf.path}")
-    days[day] = owed
-    kept = sorted(days.items())[-OWED_HISTORY_DAYS:]
-    data[str(wf.path)] = dict(kept)
-    _write_json(path, data)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    # Its own lock: two workflows' runs finishing together must not drop each other's key.
+    with open(path.with_name("owed-history.lock"), "a") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        data = _read_json(path)
+        days = data.get(str(wf.path), {})
+        if not isinstance(days, dict) or not all(
+                isinstance(v, int) and not isinstance(v, bool) for v in days.values()):
+            raise ValueError(f"{path} holds a malformed owed history for {wf.path}")
+        days[day] = owed
+        kept = sorted(days.items())[-OWED_HISTORY_DAYS:]
+        data[str(wf.path)] = dict(kept)
+        _write_json(path, data)
     return kept
 
 
 def owed_growth(history: list[tuple[str, int]]) -> tuple[int | None, int]:
-    """``(delta, streak)`` for the newest day of ``history``: its count minus the day before's
-    (``None`` with no day before), and how many days running the count has grown."""
+    """``(delta, streak)`` for the newest day of ``history``: its count minus the last
+    recorded day before's (``None`` with no day before), and how many CALENDAR days running
+    the count has grown — a day with no record breaks the run."""
     if len(history) < 2:
         return None, 0
     streak = 0
-    for (_d0, before), (_d1, after) in zip(reversed(history[:-1]), reversed(history[1:])):
-        if after <= before:
+    for (d0, before), (d1, after) in zip(reversed(history[:-1]), reversed(history[1:])):
+        if after <= before or (datetime.fromisoformat(d1)
+                               - datetime.fromisoformat(d0)).days != 1:
             break
         streak += 1
     return history[-1][1] - history[-2][1], streak
