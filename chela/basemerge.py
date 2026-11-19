@@ -14,6 +14,14 @@ it is provisioned the way the judge's is (:func:`chela.judge.provision_suite_env
 targeted tests run, outside the suite slot. A run that still could not START (provisioning
 failed, the runner never spawned, nothing collected) is :data:`INFRA`: nothing about the code
 was measured, so it is never sent back as red.
+
+🔀 CMX-437: the same rebuild, in the AGENT's own worktree (:func:`merge_into`, ``chela
+merge-base``, and ``chela task-finished``'s base-sync gate). Most bundle conflicts were met
+there, not by the dispatcher: the hand-in gate refuses a branch that conflicts with the base, so
+the agent merged by hand and resolved the bundle by hand. They are rename/delete and
+rename/rename conflicts on the hash-named asset as often as content ones on ``manifest.json``,
+which is why this is a step after ``git merge`` and not a ``.gitattributes`` merge driver: git
+never hands a rename conflict to a driver.
 """
 from __future__ import annotations
 
@@ -39,6 +47,7 @@ RED = "red"             # clean, but the targeted tests failed: ``files`` are th
 CURRENT = "current"     # the branch already contains origin/<base>: nothing to merge
 REBUILT = "rebuilt"     # conflicted ONLY in the bundle: rebuilt, checked, tests green, pushed
 BUILD_FAILED = "build_failed"   # conflicted only in the bundle, but its rebuild failed
+DIRTY = "dirty"         # merge_into: the worktree has uncommitted changes; nothing was merged
 INFRA = "infra"         # clean, but the targeted tests could not START: nothing was measured
 
 # pytest's exit codes for a run that never reached a test: 2 interrupted (also uv's own
@@ -85,10 +94,11 @@ def _step(wt: Path, argv: tuple[str, ...], timeout: int) -> tuple[int, str]:
     return cp.returncode, (cp.stdout or "") + (cp.stderr or "")
 
 
-def _rebuild(wt: Path) -> str:
+def _rebuild(wt: Path, ignore: frozenset[str] = frozenset()) -> str:
     """Resolve a merge conflicted only under :data:`BUNDLE_DIR` by rebuilding it. ``""`` when
     the bundle is rebuilt, fresh and staged, with nothing else left to resolve; otherwise why
-    not (the merge is then abandoned with the scratch worktree, never committed)."""
+    not (the merge is then abandoned with the scratch worktree, never committed). ``ignore``:
+    untracked files that were there BEFORE the merge (an agent's own notes), not strays."""
     _git(wt, "rm", "-r", "-q", "-f", "--", BUNDLE_DIR)     # both sides and their conflict
     for argv, timeout in REBUILD_STEPS:
         code, output = _step(wt, argv, timeout)
@@ -99,11 +109,96 @@ def _rebuild(wt: Path) -> str:
     _git(wt, "add", "-A", "--", BUNDLE_DIR)
     left = (_git(wt, "diff", "--name-only", "--diff-filter=U").splitlines()
             + _git(wt, "diff", "--name-only").splitlines()
-            + _git(wt, "ls-files", "--others", "--exclude-standard").splitlines())
+            + [f for f in _git(wt, "ls-files", "--others", "--exclude-standard").splitlines()
+               if f not in ignore])
     if left:
         return "the rebuild left files unresolved or changed outside the bundle:\n" + \
             "\n".join(sorted(set(left)))
     return ""
+
+
+def _conflicted(wt: Path) -> list[str]:
+    return _git(wt, "diff", "--name-only", "--diff-filter=U").splitlines()
+
+
+def _keep_ours(wt: Path) -> None:
+    """Resolve every conflict under :data:`BUNDLE_DIR` to HEAD's bundle, whole: every stage and
+    every renamed-to path dropped, then HEAD's files put back. Left for a rebuild once the
+    source conflicts beside it are resolved; it is stale until then."""
+    _git(wt, "rm", "-r", "-q", "-f", "--", BUNDLE_DIR)
+    if _git(wt, "ls-tree", "--name-only", "HEAD", "--", BUNDLE_DIR):
+        _git(wt, "checkout", "HEAD", "--", BUNDLE_DIR)
+
+
+def merge_into(wt: str | Path, base: str) -> dict:
+    """🔀 CMX-437: merge a fresh ``origin/<base>`` into ``wt``'s CURRENT branch, in place (the
+    agent's own worktree; :func:`attempt` is the dispatcher's scratch-worktree twin). A conflict
+    under :data:`BUNDLE_DIR` is never left to a human:
+
+    * ONLY there ⇒ the bundle is rebuilt from the merged source (:func:`_rebuild`, the same
+      steps and stale-asset check as :func:`attempt`) and the merge committed: :data:`REBUILT`.
+      A failed rebuild aborts the merge — the worktree is as it was — :data:`BUILD_FAILED`.
+    * beside a source conflict ⇒ the bundle is set to HEAD's and the merge is LEFT IN PROGRESS
+      with only the source conflicts, ``files``, for the agent: :data:`CONFLICT`. The bundle
+      is rebuilt after those are resolved (:func:`resume_hint`).
+
+    Uncommitted tracked changes ⇒ :data:`DIRTY` and nothing touched. ``{outcome, base_sha,
+    merge_sha, files, detail}``; RuntimeError when git cannot say (the merge is aborted when
+    one was started)."""
+    wt = Path(wt)
+    dirty = _git(wt, "diff", "--name-only", "HEAD").splitlines()       # staged or not
+    out = {"base_sha": "", "merge_sha": None, "files": [], "detail": ""}
+    if dirty:
+        return {**out, "outcome": DIRTY, "files": sorted(dirty)}
+    _git(wt, "fetch", "--quiet", "origin", f"+refs/heads/{base}:refs/remotes/origin/{base}",
+         timeout=FETCH_TIMEOUT)
+    base_sha = out["base_sha"] = _git(wt, "rev-parse", f"refs/remotes/origin/{base}")
+    head = _git(wt, "rev-parse", "HEAD")
+    untracked = frozenset(_git(wt, "ls-files", "--others", "--exclude-standard").splitlines())
+    try:
+        _git(wt, "merge", "--no-edit", "-m", f"Merge origin/{base} ({base_sha[:12]})",
+             base_sha)
+    except RuntimeError as e:
+        try:
+            files = _conflicted(wt)
+            if not files:
+                raise RuntimeError(f"the merge of origin/{base} failed naming no file: {e}") \
+                    from e
+            others = [f for f in files if not generated.is_rebuilt(f)]
+            if others:
+                if len(others) < len(files):
+                    _keep_ours(wt)
+                return {**out, "outcome": CONFLICT, "files": others}
+            problem = _rebuild(wt, untracked)
+            if problem:
+                abort(wt)
+                return {**out, "outcome": BUILD_FAILED, "files": files, "detail": problem}
+            _git(wt, "commit", "--no-edit", "-m",
+                 f"Merge origin/{base}; rebuild generated bundle")
+        except BaseException:
+            abort(wt)
+            raise
+        return {**out, "outcome": REBUILT, "merge_sha": _git(wt, "rev-parse", "HEAD"),
+                "files": files}
+    merge_sha = _git(wt, "rev-parse", "HEAD")
+    return {**out, "outcome": CURRENT if merge_sha == head else MERGED, "merge_sha": merge_sha}
+
+
+def abort(wt: Path) -> None:
+    """``git merge --abort``, best effort: nothing to abort is not an error."""
+    with contextlib.suppress(RuntimeError):
+        _git(wt, "merge", "--abort")
+
+
+def resume_hint(base: str, files: list[str]) -> str:
+    """What the agent does after :func:`merge_into` left source conflicts (:data:`CONFLICT`)."""
+    listed = "".join(f"     {f}\n" for f in files)
+    return (f"origin/{base} is merged in, with {len(files)} source conflict(s) left for you:\n"
+            f"{listed}"
+            f"   The generated bundle ({BUNDLE_DIR}) is set to this branch's and is STALE: "
+            "resolve the files above, then rebuild it and commit the merge:\n"
+            "     pnpm -C chela/dashboard/frontend build\n"
+            f"     git add -A {BUNDLE_DIR} && git add <the files above> && git commit --no-edit\n")
 
 
 def targeted_tests(wt: Path, touched: list[str]) -> list[str]:
@@ -202,6 +297,11 @@ def rework_body(res: dict, base: str) -> str:
     if res["outcome"] == CONFLICT:
         head = (f"🔀 **Conflict with base after `{sha}` merged: merge origin/{base} and "
                 f"resolve.**\n\nConflicting files:\n{files}")
+        if any(generated.is_rebuilt(f) for f in res["files"]):
+            # 🔀 CMX-437: the bundle part of it is never the agent's to resolve by hand.
+            head += ("\nMerge with `chela merge-base <task-id>`, not `git merge`: it sets the "
+                     "generated bundle aside, leaves you only the source conflicts, and says "
+                     "how to rebuild the bundle after.\n")
     elif res["outcome"] == BUILD_FAILED:
         head = (f"🔀 **Conflict with base after `{sha}` merged, only in the generated bundle, "
                 f"but rebuilding it on the merge failed: merge origin/{base}, rebuild and fix "

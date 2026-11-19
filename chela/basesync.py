@@ -6,6 +6,8 @@ from __future__ import annotations
 import subprocess
 from pathlib import Path
 
+from chela import generated
+
 FETCH_TIMEOUT = 120
 GIT_TIMEOUT = 60
 
@@ -87,8 +89,18 @@ def refusal(base: str, behind: int, conflicts: list[str]) -> str:
             f"     git fetch origin {base}\n"
             f"     git merge origin/{base}\n"
             "     # resolve, `git add`, `git commit`, re-run the tests, then task-finished again\n"
+            + _bundle_hint(conflicts)
             + ("" if conflicts else
                "   A deliberate hand-in on a stale base: pass --allow-behind (recorded).\n"))
+
+
+def _bundle_hint(conflicts: list[str]) -> str:
+    """🔀 CMX-437: the generated bundle is in the conflict — never resolve it by hand."""
+    if not any(generated.is_rebuilt(p) for p in conflicts):
+        return ""
+    return ("   The generated bundle conflicts too: run `chela merge-base <task-id>` instead of "
+            "`git merge` —\n   it rebuilds the bundle itself, or leaves you only the source "
+            "conflicts and says how to rebuild after.\n")
 
 
 def render(record: dict) -> str:
@@ -97,6 +109,11 @@ def render(record: dict) -> str:
     if record.get("allow_behind"):
         lines.append(f"🔀 Handed in {record.get('behind')} commit(s) behind origin/"
                      f"{record.get('base')} with --allow-behind (merges cleanly).")
+    rebuilt = record.get("rebuilt")
+    if isinstance(rebuilt, dict):
+        lines.append(f"🔀 Conflicted with origin/{record.get('base')} only in the generated "
+                     f"bundle: merged ({rebuilt.get('base_sha')}) and rebuilt from the merged "
+                     f"source at hand-in ({rebuilt.get('merge_sha')}).")
     move = record.get("moved")
     if isinstance(move, dict):
         overlap = move.get("overlap") or []
