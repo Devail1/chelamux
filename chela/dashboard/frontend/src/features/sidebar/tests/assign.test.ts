@@ -132,6 +132,13 @@ test('a null hole in the agent list is skipped, not read (the rows after it stil
   expect(reconcileAssign(c, agents, [], NOW)).toEqual(custom({ 's:S': 'g1' }, { 's:S': NOW }));
 });
 
+test('a window with no previous session, or the same one, moves no assignment', () => {
+  const c = custom({ 's:A': 'g1' }, { 's:A': NOW });
+  const now = [win('m', { window_id: '@5', session_id: 'A' })];
+  expect(reconcileAssign(c, now, [], NOW, new Map([['@5', 'A']]))).toBeNull();
+  expect(reconcileAssign(c, [win('m', { window_id: '@5', session_id: 'B' })], [], NOW, new Map([['@9', 'A']]))).toBeNull();
+});
+
 test('buildItems skips a null hole in the agent list', () => {
   expect(buildItems([null, win('m'), undefined]).map(it => it.agent?.name)).toEqual(['m']);
 });
