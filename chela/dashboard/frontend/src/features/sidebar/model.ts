@@ -967,7 +967,8 @@ export function groupSidebar(agents: (AgentRow | null | undefined)[] | null | un
     if (mode === 'state') STATE_GROUPS.forEach((g, i) => ensure(g.key, { label: g.label, rank: i }));
     if (mode === 'date') DATE_GROUPS.forEach((g, i) => ensure(g.key, { label: g.label, rank: i }));
     if (mode === 'custom') {
-        if (!dispatchOff) ensure(DISPATCHED_KEY, { label: RUNS_LABEL, rank: -1 });
+        // labels the Runs group; drawn only when a run lands in it (never with dispatch off)
+        ensure(DISPATCHED_KEY, { label: RUNS_LABEL, rank: -1 });
         (custom.groups || []).forEach((g, i) => ensure(customKey(g.id), { label: g.name, rank: i }));
         ensure(UNGROUPED_KEY, { label: 'Ungrouped', rank: 1e6 });
     }
