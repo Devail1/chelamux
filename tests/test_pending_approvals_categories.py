@@ -21,6 +21,7 @@ import time
 import pytest
 
 from chela import config, contract, dispatcher, event_log, overrides
+from tests._browser_session import as_browser
 
 pytest.importorskip("flask")
 
@@ -48,7 +49,7 @@ def _isolated(tmp_path, monkeypatch):
 @pytest.fixture
 def client():
     from chela.dashboard.app import app
-    return app.test_client()
+    return as_browser(app.test_client())
 
 
 def _override(**meta) -> dict:
@@ -172,8 +173,9 @@ def test_a_created_in_the_future_has_age_zero_not_negative(monkeypatch):
 def decide_spy(monkeypatch):
     calls = []
 
-    def fake(request_id, approve, by, *, channel="terminal", env=None):
+    def fake(request_id, approve, by, *, channel="terminal", env=None, browser_proven=False):
         calls.append({"id": request_id, "approve": approve, "by": by, "channel": channel})
+        assert browser_proven is True, "CMX-392: the dashboard routes decide as a proven session"
         return {"ok": True, "state": overrides.MERGED if approve else overrides.DENIED}
     monkeypatch.setattr(overrides, "decide", fake)
     return calls
@@ -248,7 +250,7 @@ def test_both_kinds_are_listed_each_with_its_own_fields(client):
     ov = _override(pr_url="https://github.com/o/r/pull/7", base="dev", judge_state="blocked")
     rel = _release(question="Release 0.9.0?")
     done = _release(version="0.1.0")
-    overrides.decide(done["id"], False, "t", channel="dashboard")      # decided -> hidden
+    overrides.decide(done["id"], False, "t", channel="dashboard", browser_proven=True)      # decided -> hidden
     rows = {r["id"]: r for r in client.get("/api/overrides").get_json()["requests"]}
     assert set(rows) == {ov["id"], rel["id"]}
     o, r = rows[ov["id"]], rows[rel["id"]]

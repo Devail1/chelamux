@@ -78,6 +78,29 @@ export function readBoot(doc: Document = document): BootConfig {
 }
 
 export const BOOT = readBoot();
+
+/** 🔐 CMX-392: the header an override decision carries this page's browser-session token in.
+ * The server (chela/dashboard/humanproof.py) refuses a decision without it: loopback alone
+ * never proves the operator pressed the button. */
+export const SESSION_TOKEN_HEADER = 'X-Chela-Session-Token';
+
+/** The page's session token (the boot block's `sessionToken`); '' when the page has none,
+ * which the server refuses, so a decision then fails loudly rather than silently. */
+export function readSessionToken(doc: Document = document): string {
+  try {
+    const o = JSON.parse(doc.getElementById('chela-boot')?.textContent ?? 'null') as { sessionToken?: unknown } | null;
+    return o && typeof o.sessionToken === 'string' ? o.sessionToken : '';
+  } catch {
+    return '';
+  }
+}
+
+export const SESSION_TOKEN = readSessionToken();
+
+/** The headers of a JSON decide POST: its content type and the session token. */
+export function decideHeaders(): Record<string, string> {
+  return { 'Content-Type': 'application/json', [SESSION_TOKEN_HEADER]: SESSION_TOKEN };
+}
 export const ASSET_VERSION = BOOT.assetVersion;
 export const BASE_PATH = window.location.pathname.replace(/\/$/, '');
 
