@@ -19,6 +19,12 @@ test('claudeTitle: ai_title, else the session name, else empty', () => {
   expect(claudeTitle(undefined)).toBe('');
 });
 
+test('CMX-434: claudeTitle and paneSubtitle: a /rename title (custom_title) outranks ai_title', () => {
+  expect(claudeTitle({ ...A, custom_title: 'Tipstack', ai_title: 'Tetris-style blocks', session_name: 'S' })).toBe('Tipstack');
+  expect(displayLabel({ ...A, custom_title: 'Tipstack', ai_title: 'Tetris-style blocks' }, '@1')).toBe('Tipstack');
+  expect(paneSubtitle({ ...A, manual_name: true, custom_title: 'Tipstack', ai_title: 'Tetris-style blocks' }, '@1')).toBe('Tipstack');
+});
+
 test('displayLabel: manual name > Claude title > window name > "claude window"; unknown is the id', () => {
   expect(displayLabel({ ...A, manual_name: true, ai_title: 'T' }, '@1')).toBe('win-1');
   expect(displayLabel({ ...A, ai_title: 'T' }, '@1')).toBe('T');
