@@ -2073,6 +2073,11 @@ def api_share_requests():
 @app.route("/api/share-requests/<rid>/<action>", methods=["POST"])
 @require_auth
 def api_share_request_decide(rid, action):
+    # 🔐 CMX-392: approve/deny/revoke act on the operator's behalf (an approval grants a guest
+    # access), so only the operator's browser session may; an agent on loopback is not one.
+    why = humanproof.refusal(request)
+    if why:
+        return jsonify({"ok": False, "error": why}), 403
     data = request.get_json(silent=True) or {}
     by = _granted_by()
     if action == "approve":
@@ -6177,7 +6182,14 @@ def _merge_one(row: dict) -> dict:
 @app.route("/api/dispatcher/runs/<task_id>/merge", methods=["POST"])
 @require_auth
 def api_dispatcher_run_merge(task_id: str):
-    """Squash-merge a single run's PR + clean up. See ``_merge_one`` for detail."""
+    """Squash-merge a single run's PR + clean up. See ``_merge_one`` for detail.
+
+    🔐 CMX-392: this runs ``gh pr merge`` itself, so only the operator's browser session may
+    press it (:mod:`chela.dashboard.humanproof`): an agent's raw POST from loopback merging
+    its own PR is refused here, before any run is read."""
+    why = humanproof.refusal(request)
+    if why:
+        return jsonify({"ok": False, "error": why}), 403
     row = next((r for r in dispatcher.list_runs() if r.get("task_id") == task_id), None)
     if not row:
         return jsonify({"ok": False, "error": f"run {task_id} not found"}), 404

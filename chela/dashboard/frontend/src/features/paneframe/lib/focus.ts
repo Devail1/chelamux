@@ -41,6 +41,9 @@ function focusedTermFrame(): HTMLIFrameElement | null {
 
 /** One tick: ring the pane holding the keyboard, clear every other ring. */
 export function applyTermFocus(): void {
+  // CMX-446: belt and braces. A tick that outlives the page (a test environment torn down under a
+  // leaked poll) has no document; stopFocusTracking is the fix, this only keeps it quiet.
+  if (typeof document === 'undefined') return;
   const frame = focusedTermFrame();
   const pane = frame ? frame.closest('.grid-stack-item-content, .term-pane') : null;
   document.querySelectorAll('.term-focused').forEach((el) => {
@@ -57,6 +60,14 @@ export function startFocusTracking(): void {
   if (poll) return;
   poll = setInterval(applyTermFocus, 250);
   window.addEventListener('focus', applyTermFocus); // back in the parent: clear it promptly
+}
+
+/** CMX-446: the poll is the Wall's. Leaving it (stopTermTimer) stops the interval and the focus
+ * listener, or they outlive the view, the App and, in a test, the document itself. */
+export function stopFocusTracking(): void {
+  if (poll) clearInterval(poll);
+  poll = null;
+  window.removeEventListener('focus', applyTermFocus);
 }
 
 /** Move the keyboard into a pane's terminal. CMX-114: contentWindow.focus() alone does not

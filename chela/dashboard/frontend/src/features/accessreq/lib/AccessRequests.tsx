@@ -7,7 +7,7 @@
 // duration is picked, and a mount is read-only unless the guest asked for write AND "allow
 // write" is on. A request the server refuses shows the reason and has no Approve.
 import { useState } from 'react';
-import { BASE_PATH, api } from '../../../shared/api/index.ts';
+import { BASE_PATH, api, decideHeaders } from '../../../shared/api/index.ts';
 import { icons } from '../../../shared/icons/index.ts';
 import { registerLane } from '../../../shared/scheduler/index.ts';
 import { createStore, useStore } from '../../../shared/store/index.ts';
@@ -44,7 +44,7 @@ export function closeAccessRequests() {
 async function decide(id: string, action: string, body: object = {}): Promise<string | null> {
   try {
     const res = await fetch(`${BASE_PATH}/api/share-requests/${encodeURIComponent(id)}/${action}`, {
-      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+      method: 'POST', headers: decideHeaders(), body: JSON.stringify(body),
     });
     const resp = (await res.json()) as { ok?: boolean; error?: string } | null;
     return resp?.ok ? null : resp?.error || `Could not ${action} the request`;

@@ -2,7 +2,7 @@
 // the sidebar, the canvas of views, the phone controls, the safety float and the overlays.
 // Each slot's content is lib/slots.tsx's. The classes and ids are the ones style.css and the
 // browser suites have always read, so the look does not change.
-import type { ReactNode } from 'react';
+import { useEffect, type ReactNode } from 'react';
 import { BOOT, staticUrl } from '../../../shared/api/index.ts';
 import { icons } from '../../../shared/icons/index.ts';
 import { useStore } from '../../../shared/store/index.ts';
@@ -11,6 +11,7 @@ import { IconButton } from '../../../shared/ui/index.ts';
 import { sidebarJumpInput } from '../../palette/index.ts';
 import { closeSidebar, toggleSidebar } from '../../sidebar/controller.ts';
 import { panelId } from '../views.ts';
+import { VIEWS } from './registry.ts';
 import { SLOTS } from './slots.tsx';
 
 function Slot({ id, as: Tag = 'span', className = 'island-slot' }: { id: string; as?: 'span' | 'div'; className?: string }) {
@@ -118,6 +119,10 @@ function Wall() {
 }
 
 export function App() {
+  // CMX-446: the views' timers (the Wall's tick and focus poll) are started by the view switch,
+  // not by a component, so nothing let go of them when the page's root unmounted. Every view
+  // exits with the App.
+  useEffect(() => () => VIEWS.forEach((v) => v.exit?.()), []);
   return (
     <>
       <div className="app">
