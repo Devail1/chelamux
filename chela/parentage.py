@@ -135,6 +135,17 @@ def row_fields(session_id: str | None, table: dict) -> dict:
     return {"parent_session_id": entry.get("parent"), "parent_source": entry.get("source")}
 
 
+def children_of(table: dict) -> dict[str, list[str]]:
+    """``{parent sid: [child sids]}`` — the tree read top-down (CMX-390: the sidebar archive's
+    cascade walks it). Children in session-id order, so a walk is deterministic."""
+    out: dict[str, list[str]] = {}
+    for child, entry in table.items():
+        parent = entry.get("parent") if isinstance(entry, dict) else None
+        if isinstance(parent, str) and parent and parent != child:
+            out.setdefault(parent, []).append(child)
+    return {p: sorted(cs) for p, cs in out.items()}
+
+
 # --- the rules ----------------------------------------------------------------------
 
 def ancestors(table: dict, sid: str) -> list[str]:
