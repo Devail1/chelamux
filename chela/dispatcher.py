@@ -3392,31 +3392,89 @@ def verify_standard_hand_in(task_id: str) -> dict:
     return {"ok": True, "steps": steps}
 
 
-def check_base_sync(task_id: str, allow_behind: bool = False) -> dict:
-    """🔀 CMX-189: run FIRST in task-finished. Refuses a branch conflicting with, or (without
-    ``allow_behind``) behind, a fresh ``origin/<base>``; fails CLOSED when git cannot say.
-    ``{"ok", "record"}``; record is None unless ``allow_behind`` let a stale branch through."""
+def _run_worktree_base(task_id: str) -> tuple[str, str] | str:
+    """``(worktree, base branch)`` of ``task_id``'s run, or the error string."""
     with _db() as conn:
         row = conn.execute("SELECT * FROM runs WHERE task_id=?", (task_id,)).fetchone()
     if row is None or not row["worktree_path"] or not row["workflow_path"]:
-        return {"ok": False, "error": f"no run with a worktree on record for {task_id}"}
+        return f"no run with a worktree on record for {task_id}"
     try:
         base = load_workflow(row["workflow_path"]).get("workspace", "base_branch",
                                                        default="master")
-        state = basesync.check(row["worktree_path"], base)
+    except Exception as e:
+        return f"{row['workflow_path']} could not be read: {e}"
+    return row["worktree_path"], base
+
+
+def merge_base(task_id: str) -> dict:
+    """🔀 CMX-437: ``chela merge-base`` — :func:`chela.basemerge.merge_into` on the run's own
+    worktree. ``{"ok": True, **result}`` or ``{"ok": False, "error"}`` (git could not say)."""
+    from chela import basemerge
+    found = _run_worktree_base(task_id)
+    if isinstance(found, str):
+        return {"ok": False, "error": found}
+    wt, base = found
+    try:
+        return {"ok": True, "base": base, **basemerge.merge_into(wt, base)}
+    except (RuntimeError, OSError) as e:
+        return {"ok": False, "error": f"could not merge origin/{base}: {e}"}
+
+
+def check_base_sync(task_id: str, allow_behind: bool = False) -> dict:
+    """🔀 CMX-189: run FIRST in task-finished. Refuses a branch conflicting with, or (without
+    ``allow_behind``) behind, a fresh ``origin/<base>``; fails CLOSED when git cannot say.
+    ``{"ok", "record"}``; record is None unless ``allow_behind`` let a stale branch through, or
+    🔀 CMX-437 a conflict ONLY in the generated bundle was merged and rebuilt right here
+    (:func:`chela.basemerge.merge_into`), so it never costs the agent a round."""
+    found = _run_worktree_base(task_id)
+    if isinstance(found, str):
+        return {"ok": False, "error": found}
+    wt, base = found
+    try:
+        state = basesync.check(wt, base)
     except Exception as e:
         return {"ok": False, "error": f"could not check this branch against its base — {e}. "
                                       "Unknown is not in sync: fix the remote and re-run."}
+    record = None
+    if state["conflicts"] and all(generated.is_rebuilt(f) for f in state["conflicts"]):
+        merged = merge_base(task_id)
+        if merged.get("outcome") == "conflict":   # the base moved on to a source conflict
+            from chela import basemerge
+            basemerge.abort(Path(wt))               # a gate never leaves a merge half-done
+        if not merged["ok"] or merged["outcome"] != "rebuilt":
+            why = merged.get("error") or _bundle_merge_failure(merged)
+            return {"ok": False, "error": basesync.refusal(base, state["behind"],
+                                                           state["conflicts"])
+                    + f"   It conflicts only in the generated bundle, but merging and "
+                      f"rebuilding it here failed: {why}"}
+        record = {"base": base, "rebuilt": {"base_sha": merged["base_sha"][:12],
+                                            "merge_sha": merged["merge_sha"][:12]}}
+        print(f"🔀 origin/{base} conflicted only in the generated bundle: merged, rebuilt from "
+              f"the merged source and committed ({merged['merge_sha'][:12]}).", flush=True)
+        try:
+            state = basesync.check(wt, base)
+        except Exception as e:
+            return {"ok": False, "error": f"could not re-check this branch against its base "
+                                          f"after rebuilding the bundle — {e}"}
     if state["conflicts"] or (state["behind"] and not allow_behind):
         return {"ok": False, "error": basesync.refusal(base, state["behind"], state["conflicts"])}
     if state["behind"]:
-        return {"ok": True, "record": {"base": base, "behind": state["behind"],
-                                       "allow_behind": True}}
+        return {"ok": True, "record": {**(record or {}), "base": base,
+                                       "behind": state["behind"], "allow_behind": True}}
     try:
-        since = basesync.base_sha(row["worktree_path"], base)
+        since = basesync.base_sha(wt, base)
     except RuntimeError as e:
         return {"ok": False, "error": f"could not check this branch against its base — {e}"}
-    return {"ok": True, "record": None, "since": since}
+    return {"ok": True, "record": record, "since": since}
+
+
+def _bundle_merge_failure(res: dict) -> str:
+    """One line for a :func:`chela.basemerge.merge_into` result that is not ``rebuilt``."""
+    if res["outcome"] == "dirty":
+        return "the worktree has uncommitted changes: " + ", ".join(res["files"])
+    if res["outcome"] == "build_failed":
+        return f"the rebuild failed (merge aborted):\n{res['detail']}"
+    return f"the merge came out `{res['outcome']}`"
 
 
 def reconcile_base_move(task_id: str, since: str, experiments: str | None) -> dict:
@@ -3507,6 +3565,23 @@ def check_changelog_fragments(task_id: str) -> dict:
     if problems:
         return {"ok": False, "error": problems}
     return {"ok": True}
+
+
+def check_mutations(task_id: str) -> dict:
+    """⛔ CMX-398 — ``task-finished``'s restore-first gate: apply a killed sweep's or
+    self-check's recovery marker in the run's own worktree (:func:`chela.sweep.recover`),
+    then refuse while a marker is still there or any file — on disk or committed in HEAD —
+    is byte-for-byte a recorded mutation, naming ``file:line``. ``{"ok", "restored"}`` or
+    ``{"ok": False, "error"}``; a run with no worktree on record refuses."""
+    with _db() as conn:
+        row = conn.execute("SELECT * FROM runs WHERE task_id=?", (task_id,)).fetchone()
+    if row is None or not row["worktree_path"]:
+        return {"ok": False, "error": f"no run with a worktree on record for {task_id}"}
+    restored, err = sweep.restore_and_check(Path(row["worktree_path"]))
+    if err:
+        return {"ok": False, "error": f"a sweep/self-check mutation blocks this — {err}",
+                "restored": restored}
+    return {"ok": True, "restored": restored}
 
 
 def check_review_section(task_id: str, no_review_reason: str | None = None) -> dict:
@@ -3959,6 +4034,11 @@ def request_push(task_id: str, *, pr_title: str | None = None, pr_body: str | No
             "error": "run has no worktree_path on record — cannot request a push",
             "task_id": task_id,
         }
+    # ⛔ CMX-398: never push a mutation — restore first, then refuse while one could leave.
+    restored, err = sweep.restore_and_check(Path(worktree_path))
+    if err:
+        return {"ok": False, "task_id": task_id, "restored": restored,
+                "error": f"refusing to push — a sweep/self-check mutation: {err}"}
     _push_request_path(worktree_path).write_text(
         json.dumps({
             "task_id": task_id, "requested_at": _now(),
@@ -3966,7 +4046,8 @@ def request_push(task_id: str, *, pr_title: str | None = None, pr_body: str | No
         }),
         encoding="utf-8",
     )
-    return {"ok": True, "task_id": task_id, "requested": True}
+    return {"ok": True, "task_id": task_id, "requested": True,
+            **({"restored": restored} if restored else {})}
 
 
 def _local_head(worktree_path: str | Path) -> str:
@@ -4068,6 +4149,12 @@ def _apply_push_request(conn: sqlite3.Connection, wf: WorkflowDef, row: sqlite3.
     branch = row["branch_name"]
     if not branch:
         return {"ok": False, "error": "run has no branch_name on record"}
+    # ⛔ CMX-398: the push itself — what leaves is HEAD, so HEAD is what is checked (a
+    # self-check running in the worktree right now has a live marker that is not HEAD's).
+    blockers = sweep.mutation_blockers(Path(worktree_path), head_only=True)
+    if blockers:
+        return {"ok": False, "error": "refusing to push a sweep/self-check mutation: "
+                                      + "; ".join(blockers)}
 
     push = _git(Path(worktree_path), "push", "-u", "origin", branch,
                 timeout=GIT_NET_TIMEOUT_SECONDS)
@@ -6869,10 +6956,11 @@ def tick(workflow_path: str | Path) -> dict:
         # 📐🔗 CMX-432: the backstop for a tracker that ARCHIVES finished work — every closed
         # but unarchived issue, whoever closed it (the GitHub integration, a human). The
         # source throttles itself; a failure is logged there and never stops the tick.
-        sweep = getattr(source, "archive_sweep", None)
-        if sweep is not None and not tracker_read_failed:
+        # (Not named `sweep`: that would shadow the module this function uses below.)
+        archive_sweep = getattr(source, "archive_sweep", None)
+        if archive_sweep is not None and not tracker_read_failed:
             try:
-                summary["tracker_archived"] = sweep() or 0
+                summary["tracker_archived"] = archive_sweep() or 0
             except Exception:
                 log.exception("tracker archive sweep failed for %s", wf.path)
 
@@ -7416,7 +7504,12 @@ def tick(workflow_path: str | Path) -> dict:
                 # losing the verdict and bypassing the cap. It goes back where it came from,
                 # one round poorer.
                 log.exception("Rework re-spawn failed for task %s", row["task_id"])
-                _rework_failed(conn, row, f"rework re-spawn failed: {e}")
+                if isinstance(e, sweep.MutationLeftover):
+                    # ⛔ CMX-398: no retry can resolve a mutation nobody can prove safe to
+                    # restore — a human must, so it goes straight to one.
+                    _escalate(conn, row, str(e))
+                else:
+                    _rework_failed(conn, row, f"rework re-spawn failed: {e}")
 
         # 3b′. 🧹💽 THE DISK-BUDGET RAIL (CMX-164) — the `memcap` analog for disk. A fresh
         # claim forks a BRAND-NEW worktree (`ensure_worktree`), and `~/.chela/worktrees/` is
@@ -7489,7 +7582,8 @@ def tick(workflow_path: str | Path) -> dict:
                          status=excluded.status, attempt=excluded.attempt,
                          last_error=excluded.last_error, brief=excluded.brief""",
                     (task.id, str(wf.path), task.title,
-                     "needs_human" if isinstance(e, BranchNamesExhausted) else "failed",
+                     "needs_human" if isinstance(e, (BranchNamesExhausted,
+                                                     sweep.MutationLeftover)) else "failed",
                      attempt, str(e), _now(), _task_brief(task)),
                 )
                 if requeue:
@@ -8177,8 +8271,24 @@ def _launch_agent(
     the capable :data:`DEFAULT_JUDGE_MODEL` and never inherits the fleet's coding-model
     Settings choice — a `sonnet` default must not downgrade the adversarial pass.
 
+    ⛔ CMX-398 — RESTORE FIRST: a sweep or self-check killed mid-mutation (a reboot takes its
+    guardian down too) leaves the mutated file and its recovery marker in the worktree. It
+    is restored here, before the hooks and before the window exists — so before the agent's
+    first tool call — and a marker that cannot be applied safely (a live owner, a three-way
+    state) refuses the launch with :class:`~chela.sweep.MutationLeftover`.
+
     Returns the window target (the ``@id``, or the bare name if the id was unreadable).
     """
+    restored, err = sweep.recover(Path(worktree))
+    if err and sweep.live_owner(Path(worktree)):
+        # A sweep still running there is TRANSIENT — the ordinary retry path, not a human.
+        raise RuntimeError(f"not launching an agent into {worktree} yet: {err}")
+    if err:
+        raise sweep.MutationLeftover(f"⛔ not launching an agent into {worktree}: {err}")
+    if restored:
+        log.warning("Task %s: %s before launching its agent", task_id, restored)
+        event_log.append("sweep_mutation_restored", f"{task_id}: {restored}",
+                         {"task_id": task_id, "worktree": str(worktree)})
     # CMX-274: a respawn starts clean of the last round's strays — before the hooks, which
     # may start something of their own in the worktree.
     if not judge_window:

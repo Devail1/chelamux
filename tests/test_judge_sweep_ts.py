@@ -4,14 +4,13 @@ from __future__ import annotations
 
 import os
 import shutil
-import signal
 import time
 from pathlib import Path
 
 import pytest
 
 from chela import dispatcher, judge, sweep
-from tests.test_judge_sweep import _cli, _git, _plain_repo
+from tests.test_judge_sweep import _cli, _git, _plain_repo, kill_and_await_guardian
 
 NODE_MODULES = Path(__file__).resolve().parents[1] / "node_modules"
 
@@ -91,20 +90,20 @@ def test_no_typescript_to_parse_with_fails_closed(tmp_path):
 
 
 def test_a_sigkilled_sweep_leaves_no_tsx_mutation(tmp_path):
+    """⛔ CMX-398: deterministic — it waits for the mutation to be on disk (a flag the suite
+    raises) and then for the guardian process to EXIT, never for a wall clock: the 11-16 flake
+    measured both against one 60s deadline, so a slow first mutation left the guardian no time."""
     root = _ts_repo(tmp_path / "r", REAL)
     flag = tmp_path / "flag"
     proc = _cli(root, f"sh -c 'grep -q \"false &&\" src/flag.tsx && touch {flag} && sleep 120"
                       "; true'", tmp_path / "cd", start_new_session=True)
-    deadline = time.monotonic() + 60
+    deadline = time.monotonic() + 300               # a hang guard, not a race
     while not flag.exists():
         assert proc.poll() is None and time.monotonic() < deadline, "never reached a mutation"
         time.sleep(0.1)
     assert sweep.marker_path(root).exists()
-    os.killpg(proc.pid, signal.SIGKILL)
-    proc.wait(timeout=30)
-    while (root / "src/flag.tsx").read_text() != FLAG or sweep.marker_path(root).exists():
-        assert time.monotonic() < deadline + 30, "the guardian never restored the .tsx"
-        time.sleep(0.1)
+    kill_and_await_guardian(proc)
+    assert (root / "src/flag.tsx").read_text() == FLAG and not sweep.marker_path(root).exists()
     assert _git(root, "status", "--porcelain") == ""
 
 
