@@ -16,7 +16,7 @@ import { commitLayout, getLayout, refreshLayout, writeLayout } from './lib/layou
 import { isObj, lsJson, lsRead, lsSet, postJson, publish, say, sayRefused } from './lib/page.ts';
 import {
   ARCHIVED_SECTION_KEY, type AgentRow, assignKey, buildItems, canOrderRows, clampWidth, type Custom, customKey, descendants,
-  dismissKey, dropAssignee, type Group, type Item, isArchivable, isSingleFolder, kidsKey, moveGroup, pinKey, placeGroup,
+  dismissKey, dropAssignee, type Group, type Item, isArchivable, isRunsRow, isSingleFolder, kidsKey, moveGroup, pinKey, placeGroup,
   placeRow, type NavState,
   normalizeView, reconcileAssign, type RecentRow, type RowOrder, SESSION_KEY_PREFIX, type RecentState, recentView,
   sidebarModel,
@@ -383,7 +383,16 @@ function commitOrder(next: string[]): Promise<boolean> {
   return commitLayout({ order: next }, 'Moving the group', rerender);
 }
 
+/** CMX-438: is `itemKey` (an assignment key) a dispatched run's row? A run lives in the Runs
+ * group and is never assigned to a custom group, by a drop or by Move to group. */
+function isRunKey(itemKey: string): boolean {
+  const opts = { orchWid: host.orchWid(), dispatchOff: BOOT.dispatchOffByChoice };
+  for (const it of sb.items.values()) if (assignKey(it) === itemKey && isRunsRow(it, opts)) return true;
+  return false;
+}
+
 function assignGroup(itemKey: string, id: string | null): Promise<boolean> {
+  if (isRunKey(itemKey)) return Promise.resolve(false);
   const c = custom();
   c.assign = without(c.assign, k => k === itemKey);
   const seen: Record<string, number> = Object.fromEntries(Object.entries(c.seen ?? {}).filter(([k]) => k !== itemKey));
@@ -431,7 +440,7 @@ export function dropGroup(key: string, before: string | null): boolean {
  * unassigns it, as Ungrouped does). False when that is no drop target (a pinned section). */
 export function dropOnGroup(itemKey: string, groupKey: string | null): boolean {
   const id = dropAssignee(groupKey, custom());
-  if (id === undefined) return false;
+  if (id === undefined || isRunKey(itemKey)) return false;
   void assignGroup(itemKey, id);
   return true;
 }
