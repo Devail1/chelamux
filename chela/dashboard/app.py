@@ -4231,8 +4231,8 @@ def _override_decide(request_id: str, approve: bool) -> dict:
 # 🔔 CMX-103 — "Pending approvals": the override (and, with CMX-87, release) requests waiting
 # on the operator, listed on every view so a dashboard-only operator (no Telegram bridge)
 # learns one is waiting. Reading is harmless; deciding is a POST that proves the browser
-# session (CMX-392, chela.dashboard.humanproof) and needs an explicit confirm for Approve, and the merge-gate hook denies a Claude session's curl to
-# `/override/` (which this decide URL contains).
+# session (CMX-392, chela.dashboard.humanproof) and needs an explicit confirm for Approve.
+# The merge-gate hook also denies a Claude session's curl to `/override/` (a speed bump).
 @app.route("/api/overrides")
 @require_auth
 def api_overrides():
