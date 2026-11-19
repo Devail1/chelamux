@@ -1094,7 +1094,7 @@ def test_daemon_tick_skips_a_workflow_that_does_not_parse(tmp_path, monkeypatch)
     good.write_text(_workflow_text(tmp_path, extra=FIXED_MODE))
     spawned = []
     monkeypatch.setattr(sweep_nightly, "spawn", lambda p, d=None, t=None: spawned.append(p) or "child")
-    assert sweep_nightly.daemon_tick([bad, good], None, datetime(2026, 10, 21, 3, 0),
+    assert sweep_nightly.daemon_tick([bad, good], None, datetime(2026, 10, 21, 2, 30),
                                      tmp_path / "chela") == "child"
     assert spawned == [good]
 
