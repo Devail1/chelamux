@@ -15,8 +15,15 @@ every same-shape site; slice 3/3 (CMX-305) files them in the tracker and tells t
   ``sweep.budget_seconds`` (a daily TOTAL) is spent. If no idle window came by the FALLBACK
   time — ``sweep.nightly_at`` (default ``02:00``) plus ``sweep.fallback_after_hours`` (default
   3: 05:00) — and nothing ran today, it runs anyway on ``sweep.fallback_budget_seconds``
-  (default 1800), still yielding, and the notice says so — but only inside its window
+  (default 1800), and the notice says so — but only inside its window
   (``sweep.fallback_window_hours``, default 2: 05:00–07:00), never later in the day.
+* **The fallback's floor** (CMX-439). The fallback exists for days the queue is never idle, so
+  yielding to every waiting agent between mutations measured ~nothing on exactly those days
+  (11-19: 1 of 620). A fallback run holds the suite slot — waiters and all — until it has
+  measured ``sweep.fallback_floor_mutations`` (default 10) OR held it
+  ``sweep.fallback_floor_seconds`` (default 900) past its first mutation, whichever comes
+  first; only then does it yield to a waiter. A dispatch pause or blocked hours still stop it
+  at once. Agents wait at most that floor, once a day, and the notice names who waited.
 * **Held off** (CMX-436). Never started while ``chela dispatch --pause`` holds the queue
   (until its TTL), nor inside ``sweep.blocked_hours`` (local ``HH:MM-HH:MM``, wrapping past
   midnight allowed; default ``03:00-04:30``, the host's cron window); a fallback that falls
@@ -32,7 +39,7 @@ every same-shape site; slice 3/3 (CMX-305) files them in the tracker and tells t
   Between two mutations — the last one's file already restored — it asks who is waiting for
   the slot (:func:`chela.suite_guard.waiters`); anyone stops it there: the slot goes to them,
   the run ends as YIELDED, and every mutation it did not reach is OWED (below), so the next
-  run starts there. Both modes yield.
+  run starts there. Both modes yield — a fallback run only once past its floor (above).
 * **What.** It fetches ``origin`` and reads ``origin/<workspace.base_branch>``. Every
   first-parent commit on it in the covered window whose files classify STANDARD (the same
   :func:`chela.risktier.classify` the merge gate uses — a core or always-human PR met the judge
@@ -51,6 +58,10 @@ every same-shape site; slice 3/3 (CMX-305) files them in the tracker and tells t
   leaves the set only once it ran (killed or survived; a survivor whose filing failed stays
   owed) or no line of its file reads as it did any more (``line_gone``) — the notice says
   which. An unreadable store is CANNOT VERIFY, never "nothing owed".
+  CMX-439: each day's last owed count is kept in ``owed-history.json``; the notice says how
+  it moved since the day before, and when it grew :data:`OWED_GROWTH_ALERT_DAYS` days running
+  it says that too — a backlog that only grows is not a quiet night. An unreadable history is
+  a warning in the notice, never "no growth".
 * **The covered window.** The last 24 h — or, after a night that could not look, back to the
   last run that did (at most :data:`MAX_CATCHUP_SECONDS`). An idle run (CMX-400) that comes
   more than 24 h after the last one is caught up the same way; a same-day resume measures its
@@ -147,6 +158,13 @@ DEFAULT_QUIET_SECONDS = 600            # the box stays idle this long before an 
 DEFAULT_FALLBACK_AFTER_HOURS = 3.0     # nightly_at + this: the fallback start (02:00 → 05:00)
 DEFAULT_FALLBACK_WINDOW_HOURS = 2.0    # the fallback fires only this long after its start
 DEFAULT_FALLBACK_BUDGET_SECONDS = 1800.0
+# ⏳ CMX-439: a fallback run holds the slot (no yield to a waiter) until it measured this many
+# mutations, or held the slot this long past its first one — whichever comes first.
+DEFAULT_FALLBACK_FLOOR_MUTATIONS = 10
+DEFAULT_FALLBACK_FLOOR_SECONDS = 900.0
+# ⏳ CMX-439: the owed count growing this many days running is said in the notice.
+OWED_GROWTH_ALERT_DAYS = 3
+OWED_HISTORY_DAYS = 14
 BUDGET_SPENT = "budget_spent"
 # ⏳ CMX-436: local hours the sweep never starts in (and yields at): the host's own cron load —
 # ~25 memory-capped nautilus jobs between 03:03 and 04:17 on the reference box.
@@ -353,6 +371,26 @@ def quiet_seconds(wf) -> float:
 
 def fallback_budget_seconds(wf) -> float:
     return _positive_number(wf, "fallback_budget_seconds", DEFAULT_FALLBACK_BUDGET_SECONDS)
+
+
+@dataclass(frozen=True)
+class Floor:
+    """⏳ CMX-439: what a fallback run measures before it yields the slot to a waiter —
+    ``mutations`` measured, or ``seconds`` held past the first one, whichever comes first."""
+    mutations: int
+    seconds: float
+
+    def describe(self) -> str:
+        return f"{self.mutations} mutation(s) or {self.seconds / 60:g} min"
+
+
+def fallback_floor(wf) -> Floor:
+    """``sweep.fallback_floor_mutations`` / ``sweep.fallback_floor_seconds``, each a positive
+    number or its default (said in the log when set wrong)."""
+    return Floor(
+        mutations=int(_positive_number(wf, "fallback_floor_mutations",
+                                       DEFAULT_FALLBACK_FLOOR_MUTATIONS)),
+        seconds=_positive_number(wf, "fallback_floor_seconds", DEFAULT_FALLBACK_FLOOR_SECONDS))
 
 
 def fallback_at(wf) -> tuple[int, int] | None:
@@ -1025,6 +1063,58 @@ def settle_owed(report: sweep.SweepReport, located: list[tuple[dict, int]], gone
 # --- the run --------------------------------------------------------------------------------
 
 
+def _owed_history_path(chela_dir: Path | None) -> Path:
+    return state_dir(chela_dir) / "owed-history.json"
+
+
+def record_owed(wf, day: str, owed: int, chela_dir: Path | None = None) -> list[tuple[str, int]]:
+    """⏳ CMX-439: keep ``owed`` as ``wf``'s count for ``day`` (the day's LAST run wins) and
+    return its history, oldest day first (the newest :data:`OWED_HISTORY_DAYS`). Raises
+    ``ValueError`` for a history that cannot be read — it is then left as it is."""
+    path = _owed_history_path(chela_dir)
+    data = _read_json(path)
+    days = data.get(str(wf.path), {})
+    if not isinstance(days, dict) or not all(
+            isinstance(v, int) and not isinstance(v, bool) for v in days.values()):
+        raise ValueError(f"{path} holds a malformed owed history for {wf.path}")
+    days[day] = owed
+    kept = sorted(days.items())[-OWED_HISTORY_DAYS:]
+    data[str(wf.path)] = dict(kept)
+    _write_json(path, data)
+    return kept
+
+
+def owed_growth(history: list[tuple[str, int]]) -> tuple[int | None, int]:
+    """``(delta, streak)`` for the newest day of ``history``: its count minus the day before's
+    (``None`` with no day before), and how many days running the count has grown."""
+    if len(history) < 2:
+        return None, 0
+    streak = 0
+    for (_d0, before), (_d1, after) in zip(reversed(history[:-1]), reversed(history[1:])):
+        if after <= before:
+            break
+        streak += 1
+    return history[-1][1] - history[-2][1], streak
+
+
+def _owed_trend(wf, result: dict, owed: int, chela_dir: Path | None) -> None:
+    """Record tonight's owed count and put its day-over-day move in ``result``. Never raises:
+    an unreadable history is a warning, never "it did not grow"."""
+    day = datetime.fromtimestamp(result["at"]).date().isoformat()
+    try:
+        history = record_owed(wf, day, owed, chela_dir)
+    except (ValueError, OSError) as e:
+        result["warnings"].append(f"the owed history could not be kept ({e}) — its growth is "
+                                  "UNKNOWN")
+        return
+    delta, streak = owed_growth(history)
+    if delta is not None:
+        result.update(owed_delta=delta, owed_since=history[-2][0])
+    result["owed_growth_days"] = streak
+    if streak >= OWED_GROWTH_ALERT_DAYS:
+        result["owed_trail"] = [n for _d, n in history[-(streak + 1):]]
+
+
 def paused(chela_dir: Path) -> bool:
     """A fleet pause file that exists — even one we cannot parse — means paused."""
     return os.path.lexists(Path(chela_dir) / FLEET_PAUSE_FILE)
@@ -1063,15 +1153,43 @@ class YieldCheck:
     """⏳ CMX-436: a daemon-started sweep's yield check between two mutations — a dispatch
     pause or blocked hours (:func:`hold_off`) first, then anyone waiting for the suite slot
     (:func:`slot_wanted`). Returns what it yields to (``""``: go on); :attr:`reason` keeps
-    WHY — :data:`DISPATCH_PAUSED`, :data:`BLOCKED_HOURS`, or ``""`` for the slot."""
+    WHY — :data:`DISPATCH_PAUSED`, :data:`BLOCKED_HOURS`, or ``""`` for the slot.
 
-    def __init__(self, wf, chela_dir: Path | None = None, clock=datetime.now):
+    ⏳ CMX-439: with a ``floor`` (a fallback run) a waiter does NOT stop it until the floor is
+    met (:class:`Floor`); a hold-off still does. The battery calls this once after each
+    mutation it measured, so the calls ARE the count measured; the floor's time runs from the
+    first call (``timer``: seconds, monotonic). :attr:`held_off` names who waited meanwhile."""
+
+    def __init__(self, wf, chela_dir: Path | None = None, clock=datetime.now, *,
+                 floor: Floor | None = None, timer=time.monotonic):
         self.wf, self.chela_dir, self.clock = wf, chela_dir, clock
+        self.floor, self.timer = floor, timer
         self.reason = ""
+        self.measured = 0
+        self.first: float | None = None
+        self.held_off: list[str] = []
+
+    def floor_met(self) -> bool:
+        if self.floor is None:
+            return True
+        if self.measured >= self.floor.mutations:
+            return True
+        return self.first is not None and self.timer() - self.first >= self.floor.seconds
 
     def __call__(self) -> str:
+        self.measured += 1
+        if self.first is None:
+            self.first = self.timer()
         self.reason, what = hold_off(self.wf, self.clock(), self.chela_dir)
-        return what or slot_wanted()
+        if what:
+            return what
+        wanted = slot_wanted()
+        if wanted and not self.floor_met():
+            for name in wanted.split(", "):
+                if name not in self.held_off:
+                    self.held_off.append(name)
+            return ""
+        return wanted
 
 
 def run(wf, *, now: float | None = None, chela_dir: Path | None = None,
@@ -1256,8 +1374,9 @@ def _sweep_and_file(wf, worktree: Path, head: str, ref: str, standard: list[dict
     budget = budget if budget is not None else nightly_budget(wf)
     # ⏳ CMX-400: an agent waiting for the suite slot stops the battery between mutations —
     # and (CMX-436) so does a dispatch pause or blocked hours, for a daemon-started run.
-    check = YieldCheck(wf, chela_dir) if result.get("trigger") in (IDLE, FALLBACK, FIXED) \
-        else None
+    trigger = result.get("trigger")
+    check = YieldCheck(wf, chela_dir, floor=fallback_floor(wf) if trigger == FALLBACK else None) \
+        if trigger in (IDLE, FALLBACK, FIXED) else None
     with judge_timing.within("sweep"):
         report = sweep.sweep(worktree, f"{ref}@{head[:12]} (standard-tier lines)",
                              cfg.test_cmd, timeout=cfg.suite_timeout_seconds,
@@ -1268,7 +1387,10 @@ def _sweep_and_file(wf, worktree: Path, head: str, ref: str, standard: list[dict
     unrun = [r.mutation.key for r in report._with(sweep.UNRUN)]
     result.update(yielded_to=report.yielded, sweep_seconds=report.seconds,
                   budget_seconds=budget.seconds,
-                  yield_reason=check.reason if (check and report.yielded) else "")
+                  yield_reason=check.reason if (check and report.yielded) else "",
+                  held_off=list(check.held_off) if check else [])
+    if check and check.floor:
+        result["floor"] = check.floor.describe()
     result.update(mutations=len(report.results), unrun=len(unrun),
                   measured=report.measured, battery_seconds=report.battery_seconds,
                   per_hour=report.per_hour,
@@ -1292,6 +1414,7 @@ def _sweep_and_file(wf, worktree: Path, head: str, ref: str, standard: list[dict
     unfiled = result.get("status") == CANNOT_VERIFY or bool(result["failed"])
     owed_now, dropped = settle_owed(report, located, gone, pr_of, result["at"], unfiled)
     write_owed(wf, owed_now, chela_dir)
+    _owed_trend(wf, result, len(owed_now), chela_dir)
     result.update(owed=len(owed_now),
                   owed_ran=sum(1 for d in dropped if d["why"] == RAN),
                   owed_dropped=[f"{d['file']}:{d['line']} {d['kind']} — {d['why']}"
@@ -1419,8 +1542,16 @@ def summary(result: dict) -> str:
             line += ")"
     if "owed" in result:
         line += f" — {result['owed']} owed to the next night"
+        if "owed_delta" in result:
+            line += f" ({result['owed_delta']:+d} since {result['owed_since']})"
+        if result.get("owed_growth_days", 0) >= OWED_GROWTH_ALERT_DAYS:
+            line += (f" — ⚠️ owed has grown {result['owed_growth_days']} days running: "
+                     f"{' → '.join(str(n) for n in result['owed_trail'])}")
     if result.get("yielded_to"):
         line += f" — ⏳ {_yielded(result)}"
+    if result.get("held_off"):
+        line += (f" — held the suite slot for its floor ({result.get('floor')}) while "
+                 f"{', '.join(result['held_off'])} waited")
     if result.get("trigger") and result.get("sweep_seconds"):
         line += f" — {result['sweep_seconds'] / 60:.0f} min used"
         if result.get("budget_seconds"):
