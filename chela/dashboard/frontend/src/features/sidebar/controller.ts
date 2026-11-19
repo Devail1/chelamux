@@ -245,8 +245,10 @@ export function renderSidebarAgents(agents: AgentRow[] | null | undefined): void
   // so a session resumed under a new window id lands in its group on the first draw.
   const prevSid = new Map<string, string>();
   for (const a of rows) {
-    const w = a?.window_id ?? '', was = lastWin.get(w);
-    if (was && was.created === a?.created) prevSid.set(w, was.sid);
+    const w = a?.window_id ?? '', was = lastWin.get(w), now = a?.created;
+    // an unread start (null: app.py could not read it) is unknown, not a new process: only
+    // two KNOWN starts that differ say the id now names another window
+    if (was && (was.created == null || now == null || was.created === now)) prevSid.set(w, was.sid);
   }
   const next = reconcileAssign(c, rows, archiveLoaded() ? state.sessions : null, state.now, prevSid);
   lastWin = new Map(rows.filter(a => a?.window_id && a.session_id)

@@ -113,6 +113,16 @@ test('a /clear in place carries the group to the new session, even past a null h
   expect(inInfra()).toEqual(['m']);
 });
 
+test('a /clear still carries the group when either render could not read the process start (null)', async () => {
+  for (const [before, after] of [[null, T0], [T0, null], [null, null]] as const) {
+    await load({ groups: GROUPS, assign: { 's:A': 'g1' }, seen: { 's:A': Date.now() } });
+    draw([win('m', { window_id: '@6', session_id: 'A', created: before })]);
+    draw([win('m', { window_id: '@6', session_id: 'B', created: after })]);
+    await flush();
+    expect([before, after, assigned()]).toEqual([before, after, { 's:B': 'g1' }]);
+  }
+});
+
 test('REBOOT: a session resumed into a RECYCLED window id never takes the group of the one that had it', async () => {
   await load({ groups: GROUPS, assign: { 's:A': 'g1' }, seen: { 's:A': Date.now() } });
   draw([win('a', { window_id: '@1', session_id: 'A', created: T0 }),
