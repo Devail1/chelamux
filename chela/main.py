@@ -335,6 +335,13 @@ def cmd_run(args) -> None:
                 rc_rename.flush_pending()
             except Exception:
                 log.exception("Remote Control rename flush failed")
+            # CMX-434: retry every title "Suggest names" queued (a busy or blocked session):
+            # typed only into an idle Claude pane with no dialog and an empty prompt.
+            try:
+                from chela import suggest_names
+                suggest_names.flush_pending()
+            except Exception:
+                log.exception("Suggested-title flush failed")
             # CMX-79: an override request nobody decided expires here — its PR head moved
             # (a new push invalidates it) or its TTL ran out. Reads the runs DB only.
             try:
