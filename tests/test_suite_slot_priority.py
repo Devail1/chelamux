@@ -34,7 +34,7 @@ def one_slot(monkeypatch, tmp_path):
 
 @pytest.mark.parametrize("priority,want", [
     (1, 1), (2, 2), (3, 3), (4, 4),           # Urgent, High, Medium, Low keep their number
-    (0, 5), (None, 5), (5, 5), (-1, 5),       # No priority / unknown / garbage: after Low
+    (0, 5), (None, 5), (5, 5), (6, 5), (99, 5), (-1, 5),   # none / unknown / garbage: after Low
     (True, 5), ("1", 5), (1.0, 5)])
 def test_a_hand_ins_rank_is_its_tracker_priority(priority, want):
     assert suite_guard.handin_rank(priority) == want
@@ -292,6 +292,99 @@ def test_yield_slot_asks_with_its_own_rank_and_requeues_at_it(one_slot, monkeypa
     assert not suite_guard.holders()
 
 
+def test_yield_slot_re_queues_with_the_holds_own_wait_hook(one_slot, monkeypatch):
+    """The re-wait is reported like the first one (a judge's status shows it queued): the
+    hold's own ``on_wait`` rides into the re-acquire, not a dropped ``None``."""
+    seen = []
+    real = suite_guard._acquire
+    monkeypatch.setattr(suite_guard, "outranking", lambda *a, **k: ["CMX-1"])
+
+    def hook(_since):
+        pass
+
+    def body():
+        with suite_guard.battery("/wt", "self-check", rank=3, poll=0.01, max_wait=5,
+                                 on_wait=hook):
+            monkeypatch.setattr(suite_guard, "_acquire",
+                                lambda *a: seen.append(a) or real(*a))
+            assert suite_guard.yield_slot() == "CMX-1"
+    _bounded(body)
+    [args] = seen
+    assert args[4] is hook and args[5] is None               # its hook; no bound on the re-wait
+
+
+def _queued(n, deadline=5.0):
+    """Wait until ``n`` waiters have an OPEN wait in the ledger."""
+    end = time.monotonic() + deadline
+    while time.monotonic() < end:
+        if sum(r.get("waiting_since") is not None for _p, r in suite_guard._ledgers()) >= n:
+            return
+        time.sleep(0.01)
+    pytest.fail(f"{n} waiter(s) never queued")
+
+
+def test_a_yielded_battery_takes_the_slot_back_before_a_later_equal(one_slot):
+    """END TO END: a Medium battery holds the slot; a SECOND Medium queues behind it, then an
+    Urgent judge. The battery yields to the judge — and when the judge is done, it resumes
+    BEFORE the second Medium, which arrived after its claim but before its yield. Re-queued
+    at "now" instead of its claim time, it would go behind."""
+    order, judge_go = [], threading.Event()
+
+    def judge_body():
+        with suite_guard.battery("/wt/CMX-440", "judge", poll=0.01, max_wait=10):
+            order.append("judge")
+            judge_go.wait(10)
+
+    def later_body():
+        with suite_guard.battery("/wt/CMX-999", "self-check", rank=3, poll=0.01,
+                                 max_wait=10):
+            order.append("later")
+
+    jt, lt = (threading.Thread(target=judge_body, daemon=True),
+              threading.Thread(target=later_body, daemon=True))
+
+    def body():
+        with suite_guard.battery("/wt/CMX-443", "self-check", rank=3, poll=0.01,
+                                 max_wait=10):
+            order.append("first")
+            lt.start()
+            _queued(1)                                     # the later Medium is queued
+            time.sleep(0.05)
+            jt.start()
+            _queued(2)                                     # ...and then the judge
+
+            def release_judge():
+                end = time.monotonic() + 10
+                while "judge" not in order and time.monotonic() < end:
+                    time.sleep(0.01)
+                time.sleep(0.2)                            # both Mediums queued for it
+                judge_go.set()
+            threading.Thread(target=release_judge, daemon=True).start()
+            assert suite_guard.yield_slot() == "CMX-440"
+            order.append("first-resumed")
+    _bounded(body)
+    jt.join(10)
+    lt.join(10)
+    assert order == ["first", "judge", "first-resumed", "later"]
+
+
+def test_a_failed_slot_record_write_frees_the_slot(one_slot, monkeypatch):
+    """The slot is taken but its record cannot be written: the fd is closed, so the slot is
+    free again — not leaked to a process that never ran."""
+    d = one_slot / suite_guard.SLOTS_DIRNAME
+    d.mkdir(parents=True, exist_ok=True)
+
+    def boom(*_a):
+        raise OSError("disk full")
+    with monkeypatch.context() as m:
+        m.setattr(suite_guard.os, "pwrite", boom)
+        with pytest.raises(OSError):
+            suite_guard._acquire(d, 1, "/wt", 3, None, 5, 0.01)
+    fd = suite_guard._take(d, 1)
+    assert fd is not None
+    os.close(fd)
+
+
 def test_yield_slot_frees_the_slot_for_the_waiter(one_slot, monkeypatch):
     """While it waits to take the slot back, the slot is FREE — not still held."""
     seen = []
@@ -491,6 +584,29 @@ def test_a_short_wait_is_not_announced():
     assert "waited" not in f.title
 
 
+def test_a_wait_of_exactly_one_minute_is_announced():
+    f = _doctor(_run(5 * MIN, slot_wait_seconds=60))
+    assert "waited 1min for the suite slot" in f.title
+
+
+def test_a_judge_queued_again_is_never_past_its_wall_however_long_it_ran_before():
+    """The rule is "a run waiting for the slot is never past the wall" — not just "the queue
+    time is subtracted": a run whose earlier experiments alone ran past the wall, and that is
+    queued right now for 5 min, is reported as waiting, not as a runaway."""
+    now = time.time()
+    f = _doctor(_run(140 * MIN, slot_waiting_since=now - 5 * MIN, total=4, done=2))
+    assert f.level == runtime_truth.OK
+    assert "PAST" not in f.detail
+    assert "waiting for a suite slot" in f.title
+    assert "experiment 2/4" not in f.title
+
+
+def test_a_judge_past_its_wall_names_its_progress_once_out_of_the_queue():
+    f = _doctor(_run(140 * MIN, slot_wait_seconds=5 * MIN, total=4, done=2))
+    assert f.level == runtime_truth.WARN
+    assert "experiment 2/4" in f.title and "waiting for a suite slot" not in f.title
+
+
 @pytest.mark.parametrize("status,want", [
     ({}, (False, 0.0)),
     (None, (False, 0.0)),
@@ -498,6 +614,10 @@ def test_a_short_wait_is_not_announced():
     ({"slot_waiting_since": 1000.0 - 30}, (True, 30.0)),
     ({"slot_waiting_since": 1000.0 - 30, "slot_wait_seconds": 60}, (True, 90.0)),
     ({"slot_waiting_since": 1000.0 + 30}, (True, 0.0)),          # a clock ahead: never < 0
+    # ...and a clock ahead never eats into the time already queued
+    ({"slot_waiting_since": 1000.0 + 30, "slot_wait_seconds": 60}, (True, 60.0)),
+    ({"slot_wait_seconds": -45}, (False, 0.0)),                    # a garbage total: never < 0
+    ({"slot_wait_seconds": True}, (False, 0.0)),                   # a bool is not a number
     ({"slot_waiting_since": "x", "slot_wait_seconds": "y"}, (False, 0.0)),
 ])
 def test_judge_slot_wait(status, want):
