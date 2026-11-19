@@ -82,7 +82,7 @@ case "$1" in
       *) echo "unknown dockerfile" >&2; exit 9 ;;
     esac
     printf 'dockerfile[%s]\n' "$ph" >> "$FAKE_LOG"
-    if [ "${FAKE_HANG:-}" = "$ph" ]; then exec sleep 300; fi
+    if [ "${FAKE_HANG:-}" = "$ph" ]; then echo "Get:1 slow mirror"; exec sleep 300; fi
     if [ "${FAKE_FAIL:-}" = "$ph" ]; then echo "E: build broke" >&2; exit 3; fi
     exit 0 ;;
   rm|run) exit 0 ;;
@@ -93,6 +93,7 @@ case "$1" in
         if [ "${FAKE_BLOCK_EXIT:-0}" = 1 ]; then echo "block blew up"; exit 2; fi
         echo "block running"; exec sleep 300 ;;
       *"command -v chela"*)
+        if [ "${FAKE_PROBE_HANG:-0}" = 1 ]; then exec sleep 300; fi
         [ "${FAKE_HANG:-}" != "git install" ] && [ "${FAKE_BLOCK_EXIT:-0}" != 1 ]; exit ;;
       *api/agents*)
         if [ "${FAKE_HANG:-}" = "dashboard up" ]; then printf 000; else printf 200; fi ;;
@@ -148,6 +149,18 @@ def test_a_hanging_phase_exits_75_and_names_itself(fake, phase):
     done = PHASES[:PHASES.index(phase)]
     for p in PHASES:
         assert (f"phase {p}: " in out.stderr) is (p in done), (p, out.stderr)
+
+
+def test_a_probe_that_never_returns_still_hits_the_phase_deadline(fake):
+    out, _ = fake(FAKE_PROBE_HANG="1", CHELA_FRESH_INSTALL_PROBE_TIMEOUT="1")
+    assert out.returncode == 75, out.stdout + out.stderr
+    assert "TIMEOUT: phase 'git install' did not complete within 2s" in out.stderr
+
+
+@pytest.mark.parametrize("phase", ["apt", "uv installer"])
+def test_a_build_timeout_shows_the_builds_own_output(fake, phase):
+    out, _ = fake(FAKE_HANG=phase)
+    assert "Get:1 slow mirror" in out.stderr
 
 
 def test_every_phase_is_timed_on_a_pass(fake):

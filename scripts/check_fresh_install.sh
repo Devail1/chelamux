@@ -102,6 +102,7 @@ record() { TIMINGS="${TIMINGS}phase ${1}: ${2}s"$'\n'; }
 timed_out() {  # <phase> <limit>
     echo "TIMEOUT: phase '$1' did not complete within ${2}s — infra: did not complete (NOT a pass)" >&2
     printf '%s' "$TIMINGS" >&2
+    if [ -s "$WORK/build.log" ]; then cat "$WORK/build.log" >&2; fi
     if [ -s "$WORK/block.log" ]; then cat "$WORK/block.log" >&2; fi
     exit 75
 }
@@ -157,9 +158,13 @@ BLOCK="${INSTALL_BLOCK//"$GITHUB_URL"/file:///src}"
 in_box() { "$RUNTIME" exec "$NAME" bash -c "$1"; }
 in_box 'mkdir -p ~/.local/bin && printf "#!/bin/sh\nexit 0\n" > ~/.local/bin/claude && chmod +x ~/.local/bin/claude'
 
-chela_installed() { in_box 'command -v chela' >/dev/null 2>&1; }
+# Each probe has its own short deadline: a probe that never returns (a stalled `exec`)
+# would otherwise hold `wait_for` past its phase deadline.
+T_PROBE="${CHELA_FRESH_INSTALL_PROBE_TIMEOUT:-10}"
+probe() { timeout -k 5 "$T_PROBE" "$RUNTIME" exec "$NAME" bash -c "$1"; }
+chela_installed() { probe 'command -v chela' >/dev/null 2>&1; }
 dashboard_up() {
-    [ "$(in_box "curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:$PORT/api/agents" 2>/dev/null)" = "200" ]
+    [ "$(probe "curl -s --max-time 5 -o /dev/null -w '%{http_code}' http://127.0.0.1:$PORT/api/agents" 2>/dev/null)" = "200" ]
 }
 
 echo "==> running the README install block ($(grep -c . <<<"$INSTALL_BLOCK") commands)"
