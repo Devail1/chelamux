@@ -126,6 +126,16 @@ test('a stamp in the future is reset to now, so the key can still age out', () =
   expect(reconcileAssign(c, [win('m', { session_id: 'S' })], [], NOW)).toEqual(custom({ 's:S': 'g1' }, { 's:S': NOW }));
 });
 
+test('a null hole in the agent list is skipped, not read (the rows after it still migrate)', () => {
+  const c = custom({ 'w:@7': 'g1' });
+  const agents = [null, undefined, win('m', { window_id: '@7', session_id: 'S' })];
+  expect(reconcileAssign(c, agents, [], NOW)).toEqual(custom({ 's:S': 'g1' }, { 's:S': NOW }));
+});
+
+test('buildItems skips a null hole in the agent list', () => {
+  expect(buildItems([null, win('m'), undefined]).map(it => it.agent?.name)).toEqual(['m']);
+});
+
 test('a window whose session changed in place (/clear) carries its group to the new session', () => {
   const c = custom({ 's:A': 'g1' }, { 's:A': NOW });
   const now = [win('m', { window_id: '@5', session_id: 'B' })];
