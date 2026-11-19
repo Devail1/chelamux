@@ -1,85 +1,96 @@
-// CMX-380: what a layout write RESOLVES to, against a stubbed /api: writeLayout's failure in
-// words (the server's `error`, else that it refused, else that it did not answer), and
-// commitLayout's "did the write hold" (true only when it did; false on a revert and on a
-// failure a newer write has already covered).
+// CMX-380: what an optimistic layout write RESOLVES to, through the real controller against a
+// stubbed /api (Pin is the action that hands the result back): the failure in words (the
+// server's `error`, else that it refused, else that it did not answer), and "did the write
+// hold" (true only when it did; false on a revert and on a failure a newer write covered).
 import { afterEach, beforeEach, expect, test, vi } from 'vitest';
 import { installBridge } from '../../../shared/bridge/index.ts';
-import { commitLayout, refreshLayout, writeLayout } from '../lib/layout.ts';
+import { refreshLayout, renderSidebarAgents, rowMenuAction } from '../controller.ts';
+import { type AgentRow, buildItems } from '../model.ts';
+import { win } from './fixtures.ts';
 
 const bridge = installBridge(window);
 
+let server: Record<string, unknown> = {};
 /** What the next layout POSTs answer, in order (the last one repeats); 'down' rejects. */
 let answers: unknown[] = [];
 const alerts = vi.fn();
 
+const ROWS: AgentRow[] = [win('p', { session_id: 'S-P' }), win('q', { session_id: 'S-Q' })];
+
 beforeEach(async () => {
+  document.body.innerHTML = '<div id="sidebar-agents"></div>';
+  server = { order: [], pins: [] };
   answers = [];
   alerts.mockReset();
   vi.stubGlobal('alert', alerts);
   vi.stubGlobal('fetch', (url: string, opts?: RequestInit) => {
     const method = opts?.method ?? 'GET';
     if (url.endsWith('/api/sidebar/layout') && method === 'GET') {
-      return Promise.resolve({ json: () => Promise.resolve({ layout: { order: ['/srv/a', '/srv/b'] } }) });
+      return Promise.resolve({ json: () => Promise.resolve({ layout: server }) });
     }
     if (url.endsWith('/api/sidebar/layout') && method === 'POST') {
+      const body = JSON.parse(String(opts?.body)) as Record<string, unknown>;
       const a = answers.length > 1 ? answers.shift() : answers[0];
       if (a === 'down') return Promise.reject(new Error('offline'));
+      if (a === 'saved') {
+        server = { ...server, ...body };
+        return Promise.resolve({ json: () => Promise.resolve({ ok: true, layout: server }) });
+      }
       return Promise.resolve({ json: () => Promise.resolve(a) });
     }
     return Promise.reject(new Error(`unexpected ${method} ${url}`));
   });
   await refreshLayout(); // loaded: a write is sent, not only kept
+  bridge.agents.set(ROWS as never);
+  renderSidebarAgents(ROWS);
 });
 
 afterEach(() => vi.unstubAllGlobals());
 
-test('writeLayout: a refusal is named by the server\'s error, else as refused; a held write is null', async () => {
-  const cases: [unknown, string | null][] = [
+const keyOf = (n: string) => buildItems(ROWS).find(it => it.agent?.name === n)?.key ?? '';
+const pin = (n: string) => rowMenuAction(keyOf(n), 'pin') as Promise<boolean>;
+const pins = () => bridge.sidebarLayout.get().pins;
+
+test('a refusal is named by the server\'s error, else as refused; never a blank reason', async () => {
+  const cases: [unknown, string][] = [
     // `ok: false` alone is a refusal, with no error to quote
     [{ ok: false }, 'the dashboard refused it'],
     // an `error` alone is one too, and it is quoted
     [{ error: 'disk full' }, 'disk full'],
     [{ ok: false, error: 'disk full' }, 'disk full'],
-    // an EMPTY error says nothing: the generic words, never a blank reason
+    // an EMPTY (or non-text) error says nothing: the generic words
     [{ ok: false, error: '' }, 'the dashboard refused it'],
     [{ error: '' }, 'the dashboard refused it'],
     [{ ok: false, error: 7 }, 'the dashboard refused it'],
     ['down', 'the dashboard did not answer'],
-    [{ ok: true, layout: { order: ['/srv/b', '/srv/a'] } }, null],
-    [{ ok: true }, null],
   ];
-  for (const [answer, want] of cases) {
+  for (const [answer, why] of cases) {
+    alerts.mockReset();
     answers = [answer];
-    expect([answer, await writeLayout({ order: ['/srv/b', '/srv/a'] })]).toEqual([answer, want]);
+    expect([answer, await pin('p')]).toEqual([answer, false]);
+    expect(pins()).toEqual([]);
+    expect([answer, alerts.mock.calls]).toEqual([answer, [[`Pinning the session failed: ${why}. It was put back.`]]]);
   }
 });
 
-test('commitLayout resolves true when the write held, and shows it', async () => {
-  answers = [{ ok: true, layout: { order: ['/srv/b', '/srv/a'] } }];
-  expect(await commitLayout({ order: ['/srv/b', '/srv/a'] }, 'Moving the group')).toBe(true);
-  expect(bridge.sidebarLayout.get().order).toEqual(['/srv/b', '/srv/a']);
+test('a held write resolves true and is shown; an answer with no layout still held', async () => {
+  answers = ['saved'];
+  expect(await pin('p')).toBe(true);
+  expect(pins()).toEqual(['s:S-P']);
+  answers = [{ ok: true }];
+  expect(await pin('q')).toBe(true);
+  expect(pins()).toEqual(['s:S-P', 's:S-Q']);
   expect(alerts).not.toHaveBeenCalled();
 });
 
-test('commitLayout resolves false when the write failed and was put back', async () => {
-  answers = [{ ok: true, layout: { order: ['/srv/a', '/srv/b'] } }];
-  await commitLayout({ order: ['/srv/a', '/srv/b'] }, 'Moving the group');
-  answers = [{ ok: false, error: 'disk full' }];
-  const onRevert = vi.fn();
-  expect(await commitLayout({ order: ['/srv/b', '/srv/a'] }, 'Moving the group', onRevert)).toBe(false);
-  expect(bridge.sidebarLayout.get().order).toEqual(['/srv/a', '/srv/b']);
-  expect(onRevert).toHaveBeenCalledTimes(1);
-  expect(alerts.mock.calls).toEqual([['Moving the group failed: disk full. It was put back.']]);
-});
-
-test('commitLayout resolves false when it failed under a NEWER write (nothing put back, still not held)', async () => {
-  answers = [{ ok: false, error: 'disk full' }, { ok: true, layout: { order: ['/srv/a', '/srv/b'] } }];
-  const onRevert = vi.fn();
-  const first = commitLayout({ order: ['/srv/b', '/srv/a'] }, 'Moving the group', onRevert);
-  const second = commitLayout({ order: ['/srv/a', '/srv/b'] }, 'Moving the group');
+test('a write that failed under a NEWER one resolves false, puts nothing back, and says so', async () => {
+  answers = [{ ok: false, error: 'disk full' }, 'saved'];
+  const first = pin('p');
+  const second = pin('q');
   expect(await first).toBe(false);
   expect(await second).toBe(true);
-  expect(onRevert).not.toHaveBeenCalled();
+  // the newer write keeps the screen: the failed pin is not taken back over it
+  expect(pins()).toEqual(['s:S-P', 's:S-Q']);
   expect(alerts.mock.calls).toEqual([
-    ['Moving the group failed: disk full. A later change is shown; the next refresh reads the saved layout.']]);
+    ['Pinning the session failed: disk full. A later change is shown; the next refresh reads the saved layout.']]);
 });
