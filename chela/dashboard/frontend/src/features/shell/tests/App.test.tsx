@@ -9,6 +9,7 @@ import { BOOT } from '../../../shared/api/index.ts';
 import { createBridge, installBridge } from '../../../shared/bridge/index.ts';
 import { view } from '../../../shared/store/view.ts';
 import { closePalette, palette } from '../../palette/index.ts';
+import { stopTermTimer } from '../../paneframe/index.ts';
 import * as sb from '../../sidebar/controller.ts';
 import { normalizeView, type SidebarState } from '../../sidebar/model.ts';
 import { mountApp, mountSlots, selectAgent, selectView, sidebarActions, SLOTS, VIEWS } from '../index.ts';
@@ -222,6 +223,30 @@ test('a nav row\'s click is the shell\'s view switch', () => {
   window.chelaBridge?.nav.set({ items: [{ id: 'terminals', label: 'Wall' }, { id: 'work', label: 'Work' }], active: 'work', badges: {} });
   act(() => fireEvent.click(must('#side-nav .side-item[data-view="terminals"]')));
   expect([view.get(), must('#panel-terminals').classList.contains('active')]).toEqual(['terminals', true]);
+});
+
+// CMX-446: entering the Wall starts the focus ring's 250 ms poll (paneframe startFocusTracking).
+// It used to outlive both the view and the App, and its next tick after jsdom's teardown threw
+// "document is not defined" at the end of this file. Unmounting App lets go of every view.
+test('unmounting App with the Wall\'s focus poll pending stops it: no tick runs after', async () => {
+  stopTermTimer(); // an earlier test's real poll would otherwise hold the slot this one fakes
+  vi.useFakeTimers();
+  try {
+    mount();
+    window.chelaBridge?.nav.set({ items: [{ id: 'terminals', label: 'Wall' }, { id: 'work', label: 'Work' }], active: 'work', badges: {} });
+    act(() => fireEvent.click(must('#side-nav .side-item[data-view="terminals"]')));
+    act(() => roots.splice(0).forEach((r) => r.unmount()));
+    const stray = document.createElement('div');
+    stray.className = 'term-focused'; // a poll tick clears every ring no focused frame owns
+    document.body.append(stray);
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(stray.classList.contains('term-focused')).toBe(true);
+    vi.stubGlobal('document', undefined); // what a tick meets once the environment is gone
+    await expect(vi.advanceTimersByTimeAsync(1000)).resolves.not.toThrow();
+  } finally {
+    vi.unstubAllGlobals();
+    vi.useRealTimers();
+  }
 });
 
 test('sidebarActions are the controller\'s commands, and the shell\'s view switch and session click', () => {

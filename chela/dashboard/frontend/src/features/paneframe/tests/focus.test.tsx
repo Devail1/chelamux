@@ -4,7 +4,7 @@
 import { act } from '@testing-library/react';
 import { expect, test, vi } from 'vitest';
 import { palette } from '../../palette/index.ts';
-import { applyTermFocus, focusedPane, focusFrame, markReady, mountPaneFrames, startTermTimer, termKey } from '../index.ts';
+import { applyTermFocus, focusedPane, focusFrame, markReady, mountPaneFrames, startTermTimer, stopTermTimer, termKey } from '../index.ts';
 import { frame, host, must, stage, stubFetch } from './setup.ts';
 
 function wall(...wids: string[]) {
@@ -42,6 +42,32 @@ test('the tracking polls while the Wall ticks', async () => {
   startTermTimer();
   await act(() => vi.advanceTimersByTimeAsync(250));
   expect(pane('@1').classList.contains('term-focused')).toBe(true);
+});
+
+// CMX-446: the poll belongs to the Wall. Leaving it (stopTermTimer, the view's exit) stops the
+// interval AND the window 'focus' listener, so neither can tick after the page is gone.
+test('leaving the Wall stops the focus tracking: no poll tick, no focus-event tick', async () => {
+  vi.useFakeTimers();
+  wall('@1');
+  hasFocus('@1', true);
+  startTermTimer();
+  stopTermTimer();
+  await act(() => vi.advanceTimersByTimeAsync(1000));
+  expect(pane('@1').classList.contains('term-focused')).toBe(false);
+  window.dispatchEvent(new Event('focus'));
+  expect(pane('@1').classList.contains('term-focused')).toBe(false);
+  startTermTimer(); // and entering again starts it afresh
+  await act(() => vi.advanceTimersByTimeAsync(250));
+  expect(pane('@1').classList.contains('term-focused')).toBe(true);
+});
+
+test('a tick with no document left is a no-op, never a ReferenceError', () => {
+  vi.stubGlobal('document', undefined);
+  try {
+    expect(() => applyTermFocus()).not.toThrow();
+  } finally {
+    vi.unstubAllGlobals(); // before afterEach's cleanup, which needs the document back
+  }
 });
 
 test('focusFrame moves the keyboard three ways: the window, the element and xterm', () => {

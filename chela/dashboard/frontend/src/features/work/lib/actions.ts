@@ -1,7 +1,7 @@
 // A card's server actions (static/js/kanban.js until CMX-233). Each resolves to the error to
 // show on the card, or null; on success the board refetches instead of mutating itself, so the
 // next poll is what moves the card.
-import { BASE_PATH } from '../../../shared/api/index.ts';
+import { BASE_PATH, decideHeaders } from '../../../shared/api/index.ts';
 import { refreshWork } from '../../../shared/store/work.ts';
 
 async function post(path: string, body?: unknown): Promise<string | null> {
@@ -10,7 +10,8 @@ async function post(path: string, body?: unknown): Promise<string | null> {
   try {
     resp = await fetch(BASE_PATH + path, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      // CMX-392: the session token rides on every card action; Merge refuses without it.
+      headers: decideHeaders(),
       ...(body === undefined ? {} : { body: JSON.stringify(body) }),
     });
     try {
