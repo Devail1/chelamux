@@ -297,6 +297,7 @@ describe('the list', () => {
       { key: 's:S-C1', name: 'C1', session_id: 'S-C1', parent_session_id: 'S-P', archived_at: 1 },
     ];
     const { el } = draw([win('other')], { sessions, collapsed: ['~archived:open'] });
+    expect(el.querySelector('.side-archived .archived-count')?.textContent).toBe('2');
     const box = el.querySelector('.side-archived .group-rows') as HTMLElement;
     expect([...box.children].map(c => c.className)).toEqual(['agent-row rich archived session-row tree-parent', 'tree-kids']);
     expect(box.querySelector('.tree-kids .session-row.nested')?.getAttribute('data-item')).toBe('s:S-C1');

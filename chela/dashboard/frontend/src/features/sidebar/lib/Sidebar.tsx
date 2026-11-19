@@ -356,7 +356,10 @@ export function Sidebar({ state: s, actions }: { state: SidebarState | null; act
   const alt = altNumbers(model.needsYou, model.pinned, model.groups, kids, s);
   const showArchived = s.view.status !== 'active';
   const archivedOpen = s.view.status === 'archived' || s.collapsed.includes(`${ARCHIVED_SECTION_KEY}:open`);
-  const nArch = model.archived.length;
+  // CMX-390: Archived and Pinned count every row they draw, nested ones too (Needs you counts
+  // the rows that need you: its roots)
+  const size = (roots: Item[]) => roots.reduce((n, it) => n + 1 + descendants(it, kids).length, 0);
+  const nArch = size(model.archived);
   const drawsArchive = showArchived && nArch > 0;
   // Every row's folder line; grouped by folder only a single-session folder's row draws its
   // own (CMX-379), so Needs you and Archived draw theirs only when not grouped by folder.
@@ -374,7 +377,7 @@ export function Sidebar({ state: s, actions }: { state: SidebarState | null; act
         drag={parent && section === PINNED_KEY ? childDrag(it, parent, section, s, kids, handle, rowLine) : undefined} />
     );
   };
-  const nPinned = model.pinned.reduce((n, it) => n + 1 + descendants(it, kids).length, 0);
+  const nPinned = size(model.pinned);
   return (
     <>
       {model.needsYou.length > 0 && (
