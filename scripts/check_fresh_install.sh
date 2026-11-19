@@ -10,15 +10,28 @@
 # source given as $1 (default: this checkout's HEAD), so the check tests YOUR commit, not
 # whatever is on GitHub.
 #
-# Exit codes: 0 pass · 1 fail · 77 SKIPPED (no usable docker/podman). A skip says so.
+# CMX-444: every network-bound phase runs under its own deadline, and each is timed:
+#   apt           — the prereqs image's apt-get layer
+#   uv installer  — the prereqs image's astral uv-installer layer
+#   git install   — the block's `uv tool install` (until `chela` is on PATH)
+#   dashboard up  — until the dashboard answers /api/agents with 200
+# A phase that runs out its deadline exits 75 and NAMES the phase: "infra: did not
+# complete" is not a pass, and not a code failure either. CHELA_FRESH_INSTALL_TIMEOUT=<s>
+# sets every phase's deadline at once (the defaults are below).
+#
+# The prereqs image is tagged by a hash of its two Dockerfiles, and a run that finds that
+# tag already present skips both build phases (CI restores it from a cache);
+# `--image-tag` prints the tag and exits.
+#
+# Exit codes: 0 pass · 1 fail · 75 INFRA: a phase did not complete in time ·
+# 77 SKIPPED (no usable docker/podman). A skip and a timeout each say so.
 #
 #   scripts/check_fresh_install.sh [source-repo]
+#   scripts/check_fresh_install.sh --image-tag
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-SOURCE="${1:-$ROOT}"
 GITHUB_URL="https://github.com/Devail1/chelamux"
-IMAGE="chela-fresh-install-prereqs"
 PORT=5001
 
 # The README install block, byte for byte. tests/test_check_fresh_install.py fails if it
@@ -29,6 +42,34 @@ tmux new-session -d -s chela -n researcher     # a window = an agent
 chela run > ~/chela-run.log 2>&1 &             # the daemon (the engine)
 chela dashboard                                # the wall: http://127.0.0.1:5001'
 # END INSTALL BLOCK
+
+# Only the documented prerequisites, in two layers so a hang names which fetch hung.
+APT_DOCKERFILE='FROM ubuntu:24.04
+RUN apt-get update && apt-get install -y --no-install-recommends git tmux curl ca-certificates \
+ && rm -rf /var/lib/apt/lists/*'
+UV_DOCKERFILE='ARG BASE
+FROM $BASE
+RUN curl -LsSf https://astral.sh/uv/install.sh | env UV_INSTALL_DIR=/usr/local/bin UV_NO_MODIFY_PATH=1 sh'
+# Computed only when needed: the no-runtime SKIP below must run with nothing on PATH.
+tag_images() {
+    local hash
+    hash="$(printf '%s\n--\n%s\n' "$APT_DOCKERFILE" "$UV_DOCKERFILE" | sha256sum | cut -c1-12)"
+    APT_IMAGE="chela-fresh-install-apt:$hash"
+    IMAGE="chela-fresh-install-prereqs:$hash"
+}
+
+if [ "${1:-}" = "--image-tag" ]; then
+    tag_images
+    echo "$IMAGE"
+    exit 0
+fi
+SOURCE="${1:-$ROOT}"
+
+# Per-phase deadlines, in seconds. Their sum (900) is the old whole-check budget.
+T_APT="${CHELA_FRESH_INSTALL_TIMEOUT:-240}"
+T_UV="${CHELA_FRESH_INSTALL_TIMEOUT:-120}"
+T_GIT="${CHELA_FRESH_INSTALL_TIMEOUT:-420}"
+T_DASH="${CHELA_FRESH_INSTALL_TIMEOUT:-120}"
 
 RUNTIME="${CHELA_CONTAINER_RUNTIME:-}"
 if [ -z "$RUNTIME" ]; then
@@ -44,24 +85,68 @@ if [ -z "$RUNTIME" ]; then
     exit 77
 fi
 
+tag_images
 WORK="$(mktemp -d)"
 NAME="chela-fresh-install-$$"
+BLOCK_PID=""
 cleanup() {
+    if [ -n "$BLOCK_PID" ]; then kill "$BLOCK_PID" >/dev/null 2>&1 || true; fi
     "$RUNTIME" rm -f "$NAME" >/dev/null 2>&1 || true
     rm -rf "$WORK"
 }
 trap cleanup EXIT
 
-# Only the documented prerequisites. Built once and cached; its time is reported apart
-# from the install, since a visitor may already have them.
-t0=$(date +%s)
-"$RUNTIME" build -q -t "$IMAGE" - >/dev/null <<'EOF'
-FROM ubuntu:24.04
-RUN apt-get update && apt-get install -y --no-install-recommends git tmux curl ca-certificates \
- && rm -rf /var/lib/apt/lists/*
-RUN curl -LsSf https://astral.sh/uv/install.sh | env UV_INSTALL_DIR=/usr/local/bin UV_NO_MODIFY_PATH=1 sh
-EOF
-t_prereqs=$(( $(date +%s) - t0 ))
+TIMINGS=""
+record() { TIMINGS="${TIMINGS}phase ${1}: ${2}s"$'\n'; }
+
+timed_out() {  # <phase> <limit>
+    echo "TIMEOUT: phase '$1' did not complete within ${2}s — infra: did not complete (NOT a pass)" >&2
+    printf '%s' "$TIMINGS" >&2
+    if [ -s "$WORK/block.log" ]; then cat "$WORK/block.log" >&2; fi
+    exit 75
+}
+
+build_phase() {  # <phase> <limit> <tag> <dockerfile> [build args...]
+    local phase="$1" limit="$2" tag="$3" dockerfile="$4" start=$SECONDS rc=0
+    shift 4
+    timeout -k 10 "$limit" "$RUNTIME" build -q -t "$tag" "$@" - >"$WORK/build.log" 2>&1 \
+        <<<"$dockerfile" || rc=$?
+    if [ "$rc" -eq 124 ] || [ "$rc" -eq 137 ]; then
+        timed_out "$phase" "$limit"
+    fi
+    if [ "$rc" -ne 0 ]; then
+        echo "FAIL: phase '$phase' — the image build failed (exit $rc)" >&2
+        cat "$WORK/build.log" >&2
+        exit 1
+    fi
+    record "$phase" $(( SECONDS - start ))
+}
+
+wait_for() {  # <phase> <limit> <probe command...> — polls until the probe succeeds
+    local phase="$1" limit="$2" start=$SECONDS
+    shift 2
+    until "$@"; do
+        if ! kill -0 "$BLOCK_PID" 2>/dev/null; then
+            echo "FAIL: the install block exited during phase '$phase'" >&2
+            cat "$WORK/block.log" >&2
+            exit 1
+        fi
+        if [ $(( SECONDS - start )) -ge "$limit" ]; then
+            timed_out "$phase" "$limit"
+        fi
+        sleep 1
+    done
+    record "$phase" $(( SECONDS - start ))
+}
+
+if "$RUNTIME" image inspect "$IMAGE" >/dev/null 2>&1; then
+    echo "==> prerequisites: cached image $IMAGE"
+    prereqs="cached"
+else
+    build_phase "apt" "$T_APT" "$APT_IMAGE" "$APT_DOCKERFILE"
+    build_phase "uv installer" "$T_UV" "$IMAGE" "$UV_DOCKERFILE" --build-arg "BASE=$APT_IMAGE"
+    prereqs="built"
+fi
 
 git clone --quiet "$SOURCE" "$WORK/src"
 BLOCK="${INSTALL_BLOCK//"$GITHUB_URL"/file:///src}"
@@ -72,23 +157,18 @@ BLOCK="${INSTALL_BLOCK//"$GITHUB_URL"/file:///src}"
 in_box() { "$RUNTIME" exec "$NAME" bash -c "$1"; }
 in_box 'mkdir -p ~/.local/bin && printf "#!/bin/sh\nexit 0\n" > ~/.local/bin/claude && chmod +x ~/.local/bin/claude'
 
+chela_installed() { in_box 'command -v chela' >/dev/null 2>&1; }
+dashboard_up() {
+    [ "$(in_box "curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:$PORT/api/agents" 2>/dev/null)" = "200" ]
+}
+
 echo "==> running the README install block ($(grep -c . <<<"$INSTALL_BLOCK") commands)"
-t0=$(date +%s)
+t0=$SECONDS
 "$RUNTIME" exec "$NAME" bash -c "$BLOCK" >"$WORK/block.log" 2>&1 &
-up=0
-for _ in $(seq 1 600); do
-    if [ "$(in_box "curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:$PORT/api/agents" 2>/dev/null)" = "200" ]; then
-        up=1
-        break
-    fi
-    sleep 1
-done
-t_install=$(( $(date +%s) - t0 ))
-if [ "$up" -ne 1 ]; then
-    echo "FAIL: the dashboard never answered /api/agents with 200" >&2
-    cat "$WORK/block.log" >&2
-    exit 1
-fi
+BLOCK_PID=$!
+wait_for "git install" "$T_GIT" chela_installed
+wait_for "dashboard up" "$T_DASH" dashboard_up
+t_install=$(( SECONDS - t0 ))
 
 echo "==> chela doctor"
 if ! in_box 'chela doctor'; then
@@ -97,7 +177,8 @@ if ! in_box 'chela doctor'; then
 fi
 
 echo
-echo "prerequisites: ${t_prereqs}s (cached after the first run)"
+printf '%s' "$TIMINGS"
+echo "prerequisites: ${prereqs} ($IMAGE)"
 echo "install -> dashboard up: ${t_install}s"
 echo "commands a human types: $(grep -c . <<<"$INSTALL_BLOCK")"
 echo "PASS: fresh install on $RUNTIME ubuntu:24.04"
