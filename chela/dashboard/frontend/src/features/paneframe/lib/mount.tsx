@@ -9,7 +9,7 @@ import { onEvent } from '../../../shared/events/index.ts';
 import { agents } from '../../../shared/store/agents.ts';
 import { view } from '../../../shared/store/view.ts';
 import { displayLabel, type HeadAgent } from '../../panehead/index.ts';
-import { startFocusTracking } from './focus.ts';
+import { startFocusTracking, stopFocusTracking } from './focus.ts';
 import { host, type PaneFrameHost } from './host.ts';
 import { PaneFrame } from './PaneFrame.tsx';
 import { markReady, readiness } from './ready.ts';
@@ -99,4 +99,5 @@ export function startTermTimer(): void {
 export function stopTermTimer(): void {
   if (timer) clearInterval(timer);
   timer = null;
+  stopFocusTracking(); // CMX-446: the focus poll goes with the Wall's tick
 }
