@@ -75,6 +75,9 @@ def refusal(request) -> str | None:
     origin = request.headers.get("Origin")
     if not origin:
         return "no Origin header: a decision must come from the dashboard page in a browser"
+    # host:port, deliberately NOT the scheme: behind the TLS-terminating proxy (Caddy on the
+    # tailnet) the browser's Origin is https:// while this process sees plain http, so
+    # comparing schemes would refuse the real Approve button. Same host:port is the boundary.
     if urlparse(origin).netloc != request.host:
         return "cross-origin request"
     if request.headers.get("Sec-Fetch-Site", "same-origin") not in ("same-origin", "none"):

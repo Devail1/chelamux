@@ -344,6 +344,8 @@ _EXTRA_SHAPES = {
     "same-site fetch": "cross-site request",
     "empty Origin": "no Origin header",
     "truncated token": "missing or stale session token",
+    "token with a suffix": "missing or stale session token",
+    "token in upper case": "missing or stale session token",
     "token without its cookie's session": "no dashboard session",
 }
 
@@ -354,6 +356,8 @@ def _all_shapes(sid: str, token: str) -> dict:
             "same-site fetch": ({**good, "Sec-Fetch-Site": "same-site"}, sid),
             "empty Origin": ({**good, "Origin": ""}, sid),
             "truncated token": ({**good, "X-Chela-Session-Token": token[:32]}, sid),
+            "token with a suffix": ({**good, "X-Chela-Session-Token": token + "0"}, sid),
+            "token in upper case": ({**good, "X-Chela-Session-Token": token.upper()}, sid),
             "token without its cookie's session": (good, None)}
 
 
@@ -484,6 +488,11 @@ _PORTED_ORIGINS = {
     "this host:port inside another host": "http://localhost.5005.evil.example",
     "another hostname on this port": "http://127.0.0.1:5005",
     "userinfo before this host:port": "http://evil@localhost:5005",
+    # the scheme varies too (DEFEAT_SHAPES #392d): an https page one component away is
+    # refused just the same, so a check that only parses an `http://` prefix goes red
+    "https sibling port": "https://localhost:5006",
+    "https hostname without the port": "https://localhost",
+    "https userinfo before this host:port": "https://evil@localhost:5005",
 }
 
 
@@ -507,12 +516,17 @@ def test_every_decide_route_refuses_an_origin_that_is_not_this_host_and_port(rou
     assert "cross-origin request" in resp.get_data(as_text=True), (route, shape)
 
 
+@pytest.mark.parametrize("scheme", ["http", "https"])
 @pytest.mark.parametrize("route", list(_ROUTES))
-def test_every_decide_route_accepts_the_origin_naming_this_host_and_port(route, monkeypatch):
+def test_every_decide_route_accepts_the_origin_naming_this_host_and_port(route, scheme,
+                                                                         monkeypatch):
     """Positive control: the same cookie + token with Origin == this host:port decides, so
-    each refusal above is the Origin's alone."""
+    each refusal above is the Origin's alone. Under BOTH schemes: behind the TLS-terminating
+    proxy (Caddy on the tailnet) the browser's Origin is `https://` while Flask sees plain
+    http, so the scheme is deliberately not compared; a check that does, or that only parses
+    an `http://` Origin, refuses the real deployment's Approve button."""
     calls = _sinks(monkeypatch)
-    resp = _drive_ported(route, f"http://{_HOST}", humanproof.new_session_id())
+    resp = _drive_ported(route, f"{scheme}://{_HOST}", humanproof.new_session_id())
     assert resp.status_code == 200, (route, resp.get_data(as_text=True))
     assert calls == [_ROUTES[route][2]]
 
