@@ -28,13 +28,6 @@ NIGHT = datetime(2026, 11, 18, 1, 0)
 
 
 @pytest.fixture(autouse=True)
-def _no_default_blocked_hours(monkeypatch):
-    """The run() tests below start at the REAL time: with the default blocked hours (CMX-436,
-    covered in tests/test_sweep_nightly_hold.py) a suite that ran at 03:xx would skip them."""
-    monkeypatch.setattr(sweep_nightly, "DEFAULT_BLOCKED_HOURS", ())
-
-
-@pytest.fixture(autouse=True)
 def notices(monkeypatch):
     got: list[tuple[str, str, dict]] = []
     monkeypatch.setattr("chela.inbox.enqueue",
