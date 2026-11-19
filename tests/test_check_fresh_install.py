@@ -130,6 +130,7 @@ def fake(tmp_path):
         return out, calls
 
     run.runtime = runtime
+    run.src = src
     return run
 
 
@@ -210,6 +211,29 @@ def test_an_install_block_that_dies_is_a_failure_not_a_timeout(fake):
     assert "FAIL: the install block exited during phase 'git install'" in out.stderr
     assert "block blew up" in out.stderr
     assert "TIMEOUT" not in out.stderr
+
+
+def test_the_install_is_pinned_to_the_source_commit_and_a_tested_python(fake):
+    # CI's checkout is shallow, detached and branchless, so a clone of it has no
+    # `origin/HEAD`, and an UNPINNED `git+file:///src` dies in uv: "failed to find default
+    # branch `HEAD`" (PR #961's red fresh-install job). Pinning the sha needs no branch.
+    src = fake.src
+    sha = subprocess.run(["git", "-C", str(src), "rev-parse", "HEAD"], check=True,
+                         capture_output=True, text=True).stdout.strip()
+    subprocess.run(["git", "-C", str(src), "checkout", "-q", "--detach"], check=True)
+    for ref in subprocess.run(["git", "-C", str(src), "for-each-ref", "--format=%(refname)",
+                               "refs/heads"], check=True, capture_output=True,
+                              text=True).stdout.split():
+        subprocess.run(["git", "-C", str(src), "update-ref", "-d", ref], check=True)
+    out, calls = fake()
+    assert out.returncode == 0, out.stdout + out.stderr
+    log = "\n".join(calls)
+    assert f'"chelamux[dashboard] @ git+file:///src@{sha}"' in log, log
+    assert "github.com" not in log
+    run = next(c for c in calls if c.startswith("run "))
+    assert " -e UV_PYTHON=3.13 " in run, run
+    out, calls = fake(CHELA_FRESH_INSTALL_PYTHON="3.11")
+    assert " -e UV_PYTHON=3.11 " in [c for c in calls if c.startswith("run ")][-1]
 
 
 def test_a_failing_doctor_fails_the_check(fake):

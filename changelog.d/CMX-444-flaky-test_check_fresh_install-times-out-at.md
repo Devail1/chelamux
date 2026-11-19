@@ -7,4 +7,6 @@
   own deadline; a phase that hangs exits 75 and names itself, and two hangs in a row end the
   job red as "infra: did not complete", never green. The prereqs image is tagged by a hash
   of its Dockerfiles and cached between CI runs, so apt and the uv installer are not fetched
-  on every PR. (CMX-444)
+  on every PR. The install is pinned to the checked-out commit (`git+file:///src@<sha>`, so
+  CI's shallow, detached checkout installs) and runs on Python 3.13, the newest CI tests
+  (`CHELA_FRESH_INSTALL_PYTHON` overrides it). (CMX-444)

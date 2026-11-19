@@ -8,7 +8,8 @@
 # this machine reachable. `claude` is a stub on PATH: the check needs a working wall, not a
 # Claude login. The one substitution: the block's GitHub URL is replaced by a clone of the
 # source given as $1 (default: this checkout's HEAD), so the check tests YOUR commit, not
-# whatever is on GitHub.
+# whatever is on GitHub. It is pinned to that commit's sha (`file:///src@<sha>`), and the
+# install runs on Python $CHELA_FRESH_INSTALL_PYTHON (default 3.13).
 #
 # CMX-444: every network-bound phase runs under its own deadline, and each is timed:
 #   apt           — the prereqs image's apt-get layer
@@ -70,6 +71,10 @@ T_APT="${CHELA_FRESH_INSTALL_TIMEOUT:-240}"
 T_UV="${CHELA_FRESH_INSTALL_TIMEOUT:-120}"
 T_GIT="${CHELA_FRESH_INSTALL_TIMEOUT:-420}"
 T_DASH="${CHELA_FRESH_INSTALL_TIMEOUT:-120}"
+
+# The Python the install runs on: the newest one CI's unit suite tests, not whatever uv
+# finds newest that day (it once picked an untested cpython 3.15).
+PYTHON="${CHELA_FRESH_INSTALL_PYTHON:-3.13}"
 
 RUNTIME="${CHELA_CONTAINER_RUNTIME:-}"
 if [ -z "$RUNTIME" ]; then
@@ -150,10 +155,15 @@ else
 fi
 
 git clone --quiet "$SOURCE" "$WORK/src"
-BLOCK="${INSTALL_BLOCK//"$GITHUB_URL"/file:///src}"
+# Pin the install to the cloned commit. Unpinned, uv resolves the repo's default branch via
+# `origin/HEAD`, and a clone of CI's checkout (shallow, detached, no branch) has none:
+# "failed to find default branch `HEAD`".
+SHA="$(git -C "$WORK/src" rev-parse HEAD)"
+BLOCK="${INSTALL_BLOCK//"$GITHUB_URL"/file:///src@$SHA}"
 
 "$RUNTIME" run -d --name "$NAME" --user "$(id -u):$(id -g)" \
     -e HOME=/tmp/home -e PATH=/tmp/home/.local/bin:/usr/local/bin:/usr/bin:/bin \
+    -e UV_PYTHON="$PYTHON" \
     -v "$WORK/src:/src:ro" "$IMAGE" sleep infinity >/dev/null
 in_box() { "$RUNTIME" exec "$NAME" bash -c "$1"; }
 in_box 'mkdir -p ~/.local/bin && printf "#!/bin/sh\nexit 0\n" > ~/.local/bin/claude && chmod +x ~/.local/bin/claude'
