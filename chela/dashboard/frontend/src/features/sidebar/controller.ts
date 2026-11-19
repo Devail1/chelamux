@@ -192,8 +192,11 @@ let sb: { groups: Group[]; items: Map<string, Item>; lists: Map<string, Item[]> 
 let state: SidebarState | null = null;
 let activeRow: string | null = null;
 let altHeld = false;
-// CMX-378: each window's session id at the last render, so a `/clear` carries its group.
-let lastSid: ReadonlyMap<string, string> = new Map();
+// CMX-378: each window's session id at the last render, so a `/clear` carries its group, and
+// (CMX-431) the window's Claude process start (`created`): a `/clear` keeps that process, so
+// the window id names the same window only while it is unchanged. A tmux restart (a reboot)
+// hands the old ids to OTHER sessions, which must never inherit a group through them.
+let lastWin: ReadonlyMap<string, { sid: string; created: AgentRow['created'] }> = new Map();
 
 function publishSidebar(patch: Partial<SidebarState>) {
   if (!state) return;
@@ -240,8 +243,14 @@ export function renderSidebarAgents(agents: AgentRow[] | null | undefined): void
   // rules): a legacy `w:@N` of a live window moves to its session key, a gone window's
   // `w:` is dropped, a session absent right now keeps its group. Applied to THIS render too,
   // so a session resumed under a new window id lands in its group on the first draw.
-  const next = reconcileAssign(c, rows, archiveLoaded() ? state.sessions : null, state.now, lastSid);
-  lastSid = new Map(rows.filter(a => a?.window_id && a.session_id).map(a => [a.window_id as string, a.session_id as string]));
+  const prevSid = new Map<string, string>();
+  for (const a of rows) {
+    const w = a?.window_id ?? '', was = lastWin.get(w);
+    if (was && was.created === a?.created) prevSid.set(w, was.sid);
+  }
+  const next = reconcileAssign(c, rows, archiveLoaded() ? state.sessions : null, state.now, prevSid);
+  lastWin = new Map(rows.filter(a => a?.window_id && a.session_id)
+    .map(a => [a.window_id as string, { sid: a.session_id as string, created: a.created }]));
   if (next) {
     state.custom = next;
     saveCustom(next);
