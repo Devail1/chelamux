@@ -194,12 +194,47 @@ def _start_and_wait_for_mutation(tmp_path: Path, root: Path) -> tuple[subprocess
     script.write_text(SLOW_SUITE)
     proc = _cli(root, f'"{sys.executable}" "{script}" "{flag}"', tmp_path / "cd",
                 start_new_session=True)
-    deadline = time.monotonic() + 60
+    deadline = time.monotonic() + 300               # a hang guard, not a race: see below
     while not flag.exists():
         assert proc.poll() is None, proc.communicate()[0]
         assert time.monotonic() < deadline, "the sweep never reached a mutation"
         time.sleep(0.1)
     return proc, flag
+
+
+def guardians_of(pid: int) -> list[int]:
+    """The live kill guardians watching ``pid`` (``python -m chela.sweep guard <pid> …``)."""
+    out = []
+    for proc in Path("/proc").iterdir():
+        if not proc.name.isdigit():
+            continue
+        try:
+            argv = (proc / "cmdline").read_bytes().split(b"\0")
+        except OSError:
+            continue
+        if b"chela.sweep" in argv and argv[argv.index(b"chela.sweep") + 1:][:2] == [
+                b"guard", str(pid).encode()]:
+            out.append(int(proc.name))
+    return out
+
+
+def kill_and_await_guardian(proc: subprocess.Popen, *, group: bool = True) -> None:
+    """⛔ CMX-398: SIGKILL a sweep/self-check mid-mutation and return once its guardian has
+    FINISHED — so what the caller asserts next is the guardian's result, not a race against
+    a wall clock (the 11-16 CI flake). The guardian is found BEFORE the kill (it started
+    before the first mutation), and its exit is the event waited on; the timeout only stops a
+    genuinely hung guardian from hanging the suite."""
+    watching = guardians_of(proc.pid)
+    assert watching, "no kill guardian is watching the sweep — nothing could restore it"
+    if group:
+        os.killpg(proc.pid, signal.SIGKILL)
+    else:
+        proc.kill()
+    proc.wait(timeout=60)
+    deadline = time.monotonic() + 300
+    while any(sweep._pid_alive(g) for g in watching):
+        assert time.monotonic() < deadline, "the guardian never finished"
+        time.sleep(0.05)
 
 
 def test_a_sigkilled_sweep_is_restored_by_its_guardian_without_a_next_sweep(tmp_path):
@@ -210,12 +245,8 @@ def test_a_sigkilled_sweep_is_restored_by_its_guardian_without_a_next_sweep(tmp_
     original = (root / "feat.py").read_bytes()
     proc, _ = _start_and_wait_for_mutation(tmp_path, root)
     assert sweep.marker_path(root).exists()          # the kill lands while a mutation is live
-    os.killpg(proc.pid, signal.SIGKILL)
-    proc.wait(timeout=30)
-    deadline = time.monotonic() + 30
-    while (root / "feat.py").read_bytes() != original or sweep.marker_path(root).exists():
-        assert time.monotonic() < deadline, "the guardian never restored the killed mutation"
-        time.sleep(0.1)
+    kill_and_await_guardian(proc)
+    assert (root / "feat.py").read_bytes() == original and not sweep.marker_path(root).exists()
     assert _git(root, "diff") == "" and _git(root, "status", "--porcelain") == ""
 
 
@@ -1145,7 +1176,8 @@ def test_a_pid_we_may_not_signal_is_alive():
 def test_the_marker_records_this_sweeps_own_pid(tmp_path):
     sweep._write_marker(tmp_path, "feat.py", "a\n", "b\n")
     data = json.loads(sweep.marker_path(tmp_path).read_text())
-    assert data == {"pid": os.getpid(), "file": "feat.py", "original": "a\n", "mutated": "b\n"}
+    assert data == {"pid": os.getpid(), "boot_id": sweep._boot_id(), "file": "feat.py",
+                    "line": 1, "original": "a\n", "mutated": "b\n"}
 
 
 def test_sigterm_sighup_and_sigint_raise_during_a_sweep_and_the_old_handlers_come_back(tmp_path, monkeypatch):
@@ -2114,7 +2146,8 @@ def test_recovery_restores_a_mutated_file_and_drops_the_marker(tmp_path):
     sweep._write_marker(root, "feat.py", BRANCH_FEAT, "mutated\n")
     with patch.object(sweep, "_pid_alive", return_value=False):
         done, err = sweep.recover(root)
-    assert (done, err) == ("restored feat.py from a killed sweep's recovery marker", "")
+    assert (done, err) == ("restored feat.py from a killed sweep's recovery marker (line 1: "
+                           "`mutated` → `def old(x):`)", "")
     assert (root / "feat.py").read_text() == BRANCH_FEAT and not sweep.marker_path(root).exists()
 
 

@@ -18,6 +18,7 @@ from pathlib import Path
 import pytest
 
 from chela import judge, sweep
+from tests.test_judge_sweep import kill_and_await_guardian
 
 FEAT = '''\
 def new(x):
@@ -82,7 +83,7 @@ def _start(tmp_path: Path, root: Path, prelude: str = "") -> tuple[subprocess.Po
         env={**os.environ, "CHELA_DIR": str(tmp_path / "chela-dir")},
         stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, start_new_session=True,
     )
-    deadline = time.monotonic() + 60
+    deadline = time.monotonic() + 300               # a hang guard, not a race
     while not flag.exists():
         assert proc.poll() is None, proc.communicate()[0]
         assert time.monotonic() < deadline, "the self-check never reached a mutation"
@@ -94,14 +95,6 @@ def _start(tmp_path: Path, root: Path, prelude: str = "") -> tuple[subprocess.Po
 def _clean(root: Path, original: bytes) -> bool:
     return ((root / "feat.py").read_bytes() == original and not sweep.marker_path(root).exists()
             and _git(root, "diff") == "" and _git(root, "status", "--porcelain") == "")
-
-
-def _wait_clean(root: Path, original: bytes, seconds: float = 10) -> None:
-    deadline = time.monotonic() + seconds
-    while not _clean(root, original):
-        assert time.monotonic() < deadline, (
-            f"still dirty {seconds:g}s after the kill:\n{_git(root, 'diff')}")
-        time.sleep(0.1)
 
 
 # --- the real thing: a self-check subprocess, killed ---------------------------------------
@@ -131,9 +124,8 @@ def test_a_sigkilled_self_check_is_restored_by_its_guardian(tmp_path):
     original = (root / "feat.py").read_bytes()
     proc, _ = _start(tmp_path, root)
     assert sweep.marker_path(root).exists()             # written BEFORE the mutation landed
-    proc.kill()
-    proc.wait(timeout=30)
-    _wait_clean(root, original)
+    kill_and_await_guardian(proc, group=False)
+    assert _clean(root, original), _git(root, "diff")
 
 
 def test_without_the_guardian_a_sigkill_leaves_the_mutation_on_disk(tmp_path):
@@ -187,8 +179,9 @@ def test_the_marker_holds_the_original_and_the_exact_mutation(tmp_path):
                       f"    shutil.copy({str(sweep.marker_path(root))!r}, sys.argv[1])\n")
     _self_check(root, tmp_path, f'"{sys.executable}" "{script}" "{seen}"')
     data = json.loads(seen.read_text())
-    assert data == {"pid": os.getpid(), "file": "feat.py", "original": FEAT,
-                    "mutated": FEAT.replace(BEFORE, AFTER, 1)}
+    assert data == {"pid": os.getpid(), "boot_id": sweep._boot_id(), "file": "feat.py",
+                    "line": 2, "original": FEAT, "mutated": FEAT.replace(BEFORE, AFTER, 1)}
+    assert len(data["boot_id"]) == 36           # the kernel's boot id, never empty on Linux
 
 
 def test_an_interrupt_whose_old_handler_returns_restores_and_is_cannot_verify(tmp_path,

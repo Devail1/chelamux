@@ -1020,6 +1020,18 @@ def _run(wf, now: float, chela_dir: Path, filer: Filer | None, result: dict,
         return
     root = resolve_workspace_root(wf)
     worktree = (root / "nightly-sweep").resolve()
+    # ⛔ CMX-398: restore first. The checkout below force-resets this throwaway tree, so a
+    # dead night's mutation would be discarded anyway — but a LIVE one belongs to a night
+    # still sweeping it, and resetting under it would corrupt that run's measurements.
+    owner = sweep.live_owner(worktree)
+    if owner:
+        result.update(status=CANNOT_VERIFY, why=f"the nightly worktree {worktree} is being "
+                                                f"mutated by a live sweep (pid {owner}) — "
+                                                "not reset")
+        return
+    restored, err = sweep.recover(worktree)
+    if restored or err:
+        log.warning("nightly sweep: %s", restored or f"{err} — the checkout resets it")
     try:
         detached_worktree(repo, head, worktree, root)
     except Exception as e:  # noqa: BLE001 — any checkout failure is a CANNOT VERIFY, said
