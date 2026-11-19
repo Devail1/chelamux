@@ -149,6 +149,9 @@ The sidebar is `src/features/sidebar` (CMX-172: slices CMX-276, CMX-277, CMX-278
 draw into the shell's slots: the session list `#sidebar-agents`, the VIEW menu
 `#sidebar-view-menu`, the nav rows `#side-nav`, Recent sessions `#side-recent-island` and the
 width handle `#sidebar-resize`. Its group, row and VIEW menus are the kit's `Menu`.
+The VIEW menu's **Suggest names…** opens `src/features/suggestnames` (CMX-434): a dialog of
+name and title proposals (`chela/suggest_names.py`), applied only from the dialog, names
+through the rename API and titles through `POST /api/agents/<wid>/title`.
 
 Its state and commands are `controller.ts`, the module's second entry point (the pure
 `model.ts` is the third): the `/api/agents` read the sidebar draws (its scheduler lane), the

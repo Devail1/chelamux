@@ -9,6 +9,8 @@ export type HeadAgent = WallAgent & {
   manual_name?: boolean;
   /** CMX-146: Claude's auto-generated session title. */
   ai_title?: string | null;
+  /** CMX-434: the title set with `/rename` (customTitle); it outranks ai_title, as in Claude Code. */
+  custom_title?: string | null;
   session_name?: string | null;
   needs_human?: boolean;
   /** CMX-418: 'web' on a sandboxed session launched with web access. */
@@ -26,9 +28,10 @@ export function wantsHuman(a: MaybeAgent): boolean {
   return !!a && (a.needs_human === true || a.session_status === 'waiting');
 }
 
-/** Claude's session title: its `ai_title`, else the live session's name; '' before either exists. */
+/** Claude's session title: its `/rename` title (CMX-434), else its `ai_title`, else the live
+ * session's name; '' before any exists. */
 export function claudeTitle(a: MaybeAgent): string {
-  return (a && (a.ai_title || a.session_name)) || '';
+  return (a && (a.custom_title || a.ai_title || a.session_name)) || '';
 }
 
 /**
@@ -51,7 +54,7 @@ export function paneSubtitle(a: MaybeAgent, wid: string): string {
   if (!a) return '';
   const label = displayLabel(a, wid);
   if (a.name && label !== a.name) return a.name;
-  const t = a.ai_title || '';
+  const t = a.custom_title || a.ai_title || '';
   return t && t !== label ? t : '';
 }
 

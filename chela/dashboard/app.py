@@ -29,7 +29,7 @@ from flask import abort, Flask, jsonify, render_template, request, Response, sen
 
 from chela import config
 from chela.config import DISPATCH_WORKFLOWS, CHELA_DIR, TMUX_SESSION, NOTIFY_INTERVAL
-from chela import agent_manager, capabilities, claude_account, collab, concurrency, collab_host, collab_stream, context, diffsurface, discovery, dismissed_sessions, dispatcher, epoch, event_log, fleet, gateanswer, hold, hooks, inbox, judge, launcher, messenger, notify, okf, parentage, park, personas, pr_status, probecache, rc_rename, restore, rooms, sandbox_status, scheduler, sessionids, share_requests, share_sandbox, share_store, sidebar_archive, sidebar_layout, spawn, starter, tasklists, transcripts, update, usage, userconfig
+from chela import agent_manager, capabilities, claude_account, collab, concurrency, collab_host, collab_stream, context, diffsurface, discovery, dismissed_sessions, dispatcher, epoch, event_log, fleet, gateanswer, hold, hooks, inbox, judge, launcher, messenger, notify, okf, parentage, park, personas, pr_status, probecache, rc_rename, restore, rooms, sandbox_status, scheduler, sessionids, share_requests, share_sandbox, share_store, sidebar_archive, sidebar_layout, spawn, starter, suggest_names, tasklists, transcripts, update, usage, userconfig
 from chela.dashboard import identity, resources, term_fonts, term_themes
 from chela import topic_ledger as tg_topics
 from chela.personas import autolaunch, lease
@@ -698,6 +698,10 @@ def api_agents():
             # unknown, and only a confirmed open + non-draft PR reads as reviewable.
             "pr": pr,
             "ai_title": transcript.get("ai_title"),
+            # CMX-434: the title set by `/rename` (the transcript's customTitle); it outranks
+            # ai_title, as in Claude Code itself. `title_pending` is a queued one.
+            "custom_title": transcript.get("custom_title"),
+            "title_pending": suggest_names.pending_title(window_id),
             # ⚖️ CMX-40: a judge window's DETACHED battery — invisible to `claude agents`,
             # so without this the window reads idle for the whole run. None otherwise.
             "judge_battery": judge.battery_for_window(name),
@@ -2710,6 +2714,43 @@ def api_agents_rename(wid):
     # push the new one (queued until that session is idle with an empty prompt).
     rc_rename.request(wid, name)
     return jsonify({"ok": True, "wid": wid, "name": name})
+
+
+@app.route("/api/agents/suggest-names", methods=["POST"])
+@require_auth
+def api_agents_suggest_names():
+    """CMX-434: name + title PROPOSALS for the sessions the dialog lists. Applies nothing.
+
+    Body: ``{"wids": ["@1", ...]}`` (the dialog picks them: interactive sessions, or every
+    session with its toggle on). One Haiku call; see :func:`chela.suggest_names.suggest`.
+    """
+    body = request.get_json(silent=True) or {}
+    wids = body.get("wids")
+    if not isinstance(wids, list) or not all(isinstance(w, str) for w in wids):
+        return jsonify({"ok": False, "error": "wids must be a list of window ids"}), 400
+    return jsonify({"ok": True, **suggest_names.suggest(wids)})
+
+
+@app.route("/api/agents/<wid>/title", methods=["POST"])
+@require_auth
+def api_agents_title(wid):
+    """CMX-434: set Claude Code's session title (``/rename <title>`` typed into the session).
+
+    Typed only into a pane where Claude runs, idle, with no dialog and an empty prompt;
+    otherwise QUEUED and applied on idle by the daemon (:mod:`chela.suggest_names`).
+    Body ``{"title": ...}``. ``{"ok", "state": applied|pending|refused, "reason"}``; a pane
+    with no Claude in it (a bare shell) is refused with 409 and never typed into.
+    """
+    body = request.get_json(silent=True) or {}
+    title = body.get("title")
+    if not isinstance(title, str) or not title.strip():
+        return jsonify({"ok": False, "state": "refused", "reason": "title required"}), 400
+    if wid not in discovery.get_windows_by_id():
+        return jsonify({"ok": False, "state": "refused", "reason": f"no such window: {wid}"}), 404
+    result = suggest_names.apply_title(wid, title)
+    if result["state"] == "refused":
+        return jsonify(result), 409 if result["reason"] == suggest_names.NO_CLAUDE else 400
+    return jsonify(result)
 
 
 @app.route("/api/agents/spawn", methods=["POST"])
