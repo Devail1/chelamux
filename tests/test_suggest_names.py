@@ -38,10 +38,12 @@ DIALOG_OVER_EMPTY = "Do you trust the files in this folder?\n" + EMPTY
 
 
 class _FakeTmux:
-    def __init__(self, options=None, fail_list=False):
+    def __init__(self, options=None, fail_list=False, fail_set=False):
         self.options: dict[str, dict[str, str]] = options or {}
         self.fail_list = fail_list
+        self.fail_set = fail_set
         self.calls: list[list[str]] = []
+        self.kwargs: list[dict] = []
 
     @staticmethod
     def _wid(target):
@@ -49,8 +51,14 @@ class _FakeTmux:
 
     def __call__(self, cmd, *a, **kw):
         self.calls.append(list(cmd))
+        self.kwargs.append(kw)
         ok = types.SimpleNamespace(returncode=0, stdout="", stderr="")
-        if cmd[:2] == ["tmux", "set-window-option"]:
+        if self.fail_set and cmd[:2] == ["tmux", "set-window-option"]:
+            return types.SimpleNamespace(returncode=1, stdout="", stderr="bad option")
+        if cmd[:2] == ["tmux", "display-message"]:
+            wid = self._wid(cmd[cmd.index("-t") + 1])
+            ok.stdout = self.options.get(wid, {}).get(cmd[-1][2:-1], "") + "\n"
+        elif cmd[:2] == ["tmux", "set-window-option"]:
             if "-u" in cmd:
                 self.options.setdefault(self._wid(cmd[cmd.index("-t") + 1]), {}).pop(cmd[-1], None)
             else:
@@ -366,7 +374,67 @@ def test_an_unreadable_pane_a_draft_or_a_failed_send_waits(monkeypatch, pane, se
     assert f.tmux.pending("@1") == "T"
 
 
+def test_a_remote_control_name_rename_goes_first(monkeypatch):
+    """CMX-39's queued `/rename <name>` lands before the title, never after it."""
+    from chela import rc_rename
+    f = _Fleet(monkeypatch, pids={"@1": 11}, status={"@1": "idle"}, panes={"@1": EMPTY})
+    f.tmux.options["@1"] = {suggest_names.PENDING_OPTION: "T", rc_rename.PENDING_OPTION: "tipstack"}
+    assert suggest_names.deliver_title("@1", "T") == "name-first"
+    assert f.sent == [] and f.tmux.pending("@1") == "T"
+    del f.tmux.options["@1"][rc_rename.PENDING_OPTION]
+    assert suggest_names.deliver_title("@1", "T") == "sent"
+
+
+def test_a_delivery_never_types_a_title_the_queue_no_longer_holds(monkeypatch):
+    """The daemon read the list, the dashboard sent it meanwhile: the flush types nothing."""
+    f = _Fleet(monkeypatch, pids={"@1": 11}, status={"@1": "idle"}, panes={"@1": EMPTY})
+    assert suggest_names.deliver_title("@1", "T") == "superseded"           # nothing queued
+    f.tmux.options["@1"] = {suggest_names.PENDING_OPTION: "Newer"}
+    assert suggest_names.deliver_title("@1", "Older") == "superseded"       # replaced
+    assert f.sent == [] and f.tmux.pending("@1") == "Newer"
+
+
+def test_one_delivery_per_window_at_a_time(monkeypatch):
+    f = _Fleet(monkeypatch, pids={"@1": 11, "@2": 12}, status={"@1": "idle", "@2": "idle"},
+               panes={"@1": EMPTY, "@2": EMPTY})
+    f.tmux.options["@1"] = {suggest_names.PENDING_OPTION: "T"}
+    f.tmux.options["@2"] = {suggest_names.PENDING_OPTION: "U"}
+    with suggest_names._claim("@1") as held:
+        assert held is True
+        assert suggest_names.deliver_title("@1", "T") == "locked"
+        assert suggest_names.deliver_title("@2", "U") == "sent"        # another window is free
+    assert f.sent == [("@2", "/rename U", {"interrupt": False})]
+    assert suggest_names.deliver_title("@1", "T") == "sent"             # released
+
+
+def test_a_title_tmux_will_not_queue_is_refused_not_reported_pending(monkeypatch, client):
+    f = _Fleet(monkeypatch, pids={"@1": 11}, status={"@1": "busy"}, panes={"@1": EMPTY})
+    f.tmux.fail_set = True
+    assert suggest_names.apply_title("@1", "-wip refactor") == {
+        "ok": False, "state": "refused", "reason": "could not queue the title (tmux refused it)"}
+    monkeypatch.setattr(discovery, "get_windows_by_id", lambda: {"@1": "a"})
+    r = client.post("/api/agents/@1/title", json={"title": "x"})
+    assert r.status_code == 500 and r.get_json()["reason"] == suggest_names.NOT_QUEUED
+    assert f.sent == []
+
+
+def test_get_pending_unknown_reads_as_nothing_queued(monkeypatch):
+    def boom(*a, **k):
+        raise subprocess.TimeoutExpired("tmux", 5)
+    monkeypatch.setattr(subprocess, "run", boom)
+    assert suggest_names._get_pending("@1") is None
+    monkeypatch.setattr(subprocess, "run", lambda *a, **k: types.SimpleNamespace(returncode=1, stdout="T\n", stderr=""))
+    assert suggest_names._get_pending("@1") is None
+
+
+def test_a_dialog_quoted_high_up_in_the_scrollback_does_not_hold_the_queue():
+    old = "Do you want to proceed?\n" + "".join(f"line {i}\n" for i in range(25)) + "❯ \n"
+    assert suggest_names.dialog_showing(old) is None
+    assert suggest_names.dialog_showing("Do you want to proceed?\n\n\n" + "x\n" * 18 + "❯ \n") == "permission"
+
+
 @pytest.mark.parametrize("pane,want", [
+    ("> 1. a quoted list item\n❯ \n", None),
     (TRUST, "trust"), (OLD_TRUST, "trust"), (PERMISSION, "permission"),
     (" Select model\n › 2. Sonnet\n", "menu"), ("Enter to select · Esc to cancel", "menu"),
     ("Do you want to make this edit to a.py?", "permission"),
@@ -439,6 +507,7 @@ def test_pending_titles_argv(monkeypatch):
     suggest_names._set_pending("@1", None)
     assert tmux.calls[1:] == [["tmux", "set-window-option", "-t", "chela:@2", "@chela_title_pending", "Next"],
                               ["tmux", "set-window-option", "-u", "-t", "chela:@1", "@chela_title_pending"]]
+    assert tmux.kwargs == [{"capture_output": True, "text": True, "timeout": 5}] * 3
 
 
 def test_titles_reach_custom_title(monkeypatch, tmp_path):

@@ -2749,7 +2749,8 @@ def api_agents_title(wid):
         return jsonify({"ok": False, "state": "refused", "reason": f"no such window: {wid}"}), 404
     result = suggest_names.apply_title(wid, title)
     if result["state"] == "refused":
-        return jsonify(result), 409 if result["reason"] == suggest_names.NO_CLAUDE else 400
+        status = {suggest_names.NO_CLAUDE: 409, suggest_names.NOT_QUEUED: 500}.get(result["reason"], 400)
+        return jsonify(result), status
     return jsonify(result)
 
 
