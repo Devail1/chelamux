@@ -69,6 +69,14 @@ test('dropAssignee: a custom group is its id, Ungrouped or no group unassigns, a
   expect(dropAssignee('/srv/a', c)).toBeUndefined();
 });
 
+test('dropAssignee: only a `~custom:` key names a group, even when the rest of a key spells a group id', () => {
+  // '/srv/abc' is as long as the `~custom:` prefix, so the folder '/srv/abcg1' ends in 'g1'
+  const c: Custom = { groups: [{ id: 'g1', name: 'Infra' }], assign: {} };
+  expect('~custom:'.length).toBe('/srv/abc'.length);
+  expect(dropAssignee('/srv/abcg1', c)).toBeUndefined();
+  expect(dropAssignee('~custom:g1', c)).toBe('g1');
+});
+
 test('groupSlot: the line goes before the group whose middle is below the pointer, or after the last', () => {
   const gs = [{ key: 'A', top: 0, bottom: 40 }, { key: 'B', top: 40, bottom: 80 }, { key: 'C', top: 80, bottom: 120 }];
   expect(groupSlot(gs, 'C', 10)).toEqual({ before: 'A', line: { key: 'A', side: 'before' } });
@@ -129,6 +137,14 @@ describe('desktop: a mouse drag with a move threshold', () => {
     expect(acts.toggleGroup).not.toHaveBeenCalled();
     expect(document.body.classList.contains('sidebar-dragging')).toBe(false);
     expect(el.querySelector('.drop-before, .drop-after, .dragging')).toBeNull();
+  });
+
+  test('only the group being dragged draws as dragging, not every group', () => {
+    const { el, head } = folders();
+    fireEvent.pointerDown(head('c'), pt(20, 90));
+    fireEvent.pointerMove(window, pt(20, 10));
+    expect([...el.querySelectorAll('.side-group.dragging')].map(g => (g as HTMLElement).dataset.g)).toEqual(['/srv/c']);
+    fireEvent.pointerUp(window, pt(20, 10));
   });
 
   test('a click under the move threshold still opens the row and folds the group', () => {
@@ -284,6 +300,16 @@ test('a session dropped on a custom group is assigned there, by its stable key',
   expect(acts.dropOnGroup.mock.calls).toEqual([[key, customKey('g2')]]);
   fireEvent.click(row('mine'));
   expect(acts.selectAgent).not.toHaveBeenCalled();
+});
+
+test('only the session being dragged draws as dragging, not every draggable row', () => {
+  const { el, row } = custom();
+  // negative control: both sessions are draggable rows
+  expect([row('mine'), row('other')].map(r => r.classList.contains('draggable'))).toEqual([true, true]);
+  fireEvent.pointerDown(row('mine'), pt(20, 90));
+  fireEvent.pointerMove(window, pt(20, 60));
+  expect([...el.querySelectorAll('.agent-row.dragging')].map(r => (r as HTMLElement).dataset.agent)).toEqual(['mine']);
+  fireEvent.pointerUp(window, pt(20, 60));
 });
 
 test('dropped on Ungrouped, or on the list below every group, a session is unassigned', () => {
