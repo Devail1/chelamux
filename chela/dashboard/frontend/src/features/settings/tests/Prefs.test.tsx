@@ -6,6 +6,13 @@ import { afterEach, expect, test, vi } from 'vitest';
 import { applySavedTheme, setTheme } from '../index.ts';
 import { must, openOn, pick, posts, routes, settle, type, visible } from './setup.tsx';
 
+// 🔐 CMX-447: seed the page's session token before the modules under test read it at import.
+// Unseeded it is '', and an assertion against '' passes for a request that sends an EMPTY
+// token, which the server refuses (docs/defeat_shapes/392).
+vi.hoisted(() => {
+  document.body.innerHTML = '<script type="application/json" id="chela-boot">{"sessionToken": "tok-settings"}</script>';
+});
+
 // Panes: iframes whose shim may or may not have loaded (a not-yet-loaded one has no hook).
 function panes(n: number, loaded = true) {
   const seen = { theme: 0, prefs: 0 };

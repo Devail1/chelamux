@@ -1,8 +1,15 @@
 // CMX-221: Settings > Cost, ported from tests/settings_cost.test.mjs ($ by project, CMX-287) and
 // settings_usage.test.mjs (tokens by window, CMX-38).
 import { fireEvent } from '@testing-library/react';
-import { expect, test } from 'vitest';
+import { expect, test, vi } from 'vitest';
 import { calls, must, openOn, routes, settle } from './setup.tsx';
+
+// 🔐 CMX-447: seed the page's session token before the modules under test read it at import.
+// Unseeded it is '', and an assertion against '' passes for a request that sends an EMPTY
+// token, which the server refuses (docs/defeat_shapes/392).
+vi.hoisted(() => {
+  document.body.innerHTML = '<script type="application/json" id="chela-boot">{"sessionToken": "tok-settings"}</script>';
+});
 
 const AGENTS = [{ name: 'runner-east', cwd: '/srv/chelamux' }, { name: 'runner-west', cwd: '/srv/nautilus/' }];
 const seg = (group: string, attr: string, v: string) => must(document.querySelector<HTMLElement>(`#${group} [data-${attr}="${v}"]`), `${group} ${v}`);

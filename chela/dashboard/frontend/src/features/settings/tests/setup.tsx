@@ -3,12 +3,15 @@
 import { act, cleanup, fireEvent, render, screen } from '@testing-library/react';
 import STYLE_CSS from '../../../../../static/style.css?raw';
 import { afterAll, afterEach, beforeAll, beforeEach, vi } from 'vitest';
-import { SESSION_TOKEN, SESSION_TOKEN_HEADER } from '../../../shared/api/index.ts';
+import { SESSION_TOKEN_HEADER } from '../../../shared/api/index.ts';
 import { Settings, closeSettings, config, openSettings, selectSettingsTab } from '../index.ts';
 
 // Each test opens the whole modal (every tab renders, for the search): under a loaded machine
 // (pytest -n auto runs this beside everything else) that outlasts Vitest's 5 s default.
 vi.setConfig({ testTimeout: 30_000 });
+
+/** The session token every Settings test file seeds into its boot block (vi.hoisted). */
+export const SETTINGS_TOKEN = 'tok-settings';
 
 globalThis.ResizeObserver ??= class {
   observe() {}
@@ -48,8 +51,10 @@ beforeEach(() => {
     const call = { path: u.pathname, url: u.pathname + u.search, method: init?.method ?? 'GET', body: init?.body ? JSON.parse(String(init.body)) : null };
     calls.push(call);
     // 🔐 CMX-447: like the server, a write without the page's session token is refused (403).
+    // The token is the LITERAL each test file seeds (never the module's SESSION_TOKEN, which is ''
+    // unseeded and would let an empty-token write through: docs/defeat_shapes/392).
     const token = (init?.headers as Record<string, string> | undefined)?.[SESSION_TOKEN_HEADER];
-    if (call.method !== 'GET' && token !== SESSION_TOKEN) {
+    if (call.method !== 'GET' && token !== SETTINGS_TOKEN) {
       return { ok: false, status: 403, json: () => Promise.resolve({ ok: false, error: 'missing or stale session token' }) };
     }
     let r = routes[`${call.method} ${call.path}`] ?? routes[call.path];

@@ -7,6 +7,13 @@ import { BOOT as PAGE_BOOT } from '../../../shared/api/index.ts';
 import { updateDeps } from '../index.ts';
 import { calls, must, openOn, pick, posts, routes, settle, type } from './setup.tsx';
 
+// 🔐 CMX-447: seed the page's session token before the modules under test read it at import.
+// Unseeded it is '', and an assertion against '' passes for a request that sends an EMPTY
+// token, which the server refuses (docs/defeat_shapes/392).
+vi.hoisted(() => {
+  document.body.innerHTML = '<script type="application/json" id="chela-boot">{"sessionToken": "tok-settings"}</script>';
+});
+
 // --- the Update card -----------------------------------------------------------------------
 
 const btn = () => document.getElementById('update-apply-btn') as HTMLButtonElement | null;

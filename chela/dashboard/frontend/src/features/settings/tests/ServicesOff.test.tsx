@@ -3,9 +3,16 @@
 // pointing at docs/CONFIG.md. With either configured, the tab is exactly what it was.
 // The menus' and the palette's Share rows are held in their own suites (PrimaryMenu, PaneHead,
 // Palette), on the same two BOOT flags.
-import { afterEach, expect, test } from 'vitest';
+import { afterEach, expect, test, vi } from 'vitest';
 import { BOOT } from '../../../shared/api/index.ts';
 import { must, openOn, routes } from './setup.tsx';
+
+// 🔐 CMX-447: seed the page's session token before the modules under test read it at import.
+// Unseeded it is '', and an assertion against '' passes for a request that sends an EMPTY
+// token, which the server refuses (docs/defeat_shapes/392).
+vi.hoisted(() => {
+  document.body.innerHTML = '<script type="application/json" id="chela-boot">{"sessionToken": "tok-settings"}</script>';
+});
 
 const SHARE_CONTROLS = ['collab-name', 'collab-relay', 'share-typing-toggle'];
 const TELEGRAM_CONTROLS = ['tg-delete-toggle', 'tg-cleanup-btn', 'tg-topics-msg'];

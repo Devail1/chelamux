@@ -4,9 +4,15 @@
 import { act, cleanup, fireEvent, render, screen } from '@testing-library/react';
 import { afterEach, beforeEach, expect, test, vi } from 'vitest';
 import { setWorkPoll, work, type WorkPayload } from '../../../shared/store/work.ts';
-import { SESSION_TOKEN } from '../../../shared/api/index.ts';
 import { NewTask, openNewTask } from '../index.ts';
 import { PRIORITIES, blockerChoices, linearWorkflows } from '../model.ts';
+
+// 🔐 CMX-447: seed the page's session token before the modules under test read it at import.
+// Unseeded it is '', and an assertion against '' passes for a request that sends an EMPTY
+// token, which the server refuses (docs/defeat_shapes/392).
+vi.hoisted(() => {
+  document.body.innerHTML = '<script type="application/json" id="chela-boot">{"sessionToken": "tok-newtask"}</script>';
+});
 
 const WF = '/repo/WORKFLOW.md';
 const OTHER = '/other/WORKFLOW.md';
@@ -120,7 +126,7 @@ test('a submit POSTs exactly the form fields to the dashboard route, then clears
   fill();
   await submit();
   expect(created().map((c) => [c.init?.method, (c.init?.headers as Record<string, string>)['Content-Type']])).toEqual([['POST', 'application/json']]);
-  expect(created().map((c) => (c.init?.headers as Record<string, string> | undefined)?.['X-Chela-Session-Token'])).toEqual([SESSION_TOKEN]); // CMX-447: the server refuses it without
+  expect(created().map((c) => (c.init?.headers as Record<string, string> | undefined)?.['X-Chela-Session-Token'])).toEqual(['tok-newtask']); // CMX-447: the server refuses it without
   expect(JSON.parse(String(created()[0]?.init?.body))).toEqual({ workflow_path: WF, title: 'Add a thing', description: '## Brief\n\nDo **it**.', priority: 2, blocked_by: ['CMX-1'] });
   expect(calls.some((c) => c.url.includes('linear.app'))).toBe(false);
   expect(dialog()).toBeNull();

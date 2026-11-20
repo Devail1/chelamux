@@ -3,9 +3,16 @@
 // settings_concurrency. The env-wins rule is driven through EVERY control kind (number, text,
 // bool): the bool select is a different branch of the same flag (DEFEAT_SHAPES #22).
 import { act, fireEvent, screen } from '@testing-library/react';
-import { expect, test } from 'vitest';
+import { expect, test, vi } from 'vitest';
 import { setSettingsQuery } from '../index.ts';
 import { must, openOn, pick, posts, routes, settle, type, visible } from './setup.tsx';
+
+// 🔐 CMX-447: seed the page's session token before the modules under test read it at import.
+// Unseeded it is '', and an assertion against '' passes for a request that sends an EMPTY
+// token, which the server refuses (docs/defeat_shapes/392).
+vi.hoisted(() => {
+  document.body.innerHTML = '<script type="application/json" id="chela-boot">{"sessionToken": "tok-settings"}</script>';
+});
 
 const knob = (key: string, label: string, extra: object = {}) => ({ key, env: `CHELA_${key.toUpperCase()}`, label, unit: 's', default: 30, stored: '', effective: 30, source: 'default', restart_required: false, ...extra });
 const TIMING = [

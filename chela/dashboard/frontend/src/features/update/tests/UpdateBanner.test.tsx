@@ -6,9 +6,15 @@
 import { act, cleanup, fireEvent, render } from '@testing-library/react';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, test, vi } from 'vitest';
 import css from '../../../../../static/style.css?raw';
-import { SESSION_TOKEN } from '../../../shared/api/index.ts';
 import { UpdateBanner, applyStale, applyVersion, banner, checkForUpdate, reloadOffered, restartStale } from '../index.ts';
 import type { UpdateStatus } from '../flow.ts';
+
+// 🔐 CMX-447: seed the page's session token before the modules under test read it at import.
+// Unseeded it is '', and an assertion against '' passes for a request that sends an EMPTY
+// token, which the server refuses (docs/defeat_shapes/392).
+vi.hoisted(() => {
+  document.body.innerHTML = '<script type="application/json" id="chela-boot">{"sessionToken": "tok-update"}</script>';
+});
 
 const PAGE = 'aaaaaaaaaaaa';
 let versionPayload: unknown;
@@ -160,7 +166,7 @@ test('Restart: confirm names the services, POSTs the existing route, ends in the
   const res = await act(() => restartStale(instant([{ ...STALE, applying: true }, { ...STALE, last_result: { run: 2, ok: true, behind_before: 0, restarted: ['chela-telegram', 'chela-collab'] } }])));
   expect(asked).toBe('Restart: chela-collab, chela-telegram? Running agents and judges keep running; the daemon restarts between ticks.');
   expect(posts().map((c) => c.method)).toEqual(['POST']);
-  expect(posts().map((c) => c.token)).toEqual([SESSION_TOKEN]); // CMX-447: the server refuses it without
+  expect(posts().map((c) => c.token)).toEqual(['tok-update']); // CMX-447: the server refuses it without
   expect([res?.text, msg()]).toEqual(['Restarted chela-collab, chela-telegram', 'Restarted chela-collab, chela-telegram']);
   expect($('update-banner-msg')?.className).toBe('s-savemsg ok');
   expect($('update-banner-restart')).toBeNull();
