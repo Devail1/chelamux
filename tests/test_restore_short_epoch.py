@@ -378,3 +378,24 @@ def test_a_walk_that_resumes_nothing_still_says_so(tmp_path):
     r = _boot(tmp_path, live, lifetimes={A: LONG, B: SHORT})
     assert r.spawned == [] and len(r.notices) == 1
     assert r.notices[0][1].endswith(f"; walked back past: {B} (lived 5s, under 900s)")
+
+
+def test_a_read_that_fails_after_a_cwd_was_seen_is_none(tmp_path, monkeypatch):
+    """Unreadable fails CLOSED even when a cwd was already read before the error."""
+    class Broken:
+        parent = SimpleNamespace(name="-elsewhere")
+
+        def open(self, **kw):
+            def lines():
+                yield json.dumps({"cwd": str(tmp_path)}) + "\n"
+                raise OSError("EIO")
+
+            class Fh:
+                def __enter__(self):
+                    return lines()
+
+                def __exit__(self, *a):
+                    return False
+            return Fh()
+    monkeypatch.setattr(sessions, "transcript_for_session", lambda sid, base=None: Broken())
+    assert sessions.cwd_for_session(SID) is None

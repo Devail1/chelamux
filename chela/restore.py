@@ -805,9 +805,10 @@ def boot_marker_path() -> Path:
 
 def _is_short(ep: str, lifetimes: dict | None, short_s: float) -> bool:
     """CMX-449: did the roster see ``ep`` live for less than ``short_s`` seconds? An epoch
-    with no recorded lifetime is NOT short — unknown never reads as transient."""
+    with no recorded lifetime is NOT short — unknown never reads as transient. A lifetime
+    is never negative (:func:`chela.roster.lifetimes`), so ``short_s`` 0 walks past nothing."""
     lived = (lifetimes or {}).get(ep)
-    return short_s > 0 and lived is not None and lived < short_s
+    return lived is not None and lived < short_s
 
 
 def _source_epochs(previous: str, ended: list[tuple[str, dict]],
