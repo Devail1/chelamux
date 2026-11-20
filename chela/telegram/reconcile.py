@@ -509,18 +509,28 @@ def reconcile_bindings(
         if current is not None and (wid not in (force_rebinds or ()) or current == str(thread)):
             continue                       # already bridged; nothing to restore
         if registry.window_for_thread(thread) is not None:
+            if current is not None:
+                log.warning("auto-topics: forced rebind of %s to %s dropped: another window "
+                            "holds that topic", wid, thread)
             continue                       # that topic belongs to someone else now
         if not topic_api.reopen_topic(thread):
+            if current is not None:
+                log.warning("auto-topics: forced rebind of %s to %s dropped: the topic "
+                            "could not be reopened", wid, thread)
             continue                       # gone / no permission — provisioned fresh below
+        sid = None
+        if session_for is not None and ledger is not None:
+            try:
+                sid = session_for(wid)
+            except Exception:  # noqa: BLE001 — unknown session: rebound all the same
+                log.debug("auto-topics: session of %s unreadable", wid, exc_info=True)
         if current is not None:
-            sid = session_for(wid) if session_for is not None and ledger is not None else None
             _retire_topic(topic_api, ledger, current, False, sid)
             registry.unbind(wid)
             log.info("auto-topics: %s moved off topic %s (forced rebind)", wid, current)
         registry.bind(wid, thread, now_epoch)
         if ledger is not None:
-            ledger.opened(thread, wid, cwds[wid])
-            _note_session(ledger, session_for, thread, wid)
+            ledger.opened(thread, wid, cwds[wid], session_id=sid)
         log.info("auto-topics: reopened topic %s for resumed %s", thread, wid)
         changed = True
 
@@ -621,7 +631,8 @@ def _retire_topic(topic_api, ledger, thread: str, delete: bool,
 def _note_session(ledger, session_for, thread, wid: str) -> None:
     """Record the session ``wid`` runs on its bound ``thread`` when the ledger has none
     for it yet (CMX-450): a binding made before session ids were recorded, or by a path
-    that did not know it. Edge-triggered: once recorded, no further lookup."""
+    that did not know it. Once recorded, no further lookup; a window whose session never
+    resolves is asked again each tick (one cached-pane read)."""
     if ledger is None or session_for is None or thread is None:
         return
     entry = ledger.get(thread)
@@ -644,7 +655,9 @@ def _reopen_for_session(topic_api, ledger, registry, session_id: str | None) -> 
     and would get a NEW topic while its history sits in the old one. The session id is what
     survives, and the ledger records it when a topic is bound. The topic may still be open
     (a reopen of an open topic is accepted, ``TOPIC_NOT_MODIFIED``) or closed by the reap.
-    A reopen that fails (deleted by hand) drops it from the ledger and the next is tried.
+    A reopen that fails moves on to the next; the topic is NOT forgotten, because a
+    failure here may be transient (a rate limit, a timeout) and the ledger row is the only
+    link from the session to its history. The caller then provisions as before.
     """
     if ledger is None or not session_id:
         return None
@@ -653,7 +666,6 @@ def _reopen_for_session(topic_api, ledger, registry, session_id: str | None) -> 
             continue
         if topic_api.reopen_topic(thread):
             return thread
-        ledger.forget(thread)
     return None
 
 

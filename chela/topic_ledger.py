@@ -75,6 +75,7 @@ class TopicLedger:
             entry["name"] = name
         if session_id:
             entry["session_id"] = session_id
+            entry["bound"] = self._clock()
         self._save()
 
     def closed(self, thread, session_id: str | None = None) -> None:
@@ -95,16 +96,19 @@ class TopicLedger:
         if entry is None or entry.get("session_id") or not session_id:
             return False
         entry["session_id"] = session_id
+        entry["bound"] = self._clock()
         self._save()
         return True
 
     def for_session(self, session_id: str | None) -> list[str]:
-        """Every topic recorded for ``session_id``, newest first (CMX-450). None/empty
+        """Every topic recorded for ``session_id``, the one it was bound to LAST first
+        (CMX-450): after a forced rebind onto an older topic, that one wins. None/empty
         matches nothing."""
         if not session_id:
             return []
         hits = [t for t, e in self._topics.items() if e.get("session_id") == session_id]
-        return sorted(hits, key=lambda t: self._topics[t].get("created") or 0, reverse=True)
+        return sorted(hits, key=lambda t: (self._topics[t].get("bound") or 0,
+                                           self._topics[t].get("created") or 0), reverse=True)
 
     def forget(self, thread) -> None:
         if self._topics.pop(str(thread), None) is not None:

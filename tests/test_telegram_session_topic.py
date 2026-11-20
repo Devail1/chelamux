@@ -138,12 +138,42 @@ def test_a_topic_telegram_already_shows_open_is_rebound(ledger):
     assert reg.thread_for_window("@0") == "140624" and "createForumTopic" not in wire.methods()
 
 
-def test_a_deleted_old_topic_is_forgotten_and_a_new_one_created(ledger):
+def test_a_failed_reopen_keeps_the_topic_and_a_new_one_is_created(ledger):
+    """A failure may be transient (429, timeout): the session's link is NOT forgotten."""
     reg, wire = BindingRegistry(CHAT), _Wire({"reopenForumTopic"})
     ledger.opened("140624", "@4", "/p/t", session_id=SID)
     _tick(reg, ledger, wire, {"@0": "t"}, {}, {"@0": SID}, now_epoch=NEW)
-    assert ledger.get("140624") is None
+    assert ledger.get("140624")["session_id"] == SID
     assert reg.thread_for_window("@0") == "201"
+
+
+def test_after_a_forced_rebind_the_rebound_topic_wins_the_next_restart(ledger):
+    """T1 (older) is rebound over T2 (newer): a later restart must come back to T1."""
+    reg, wire = BindingRegistry(CHAT), _Wire()
+    ledger.opened("100", "@1", "/p/t", session_id=SID)       # T1, created first
+    ledger.closed("100")
+    reg.bind("@6", "200", NEW)
+    ledger.opened("200", "@6", "/p/t", session_id=SID)       # T2, the new one
+    _tick(reg, ledger, wire, {"@6": "t"}, {}, {"@6": SID}, now_epoch=NEW,
+          rebinds={"@6": "100"}, force_rebinds={"@6"})
+    assert reg.thread_for_window("@6") == "100"
+    assert ledger.for_session(SID) == ["100", "200"]
+    # The restart: @6 dies with the server, the session is back at @0.
+    _tick(reg, ledger, wire, {"@0": "t"}, {}, {"@0": SID}, now_epoch="e3-300")
+    assert reg.thread_for_window("@0") == "100"
+
+
+def test_a_forced_rebind_with_an_unreadable_session_still_binds(ledger):
+    reg, wire = BindingRegistry(CHAT), _Wire()
+    reg.bind("@6", "200", NEW)
+
+    def boom(wid):
+        raise RuntimeError("no tmux")
+    api = TopicManager("tok", CHAT, transport=wire)
+    reconcile_bindings(reg, {"@6": "t"}, {"@6"}, api, cwd_for={}.get, ledger=ledger,
+                       session_for=boom, now_epoch=NEW, rebinds={"@6": "100"},
+                       force_rebinds={"@6"})
+    assert reg.thread_for_window("@6") == "100"
 
 
 def test_a_topic_another_window_holds_is_never_taken(ledger):

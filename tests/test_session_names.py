@@ -239,6 +239,41 @@ def test_a_different_applied_title_does_not_drop_the_queued_one(monkeypatch, tmp
     assert session_names._applied_title(SID) is None
 
 
+def test_a_title_retitled_since_it_was_queued_is_dropped(monkeypatch, tmp_path, tmux):
+    """Queued 'A' over 'Old'; the user then ran `/rename B` themselves: B wins, A is dropped."""
+    path = tmp_path / "s.jsonl"
+    path.write_text(json.dumps({"type": "custom-title", "customTitle": "Old"}) + "\n")
+    monkeypatch.setattr(sessions, "transcript_for_session", lambda sid: path)
+    session_names.record_title(SID, "A")
+    assert session_names.entries()[SID]["title_over"] == "Old"
+    with path.open("a") as fh:
+        fh.write(json.dumps({"type": "custom-title", "customTitle": "B"}) + "\n")
+    assert _tick(monkeypatch, {"@7": _pane("@7")}, {"@7": "w"}, {SID: "@7"}) == [
+        "@7 title 'A' dropped: retitled to 'B'"]
+    assert tmux.calls == [] and session_names.entries() == {}
+
+
+def test_a_title_queued_over_no_title_is_dropped_once_one_appears(monkeypatch, tmp_path, tmux):
+    path = tmp_path / "s.jsonl"
+    path.write_text("")
+    monkeypatch.setattr(sessions, "transcript_for_session", lambda sid: path)
+    session_names.record_title(SID, "A")
+    assert session_names.entries()[SID]["title_over"] == ""
+    assert _tick(monkeypatch, {"@7": _pane("@7")}, {"@7": "w"}, {SID: "@7"}) == [
+        "@7 title 'A' queued again"]
+    path.write_text(json.dumps({"type": "custom-title", "customTitle": "B"}) + "\n")
+    assert _tick(monkeypatch, {"@7": _pane("@7")}, {"@7": "w"}, {SID: "@7"}) == [
+        "@7 title 'A' dropped: retitled to 'B'"]
+
+
+def test_a_non_numeric_ts_is_pruned_not_raised():
+    path = config.CHELA_DIR / "session-names.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({OTHER: {"name": "x", "ts": "x"}}))
+    assert session_names.record_name(SID, "tapparty") is True
+    assert set(_store()) == {SID}
+
+
 def test_a_queue_tmux_refuses_is_not_reported(monkeypatch):
     fake = _Tmux(fail={("tmux", "set-window-option")})
     monkeypatch.setattr(subprocess, "run", fake)
@@ -337,8 +372,8 @@ def test_acceptance_name_and_title_survive_a_tmux_restart(monkeypatch, rc):
     f.status["@0"] = "idle"
     assert suggest_names.flush_pending() == {"@0": "sent"}
     assert f.sent == [("@0", "/rename Ladder words", {"interrupt": False})]
-    assert session_names.entries()[SID] == {"name": "tapparty",
-                                            "ts": session_names.entries()[SID]["ts"]}
+    row = session_names.entries()[SID]
+    assert row["name"] == "tapparty" and "title" not in row and "title_over" not in row
 
 
 def test_restore_tick_reads_fresh_state_when_not_given(monkeypatch, tmux, rc):
