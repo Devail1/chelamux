@@ -685,6 +685,8 @@ def test_repeat_flake_rule_matches_across_tasks_via_flakes_and_red_baselines(env
     heldout(env, "CMX-3", NOW - 60, cannot="failing: tests/b.py::u[x]). RED")
     got = {f["subject"]: sorted(f["evidence"]["tasks"]) for f in ops.rule_repeat_flake(src(env), {})}
     assert got == {"tests/a.py::t": ["CMX-1", "CMX-2"], "tests/b.py::u[x]": ["CMX-2", "CMX-3"]}
+    sigs = {f["subject"]: f["sig"] for f in ops.rule_repeat_flake(src(env), {})}
+    assert sigs == {"tests/a.py::t": "CMX-1,CMX-2", "tests/b.py::u[x]": "CMX-2,CMX-3"}
 
 
 def test_repeat_flake_near_misses(env):
@@ -1005,6 +1007,76 @@ def test_a_known_quarantine_finding_is_not_renotified_across_restarts(env, monke
     assert len(sent) == 2
     state = json.loads((env.dir / "ops" / "state.json").read_text())
     assert state["sigs"] == {f"repeat_flake:ci:{T}": "CMX-1,CMX-2,CMX-3"}
+
+
+def test_a_judge_baseline_flake_is_not_renotified_across_restarts(env, monkeypatch):
+    """CMX-451: the same two tasks, re-read after every restart, sent nothing new; a third
+    task sends once; a later round of a task already named is not news."""
+    sent = []
+    monkeypatch.setattr("chela.inbox.enqueue", lambda *a: sent.append(a) or True)
+    monkeypatch.setattr("chela.event_log.log_path", lambda: env.dir / "events.jsonl")
+    clock = [NOW]
+    monkeypatch.setattr(ops.time, "time", lambda: clock[0])
+    tid = "tests/a.py::t"
+    heldout(env, "CMX-1", NOW - 60, flakes=[tid])
+    heldout(env, "CMX-2", NOW - 30, flakes=[tid])
+    ops.scheduled(env.dir, env.proc)
+    assert len(sent) == 1
+    for _ in range(3):                           # each a fresh process over the saved state
+        clock[0] += ops.RENOTIFY_S + 1
+        ops.scheduled(env.dir, env.proc)
+    assert len(sent) == 1
+    heldout(env, "CMX-2", clock[0] - 30, flakes=[tid])   # CMX-2's next round: same tasks
+    clock[0] += 60
+    ops.scheduled(env.dir, env.proc)
+    assert len(sent) == 1
+    heldout(env, "CMX-3", clock[0] - 30, flakes=[tid])   # a third task: that is news
+    clock[0] += 60
+    ops.scheduled(env.dir, env.proc)
+    assert len(sent) == 2 and "3 tasks in 24h: CMX-1, CMX-2, CMX-3" in sent[1][1]
+    clock[0] += 60
+    ops.scheduled(env.dir, env.proc)
+    assert len(sent) == 2
+    state = json.loads((env.dir / "ops" / "state.json").read_text())
+    assert state["sigs"] == {f"repeat_flake:{tid}": "CMX-1,CMX-2,CMX-3"}
+    clock[0] = NOW + 24 * 3600                   # CMX-1's only record ages out: not news
+    ops.scheduled(env.dir, env.proc)
+    assert len(sent) == 2
+    state = json.loads((env.dir / "ops" / "state.json").read_text())
+    assert state["sigs"] == {f"repeat_flake:{tid}": "CMX-1,CMX-2,CMX-3"}
+
+
+@pytest.mark.parametrize("told, sig, sent, saved", [
+    ("CMX-1,CMX-2,CMX-3", "CMX-2,CMX-3", False, "CMX-1,CMX-2,CMX-3"),   # one aged out
+    ("CMX-1,CMX-2", "CMX-1,CMX-2", False, "CMX-1,CMX-2"),               # unchanged
+    ("CMX-1,CMX-2", "CMX-2,CMX-3", True, "CMX-1,CMX-2,CMX-3"),          # one out, one new
+    ("CMX-1,CMX-2", "CMX-1,CMX-2,CMX-3", True, "CMX-1,CMX-2,CMX-3"),    # one new
+])
+def test_a_signed_finding_is_renotified_only_for_an_id_never_told(env, told, sig, sent, saved):
+    key = "repeat_flake:tests/a.py::t"
+    f = ops._finding("repeat_flake", "tests/a.py::t", "x", sig=sig)
+    state = {"notified": {key: NOW - 60}, "sigs": {key: told}}
+    result = {"ts": NOW, "findings": [f], "rules_done": ["repeat_flake"], "errors": {}}
+    assert ops.record(env.dir, result, state, src(env)) == ([f] if sent else [])
+    got = json.loads((env.dir / "ops" / "state.json").read_text())
+    assert got["sigs"] == {key: saved}
+    assert got["notified"] == {key: NOW if sent else NOW - 60}
+
+
+def test_a_finding_notified_before_it_was_signed_adopts_its_sig_quietly(env):
+    """CMX-451: a box upgrading mid-finding has it in ``notified`` with no sig — the first
+    restart on the new code must not re-send it, and must remember the evidence it saw."""
+    key = "repeat_flake:tests/a.py::t"
+    f = ops._finding("repeat_flake", "tests/a.py::t", "x", sig="CMX-1,CMX-2")
+    state = {"notified": {key: NOW - ops.RENOTIFY_S - 1}, "sigs": {}}
+    result = {"ts": NOW, "findings": [f], "rules_done": ["repeat_flake"], "errors": {}}
+    assert ops.record(env.dir, result, state, src(env)) == []
+    saved = json.loads((env.dir / "ops" / "state.json").read_text())
+    assert saved["sigs"] == {key: "CMX-1,CMX-2"}
+    assert saved["notified"] == {key: NOW - ops.RENOTIFY_S - 1}
+    g = ops._finding("repeat_flake", "tests/a.py::t", "y", sig="CMX-1,CMX-2,CMX-3")
+    later = dict(result, ts=NOW + 60, findings=[g])
+    assert ops.record(env.dir, later, saved, src(env)) == [g]
 
 
 def test_a_finding_without_a_sig_still_renotifies_and_leaves_no_sig(env):
