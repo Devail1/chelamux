@@ -1039,6 +1039,28 @@ def test_a_judge_baseline_flake_is_not_renotified_across_restarts(env, monkeypat
     assert len(sent) == 2
     state = json.loads((env.dir / "ops" / "state.json").read_text())
     assert state["sigs"] == {f"repeat_flake:{tid}": "CMX-1,CMX-2,CMX-3"}
+    clock[0] = NOW + 24 * 3600                   # CMX-1's only record ages out: not news
+    ops.scheduled(env.dir, env.proc)
+    assert len(sent) == 2
+    state = json.loads((env.dir / "ops" / "state.json").read_text())
+    assert state["sigs"] == {f"repeat_flake:{tid}": "CMX-1,CMX-2,CMX-3"}
+
+
+@pytest.mark.parametrize("told, sig, sent, saved", [
+    ("CMX-1,CMX-2,CMX-3", "CMX-2,CMX-3", False, "CMX-1,CMX-2,CMX-3"),   # one aged out
+    ("CMX-1,CMX-2", "CMX-1,CMX-2", False, "CMX-1,CMX-2"),               # unchanged
+    ("CMX-1,CMX-2", "CMX-2,CMX-3", True, "CMX-1,CMX-2,CMX-3"),          # one out, one new
+    ("CMX-1,CMX-2", "CMX-1,CMX-2,CMX-3", True, "CMX-1,CMX-2,CMX-3"),    # one new
+])
+def test_a_signed_finding_is_renotified_only_for_an_id_never_told(env, told, sig, sent, saved):
+    key = "repeat_flake:tests/a.py::t"
+    f = ops._finding("repeat_flake", "tests/a.py::t", "x", sig=sig)
+    state = {"notified": {key: NOW - 60}, "sigs": {key: told}}
+    result = {"ts": NOW, "findings": [f], "rules_done": ["repeat_flake"], "errors": {}}
+    assert ops.record(env.dir, result, state, src(env)) == ([f] if sent else [])
+    got = json.loads((env.dir / "ops" / "state.json").read_text())
+    assert got["sigs"] == {key: saved}
+    assert got["notified"] == {key: NOW if sent else NOW - 60}
 
 
 def test_a_finding_notified_before_it_was_signed_adopts_its_sig_quietly(env):

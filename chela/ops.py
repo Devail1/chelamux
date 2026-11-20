@@ -343,8 +343,9 @@ def _imported_paths(source: str, test_file: str) -> set[str]:
 
 def _finding(rule: str, subject: str, summary: str, *, sig: str | None = None,
              **evidence) -> dict:
-    """``sig`` (CMX-298): a finding about past facts — flakes that happened — carries one;
-    while it is unchanged the finding is never re-notified, however old the notice."""
+    """``sig`` (CMX-298): a finding about past facts — flakes that happened — carries one, a
+    comma-joined set of the ids it rests on (tasks, PRs). It is re-notified only when that set
+    names an id no earlier notice did (CMX-451), however old the notice."""
     out = {"rule": rule, "subject": subject, "summary": summary, "evidence": evidence}
     return dict(out, sig=sig) if sig is not None else out
 
@@ -699,10 +700,12 @@ def fleet_paused(chela_dir: Path) -> bool:
 
 def record(chela_dir: Path, result: dict, state: dict, src: Sources) -> list[dict]:
     """Append the findings to ``ops/findings.jsonl``, update the dedupe state, and return the
-    ones to notify: never notified, or last notified ≥ :data:`RENOTIFY_S` ago — unless it
-    carries a ``sig`` equal to the one last notified (CMX-298: the same past flakes, re-read
-    by every later scan, are not news). A notified finding with no saved sig (notified before
-    its rule signed it, CMX-451) adopts the current one without a notice. A finding that is gone from a rule that completed
+    ones to notify: never notified, or last notified ≥ :data:`RENOTIFY_S` ago. A finding
+    carrying a ``sig`` is instead re-notified only when its sig names an id the saved one does
+    not (CMX-298/451: the same past flakes, re-read by every later scan or after a restart,
+    are not news, and neither is one aging out of the window); the saved sig is the union of
+    every id told. A notified finding with no saved sig (notified before its rule signed it)
+    adopts the current one without a notice. A finding that is gone from a rule that completed
     WITHOUT raising is forgotten, so its recurrence is new again; a rule that raised proves
     nothing about what it used to find."""
     notified, now = dict(state.get("notified") or {}), result["ts"]
@@ -721,7 +724,8 @@ def record(chela_dir: Path, result: dict, state: dict, src: Sources) -> list[dic
             if key not in sigs:   # CMX-451: notified before its rule signed it — adopt, quietly
                 sigs[key] = sig
                 continue
-            due = sigs[key] != sig
+            told, ids = set(sigs[key].split(",")), set(sig.split(","))
+            due, sig = not ids <= told, ",".join(sorted(told | ids))
         else:
             due = now - notified.get(key, float("-inf")) >= RENOTIFY_S
         if due:
