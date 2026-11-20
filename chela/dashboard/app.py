@@ -29,7 +29,7 @@ from flask import abort, Flask, jsonify, render_template, request, Response, sen
 
 from chela import config
 from chela.config import DISPATCH_WORKFLOWS, CHELA_DIR, TMUX_SESSION, NOTIFY_INTERVAL
-from chela import agent_manager, capabilities, claude_account, collab, concurrency, collab_host, collab_stream, context, diffsurface, discovery, dismissed_sessions, dispatcher, epoch, event_log, fleet, gateanswer, hold, hooks, inbox, judge, launcher, messenger, notify, okf, parentage, park, personas, pr_status, probecache, rc_rename, restore, rooms, sandbox_status, scheduler, sessionids, share_requests, share_sandbox, share_store, sidebar_archive, sidebar_layout, spawn, starter, suggest_names, tasklists, transcripts, update, usage, userconfig
+from chela import agent_manager, capabilities, claude_account, collab, concurrency, collab_host, collab_stream, context, diffsurface, discovery, dismissed_sessions, dispatcher, epoch, event_log, fleet, gateanswer, hold, hooks, inbox, judge, launcher, messenger, notify, okf, parentage, park, personas, pr_status, probecache, rc_rename, restore, rooms, sandbox_status, scheduler, session_names, sessionids, share_requests, share_sandbox, share_store, sidebar_archive, sidebar_layout, spawn, starter, suggest_names, tasklists, transcripts, update, usage, userconfig
 from chela.dashboard import humanproof, identity, resources, term_fonts, term_themes
 from chela import topic_ledger as tg_topics
 from chela.personas import autolaunch, lease
@@ -2736,6 +2736,9 @@ def api_agents_rename(wid):
     # CMX-39: a Remote Control session shows the window name in claude.ai / the desktop —
     # push the new one (queued until that session is idle with an empty prompt).
     rc_rename.request(wid, name)
+    # CMX-450: the name dies with the tmux server; keep it by session so a restore puts it
+    # back on the window that session comes back in (chela.session_names.restore_tick).
+    session_names.record_name(session_names.session_for_window(wid), name)
     return jsonify({"ok": True, "wid": wid, "name": name})
 
 

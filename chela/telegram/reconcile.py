@@ -343,6 +343,7 @@ def reconcile_bindings(
     ledger=None,
     delete_on_close: bool = False,
     session_for: Callable[[str], str | None] | None = None,
+    force_rebinds=None,
 ) -> bool:
     """Diff the registry against the live fleet; provision + reap. Return changed.
 
@@ -394,7 +395,15 @@ def reconcile_bindings(
       the reap deletes the topic instead of closing it, and closes it if the delete fails.
     * ``session_for`` — ``window_id -> Claude session id | None`` (in production
       :func:`window_session_id`): recorded in the ledger when a reap closes the window's
-      topic, so a human reopening it resumes that session (CMX-267).
+      topic, so a human reopening it resumes that session (CMX-267). CMX-450: also recorded
+      when a topic is bound, and a window needing a topic first takes back the topic its
+      SESSION had (:func:`_reopen_for_session`), before the folder match and before a
+      create: a tmux restart reissues window ids, never session ids. A reap of a binding
+      from a previous tmux epoch closes its topic and never deletes it (the session is
+      likely to come back for it), and never asks the stranger now wearing its id for a
+      session id.
+    * ``force_rebinds`` — window ids whose ``rebinds`` request moves them even when already
+      bound elsewhere (``chela telegram rebind``, CMX-450): the current topic is closed.
 
     **Provision** every agent window with no binding: create a topic named after
     the agent's project (:func:`topic_name_for`, falling back to the window name)
@@ -463,11 +472,17 @@ def reconcile_bindings(
         if wid in live_windows and not dangling:
             if now_epoch and registry.stamp(wid, now_epoch):
                 changed = True             # adopt a pre-CMX-77 binding into this epoch
+            _note_session(ledger, session_for, registry.thread_for_window(wid), wid)
             continue
         thread = registry.thread_for_window(wid)
         if thread is not None:
-            sid = session_for(wid) if session_for is not None and ledger is not None else None
-            _retire_topic(topic_api, ledger, thread, delete_on_close, sid)
+            # CMX-450: a dangling id now names a STRANGER, so asking it for a session id
+            # would file the stranger's session on this topic; None keeps the one recorded
+            # when the topic was bound. And a restart is not a close: its session is
+            # likely to come back and want this topic (and its history), so never delete it.
+            sid = (session_for(wid) if session_for is not None and ledger is not None
+                   and not dangling else None)
+            _retire_topic(topic_api, ledger, thread, delete_on_close and not dangling, sid)
         registry.unbind(wid)
         why = "the tmux server restarted; its id was reissued" if dangling else "gone"
         log.info("auto-topics: window %s %s — closed topic %s, unbound", wid, why, thread)
@@ -484,38 +499,83 @@ def reconcile_bindings(
 
     # Rebind (CMX-75): a resumed archive takes back its own topic, reopened. Only once the
     # window runs Claude (an agent id), and never a thread another window holds now.
+    # A FORCED request (CMX-450, `chela telegram rebind`) also moves a window that is
+    # already bridged elsewhere: its current topic is closed (never deleted) first.
     for wid, thread in list((rebinds or {}).items()):
         if wid not in agent_ids:
             continue                       # not up yet — keep the request for a later tick
         rebinds.pop(wid, None)
-        if registry.thread_for_window(wid) is not None:
+        current = registry.thread_for_window(wid)
+        if current is not None and (wid not in (force_rebinds or ()) or current == str(thread)):
             continue                       # already bridged; nothing to restore
         if registry.window_for_thread(thread) is not None:
+            if current is not None:
+                log.warning("auto-topics: forced rebind of %s to %s dropped: another window "
+                            "holds that topic", wid, thread)
             continue                       # that topic belongs to someone else now
         if not topic_api.reopen_topic(thread):
+            if current is not None:
+                log.warning("auto-topics: forced rebind of %s to %s dropped: the topic "
+                            "could not be reopened", wid, thread)
             continue                       # gone / no permission — provisioned fresh below
+        sid = None
+        if session_for is not None and ledger is not None:
+            try:
+                sid = session_for(wid)
+            except Exception:  # noqa: BLE001 — unknown session: rebound all the same
+                log.debug("auto-topics: session of %s unreadable", wid, exc_info=True)
+        if current is not None:
+            _retire_topic(topic_api, ledger, current, False, sid)
+            registry.unbind(wid)
+            log.info("auto-topics: %s moved off topic %s (forced rebind)", wid, current)
         registry.bind(wid, thread, now_epoch)
         if ledger is not None:
-            ledger.opened(thread, wid, cwds[wid])
+            ledger.opened(thread, wid, cwds[wid], session_id=sid)
         log.info("auto-topics: reopened topic %s for resumed %s", thread, wid)
         changed = True
 
+    # CMX-450: the session each window still needing a topic runs. A session that had a
+    # topic before (a tmux restart reissued its window id) takes THAT topic back below,
+    # and no other window may take it through the folder match meanwhile.
+    needs = [wid for wid in agent_ids
+             if registry.thread_for_window(wid) is None and _wants_topic(wid)]
+    sids: dict[str, str | None] = {}
+    if ledger is not None and session_for is not None:
+        for wid in needs:
+            try:
+                sids[wid] = session_for(wid)
+            except Exception:  # noqa: BLE001 — unknown is "no session match", never a crash
+                log.debug("auto-topics: session of %s unreadable", wid, exc_info=True)
+                sids[wid] = None
+    for wid in needs:
+        thread = _reopen_for_session(topic_api, ledger, registry, sids.get(wid))
+        if thread is None:
+            continue
+        old_name = (ledger.get(thread) or {}).get("name")
+        registry.bind(wid, thread, now_epoch)
+        if old_name:
+            registry.set_topic_name(wid, old_name)
+        ledger.opened(thread, wid, cwds[wid], session_id=sids.get(wid))
+        log.info("auto-topics: rebound %s to topic %s of its session %s",
+                 wid, thread, sids.get(wid))
+        changed = True
+    claimed = {sid for sid in sids.values() if sid}
+
     # Provision: an agent window with no binding gets a fresh topic. Idempotent —
     # a window that already has a binding (by id) is skipped, so no double-create.
-    for wid in agent_ids:
+    for wid in needs:   # unbound, and wanting a topic (a dispatched one only once blocked)
         if registry.thread_for_window(wid) is not None:
-            continue
-        if not _wants_topic(wid):
-            continue  # dispatcher-owned and working away quietly — not the forum's problem
+            continue        # took its session's topic back above
         name = desired_names[wid]
-        thread = _reopen_for_cwd(topic_api, ledger, registry, cwds[wid])
+        thread = _reopen_for_cwd(topic_api, ledger, registry, cwds[wid],
+                                 skip_sessions=claimed - {sids.get(wid)})
         if thread is not None:
             # The rename loop below edits the name only if it differs from the old one.
             old_name = (ledger.get(thread) or {}).get("name")
             registry.bind(wid, thread, now_epoch)
             if old_name:
                 registry.set_topic_name(wid, old_name)
-            ledger.opened(thread, wid, cwds[wid])
+            ledger.opened(thread, wid, cwds[wid], session_id=sids.get(wid))
             log.info("auto-topics: reopened topic %s of %s for %s", thread, cwds[wid], wid)
             changed = True
             continue
@@ -525,7 +585,7 @@ def reconcile_bindings(
         registry.bind(wid, thread, now_epoch)
         registry.set_topic_name(wid, name)
         if ledger is not None:
-            ledger.opened(thread, wid, cwds[wid], name)
+            ledger.opened(thread, wid, cwds[wid], name, session_id=sids.get(wid))
         log.info("auto-topics: created topic %s for %s (%s)", thread, wid, name)
         changed = True
 
@@ -568,17 +628,63 @@ def _retire_topic(topic_api, ledger, thread: str, delete: bool,
         ledger.closed(thread, session_id)
 
 
-def _reopen_for_cwd(topic_api, ledger, registry, cwd: str | None) -> str | None:
+def _note_session(ledger, session_for, thread, wid: str) -> None:
+    """Record the session ``wid`` runs on its bound ``thread`` when the ledger has none
+    for it yet (CMX-450): a binding made before session ids were recorded, or by a path
+    that did not know it. Once recorded, no further lookup; a window whose session never
+    resolves is asked again each tick (one cached-pane read)."""
+    if ledger is None or session_for is None or thread is None:
+        return
+    entry = ledger.get(thread)
+    if entry is None or entry.get("session_id"):
+        return
+    try:
+        sid = session_for(wid)
+    except Exception:  # noqa: BLE001 — unknown stays unrecorded, never a crash
+        log.debug("auto-topics: session of %s unreadable", wid, exc_info=True)
+        return
+    if sid:
+        ledger.set_session(thread, sid)
+
+
+def _reopen_for_session(topic_api, ledger, registry, session_id: str | None) -> str | None:
+    """Reopen the newest topic recorded for ``session_id`` that no window holds; its thread
+    id, or None (CMX-450).
+
+    A tmux restart reissues every window id, so a restored session looks like a new window
+    and would get a NEW topic while its history sits in the old one. The session id is what
+    survives, and the ledger records it when a topic is bound. The topic may still be open
+    (a reopen of an open topic is accepted, ``TOPIC_NOT_MODIFIED``) or closed by the reap.
+    A reopen that fails moves on to the next; the topic is NOT forgotten, because a
+    failure here may be transient (a rate limit, a timeout) and the ledger row is the only
+    link from the session to its history. The caller then provisions as before.
+    """
+    if ledger is None or not session_id:
+        return None
+    for thread in ledger.for_session(session_id):
+        if registry.window_for_thread(thread) is not None:
+            continue
+        if topic_api.reopen_topic(thread):
+            return thread
+    return None
+
+
+def _reopen_for_cwd(topic_api, ledger, registry, cwd: str | None,
+                    skip_sessions=frozenset()) -> str | None:
     """Reopen the oldest CLOSED topic chela made for ``cwd``; its thread id, or None.
 
     The growth this stops is re-creation (CMX-204): every relaunch made a fresh window and
     so a fresh topic. A closed topic is not bound, so two live windows in one cwd still get
     two topics, and both come back next time. A reopen that fails (deleted by hand, not
     found) drops the topic from the ledger, and the caller creates a new one.
+
+    ``skip_sessions`` (CMX-450): a topic recorded for one of these sessions belongs to
+    another window this tick is placing, and is not taken by folder.
     """
     if ledger is None:
         return None
-    free = [t for t in ledger.closed_for(cwd) if registry.window_for_thread(t) is None]
+    free = [t for t in ledger.closed_for(cwd) if registry.window_for_thread(t) is None
+            and (ledger.get(t) or {}).get("session_id") not in skip_sessions]
     if not free:
         return None
     if topic_api.reopen_topic(free[0]):

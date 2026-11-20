@@ -335,6 +335,16 @@ def cmd_run(args) -> None:
                 rc_rename.flush_pending()
             except Exception:
                 log.exception("Remote Control rename flush failed")
+            # CMX-450: a manual name and a queued title are kept by SESSION id; put them
+            # back on the window a restored session now runs in (before the flush below,
+            # so a re-queued title is tried on this same tick).
+            try:
+                from chela import session_names
+                restored = session_names.restore_tick()
+                if restored:
+                    log.info("Restored session names/titles: %s", "; ".join(restored))
+            except Exception:
+                log.exception("Session name/title restore failed")
             # CMX-434: retry every title "Suggest names" queued (a busy or blocked session):
             # typed only into an idle Claude pane with no dialog and an empty prompt.
             try:
@@ -1954,6 +1964,7 @@ def _reconcile_loop(registry, topic_api, interval: int, stop, ledger=None) -> No
                 live_windows=live, now_epoch=now_epoch)
             # CMX-75: a session the sidebar unarchived asks for its old topic back.
             rebinds = sidebar_archive.pending_rebinds(now_epoch)
+            forced = sidebar_archive.forced_rebinds(now_epoch)    # CMX-450
             had_rebinds = bool(rebinds)
             bindings_changed = tg.reconcile_bindings(
                 registry, live, agents, topic_api,
@@ -1966,6 +1977,7 @@ def _reconcile_loop(registry, topic_api, interval: int, stop, ledger=None) -> No
                 ledger=ledger,
                 delete_on_close=userconfig.get(topics.DELETE_ON_CLOSE_KEY) is True,
                 session_for=tg.window_session_id,
+                force_rebinds=forced,
             )
             if had_rebinds:
                 sidebar_archive.settle_rebinds(rebinds, now_epoch)
@@ -2054,6 +2066,29 @@ def cmd_telegram_send_file(args) -> None:
         print(f"chela telegram send-file: {e}", file=sys.stderr)
         sys.exit(1)
     print(sendfile.describe(sent))
+
+
+def cmd_telegram_rebind(args) -> None:
+    """``chela telegram rebind @N THREAD``: move window ``@N`` onto an existing topic (CMX-450).
+
+    For a session that came back from a restart in a NEW topic while its history stays in
+    its old one. Only a request: the running ``chela telegram`` daemon reopens ``THREAD``,
+    closes (never deletes) the window's current topic and binds the window on its next
+    reconcile tick. The request names the window under THIS tmux server and expires like a
+    sidebar rebind (``REBIND_TTL_SECONDS``).
+    """
+    window = _resolve_wid(args.window)
+    thread = str(args.thread).strip()
+    if not window or not window.startswith("@") or not window[1:].isdigit():
+        print(f"chela telegram rebind: {args.window!r} is not a window id (@N)", file=sys.stderr)
+        sys.exit(1)
+    if not thread.isdigit():
+        print(f"chela telegram rebind: {args.thread!r} is not a topic thread id",
+              file=sys.stderr)
+        sys.exit(1)
+    sidebar_archive.request_rebind(window, thread, force=True)
+    print(f"requested: {window} -> topic {thread} (the chela telegram daemon applies it on "
+          "its next reconcile tick)")
 
 
 def cmd_telegram(args) -> None:
@@ -4995,7 +5030,13 @@ def main() -> None:
         epilog="Outbound files: chela telegram send-file <path> posts a file (any type, up "
                "to 50 MB) to your own window's topic; --to @N for another window's.",
     )
-    tg_sub = p_tg.add_subparsers(dest="tg_cmd", metavar="{send-file}")
+    tg_sub = p_tg.add_subparsers(dest="tg_cmd", metavar="{send-file,rebind}")
+    p_rb = tg_sub.add_parser(
+        "rebind",
+        help="Move a window onto an existing topic (e.g. its old one after a restart)",
+    )
+    p_rb.add_argument("window", help="Window id, @N")
+    p_rb.add_argument("thread", help="The topic's thread id")
     p_sf = tg_sub.add_parser(
         "send-file",
         help="Send a file (any type, up to 50 MB) to your own window's Telegram topic",
@@ -5285,6 +5326,8 @@ def main() -> None:
     elif args.command == "telegram":
         if args.tg_cmd == "send-file":
             cmd_telegram_send_file(args)
+        elif args.tg_cmd == "rebind":
+            cmd_telegram_rebind(args)
         else:
             cmd_telegram(args)
     elif args.command == "dashboard":

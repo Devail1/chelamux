@@ -29,9 +29,11 @@ here applies a name, and a title is applied only by :func:`apply_title`, which t
    suggestion is empty, a typed draft is not).
 
 A title that cannot go now is QUEUED on the window (:data:`PENDING_OPTION`, a tmux user
-option like ``@chela_manual_name``: it dies with the window and both the dashboard and the
-daemon see it), shown as pending, and the daemon retries it every tick
-(:func:`flush_pending`). A pane with no Claude in it is never queued: it is refused.
+option like ``@chela_manual_name``: both the dashboard and the daemon see it), shown as
+pending, and the daemon retries it every tick (:func:`flush_pending`). A pane with no Claude
+in it is never queued: it is refused. The window option dies with the tmux server, so the
+queued title is also kept by SESSION id (:mod:`chela.session_names`, CMX-450) and put back
+in the restored window's queue after a restart.
 """
 from __future__ import annotations
 
@@ -287,6 +289,21 @@ def _set_pending(wid: str, title: str | None) -> bool:
     return True
 
 
+def queue_title(wid: str, title: str) -> bool:
+    """Put ``title`` back in ``wid``'s queue (:mod:`chela.session_names` after a restart).
+    False when tmux did not take it."""
+    return _set_pending(wid, title)
+
+
+def _forget(wid: str) -> None:
+    """Clear ``wid``'s queue AND its session's stored copy: the title was typed or dropped,
+    so a restart must not queue it again."""
+    from chela import session_names
+
+    _set_pending(wid, None)
+    session_names.record_title(session_names.session_for_window(wid), None)
+
+
 def _get_pending(wid: str) -> str | None:
     """The title queued on ``wid`` right now, read fresh from tmux. None when none is, or
     tmux can't say (nothing is then typed: unknown never reads as queued)."""
@@ -388,7 +405,7 @@ def _deliver(wid: str, title: str) -> str:
     cpid = agent_manager.claude_pid(wid)
     if cpid is None:
         log.warning("suggest_names: %s has no Claude process; /rename %r NOT typed", wid, title)
-        _set_pending(wid, None)
+        _forget(wid)
         return "no-claude"
     status = _status(cpid)
     if status != "idle":
@@ -408,7 +425,7 @@ def _deliver(wid: str, title: str) -> str:
     if not messenger.send_tmux(wid, f"/rename {title}", interrupt=False):
         log.warning("suggest_names: /rename %r to %s failed to send; stays queued", title, wid)
         return "failed"
-    _set_pending(wid, None)
+    _forget(wid)
     log.info("suggest_names: typed /rename %r into %s", title, wid)
     return "sent"
 
@@ -434,6 +451,8 @@ def apply_title(wid: str, title: str) -> dict:
         return {"ok": False, "state": "refused", "reason": NO_CLAUDE}
     if not _set_pending(wid, title):
         return {"ok": False, "state": "refused", "reason": NOT_QUEUED}
+    from chela import session_names
+    session_names.record_title(session_names.session_for_window(wid), title)
     outcome = deliver_title(wid, title)
     if outcome == "sent":
         return {"ok": True, "state": "applied", "reason": None}

@@ -512,13 +512,24 @@ def drop_resumed_elsewhere(is_live) -> list[str]:
 
 # --- the Telegram rebind hand-off ---------------------------------------------------------
 
-def request_rebind(wid: str, thread_id: str) -> None:
+def request_rebind(wid: str, thread_id: str, force: bool = False) -> None:
     """Ask the Telegram daemon to reopen ``thread_id`` and bind it to ``wid`` (a resumed
-    archive). Read by the daemon's reconcile loop (:func:`pending_rebinds`)."""
+    archive). Read by the daemon's reconcile loop (:func:`pending_rebinds`). ``force``
+    (CMX-450, ``chela telegram rebind``) moves ``wid`` even if it is bound to another topic
+    already (:func:`forced_rebinds`)."""
     with _LOCK:
         data = _read(_REBINDS)
         data[wid] = {"thread_id": str(thread_id), "epoch": epoch.current(), "ts": time.time()}
+        if force:
+            data[wid]["force"] = True
         _write(_REBINDS, data)
+
+
+def forced_rebinds(now_epoch: str | None, now: float | None = None) -> set[str]:
+    """The window ids among :func:`pending_rebinds` whose request was FORCED."""
+    pending = pending_rebinds(now_epoch, now)
+    return {w for w, r in _read(_REBINDS).items()
+            if w in pending and isinstance(r, dict) and r.get("force") is True}
 
 
 def pending_rebinds(now_epoch: str | None, now: float | None = None) -> dict[str, str]:
