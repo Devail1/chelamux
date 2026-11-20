@@ -54,6 +54,8 @@ def test_ledger_for_session_newest_first_and_set_session(ledger):
     ledger.opened("10", "@1", "/p", session_id=SID)
     ledger.opened("11", "@2", "/p", session_id=OTHER)
     ledger.opened("12", "@3", "/p", session_id=SID)
+    ledger.opened("14", "@5", "/p")                          # no session recorded
+    ledger.closed("15")                                      # closed with an unknown one
     assert ledger.for_session(SID) == ["12", "10"]
     assert ledger.for_session(None) == [] and ledger.for_session("") == []
     ledger.opened("13", "@4", "/p")
@@ -317,14 +319,41 @@ def test_a_forced_rebind_to_the_topic_it_already_has_does_nothing(ledger):
     assert wire.calls == []
 
 
-def test_a_forced_rebind_whose_topic_is_gone_keeps_the_current_one(ledger):
+def test_a_forced_rebind_whose_topic_is_gone_keeps_the_current_one(ledger, caplog):
     reg, wire = BindingRegistry(CHAT), _Wire({"reopenForumTopic"})
     reg.bind("@6", "159840", NEW)
     reg.set_topic_name("@6", "t")
-    _tick(reg, ledger, wire, {"@6": "t"}, {}, {}, now_epoch=NEW,
-          rebinds={"@6": "140624"}, force_rebinds={"@6"})
+    with caplog.at_level("WARNING", logger="chela.telegram.reconcile"):
+        _tick(reg, ledger, wire, {"@6": "t"}, {}, {}, now_epoch=NEW,
+              rebinds={"@6": "140624"}, force_rebinds={"@6"})
     assert reg.thread_for_window("@6") == "159840"
     assert wire.methods() == ["reopenForumTopic"]
+    assert "forced rebind of @6 to 140624 dropped: the topic could not be reopened" in caplog.text
+
+
+def test_a_forced_rebind_to_a_topic_another_window_holds_is_dropped_loudly(ledger, caplog):
+    reg, wire = BindingRegistry(CHAT), _Wire()
+    reg.bind("@6", "159840", NEW)
+    reg.set_topic_name("@6", "t")
+    reg.bind("@9", "140624", NEW)
+    reg.set_topic_name("@9", "u")
+    with caplog.at_level("WARNING", logger="chela.telegram.reconcile"):
+        _tick(reg, ledger, wire, {"@6": "t", "@9": "u"}, {}, {}, now_epoch=NEW,
+              rebinds={"@6": "140624"}, force_rebinds={"@6"})
+    assert reg.thread_for_window("@6") == "159840" and wire.calls == []
+    assert "forced rebind of @6 to 140624 dropped: another window holds that topic" in caplog.text
+
+
+def test_an_unforced_rebind_failure_logs_no_forced_warning(ledger, caplog):
+    reg, wire = BindingRegistry(CHAT), _Wire({"reopenForumTopic", "createForumTopic"})
+    reg.bind("@9", "140624", NEW)
+    reg.set_topic_name("@9", "u")
+    with caplog.at_level("WARNING", logger="chela.telegram.reconcile"):
+        _tick(reg, ledger, wire, {"@6": "t", "@9": "u"}, {}, {}, now_epoch=NEW,
+              rebinds={"@6": "140624"})
+        _tick(reg, ledger, wire, {"@6": "t", "@9": "u"}, {}, {}, now_epoch=NEW,
+              rebinds={"@6": "500"})
+    assert "forced rebind" not in caplog.text
 
 
 def test_forced_rebinds_are_the_forced_pending_requests(monkeypatch):
