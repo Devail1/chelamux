@@ -251,10 +251,10 @@ def _classify(store: str, wid: str, stamped_epoch: str | None, session_id: str |
         sid = roster_row["session_id"]
     cwd = roster_row.get("cwd")
     # CMX-449: no cwd on record, but a session — its own transcript says where it ran.
-    if not cwd and sid and cwd_for_session is not None:
-        cwd = cwd_for_session(sid)
     label = roster_row.get("name") or ""
     new_wid = wid_for_session(sid) if sid else None
+    if not cwd and sid and not new_wid and cwd_for_session is not None:
+        cwd = cwd_for_session(sid)       # only a row that may be relaunched needs one
     if new_wid:
         return Verdict(store, wid, stamped_epoch, "REVIVABLE", sid, new_wid, cwd, label)
     return Verdict(store, wid, stamped_epoch, "MANUAL", sid, None, cwd, label)
@@ -1034,7 +1034,7 @@ def boot_pass(now_epoch: str | None, *, resume_enabled: bool, gather, marker: Pa
     if walked:
         out["source_epochs"] = sources
         out["walked"] = walked
-    if back or left or skipped_closed:
+    if back or left or skipped_closed or walked:
         (notify or inbox.enqueue)(
             "restore_boot",
             f"{head} — came back: {', '.join(back) or 'none'}; "

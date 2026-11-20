@@ -342,3 +342,39 @@ def test_plan_defaults_to_the_real_transcript_reader(tmp_path, monkeypatch):
                       roster_lookup=lambda ep, wid: {}, wid_for_session=lambda sid: None)
     assert vs[0].cwd == str(tmp_path)
 
+
+
+def test_the_cwd_naming_the_transcripts_own_project_dir_wins(tmp_path):
+    """``claude --resume`` looks the session up under its launch cwd's project dir."""
+    started, home = tmp_path / "wt", tmp_path / "proj_a"
+    started.mkdir()
+    home.mkdir()
+    proj = tmp_path / "projects" / sessions.transcripts.encode_cwd(str(home))
+    proj.mkdir(parents=True)
+    (proj / f"{SID}.jsonl").write_text("".join(json.dumps(r) + "\n" for r in [
+        {"cwd": str(started)}, {"cwd": str(home)}, {"cwd": str(started)}]))
+    assert sessions.cwd_for_session(SID, tmp_path / "projects") == str(home)
+
+
+def test_a_matching_cwd_that_no_longer_exists_is_none(tmp_path):
+    gone = str(tmp_path / "gone")
+    proj = tmp_path / "projects" / sessions.transcripts.encode_cwd(gone)
+    proj.mkdir(parents=True)
+    (proj / f"{SID}.jsonl").write_text(json.dumps({"cwd": gone}) + "\n"
+                                       + json.dumps({"cwd": str(tmp_path)}) + "\n")
+    assert sessions.cwd_for_session(SID, tmp_path / "projects") is None
+
+
+def test_a_live_row_never_reads_a_transcript():
+    calls = []
+    vs = restore.plan({}, {}, {"@4": {"session_id": SID, "epoch": A}}, C,
+                      roster_lookup=lambda ep, wid: {}, wid_for_session=lambda sid: "@9",
+                      cwd_for_session=lambda sid: calls.append(sid) or "/x")
+    assert (vs[0].verdict, vs[0].cwd, calls) == ("REVIVABLE", None, [])
+
+
+def test_a_walk_that_resumes_nothing_still_says_so(tmp_path):
+    live = [_row(A, _sid("a", 1), "proj1", verdict="REVIVABLE", new_wid="@7")]
+    r = _boot(tmp_path, live, lifetimes={A: LONG, B: SHORT})
+    assert r.spawned == [] and len(r.notices) == 1
+    assert r.notices[0][1].endswith(f"; walked back past: {B} (lived 5s, under 900s)")

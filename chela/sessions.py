@@ -1053,16 +1053,20 @@ _CWD_SCAN_LINES = 200
 
 def cwd_for_session(session_id: str | None, base: Path | None = None) -> str | None:
     """CMX-449: the working directory a session ran in, read from its own transcript —
-    ``<sid>`` → ``~/.claude/projects/*/<sid>.jsonl`` → the first record's ``cwd``.
+    ``<sid>`` → ``~/.claude/projects/*/<sid>.jsonl`` → a record's ``cwd``.
 
-    For a restore row with a session but no cwd on record. ``None`` — never a guess — when
-    the transcript is missing or unreadable, carries no absolute ``cwd`` in its first
+    For a restore row with a session but no cwd on record. ``claude --resume`` finds a
+    session through the project dir its launch cwd encodes to, so the cwd whose encoding
+    (:func:`chela.transcripts.encode_cwd`) names the transcript's own directory wins; only
+    when no record's does is the first absolute ``cwd`` taken. ``None`` — never a guess —
+    when the transcript is missing or unreadable, carries no absolute ``cwd`` in its first
     :data:`_CWD_SCAN_LINES` lines, or names a directory that no longer exists (relaunching
     a session there could only fail).
     """
     path = transcript_for_session(session_id, base)
     if path is None:
         return None
+    first = None
     try:
         with path.open(encoding="utf-8", errors="replace") as fh:
             for i, line in enumerate(fh):
@@ -1073,11 +1077,15 @@ def cwd_for_session(session_id: str | None, base: Path | None = None) -> str | N
                 except ValueError:
                     continue
                 cwd = rec.get("cwd") if isinstance(rec, dict) else None
-                if isinstance(cwd, str) and os.path.isabs(cwd):
-                    return cwd if os.path.isdir(cwd) else None
+                if not isinstance(cwd, str) or not os.path.isabs(cwd):
+                    continue
+                if transcripts.encode_cwd(cwd) == path.parent.name:
+                    first = cwd
+                    break
+                first = first or cwd
     except OSError:
         return None
-    return None
+    return first if first and os.path.isdir(first) else None
 
 
 def _session_from_log(wid: str, since: float) -> str | None:
