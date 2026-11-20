@@ -122,7 +122,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Protocol
 
-from chela import config, judge, judge_timing, risktier, sweep
+from chela import config, judge, judge_timing, risktier, suite_guard, sweep
 from chela.workflow import dispatch_enabled
 
 log = logging.getLogger(__name__)
@@ -1576,7 +1576,8 @@ def _sweep_and_file(wf, worktree: Path, head: str, ref: str, standard: list[dict
                              select_tests=cfg.select_tests, provision=False, budget=budget,
                              lines=swept, keep=evidence_dir(wf, result["at"], chela_dir),
                              order=lambda muts: owed_first(muts, first, lines),
-                             should_yield=check or slot_wanted)
+                             should_yield=check or slot_wanted,
+                             rank=suite_guard.RANK_SWEEP)
     unrun = [r.mutation.key for r in report._with(sweep.UNRUN)]
     result.update(yielded_to=report.yielded, sweep_seconds=report.seconds,
                   budget_seconds=budget.seconds,
