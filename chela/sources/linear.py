@@ -1390,6 +1390,7 @@ class LinearSource:
             branch=_branch_for(ident, title, node.get("branchName")),
             terminal_state=terminal,
             tracker_state=str(state.get("name") or "") or None,
+            priority=_priority(node.get("priority")),
             # CMX-430: the reconcile acts on `state`. A terminal (done/canceled/archived)
             # Linear issue is POSITIVELY closed, never left reading as open.
             state="closed" if terminal else "open",
@@ -1414,6 +1415,13 @@ class LinearSource:
             return (prio if prio > 0 else 5, order, t.task_number or 0)
 
         return sorted(tasks, key=key)
+
+
+def _priority(raw: object) -> int | None:
+    """⏳ CMX-445: Linear's priority number (0-4) as it came back, or None for anything else."""
+    if isinstance(raw, bool) or not isinstance(raw, int) or raw not in PRIORITIES:
+        return None
+    return raw
 
 
 def _issue_url(url: object) -> str | None:

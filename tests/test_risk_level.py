@@ -402,3 +402,38 @@ def test_the_claim_records_the_trackers_risk_on_the_run_row(tmp_path):
     run = dispatcher.resolve_run("fresh")
     assert (run["risk"], run["risk_reason"]) == ("low", "marker")
     assert dispatcher._rework_cap(run) == 3
+
+
+@pytest.mark.parametrize("priority", [1, 3, None])
+def test_the_claim_records_the_trackers_priority_on_the_run_row(tmp_path, priority):
+    """⏳ CMX-445: the issue's priority lands on the run row — what orders its hand-in in the
+    suite slot queue (`hand_in_battery`)."""
+    wf = _wf(tmp_path)
+    task = Task(id="fresh", title="a new thing", file=str(tmp_path / "TODO.md"),
+                line_number=1, raw="- [ ] a new thing", priority=priority)
+    wt = tmp_path / "wt"
+    wt.mkdir()
+    with dispatcher._db() as conn, \
+         patch.object(dispatcher, "ensure_worktree", return_value=(wt, True)), \
+         patch.object(dispatcher, "_launch_agent"), \
+         patch.object(dispatcher, "_run_critic"):
+        assert dispatcher._spawn(wf, task, 1, conn) is True
+    assert dispatcher.resolve_run("fresh")["priority"] == priority
+
+
+@pytest.mark.parametrize("before,after", [(3, 1), (1, None), (None, 4)])
+def test_a_re_claim_takes_the_trackers_current_priority(tmp_path, before, after):
+    """⏳ CMX-445: a run re-claimed after its issue was re-prioritised (Medium → Urgent)
+    queues at the NEW priority — the claim's upsert overwrites the row's old one."""
+    wf = _wf(tmp_path)
+    wt = tmp_path / "wt"
+    wt.mkdir()
+    for prio in (before, after):
+        task = Task(id="fresh", title="a new thing", file=str(tmp_path / "TODO.md"),
+                    line_number=1, raw="- [ ] a new thing", priority=prio)
+        with dispatcher._db() as conn, \
+             patch.object(dispatcher, "ensure_worktree", return_value=(wt, True)), \
+             patch.object(dispatcher, "_launch_agent"), \
+             patch.object(dispatcher, "_run_critic"):
+            assert dispatcher._spawn(wf, task, 1, conn) is True
+        assert dispatcher.resolve_run("fresh")["priority"] == prio

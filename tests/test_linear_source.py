@@ -1702,3 +1702,15 @@ def test_a_run_whose_issue_became_duplicate_reconciles_closed(repo, team, launch
     assert summary["dispatched"] == 0 and launched == []
     assert _row("CMX-6")["status"] != "awaiting_review"
     assert _row("CMX-6")["status"] == _row("CMX-5")["status"]
+
+
+# --- ⏳ CMX-445: the issue's priority rides on the task -----------------------------------
+
+@pytest.mark.parametrize("raw,want", [
+    (1, 1), (2, 2), (3, 3), (4, 4), (0, 0), (5, None), (-1, None), (None, None),
+    (True, None), ("1", None), (1.0, None)])
+def test_a_tasks_priority_is_linears_own_number(tmp_path, raw, want):
+    node = issue(7, priority=0)
+    node["priority"] = raw
+    task = _src(tmp_path, FakeLinear([node]))._task(node)
+    assert task is not None and task.priority == want

@@ -22,6 +22,12 @@ this is what that one choke point wraps it in.
    11-17). A battery killed anyway leaves its record, and the daemon names every such
    stopped run in ONE notice once the slot is free and memory is back
    (:func:`stopped_batteries`).
+5. **Waiters are ranked, and a holder yields to a better one** (CMX-445) — a free slot goes
+   to judge rounds first, then hand-ins by issue priority (Urgent, High, Medium, Low, none),
+   then the nightly sweep; first come first served only among equals (:func:`queue_key`).
+   A self-check or hand-in sweep gives its slot up between two experiments when a better
+   waiter is queued, and takes it back after (:func:`yield_slot`). On 11-19 a Medium
+   self-check held the only slot for 2 h 08 m while an Urgent judge waited 1 h 13 m.
 
 ⛔ Never fix an OOM by raising the ceiling blindly: a fatter ceiling is a fatter target.
 """
@@ -186,6 +192,30 @@ BATTERY_WAIT_TIMEOUTS = 12
 SUITE_RAM_SHARE = 0.5
 DEFAULT_SLOTS_MAX = 4
 
+# ⏳ CMX-445: the queue order — LOWER goes first. A judge round, then hand-ins by tracker
+# priority (Linear 1 Urgent … 4 Low; "No priority" or unknown after Low), then the sweep.
+RANK_JUDGE = 0
+RANK_URGENT, RANK_HIGH, RANK_MEDIUM, RANK_LOW = 1, 2, 3, 4
+RANK_UNKNOWN = 5
+RANK_SWEEP = 6
+_KIND_RANKS = {"judge": RANK_JUDGE}
+
+
+def handin_rank(priority) -> int:
+    """⏳ CMX-445: a hand-in's queue rank from its tracker priority number — ``1``..``4``
+    (Urgent..Low) keep their number; ``0`` (No priority), None and garbage rank after Low."""
+    if isinstance(priority, bool) or not isinstance(priority, int):
+        return RANK_UNKNOWN
+    return priority if RANK_URGENT <= priority <= RANK_LOW else RANK_UNKNOWN
+
+
+def _rank(raw) -> int:
+    """A ledger's rank; a record without one (an older chela) ranks as an unknown hand-in."""
+    if isinstance(raw, bool) or not isinstance(raw, int) or not RANK_JUDGE <= raw <= RANK_SWEEP:
+        return RANK_UNKNOWN
+    return raw
+
+
 _waited = 0.0                     # seconds THIS process has spent waiting for a slot
 _held = threading.local()         # CMX-393: ``depth`` of this thread's hold — a nested slot re-enters
 _waited_lock = threading.Lock()
@@ -276,9 +306,10 @@ class _Ledger:
     (``None`` once it holds a slot) and how long it has waited in all. It is what orders the
     queue (:func:`_must_queue`) and what the stuck probes credit (:func:`waits_in`)."""
 
-    def __init__(self, cwd: str):
+    def __init__(self, cwd: str, rank: int = RANK_UNKNOWN):
         self.path = _waits_dir() / f"{os.getpid()}-{threading.get_ident()}.json"
         self.cwd, self.waited = cwd, _thread_waited.get((threading.get_ident(), cwd), 0.0)
+        self.rank = rank
         stat = _proc_stat(os.getpid())
         self.start = stat[1] if stat else None
 
@@ -288,7 +319,7 @@ class _Ledger:
             tmp = self.path.with_suffix(".tmp")
             tmp.write_text(json.dumps({"pid": os.getpid(), "start": self.start,
                                        "cwd": self.cwd, "waiting_since": waiting_since,
-                                       "waited": self.waited}))
+                                       "waited": self.waited, "rank": self.rank}))
             tmp.replace(self.path)
         except OSError:
             log.debug("suite_guard: could not publish the slot wait", exc_info=True)
@@ -315,17 +346,48 @@ def _ledgers() -> list[tuple[Path, dict]]:
     return out
 
 
-def _must_queue(me: Path, since: float) -> bool:
-    """Is an OLDER waiter still queued? Then it goes first: a battery that frees its slot and
-    takes the next one a millisecond later must not starve a run already waiting. A stopped
-    waiter (a fleet pause, ``T``) does not hold the line."""
+def queue_key(rank: int, since: float, name: str) -> tuple:
+    """⏳ CMX-445: where a waiter stands in the queue — rank first (:data:`RANK_JUDGE` …
+    :data:`RANK_SWEEP`), then age (first come first served among equals), then its ledger
+    name so two waiters never tie."""
+    return (rank, since, name)
+
+
+def _must_queue(me: Path, since: float, rank: int = RANK_UNKNOWN) -> bool:
+    """Is a waiter AHEAD of us (:func:`queue_key`) still queued? Then it goes first: a
+    battery that frees its slot and takes the next one a millisecond later must not starve a
+    run already waiting, and a Medium hand-in must not take the slot an Urgent judge is
+    queued for (CMX-445). A stopped waiter (a fleet pause, ``T``) does not hold the line."""
+    mine = queue_key(rank, since, me.name)
     for path, rec in _ledgers():
         opened = rec.get("waiting_since")
         if path == me or opened is None or rec["state"] in ("T", "t"):
             continue
-        if (float(opened), path.name) < (since, me.name):
+        try:
+            theirs = queue_key(_rank(rec.get("rank")), float(opened), path.name)
+        except (TypeError, ValueError):
+            continue
+        if theirs < mine:
             return True
     return False
+
+
+def outranking(rank: int, exclude_pid: int | None = None) -> list[str]:
+    """⏳ CMX-445: the worktree names of every live, unstopped waiter whose rank is strictly
+    BETTER than ``rank`` — who a holder of that rank yields its slot to (best first)."""
+    out = []
+    for _path, rec in _ledgers():
+        opened = rec.get("waiting_since")
+        if opened is None or rec["state"] in ("T", "t") or rec.get("pid") == exclude_pid:
+            continue
+        theirs = _rank(rec.get("rank"))
+        if theirs >= rank:
+            continue
+        try:
+            out.append((theirs, float(opened), Path(str(rec.get("cwd") or "?")).name))
+        except (TypeError, ValueError):
+            continue
+    return [name for _r, _s, name in sorted(out)]
 
 
 def waits_in(worktree: str | Path) -> dict | None:
@@ -462,16 +524,62 @@ class SlotTimeout(TimeoutError):
     suite that could not be run — CANNOT VERIFY, never a pass."""
 
 
+def _acquire(d: Path, k: int, cwd: str, rank: int, on_wait, max_wait: float | None,
+             poll: float, since: float | None = None) -> int:
+    """Wait (visibly, in :func:`queue_key` order) for one of the ``k`` slots and return its
+    fd, at most ``max_wait`` seconds (:class:`SlotTimeout`); the wait is credited. ``since``
+    is where it stands among equals (default: now)."""
+    global _waited
+    ledger = _Ledger(cwd, rank)
+    opened = time.time()
+    since = opened if since is None else since
+    started, fd = None, None
+    try:
+        while True:
+            if not _must_queue(ledger.path, since, rank) and (fd := _take(d, k)) is not None:
+                break
+            if started is None:
+                started = time.monotonic()
+                ledger.write(since)
+                print(f"⏳ waiting for a suite slot — all {k} busy: {_holders(d, k)} "
+                      f"(CMX-119; CHELA_SUITE_SLOTS)", file=sys.stderr, flush=True)
+                if on_wait is not None:
+                    on_wait(since)
+            elif max_wait is not None and time.time() - opened >= max_wait:
+                raise SlotTimeout(f"no suite slot came free in {max_wait:.0f}s "
+                                  f"(all {k} busy: {_holders(d, k)})")
+            time.sleep(poll)
+    finally:
+        if started is not None:
+            spent = time.monotonic() - started
+            with _waited_lock:
+                _waited += spent
+            ledger.waited += spent
+            _thread_waited[(threading.get_ident(), ledger.cwd)] = ledger.waited
+            ledger.write(None)      # kept: what the stuck probes credit, while we live
+            if on_wait is not None:
+                on_wait(None)
+    try:
+        os.ftruncate(fd, 0)
+        os.pwrite(fd, json.dumps({"pid": os.getpid(), "cwd": cwd,
+                                  "since": time.time()}).encode(), 0)
+    except BaseException:
+        os.close(fd)
+        raise
+    return fd
+
+
 @contextlib.contextmanager
 def slot(cwd: str | Path, on_wait=None, max_wait: float | None = None,
-         poll: float | None = None):
-    """Hold one of the K suite slots for the ``with`` body; wait (visibly, first come first
-    served) for one first, at most ``max_wait`` seconds (:class:`SlotTimeout`).
+         poll: float | None = None, rank: int = RANK_UNKNOWN):
+    """Hold one of the K suite slots for the ``with`` body; wait (visibly, in
+    :func:`queue_key` order — ``rank`` first, then first come first served) for one first,
+    at most ``max_wait`` seconds (:class:`SlotTimeout`).
 
     ``on_wait(since)`` is told when a wait begins (``since`` = its wall-clock start) and
     ends (``None``). With ``K == 0`` the body runs at once. A slot dir that cannot be made
-    raises ``OSError`` — :func:`chela.judge.run_suite` reports that as CANNOT VERIFY."""
-    global _waited
+    raises ``OSError`` — :func:`chela.judge.run_suite` reports that as CANNOT VERIFY.
+    The body may hand the slot over and take it back (:func:`yield_slot`)."""
     if getattr(_held, "depth", 0):
         # 🧠 CMX-393: this thread already holds a slot (its battery's) — a suite run inside
         # the battery re-enters it. Taking a SECOND one would deadlock at K=1, and freeing
@@ -493,42 +601,44 @@ def slot(cwd: str | Path, on_wait=None, max_wait: float | None = None,
         return
     d = config.CHELA_DIR / SLOTS_DIRNAME
     d.mkdir(parents=True, exist_ok=True)
-    ledger = _Ledger(str(cwd))
-    since, started, fd = time.time(), None, None
+    claimed = time.time()
+    _held.fd = _acquire(d, k, str(cwd), rank, on_wait, max_wait, poll, claimed)
+    _held.hold = (d, k, str(cwd), rank, on_wait, claimed, poll)
     try:
-        while True:
-            if not _must_queue(ledger.path, since) and (fd := _take(d, k)) is not None:
-                break
-            if started is None:
-                started = time.monotonic()
-                ledger.write(since)
-                print(f"⏳ waiting for a suite slot — all {k} busy: {_holders(d, k)} "
-                      f"(CMX-119; CHELA_SUITE_SLOTS)", file=sys.stderr, flush=True)
-                if on_wait is not None:
-                    on_wait(since)
-            elif max_wait is not None and time.time() - since >= max_wait:
-                raise SlotTimeout(f"no suite slot came free in {max_wait:.0f}s "
-                                  f"(all {k} busy: {_holders(d, k)})")
-            time.sleep(poll)
-    finally:
-        if started is not None:
-            spent = time.monotonic() - started
-            with _waited_lock:
-                _waited += spent
-            ledger.waited += spent
-            _thread_waited[(threading.get_ident(), ledger.cwd)] = ledger.waited
-            ledger.write(None)      # kept: what the stuck probes credit, while we live
-            if on_wait is not None:
-                on_wait(None)
-    try:
-        os.ftruncate(fd, 0)
-        os.pwrite(fd, json.dumps({"pid": os.getpid(), "cwd": str(cwd),
-                                  "since": time.time()}).encode(), 0)
         _held.depth = 1
         yield
     finally:
         _held.depth = 0
-        os.close(fd)
+        fd, _held.fd, _held.hold = getattr(_held, "fd", None), None, None
+        if fd is not None:
+            os.close(fd)
+
+
+def yield_slot() -> str:
+    """⏳ CMX-445: call BETWEEN two suite runs of a battery (no file mutated). When a waiter
+    outranks this thread's hold (:func:`outranking`) — an Urgent judge queued behind a Medium
+    self-check — free the slot, queue for it again at this hold's own rank, and return once
+    it is back. Returns who it yielded to (``""``: nobody outranked it, the slot was kept).
+
+    It queues again at its ORIGINAL claim time, so only a strictly better rank — never an
+    equal that came after it — goes ahead, and it waits for the slot without a bound: every
+    run ahead of it is bounded by its own budget, and a timeout here would throw away the
+    experiments this battery already measured. Not holding a slot (``K == 0``, or outside a
+    battery) is a no-op."""
+    hold, fd = getattr(_held, "hold", None), getattr(_held, "fd", None)
+    if hold is None or fd is None:
+        return ""
+    d, k, cwd, rank, on_wait, claimed, poll = hold
+    better = outranking(rank)
+    if not better:
+        return ""
+    names = ", ".join(better)
+    print(f"⏳ yielding the suite slot to {names} — it outranks this run (CMX-445); "
+          "resuming once it is free again", file=sys.stderr, flush=True)
+    _held.fd = None
+    os.close(fd)
+    _held.fd = _acquire(d, k, cwd, rank, on_wait, None, poll, claimed)
+    return names
 
 
 # --- whole batteries: one slot for the battery, a record while it runs (CMX-393) ----------
@@ -545,7 +655,7 @@ def _batteries_dir() -> Path:
 
 @contextlib.contextmanager
 def battery(cwd: str | Path, kind: str, on_wait=None, max_wait: float | None = None,
-            poll: float | None = None):
+            poll: float | None = None, rank: int | None = None):
     """Hold ONE suite slot for a whole battery (``kind``: ``"sweep"``, ``"self-check"``,
     ``"judge"``, ``"task-finished"``), and keep a record of it while it runs.
 
@@ -557,9 +667,13 @@ def battery(cwd: str | Path, kind: str, on_wait=None, max_wait: float | None = N
     returning, raising, or ``sys.exit`` — and KEPT when a signal stops it (an exception that
     is not an ``Exception``/``SystemExit``, e.g. the sweep's own ``_Interrupted``) or nothing
     runs at all (SIGKILL). A record whose process is gone is a stopped run:
-    :func:`stopped_batteries`."""
+    :func:`stopped_batteries`.
+
+    ⏳ CMX-445: ``rank`` is where it queues (:func:`queue_key`); None ranks it by ``kind`` —
+    a ``"judge"`` first, anything else as a hand-in of unknown priority."""
     nested = bool(getattr(_held, "depth", 0))
-    with slot(cwd, on_wait=on_wait, max_wait=max_wait, poll=poll):
+    rank = _KIND_RANKS.get(kind, RANK_UNKNOWN) if rank is None else rank
+    with slot(cwd, on_wait=on_wait, max_wait=max_wait, poll=poll, rank=rank):
         if nested:
             yield
             return

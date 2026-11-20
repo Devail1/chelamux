@@ -58,6 +58,10 @@ class Task:
     # (Linear: `Todo`, `In Progress`, `In Review`, …) — the Work board files the card under
     # that column. None for markdown/gh_issues, whose board keeps chela's own lanes.
     tracker_state: str | None = None
+    # ⏳ CMX-445. The tracker's own PRIORITY number (Linear: 1 Urgent, 2 High, 3 Medium,
+    # 4 Low, 0 No priority). It orders the hand-ins queued for a suite slot (see
+    # :func:`chela.suite_guard.handin_rank`). None for a tracker that has no priority.
+    priority: int | None = None
 
 
 # ⚖️🎚️ CMX-405 — ordered LOWEST to HIGHEST stakes; `highest_risk` relies on the order.
