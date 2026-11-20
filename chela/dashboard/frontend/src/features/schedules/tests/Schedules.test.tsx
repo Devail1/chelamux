@@ -6,6 +6,13 @@ import { agents } from '../../../shared/store/agents.ts';
 import { Schedules, refreshSchedules, showAddSchedule } from '../index.ts';
 import { clip, scheduleHint } from '../model.ts';
 
+// 🔐 CMX-447: seed the page's session token before the modules under test read it at import.
+// Unseeded it is '', and an assertion against '' passes for a request that sends an EMPTY
+// token, which the server refuses (docs/defeat_shapes/392).
+vi.hoisted(() => {
+  document.body.innerHTML = '<script type="application/json" id="chela-boot">{"sessionToken": "tok-schedules"}</script>';
+});
+
 const SCHED = [
   { id: 3, agent_name: 'researcher', schedule_type: 'interval', schedule_value: '30m', prompt: 'p'.repeat(61), last_run: null, next_run: null, enabled: true },
   { id: 4, agent_name: 'risk', schedule_type: 'cron', schedule_value: '0 9 * * *', prompt: 'check <risk>', last_run: null, next_run: null, enabled: false },
@@ -89,6 +96,7 @@ test('Disable / Enable PATCH the flipped state and refetch', async () => {
   await act(async () => fireEvent.click(screen.getByRole('button', { name: 'Enable' })));
   const patches = calls.filter((c) => c.init?.method === 'PATCH').map((c) => [c.url, c.init?.body]);
   expect(patches).toEqual([['/api/schedules/3', '{"enabled":false}'], ['/api/schedules/4', '{"enabled":true}']]);
+  expect(calls.filter((c) => c.init?.method === 'PATCH').map((c) => (c.init?.headers as Record<string, string> | undefined)?.['X-Chela-Session-Token'])).toEqual(['tok-schedules', 'tok-schedules']);
   expect(gets().filter((u) => u === '/api/schedules').length).toBe(2);
 });
 
@@ -101,6 +109,7 @@ test('Del asks first; declined, nothing is sent', async () => {
   confirmAnswer = true;
   await act(async () => fireEvent.click(screen.getAllByRole('button', { name: 'Del' })[1] as HTMLElement));
   expect(calls.filter((c) => c.init?.method).map((c) => [c.url, c.init?.method])).toEqual([['/api/schedules/4', 'DELETE']]);
+  expect(calls.filter((c) => c.init?.method).map((c) => (c.init?.headers as Record<string, string> | undefined)?.['X-Chela-Session-Token'])).toEqual(['tok-schedules']);
   expect(gets()).toContain('/api/schedules');
 });
 
@@ -125,6 +134,7 @@ test('the add dialog: agents sorted by name, the value hint follows the type, an
   fireEvent.change(screen.getByRole('textbox', { name: 'Prompt' }), { target: { value: ' refresh ' } });
   await act(async () => fireEvent.click(screen.getByRole('button', { name: 'Add' })));
   const post = calls.find((c) => c.init?.method === 'POST');
+  expect((post?.init?.headers as Record<string, string> | undefined)?.['X-Chela-Session-Token']).toBe('tok-schedules');
   expect([post?.url, post?.init?.body]).toEqual(['/api/schedules', JSON.stringify({ agent_name: 'zeta', schedule_type: 'cron', schedule_value: '0 9 * * *', prompt: 'refresh' })]);
   expect(screen.queryByRole('dialog')).toBeNull();
   expect(gets()).toContain('/api/schedules');
@@ -154,4 +164,26 @@ test('with no agent to pick, Add sends nothing', async () => {
   await act(async () => fireEvent.click(screen.getByRole('button', { name: 'Add' })));
   expect(calls).toEqual([]);
   fireEvent.click(screen.getByRole('button', { name: 'Cancel' }));
+});
+
+test('CMX-447: a refused write is shown, and a refused add keeps the dialog and its input', async () => {
+  const alerts: string[] = [];
+  vi.stubGlobal('alert', (m: string) => alerts.push(m));
+  const ERR = 'missing or stale session token: reload the page';
+  vi.stubGlobal('fetch', async (url: string, init?: RequestInit) => {
+    calls.push({ url, init });
+    const body = init?.method ? { ok: false, error: ERR } : await (answers[url] ?? (() => Promise.resolve({})))();
+    return { ok: !init?.method, status: init?.method ? 403 : 200, json: () => Promise.resolve(body) };
+  });
+  await shown();
+  await act(async () => fireEvent.click(screen.getByRole('button', { name: 'Disable' })));
+  await act(async () => fireEvent.click(screen.getAllByRole('button', { name: 'Del' })[0] as HTMLElement));
+  expect(alerts).toEqual([ERR, ERR]);
+  fireEvent.click(screen.getByRole('button', { name: '+ Add Task' }));
+  fireEvent.change(screen.getByRole('textbox', { name: 'Interval (e.g. 30s, 5m, 1h)' }), { target: { value: '5m' } });
+  fireEvent.change(screen.getByRole('textbox', { name: 'Prompt' }), { target: { value: 'refresh' } });
+  await act(async () => fireEvent.click(screen.getByRole('button', { name: 'Add' })));
+  expect(alerts).toEqual([ERR, ERR, ERR]);
+  expect(screen.queryByRole('dialog')).not.toBeNull();
+  expect((screen.getByRole('textbox', { name: 'Prompt' }) as HTMLTextAreaElement).value).toBe('refresh');
 });

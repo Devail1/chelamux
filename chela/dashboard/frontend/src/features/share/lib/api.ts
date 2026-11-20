@@ -1,6 +1,6 @@
 // CMX-239: the share dialog's two requests. Both fail CLOSED: an unreadable options read
 // offers view only, and a mint that throws or answers without `ok` is an error, never a share.
-import { api } from '../../../shared/api/index.ts';
+import { api, decideHeaders } from '../../../shared/api/index.ts';
 import type { ShareOptions } from './model.ts';
 
 /** What POST /api/term/<wid>/share answers on success. */
@@ -31,7 +31,7 @@ export async function mintShare(wid: string, body: Record<string, unknown>): Pro
   try {
     resp = (await api(`${termPath(wid)}/share`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: decideHeaders(),
       body: JSON.stringify(body),
     })) as typeof resp;
   } catch {

@@ -236,19 +236,19 @@ operator's behalf that an agent is refused elsewhere?
 | `POST /api/override/<id>/approve\|deny`, `POST /override/<id>` (the confirm page) | **proof required.** Approving an override merges a PR past the judge, or ships a release |
 | `POST /api/share-requests/<id>/approve\|deny\|revoke` | **proof required.** An approval grants a guest access to a terminal |
 | `POST /api/dispatcher/runs/<id>/merge` (the card's Merge) | **proof required.** It runs `gh pr merge` itself, which the merge-gate hook denies an agent; without the proof an agent could merge its own PR through it |
-| `POST /api/config` (agent permission mode, model), `/api/config/dispatch`, `/api/config/concurrency`, `/api/config/timing` | **should get it next.** Setting the permission mode loosens every future dispatch |
-| `POST /api/update/apply` | **should get it next.** It pulls and restarts every chela service |
-| `POST /api/schedules`, `PATCH`/`DELETE /api/schedules/<id>` | **should get it next.** A schedule runs a prompt on a timer |
-| `POST /api/dispatcher/backlog/promote`, `/api/dispatcher/init`, `/api/dispatcher/linear/issue` | **should get it next.** Each writes to a repo or tracker as the operator |
-| `POST /api/term/<wid>/share`, `/api/term/<wid>/share-mode` | **should get it next.** The unsandboxed mode's typed-window-name confirm is readable by an agent |
+| `POST /api/config` (agent permission mode, model), `/api/config/dispatch`, `/api/config/concurrency`, `/api/config/timing` (the GET of each stays open) | **proof required** (CMX-447). Setting the permission mode loosens every future dispatch |
+| `POST /api/update/apply` | **proof required** (CMX-447). It pulls and restarts every chela service |
+| `POST /api/schedules`, `PATCH`/`DELETE /api/schedules/<id>` | **proof required** (CMX-447). A schedule runs a prompt on a timer |
+| `POST /api/dispatcher/backlog/promote`, `/api/dispatcher/init`, `/api/dispatcher/linear/issue` | **proof required** (CMX-447). Each writes to a repo or tracker as the operator |
+| `POST /api/term/<wid>/share`, `/api/term/<wid>/share-mode` | **proof required** (CMX-447). The unsandboxed mode's typed-window-name confirm is readable by an agent |
 | `POST /api/dispatcher/pause\|resume`, `/api/dispatcher/runs/<id>/close`, `/api/dispatcher/delete`, `/api/orchestrator/subscribe\|release` | lower risk: disruptive, but no gate is skipped |
 | terminal input (`/term/<wid>/…`, `/api/term/key`, `/paste`, `/paste-image`, `/upload`, `/watch`, `/grid`, `/api/agents/msg`, `/broadcast`, `/trigger`) | **no added power:** an agent on the box can already type into any pane with `tmux` or `chela msg` |
 | agent lifecycle (`/api/agents/start`, `stop`, `restart`, `rediscover`, `spawn`, `spawn-sandboxed`, `kill`, `<wid>/rename`, `<wid>/title`, `suggest-names`) | **no added power:** the same `tmux` and `chela` CLI calls are open to an agent |
 | sidebar archive (`/api/sidebar/archive`, `unarchive`, `archive/migrate`) and layout (`/api/sidebar/layout`), launcher pins (`/api/launcher/pin`, `unpin`, `forget`), restore (`/api/restore/dismiss`, `undismiss`, `resume`), rooms (`/api/rooms/join\|leave`), knowledge export (`/api/knowledge/export`) | **no added power:** each edits the operator's own view or files an agent can already write |
 | `POST /hooks/<event>`, `POST /api/inbox/denial` | **agent-posted by design:** agents' own hooks post these, so no browser proof is possible |
 
-The "should get it next" rows are tracked as one follow-up issue; until it lands, treat each
-as reachable by any process on the box.
+`chela schedule` and `chela update` call their modules directly, not the dashboard, so they
+still work from a terminal.
 
 **Two unattended paths exist, and both are strictly opt-in, off by default, and loud when
 on** (`capabilities.py`'s `warn_when_on` logs a WARNING, not an INFO, on every boot they

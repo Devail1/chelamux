@@ -7,7 +7,7 @@
 //
 // CMX-129: the same banner carries "N services run old code, Restart". One banner, never two
 // stacked, each fact with its own button.
-import { ASSET_VERSION, BASE_PATH, api } from '../../../shared/api/index.ts';
+import { ASSET_VERSION, BASE_PATH, api, decideHeaders } from '../../../shared/api/index.ts';
 import { icons } from '../../../shared/icons/index.ts';
 import { registerLane } from '../../../shared/scheduler/index.ts';
 import { createStore, useStore } from '../../../shared/store/index.ts';
@@ -74,7 +74,7 @@ export async function restartStale(deps: FollowDeps = {}): Promise<Progress | nu
   patch({ progress: { text: 'Starting…', cls: '' } });
   let resp: { ok?: boolean; error?: string; started?: boolean; detail?: string; run?: unknown; boot?: unknown } | null;
   try {
-    const res = await fetch(`${BASE_PATH}/api/update/apply`, { method: 'POST' });
+    const res = await fetch(`${BASE_PATH}/api/update/apply`, { method: 'POST', headers: decideHeaders() });
     resp = (await res.json()) as typeof resp;
   } catch {
     resp = { ok: false, error: 'request failed, the dashboard may be restarting' };

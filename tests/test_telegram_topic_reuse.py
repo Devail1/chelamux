@@ -14,6 +14,7 @@ from chela import topic_ledger as topics
 from chela.telegram.bindings import BindingRegistry
 from chela.telegram.reconcile import TopicManager, delete_archived_topics, reconcile_bindings
 from chela.topic_ledger import TopicLedger
+from tests._browser_session import as_browser
 
 CHAT = "-100777"
 
@@ -304,7 +305,7 @@ def test_settings_route_stores_the_switch_and_the_cleanup_request(monkeypatch, t
     led.closed("42")
     led.opened("43", "@3", "/p")                  # open: not archived, not counted
     led.closed("44")
-    c = app_mod.app.test_client()
+    c = as_browser(app_mod.app.test_client())
     try:
         j = c.get("/api/config").get_json()
         assert (j["telegram_delete_on_close"], j["telegram_archived_topics"]) == (False, 2)

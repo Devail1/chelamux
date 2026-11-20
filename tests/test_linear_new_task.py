@@ -14,6 +14,7 @@ from chela import config
 from chela.dashboard import app as dash
 from chela.sources import linear
 from chela.sources.linear import LinearError, LinearSource
+from tests._browser_session import as_browser
 
 SECRET = "lin_api_NEWTASKsecretVALUE0123456789"
 OWNER = {"Sec-Fetch-Site": "same-origin"}
@@ -146,7 +147,7 @@ def wf_path(tmp_path, monkeypatch):
 
 @pytest.fixture
 def client():
-    return dash.app.test_client()
+    return as_browser(dash.app.test_client())
 
 
 def _post(client, wf_path, headers=OWNER, **body):

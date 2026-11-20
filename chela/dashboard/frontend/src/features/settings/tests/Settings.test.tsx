@@ -6,6 +6,13 @@ import { expect, test, vi } from 'vitest';
 import { closeSettings, openSettings, settings, toggleSettings } from '../index.ts';
 import { must, openOn, routes, rowOf, sectionTitled, settle, visible } from './setup.tsx';
 
+// 🔐 CMX-447: seed the page's session token before the modules under test read it at import.
+// Unseeded it is '', and an assertion against '' passes for a request that sends an EMPTY
+// token, which the server refuses (docs/defeat_shapes/392).
+vi.hoisted(() => {
+  document.body.innerHTML = '<script type="application/json" id="chela-boot">{"sessionToken": "tok-settings"}</script>';
+});
+
 const modal = () => must(document.getElementById('settings-drawer'), '#settings-drawer');
 const search = () => must(document.getElementById('settings-search'), '#settings-search') as HTMLInputElement;
 const status = () => must(document.getElementById('settings-search-status')).textContent;

@@ -1,6 +1,6 @@
 // CMX-221 (CMX-212 P15): the Settings modal's state: open or closed, the tab, the search query,
 // and the /api/config payload the tabs read (one GET per open, not one per section).
-import { api } from '../../../shared/api/index.ts';
+import { api, decideHeaders } from '../../../shared/api/index.ts';
 import { createStore } from '../../../shared/store/index.ts';
 import { isTab, type Config, type SettingsTab } from '../model.ts';
 
@@ -36,7 +36,7 @@ export async function loadConfig(): Promise<void> {
 export async function postConfig(body: Record<string, unknown>): Promise<{ cfg: Config | null; failed: 'request' | 'rejected' | null }> {
   let cfg: Config | null;
   try {
-    cfg = (await api('/api/config', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })) as Config | null;
+    cfg = (await api('/api/config', { method: 'POST', headers: decideHeaders(), body: JSON.stringify(body) })) as Config | null;
   } catch {
     void loadConfig();
     return { cfg: null, failed: 'request' };

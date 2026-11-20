@@ -1974,6 +1974,15 @@ def _window_name(wid: str) -> str | None:
     return name if p.returncode == 0 and name else None
 
 
+def _browser_refusal():
+    """🔐 CMX-392: None when the request proves the operator's browser session
+    (:func:`humanproof.refusal`); else the 403 to return before acting. A route that changes
+    what agents may do, or acts as the operator, calls this first: loopback alone proves
+    nothing, since every dispatched agent is on loopback too."""
+    why = humanproof.refusal(request)
+    return (jsonify({"ok": False, "error": why}), 403) if why else None
+
+
 def _granted_by() -> str:
     """Who is granting, for the audit event. There is no built-in auth; a tailnet
     front (``tailscale serve``) names the user in a header, else the peer address."""
@@ -2118,6 +2127,8 @@ def api_term_share(wid):
     the configured default when absent, clamped to [1, 14 days]; above 4 h it also needs
     ``confirm_long`` equal to the window name. The bridge re-enforces all of it per
     keystroke; these refusals only keep the dialog honest."""
+    if refused := _browser_refusal():
+        return refused
     _require_terminals()
     if wid not in _terminals_port_map():
         abort(404)
@@ -2182,6 +2193,8 @@ def api_term_share_mode(wid):
     already joined keeps the connection. Down to view: always, no confirmation. Up: the
     exact gates of minting a share with that mode (``_access_gate``). The bridge audits
     every change as ``share.mode_changed`` and tells the guest."""
+    if refused := _browser_refusal():
+        return refused
     _require_terminals()
     if wid not in _terminals_port_map():
         abort(404)
@@ -3441,6 +3454,8 @@ def api_config():
     itself. The JUDGE's model is fixed (dispatcher.DEFAULT_JUDGE_MODEL) and not
     settable here — a fleet-wide coding-model choice must not downgrade it."""
     if request.method == "POST":
+        if refused := _browser_refusal():
+            return refused
         data = request.get_json(silent=True) or {}
         if "agent_permission_mode" in data:
             mode = (data.get("agent_permission_mode") or "").strip()
@@ -3583,6 +3598,8 @@ def api_config_timing():
     same request — untouched, rather than partially applying the batch.
     """
     if request.method == "POST":
+        if refused := _browser_refusal():
+            return refused
         data = request.get_json(silent=True) or {}
         errors: dict[str, str] = {}
         parsed: dict[str, object] = {}
@@ -3623,6 +3640,8 @@ def api_config_dispatch():
     value untouched.
     """
     if request.method == "POST":
+        if refused := _browser_refusal():
+            return refused
         data = request.get_json(silent=True) or {}
         errors: dict[str, str] = {}
         parsed: dict[str, object] = {}
@@ -3682,6 +3701,8 @@ def api_config_concurrency():
     and every change lands in the event log (who, old -> new).
     """
     if request.method == "POST":
+        if refused := _browser_refusal():
+            return refused
         data = request.get_json(silent=True) or {}
         if "judges" in data:
             err = concurrency.set_judges(data["judges"], _granted_by())
@@ -4036,6 +4057,8 @@ def api_update_apply():
     Dispatched runs don't block it (CMX-95): tmux agents and detached judges survive a
     daemon restart, and `update._restart` waits for the daemon's tick (`chela.ticklock`).
     """
+    if refused := _browser_refusal():
+        return refused
     global _update_apply_started_at, _update_apply_runs
     try:
         status = update.commits_behind(fetch=False)
@@ -4794,6 +4817,8 @@ def api_schedules():
 @app.route("/api/schedules", methods=["POST"])
 @require_auth
 def api_schedules_add():
+    if refused := _browser_refusal():
+        return refused
     data = request.get_json(force=True)
     try:
         task_id = scheduler.add_task(
@@ -4810,6 +4835,8 @@ def api_schedules_add():
 @app.route("/api/schedules/<int:task_id>", methods=["DELETE"])
 @require_auth
 def api_schedules_delete(task_id):
+    if refused := _browser_refusal():
+        return refused
     ok = scheduler.remove_task(task_id)
     return jsonify({"deleted": ok})
 
@@ -4817,6 +4844,8 @@ def api_schedules_delete(task_id):
 @app.route("/api/schedules/<int:task_id>", methods=["PATCH"])
 @require_auth
 def api_schedules_toggle(task_id):
+    if refused := _browser_refusal():
+        return refused
     data = request.get_json(force=True)
     try:
         scheduler.set_enabled(task_id, bool(data.get("enabled", True)))
@@ -5131,6 +5160,8 @@ def _project_key_from_runs(*run_groups: list[dict]) -> str | None:
 @require_auth
 def api_dispatcher_init():
     """Seed a starter WORKFLOW.md + TODO.md into a repo (never overwriting)."""
+    if refused := _browser_refusal():
+        return refused
     data = request.get_json(silent=True) or {}
     path = (data.get("path") or "").strip()
     if not path:
@@ -5699,6 +5730,8 @@ def api_dispatcher_linear_issue():
     if _share_guest_request():
         return jsonify({"ok": False, "error": "Share guests cannot create tasks.",
                         "reason": "share_guest"}), 403
+    if refused := _browser_refusal():
+        return refused
     data = request.get_json(silent=True) or {}
     if not isinstance(data, dict):
         return jsonify({"ok": False, "error": "a JSON object is required"}), 400
@@ -5764,6 +5797,8 @@ def api_dispatcher_backlog_promote():
     any post-mutation failure so the call is either fully applied or
     fully rolled back.
     """
+    if refused := _browser_refusal():
+        return refused
     data = request.get_json(force=True) or {}
     wf_path = data.get("workflow_path", "")
     text = (data.get("text", "") or "").strip()

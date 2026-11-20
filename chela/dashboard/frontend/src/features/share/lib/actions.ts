@@ -1,7 +1,7 @@
 // CMX-240 (CMX-212 P25): what changes a share from this page: adopt-or-mint, Stop (the kill
 // switch), a live mode change, and opening the Active shares sheet. The pane itself (its title,
 // its ttyd iframe, the open pane) is the Wall's (features/wall), handed in through configureShareHost.
-import { api, BOOT } from '../../../shared/api/index.ts';
+import { api, BOOT, decideHeaders } from '../../../shared/api/index.ts';
 import { createStore } from '../../../shared/store/index.ts';
 import type { MintResponse } from './api.ts';
 import { openShareDialog } from './mount.tsx';
@@ -59,7 +59,7 @@ function paneDims(wid: string): { cols: number; rows: number } | null {
 }
 
 const termPath = (wid: string) => `/api/term/${encodeURIComponent(wid)}`;
-const post = (path: string, body: unknown) => api(path, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+const post = (path: string, body: unknown) => api(path, { method: 'POST', headers: decideHeaders(), body: JSON.stringify(body) });
 
 /** Owner-only: the share's join link + pairing code. An unreadable answer is `{}`. */
 export async function fetchShareInfo(wid: string): Promise<ShareInfo & { share_epoch?: number }> {

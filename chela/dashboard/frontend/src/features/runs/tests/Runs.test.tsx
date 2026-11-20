@@ -5,6 +5,13 @@ import { afterEach, beforeEach, expect, test, vi } from 'vitest';
 import { setWorkPoll, work, type Run, type Workflow } from '../../../shared/store/work.ts';
 import { InitRepo, Runs, launcherPaths, openInitRepo, postWorkDelete } from '../index.ts';
 
+// 🔐 CMX-447: seed the page's session token before the modules under test read it at import.
+// Unseeded it is '', and an assertion against '' passes for a request that sends an EMPTY
+// token, which the server refuses (docs/defeat_shapes/392).
+vi.hoisted(() => {
+  document.body.innerHTML = '<script type="application/json" id="chela-boot">{"sessionToken": "tok-runs"}</script>';
+});
+
 const URL = 'https://linear.app/acme/issue/CMX-12/tighten-top-row';
 let calls: { url: string; init?: RequestInit }[] = [];
 let reply: (url: string) => Promise<{ status: number; body: unknown }> = () => Promise.resolve({ status: 200, body: {} });
@@ -238,6 +245,7 @@ test('an empty path never POSTs', async () => {
 test('a seeded git repo reports what was created and refreshes Work; no git warning', async () => {
   await seed(' /srv/repo ', { ...INIT, skipped: ['TODO.md'], created: ['WORKFLOW.md'] });
   expect(calls.map((c) => [c.url, c.init?.method, c.init?.body])).toEqual([['/api/dispatcher/init', 'POST', JSON.stringify({ path: '/srv/repo' })]]);
+  expect(calls.map((c) => (c.init?.headers as Record<string, string> | undefined)?.['X-Chela-Session-Token'])).toEqual(['tok-runs']); // CMX-447: the server refuses it without
   expect(result().className).toBe('init-result ok');
   expect(lines()).toEqual(['created+icon: Created WORKFLOW.md', 'skipped+icon: Skipped (already exist): TODO.md',
     'next: Next: add /srv/repo/WORKFLOW.md to CHELA_DISPATCH_WORKFLOWS and restart the daemon, or run:  chela dispatch /srv/repo/WORKFLOW.md']);

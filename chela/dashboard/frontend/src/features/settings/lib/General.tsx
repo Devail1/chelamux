@@ -2,7 +2,7 @@
 // folder, the dispatcher agent's permission mode and model, Remote Control, file drop, the
 // Telegram topics (CMX-204) and the remote-access note.
 import { useState } from 'react';
-import { api, BOOT } from '../../../shared/api/index.ts';
+import { api, BOOT, decideHeaders } from '../../../shared/api/index.ts';
 import { useStore } from '../../../shared/store/index.ts';
 import { Button, FieldRow, Select, TextInput, Toggle } from '../../../shared/ui/index.ts';
 import { refreshLauncher } from '../../launcher/index.ts';
@@ -105,7 +105,7 @@ function UpdateCard({ data, reload }: { data: SettingsPayload | 'failed' | null;
     setMsg({ cls: '', text: 'Starting…' });
     let resp: { error?: string; ok?: boolean; started?: boolean; detail?: string; run?: unknown; boot?: unknown } | null;
     try {
-      resp = (await api('/api/update/apply', { method: 'POST' })) as typeof resp;
+      resp = (await api('/api/update/apply', { method: 'POST', headers: decideHeaders() })) as typeof resp;
     } catch {
       setMsg({ cls: 'err', text: 'Request failed. The dashboard may have already restarted; refresh to check.' });
       return;

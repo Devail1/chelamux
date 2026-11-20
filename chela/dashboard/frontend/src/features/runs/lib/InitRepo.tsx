@@ -2,7 +2,7 @@
 // starter.seed_repo, which never overwrites). The path field suggests the launcher's known
 // project dirs. Ported from static/js/dispatcher.js by CMX-231.
 import { useState } from 'react';
-import { api } from '../../../shared/api/index.ts';
+import { api, decideHeaders } from '../../../shared/api/index.ts';
 import { icons } from '../../../shared/icons/index.ts';
 import { createStore, useStore } from '../../../shared/store/index.ts';
 import { refreshWork } from '../../../shared/store/work.ts';
@@ -50,7 +50,7 @@ function InitForm({ paths }: { paths: string[] }) {
     setResult({ cls: '', text: 'Seeding…' });
     let res: InitResponse | null;
     try {
-      res = (await api('/api/dispatcher/init', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ path: p }) })) as InitResponse | null;
+      res = (await api('/api/dispatcher/init', { method: 'POST', headers: decideHeaders(), body: JSON.stringify({ path: p }) })) as InitResponse | null;
     } catch {
       return setResult({ cls: 'err', text: 'Request failed.' });
     }

@@ -9,6 +9,7 @@ from __future__ import annotations
 import pytest
 
 from chela.dashboard import app as dash
+from tests._browser_session import as_browser
 
 
 @pytest.fixture(autouse=True)
@@ -109,7 +110,7 @@ def test_share_does_not_resize_owner_window(monkeypatch, _isolate):
     monkeypatch.setattr(dash.collab_stream, "start_bridge", lambda wid, on_revoke=None, **kw: "CODE")
     monkeypatch.setattr(dash.collab_stream, "join_url", lambda wid: "https://relay/j/room")
 
-    resp = dash.app.test_client().post("/api/term/@9/share", json={"on": True, "cols": 111, "rows": 22})
+    resp = as_browser(dash.app.test_client()).post("/api/term/@9/share", json={"on": True, "cols": 111, "rows": 22})
     assert resp.status_code == 200
     assert dash._SHARED["@9"] == {"cols": 110, "rows": 19}   # live dims win over posted 111x22
     assert touched == []                                     # window size untouched on share
@@ -201,7 +202,7 @@ def test_share_on_without_relay_errors_instead_of_faking_it(monkeypatch, _isolat
     started = []
     monkeypatch.setattr(dash.collab_stream, "start_bridge", lambda wid, on_revoke=None: started.append(wid) or "CODE")
 
-    resp = dash.app.test_client().post("/api/term/@9/share", json={"on": True})
+    resp = as_browser(dash.app.test_client()).post("/api/term/@9/share", json={"on": True})
 
     assert resp.status_code == 400
     body = resp.get_json()
@@ -215,6 +216,6 @@ def test_grant_endpoint_is_gone(monkeypatch, _isolate):
     """The write-grant plane was removed (full-access) — /grant must 404/405."""
     monkeypatch.setattr(dash, "_terminals_port_map", lambda: {"@9": 5301})
     monkeypatch.setattr(dash, "_require_terminals", lambda: None)
-    r = dash.app.test_client().post("/api/term/@9/grant", json={"write": True})
+    r = as_browser(dash.app.test_client()).post("/api/term/@9/grant", json={"write": True})
     assert r.status_code in (404, 405)
     assert not hasattr(dash.collab_stream, "set_write")   # helper deleted too
