@@ -600,8 +600,12 @@ def rule_repeat_flake(src: Sources, state: dict) -> list[dict]:
         ids |= {m.rstrip(".,;)") for m in _TEST_ID_RE.findall(rec.get("cannot_verify") or "")}
         for tid in ids:
             seen.setdefault(tid, {})[str(rec.get("task_id"))] = at
+    # CMX-451: signed by its task set, like the CI half below — the same two tasks re-read
+    # by every later scan (after a restart, or once RENOTIFY_S passes) are not news; a third
+    # task is. A task's later round only moves its timestamp, so it is not news either.
     out = [_finding("repeat_flake", tid, f"{tid} failed judge baselines of {len(tasks)} "
-                    f"tasks in 24h: {', '.join(sorted(tasks))}", test=tid, tasks=tasks)
+                    f"tasks in 24h: {', '.join(sorted(tasks))}", sig=",".join(sorted(tasks)),
+                    test=tid, tasks=tasks)
            for tid, tasks in sorted(seen.items()) if len(tasks) >= 2]
     # CMX-282: the same test red-then-green-on-re-run on ≥2 PRs' heads within 48 h ⇒ file
     # it and register it in tests/flaky.toml the same day. CMX-298: a flake on a head from
@@ -697,7 +701,8 @@ def record(chela_dir: Path, result: dict, state: dict, src: Sources) -> list[dic
     """Append the findings to ``ops/findings.jsonl``, update the dedupe state, and return the
     ones to notify: never notified, or last notified ≥ :data:`RENOTIFY_S` ago — unless it
     carries a ``sig`` equal to the one last notified (CMX-298: the same past flakes, re-read
-    by every later scan, are not news). A finding that is gone from a rule that completed
+    by every later scan, are not news). A notified finding with no saved sig (notified before
+    its rule signed it, CMX-451) adopts the current one without a notice. A finding that is gone from a rule that completed
     WITHOUT raising is forgotten, so its recurrence is new again; a rule that raised proves
     nothing about what it used to find."""
     notified, now = dict(state.get("notified") or {}), result["ts"]
@@ -713,7 +718,10 @@ def record(chela_dir: Path, result: dict, state: dict, src: Sources) -> list[dic
         key = f"{f['rule']}:{f['subject']}"
         sig = f.get("sig")
         if sig is not None and key in notified:
-            due = sigs.get(key) != sig
+            if key not in sigs:   # CMX-451: notified before its rule signed it — adopt, quietly
+                sigs[key] = sig
+                continue
+            due = sigs[key] != sig
         else:
             due = now - notified.get(key, float("-inf")) >= RENOTIFY_S
         if due:
