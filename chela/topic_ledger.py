@@ -64,22 +64,47 @@ class TopicLedger:
     def get(self, thread) -> dict | None:
         return self._topics.get(str(thread))
 
-    def opened(self, thread, window: str, cwd: str | None, name: str | None = None) -> None:
-        """Record ``thread`` as open and bound to ``window`` (a create, reopen or rename)."""
+    def opened(self, thread, window: str, cwd: str | None, name: str | None = None,
+               session_id: str | None = None) -> None:
+        """Record ``thread`` as open and bound to ``window`` (a create, reopen or rename).
+        ``session_id`` (CMX-450) is the Claude session that window runs, recorded when the
+        topic is bound so a restart can find the topic by session; None keeps what is there."""
         entry = self._topics.setdefault(str(thread), {"created": self._clock()})
         entry.update(window=window, cwd=_norm_cwd(cwd), closed=None)
         if name is not None:
             entry["name"] = name
+        if session_id:
+            entry["session_id"] = session_id
         self._save()
 
     def closed(self, thread, session_id: str | None = None) -> None:
         """Record ``thread`` as closed. A topic made before the ledger existed is added
         with no cwd: never reused, but the cleanup can still find it. ``session_id`` is the
-        Claude session its window was running (None = unknown), what a reopen resumes."""
+        Claude session its window was running, what a reopen resumes; None (unknown) keeps
+        the one recorded when the topic was bound (CMX-450) rather than erasing it."""
         entry = self._topics.setdefault(str(thread), {"created": None, "cwd": None})
         entry["closed"] = self._clock()
+        if session_id or "session_id" not in entry:
+            entry["session_id"] = session_id
+        self._save()
+
+    def set_session(self, thread, session_id: str) -> bool:
+        """Record ``session_id`` on a known ``thread`` that has none yet (CMX-450: a topic
+        bound before session ids were recorded). True when it wrote."""
+        entry = self._topics.get(str(thread))
+        if entry is None or entry.get("session_id") or not session_id:
+            return False
         entry["session_id"] = session_id
         self._save()
+        return True
+
+    def for_session(self, session_id: str | None) -> list[str]:
+        """Every topic recorded for ``session_id``, newest first (CMX-450). None/empty
+        matches nothing."""
+        if not session_id:
+            return []
+        hits = [t for t, e in self._topics.items() if e.get("session_id") == session_id]
+        return sorted(hits, key=lambda t: self._topics[t].get("created") or 0, reverse=True)
 
     def forget(self, thread) -> None:
         if self._topics.pop(str(thread), None) is not None:
