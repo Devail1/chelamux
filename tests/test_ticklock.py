@@ -71,18 +71,26 @@ def _py(code: str, *args, **kw) -> subprocess.Popen:
 # the test creates `release` — so "the tick is still running" never depends on how fast the
 # runner is (a fixed gap raced a loaded CI runner).
 _DAEMON = """
-    import json, sys, time
+    import json, os, sys, time
     from pathlib import Path
     from chela import config, ticklock
     config.CHELA_DIR = Path(sys.argv[1])
     row, in_tick, release = Path(sys.argv[2]), Path(sys.argv[3]), Path(sys.argv[4])
+
+    def write_row(data):
+        # Atomic, like a DB commit: the test polls this file, and an in-place rewrite let it
+        # read a torn mix of the old and new row (CI 11-19: JSONDecodeError "Extra data").
+        tmp = row.with_suffix(".tmp")
+        tmp.write_text(json.dumps(data))
+        os.replace(tmp, row)
+
     fd = ticklock.begin_tick(lambda s: (time.sleep(s), False)[1])
-    row.write_text(json.dumps({"task_id": "CMX-1", "status": "claimed"}))
+    write_row({"task_id": "CMX-1", "status": "claimed"})
     in_tick.touch()
     deadline = time.monotonic() + 60
     while not release.exists() and time.monotonic() < deadline:
         time.sleep(0.01)
-    row.write_text(json.dumps({"task_id": "CMX-1", "status": "running", "window": "@7"}))
+    write_row({"task_id": "CMX-1", "status": "running", "window": "@7"})
     ticklock.end_tick(fd)
     time.sleep(60)
 """
