@@ -473,6 +473,8 @@ class Report:
     # ⏳ CMX-141 (self-check): UNRUN experiments — kept OUT of ``outcomes`` — and why.
     unrun: list[Outcome] = field(default_factory=list)
     exhausted: str = ""
+    # ⏳ CMX-445 (self-check): who it handed the suite slot to between two experiments.
+    yielded_to: list[str] = field(default_factory=list)
     # 📄 CMX-163: every NON-GREEN infrastructure suite run (the baseline, its coverage run, the
     # base-branch diagnostic) — and the failure-log paths `judge_run` wrote them to.
     suite_failures: list[SuiteResult] = field(default_factory=list)
@@ -2739,6 +2741,11 @@ def _self_check(
                                 f"{n} of {len(items)} experiment(s)")
             _mark_unrun(report, chosen[n:], report.exhausted)
             break
+        # ⏳ CMX-445: between two suite runs (no file mutated), a better-ranked waiter — a
+        # judge round, a higher-priority hand-in — gets the slot now; this resumes after.
+        yielded = suite_guard.yield_slot()
+        if yielded:
+            report.yielded_to.append(yielded)
         with judge_timing.within("experiments"):
             outcomes, contamination = _apply_experiments(
                 worktree, test_cmd, [raw_exp], baseline, timeout, selector)

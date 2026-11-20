@@ -77,7 +77,7 @@ def _fake_box(monkeypatch, clock: FakeClock, original: str) -> list[float]:
         return ""
 
     @contextmanager
-    def battery(cwd, kind, on_wait=None, max_wait=None):
+    def battery(cwd, kind, on_wait=None, max_wait=None, rank=None):
         yield       # 🧠 CMX-393: the battery's own slot — its wait is tested in test_suite_battery
 
     monkeypatch.setattr(suite_guard, "slot", slot)
