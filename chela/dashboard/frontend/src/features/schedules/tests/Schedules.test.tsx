@@ -159,3 +159,25 @@ test('with no agent to pick, Add sends nothing', async () => {
   expect(calls).toEqual([]);
   fireEvent.click(screen.getByRole('button', { name: 'Cancel' }));
 });
+
+test('CMX-447: a refused write is shown, and a refused add keeps the dialog and its input', async () => {
+  const alerts: string[] = [];
+  vi.stubGlobal('alert', (m: string) => alerts.push(m));
+  const ERR = 'missing or stale session token: reload the page';
+  vi.stubGlobal('fetch', async (url: string, init?: RequestInit) => {
+    calls.push({ url, init });
+    const body = init?.method ? { ok: false, error: ERR } : await (answers[url] ?? (() => Promise.resolve({})))();
+    return { ok: !init?.method, status: init?.method ? 403 : 200, json: () => Promise.resolve(body) };
+  });
+  await shown();
+  await act(async () => fireEvent.click(screen.getByRole('button', { name: 'Disable' })));
+  await act(async () => fireEvent.click(screen.getAllByRole('button', { name: 'Del' })[0] as HTMLElement));
+  expect(alerts).toEqual([ERR, ERR]);
+  fireEvent.click(screen.getByRole('button', { name: '+ Add Task' }));
+  fireEvent.change(screen.getByRole('textbox', { name: 'Interval (e.g. 30s, 5m, 1h)' }), { target: { value: '5m' } });
+  fireEvent.change(screen.getByRole('textbox', { name: 'Prompt' }), { target: { value: 'refresh' } });
+  await act(async () => fireEvent.click(screen.getByRole('button', { name: 'Add' })));
+  expect(alerts).toEqual([ERR, ERR, ERR]);
+  expect(screen.queryByRole('dialog')).not.toBeNull();
+  expect((screen.getByRole('textbox', { name: 'Prompt' }) as HTMLTextAreaElement).value).toBe('refresh');
+});

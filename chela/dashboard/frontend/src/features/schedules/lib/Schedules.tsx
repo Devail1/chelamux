@@ -24,14 +24,23 @@ export function showAddSchedule() {
 }
 
 
+/** A write's refusal (a 403 for a stale session token, a 400 for a bad field): shown, never
+ * swallowed. Resolves to whether the write went through. */
+async function write(path: string, init: RequestInit): Promise<boolean> {
+  const reply = (await api(path, init)) as { error?: unknown } | null;
+  if (typeof reply?.error !== 'string') return true;
+  window.alert(reply.error);
+  return false;
+}
+
 function ScheduleRow({ t }: { t: Schedule }) {
   async function toggle() {
-    await api(`/api/schedules/${t.id}`, { method: 'PATCH', headers: decideHeaders(), body: JSON.stringify({ enabled: !t.enabled }) });
+    await write(`/api/schedules/${t.id}`, { method: 'PATCH', headers: decideHeaders(), body: JSON.stringify({ enabled: !t.enabled }) });
     refreshSchedules();
   }
   async function remove() {
     if (!window.confirm(`Delete task ${t.id}?`)) return;
-    await api(`/api/schedules/${t.id}`, { method: 'DELETE', headers: decideHeaders() });
+    await write(`/api/schedules/${t.id}`, { method: 'DELETE', headers: decideHeaders() });
     refreshSchedules();
   }
   return (
@@ -114,7 +123,8 @@ function AddForm() {
   async function add() {
     const body = { agent_name: agentName, schedule_type: type, schedule_value: value.trim(), prompt: prompt.trim() };
     if (!body.agent_name || !body.schedule_value || !body.prompt) return;
-    await api('/api/schedules', { method: 'POST', headers: decideHeaders(), body: JSON.stringify(body) });
+    // A refused add keeps the dialog and what was typed in it.
+    if (!(await write('/api/schedules', { method: 'POST', headers: decideHeaders(), body: JSON.stringify(body) }))) return;
     adding.set(false);
     refreshSchedules();
   }
