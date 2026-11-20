@@ -1,7 +1,9 @@
 // CMX-276: the sidebar's components. `model.ts` (the pure grouping model) and `controller.ts`
 // (its state and commands, CMX-278) are this module's other entry points.
 export { LONG_PRESS_MS, Sidebar, type SidebarActions } from './lib/Sidebar.tsx';
-export { DRAG_THRESHOLD_PX, LONG_PRESS_DRAG_MS, TOUCH_SLOP_PX, groupSlot } from './lib/drag.ts';
+export {
+  DRAG_THRESHOLD_PX, type DragDrop, type DragSource, type DragView, LONG_PRESS_DRAG_MS, TOUCH_SLOP_PX, groupSlot, useSidebarDrag,
+} from './lib/drag.ts';
 export { ViewMenu } from './lib/menus.tsx';
 export { Nav } from './lib/Nav.tsx';
 export { Recent } from './lib/Recent.tsx';
