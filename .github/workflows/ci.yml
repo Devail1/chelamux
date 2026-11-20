@@ -159,3 +159,49 @@ jobs:
       # a fresh build of src/ — a source change without a rebuild. Also runs inside Pytest above.
       - name: Committed build is fresh
         run: python3 chela/dashboard/frontend_build.py
+
+  # CMX-444: the clean-container install check (scripts/check_fresh_install.sh) is
+  # network-bound — apt, the astral uv installer, a git install — so it lives here, out of
+  # the unit suite, with its own deadline and one retry. A phase that hangs exits 75 and
+  # names itself; two in a row end this job RED as "infra: did not complete" (never green).
+  # The prereqs image is cached between runs, keyed on its Dockerfiles' hash + the month.
+  fresh-install:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+      - name: Name the prereqs image
+        id: prereqs
+        run: |
+          tag="$(scripts/check_fresh_install.sh --image-tag)"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "key=fresh-install-${tag//:/-}-$(date -u +%Y-%m)" >> "$GITHUB_OUTPUT"
+      - name: Cache the prereqs image
+        id: cache
+        uses: actions/cache@v4
+        with:
+          path: /tmp/fresh-install-prereqs.tar
+          key: ${{ steps.prereqs.outputs.key }}
+      - name: Load the cached prereqs image
+        if: steps.cache.outputs.cache-hit == 'true'
+        run: docker load -i /tmp/fresh-install-prereqs.tar
+      - name: Fresh install (one retry on an infra timeout)
+        run: |
+          for attempt in 1 2; do
+            rc=0
+            scripts/check_fresh_install.sh || rc=$?
+            case "$rc" in
+              0) exit 0 ;;
+              75) echo "::warning title=infra: did not complete::attempt $attempt timed out (the phase is named above)" ;;
+              77) echo "::error title=fresh install did NOT run::no usable docker on the runner"; exit 1 ;;
+              *) exit "$rc" ;;
+            esac
+          done
+          echo "::error title=infra: did not complete::the fresh-install check timed out twice — not a pass"
+          exit 1
+      - name: Save the prereqs image for the cache
+        if: steps.cache.outputs.cache-hit != 'true'
+        run: |
+          if docker image inspect "${{ steps.prereqs.outputs.tag }}" >/dev/null 2>&1; then
+            docker save -o /tmp/fresh-install-prereqs.tar "${{ steps.prereqs.outputs.tag }}"
+          fi

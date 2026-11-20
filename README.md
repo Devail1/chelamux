@@ -124,7 +124,7 @@ chela dashboard                                # the wall: http://127.0.0.1:5001
 Four commands; on a clean Ubuntu box the wall is up about 15s after the first one.
 `scripts/check_fresh_install.sh` runs
 exactly this block in a clean container, times it and checks that `chela doctor` passes
-(the test suite runs it wherever docker or podman is available). If your shell does not find `chela`, run `uv tool update-shell`.
+(CI runs it on every PR, in its own `fresh-install` job). If your shell does not find `chela`, run `uv tool update-shell`.
 
 > **`chela run` is the engine, not a helper.** The scheduler, the dispatcher, the
 > needs-input scan and the decisions inbox all live in its loop. Kill it and nothing *looks*
