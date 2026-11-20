@@ -191,6 +191,18 @@ def ended(now_epoch: str | None, *, path: Path | None = None) -> list[tuple[str,
     return [(ep, rec.get("windows") or {}) for ep, rec in ordered if ep != now_epoch]
 
 
+def lifetimes(*, path: Path | None = None) -> dict[str, float]:
+    """CMX-449: ``{epoch: seconds the roster saw it live}`` — ``last_seen - first_seen``, a
+    LOWER bound on how long that server ran (the reconcile tick samples it on an interval).
+    An epoch missing either timestamp is left out: its lifetime is unknown, never zero."""
+    out: dict[str, float] = {}
+    for ep, rec in _load(path)["epochs"].items():
+        first, last = rec.get("first_seen"), rec.get("last_seen")
+        if isinstance(first, (int, float)) and isinstance(last, (int, float)):
+            out[ep] = max(0.0, float(last) - float(first))
+    return out
+
+
 # A window that vanished in a server's last minute may be the shutdown tearing panes down
 # one by one, not the user: only a close the server outlived by this long counts as one.
 _CLOSE_SETTLE_S = 60.0

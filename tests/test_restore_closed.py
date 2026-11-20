@@ -145,7 +145,7 @@ def test_a_session_restored_in_b_then_closed_in_b_is_not_resumed_by_bs_crash(
     _carried_into_b(tmp_path, monkeypatch)
     _rec(B, {"@11": ("site", S), "@12": ("orch", T)}, 20.0, monkeypatch)
     _rec(B, {"@12": ("orch", T)}, 30.0, monkeypatch)           # the user closes S
-    _rec(B, {"@12": ("orch", T)}, 500.0, monkeypatch)          # ... and B lives on
+    _rec(B, {"@12": ("orch", T)}, 2000.0, monkeypatch)  # ... and B lives on (CMX-449: long)
 
     at_c = _boot(tmp_path, C, {"epoch": B, "owed": [
         {"session_id": S, "cwd": CWD, "label": "site", "wid": "@32",

@@ -231,7 +231,8 @@ class Verdict:
 
 
 def _classify(store: str, wid: str, stamped_epoch: str | None, session_id: str | None,
-              now_epoch: str | None, roster_lookup, wid_for_session) -> Verdict | None:
+              now_epoch: str | None, roster_lookup, wid_for_session,
+              cwd_for_session=None) -> Verdict | None:
     """One row → a :class:`Verdict`, or ``None`` if it isn't dangling at all.
 
     ⛔ Session id is the ONLY automatic path: a row whose ``cwd``/``name`` happen to match a
@@ -249,8 +250,11 @@ def _classify(store: str, wid: str, stamped_epoch: str | None, session_id: str |
     if roster_row.get("session_source") == "live" and roster_row.get("session_id"):
         sid = roster_row["session_id"]
     cwd = roster_row.get("cwd")
+    # CMX-449: no cwd on record, but a session — its own transcript says where it ran.
     label = roster_row.get("name") or ""
     new_wid = wid_for_session(sid) if sid else None
+    if not cwd and sid and not new_wid and cwd_for_session is not None:
+        cwd = cwd_for_session(sid)       # only a row that may be relaunched needs one
     if new_wid:
         return Verdict(store, wid, stamped_epoch, "REVIVABLE", sid, new_wid, cwd, label)
     return Verdict(store, wid, stamped_epoch, "MANUAL", sid, None, cwd, label)
@@ -258,7 +262,8 @@ def _classify(store: str, wid: str, stamped_epoch: str | None, session_id: str |
 
 def plan(orchestrator: dict, bindings: dict, session_entries: dict,
          now_epoch: str | None, roster_lookup=roster.window,
-         wid_for_session=sessions.wid_for_session) -> list[Verdict]:
+         wid_for_session=sessions.wid_for_session,
+         cwd_for_session=sessions.cwd_for_session) -> list[Verdict]:
     """Classify every dangling row across the three session-stamped stores.
 
     ``orchestrator`` is ``inbox.load()``'s store dict (only its ``orchestrator``/
@@ -267,6 +272,10 @@ def plan(orchestrator: dict, bindings: dict, session_entries: dict,
     :func:`chela.sessionids.entries`. ``roster_lookup`` and ``wid_for_session`` are DI seams
     (default to the real :mod:`chela.roster` / :mod:`chela.sessions`) so this tests without
     tmux, ``/proc``, or a live roster file.
+
+    CMX-449: a row whose roster join carries no ``cwd`` but does carry a session falls back
+    to ``cwd_for_session`` (default :func:`chela.sessions.cwd_for_session`, the session's own
+    transcript), so it can still be relaunched instead of reading "no cwd on record".
 
     ``now_epoch`` unknown (``None``) classifies NOTHING and writes nothing — the same
     two-known-halves rule :func:`chela.epoch.is_dangling` itself follows: an unverifiable
@@ -279,17 +288,17 @@ def plan(orchestrator: dict, bindings: dict, session_entries: dict,
     if wid:
         v = _classify("inbox.orchestrator", wid, orchestrator.get("orchestrator_epoch"),
                       orchestrator.get("orchestrator_session"), now_epoch,
-                      roster_lookup, wid_for_session)
+                      roster_lookup, wid_for_session, cwd_for_session)
         if v:
             out.append(v)
     for bwid, bepoch in sorted((bindings or {}).items()):
         v = _classify("telegram.bindings", bwid, bepoch, None, now_epoch,
-                      roster_lookup, wid_for_session)
+                      roster_lookup, wid_for_session, cwd_for_session)
         if v:
             out.append(v)
     for swid, meta in sorted((session_entries or {}).items()):
         v = _classify("session-ids", swid, meta.get("epoch"), meta.get("session_id"),
-                      now_epoch, roster_lookup, wid_for_session)
+                      now_epoch, roster_lookup, wid_for_session, cwd_for_session)
         if v:
             out.append(v)
     return out
@@ -794,19 +803,47 @@ def boot_marker_path() -> Path:
     return config.CHELA_DIR / "restore-boot.json"
 
 
-def _source_epochs(previous: str, ended: list[tuple[str, dict]]) -> list[str]:
-    """CMX-152: ``previous`` — plus, ONLY when the roster recorded ``previous`` with no
-    windows (tmux restarted again before it was sampled), the epochs before it back to and
-    including the first one that recorded any. Never further: that is the lookback bound.
-    ``previous`` unrecorded is unknown, not empty — no walk."""
+def _is_short(ep: str, lifetimes: dict | None, short_s: float) -> bool:
+    """CMX-449: did the roster see ``ep`` live for less than ``short_s`` seconds? An epoch
+    with no recorded lifetime is NOT short — unknown never reads as transient. A lifetime
+    is never negative (:func:`chela.roster.lifetimes`), so ``short_s`` 0 walks past nothing."""
+    lived = (lifetimes or {}).get(ep)
+    return lived is not None and lived < short_s
+
+
+def _source_epochs(previous: str, ended: list[tuple[str, dict]],
+                   lifetimes: dict | None = None, short_s: float = 0) -> list[str]:
+    """The ended epochs a boot pass resumes from, newest first, starting at ``previous``.
+
+    CMX-152: an epoch the roster recorded with no windows (tmux restarted again before it
+    was sampled) is walked past. CMX-449: so is one that recorded windows but lived less
+    than ``short_s`` seconds (:func:`_is_short`) — a crash loop's middle epoch holds only
+    the few windows that came back, while the real working set lived in the one before it.
+    The walk stops at, and includes, the first epoch that recorded windows and was not
+    short; if none is, it covers every epoch up to the oldest that recorded windows. Never
+    further: that is the lookback bound. ``previous`` unrecorded is unknown, not empty — no
+    walk."""
     order = [ep for ep, _ in ended]
-    if previous not in order or ended[order.index(previous)][1]:
+    if previous not in order:
         return [previous]
-    i = order.index(previous)
-    for j in range(i + 1, len(ended)):
-        if ended[j][1]:
-            return [previous, *order[i + 1:j + 1]]
-    return [previous]
+    walked: list[str] = []
+    upto = 0
+    for ep, windows in ended[order.index(previous):]:
+        walked.append(ep)
+        if windows:
+            upto = len(walked)
+            if not _is_short(ep, lifetimes, short_s):
+                return walked
+    return walked[:upto] if upto else [previous]
+
+
+def _why_walked(ep: str, ended: list[tuple[str, dict]], lifetimes: dict | None,
+                short_s: float) -> str:
+    """Why the boot pass walked back past ``ep`` — the sentence its notice prints."""
+    if not dict(ended).get(ep):
+        return f"{ep} (recorded no windows)"
+    lived = (lifetimes or {}).get(ep, 0.0)
+    return f"{ep} (lived {lived:.0f}s, under {short_s:.0f}s)"
 
 
 def lineage(name: str | None, cwd: str | None) -> tuple[str, str] | None:
@@ -829,7 +866,8 @@ def _write_marker(marker: Path, now_epoch: str, owed: list[dict]) -> None:
 
 
 def closed_before_crash(now_epoch: str | None, *, roster_epochs=None,
-                        closed_lookup=None) -> dict[str, dict]:
+                        closed_lookup=None, roster_lifetimes=None,
+                        short_epoch_s=None) -> dict[str, dict]:
     """CMX-275: the sessions the user closed in the epoch(s) the last crash ended — the same
     source epochs :func:`boot_pass` reads — so ``chela restore`` names them as skipped."""
     if not now_epoch:
@@ -837,7 +875,10 @@ def closed_before_crash(now_epoch: str | None, *, roster_epochs=None,
     ended = (roster_epochs or roster.ended)(now_epoch)
     if not ended:
         return {}
-    return (closed_lookup or roster.closed)(_source_epochs(ended[0][0], ended))
+    short_s = config.restore_short_epoch_seconds() if short_epoch_s is None else short_epoch_s
+    sources = _source_epochs(ended[0][0], ended, (roster_lifetimes or roster.lifetimes)(),
+                             short_s)
+    return (closed_lookup or roster.closed)(sources)
 
 
 def closed_note(info: dict) -> str:
@@ -877,7 +918,8 @@ def _one_per_lineage(rows: list[Verdict], carried: list[Verdict],
 
 def boot_pass(now_epoch: str | None, *, resume_enabled: bool, gather, marker: Path,
               resume_fn=None, notify=None, roster_epochs=None,
-              wid_for_session=None, closed_lookup=None) -> dict | None:
+              wid_for_session=None, closed_lookup=None, roster_lifetimes=None,
+              short_epoch_s=None) -> dict | None:
     """CMX-125: run the restore pass at most ONCE per tmux epoch (called every daemon tick).
 
     ``marker`` holds the last epoch seen. Unknown epoch → nothing (a boot can reach the daemon
@@ -896,6 +938,14 @@ def boot_pass(now_epoch: str | None, *, resume_enabled: bool, gather, marker: Pa
     CMX-275: a session the roster saw CLOSED in a source epoch (:func:`chela.roster.closed`,
     ``closed_lookup``) is never resumed — owed or gathered — and drops out of ``owed``; the
     notice names it under ``skipped_closed``.
+
+    CMX-449 — a SHORT-lived middle epoch (tmux restarted, ran seconds, restarted again): the
+    walk also passes every epoch the roster saw live under ``short_epoch_s`` seconds
+    (default :func:`chela.config.restore_short_epoch_seconds`; lifetimes from
+    ``roster_lifetimes``, default :func:`chela.roster.lifetimes`) and resumes the union of the
+    walked epochs, one launch per session from its newest epoch. The notice names the epochs
+    it walked past and why (``walked``), and a source row already live elsewhere
+    (REVIVABLE) under ``skipped_live``.
     """
     if not now_epoch:
         return None
@@ -921,7 +971,10 @@ def boot_pass(now_epoch: str | None, *, resume_enabled: bool, gather, marker: Pa
             and o["session_id"] not in sampled
             and lineage(o.get("label"), o["cwd"]) not in sampled_lineages]
     _write_marker(marker, now_epoch, owed)
-    sources = _source_epochs(previous, ended)
+    short_s = config.restore_short_epoch_seconds() if short_epoch_s is None else short_epoch_s
+    lifetimes = (roster_lifetimes or roster.lifetimes)()
+    sources = _source_epochs(previous, ended, lifetimes, short_s)
+    walked = [_why_walked(ep, ended, lifetimes, short_s) for ep in sources[:-1]]
     closed = (closed_lookup or roster.closed)(sources)
     live = wid_for_session or sessions.wid_for_session
     still_live = [o for o in owed if live(o["session_id"])]
@@ -939,6 +992,11 @@ def boot_pass(now_epoch: str | None, *, resume_enabled: bool, gather, marker: Pa
                                    o["session_id"], None, o["cwd"], o.get("label") or "")
                            for o in owed if o not in still_live) if not_closed(v)]
     verdicts, runs = gather()
+    skipped_live: dict = {}
+    for v in verdicts:
+        if v.stamped_epoch in sources and v.verdict == "REVIVABLE" and v.session_id:
+            skipped_live.setdefault(
+                v.session_id, f"{v.label or v.wid}: already live at {v.new_wid}")
     newest: dict = {v.session_id: None for v in carried}
     rows = list(carried)
     for v in sorted((v for v in verdicts if v.stamped_epoch in sources
@@ -966,18 +1024,26 @@ def boot_pass(now_epoch: str | None, *, resume_enabled: bool, gather, marker: Pa
     log.info("restore boot pass: tmux epoch %s -> %s, %d resumed, %d not",
              previous, now_epoch, len(back), len(left))
     out = {"previous": previous, "epoch": now_epoch, "resumed": back, "not_resumed": left,
-           **({"skipped_closed": list(skipped_closed.values())} if skipped_closed else {})}
+           **({"skipped_closed": list(skipped_closed.values())} if skipped_closed else {}),
+           **({"skipped_live": list(skipped_live.values())} if skipped_live else {})}
     recovered = sources[-1] if len(sources) > 1 else previous if carried else None
     head = "tmux restarted"
     if recovered:
         out["recovered_from"] = recovered
-        head = f"tmux restarted twice; recovered from epoch {recovered}"
-    if back or left or skipped_closed:
+        times = "twice" if len(sources) <= 2 else f"{len(sources)} times"
+        head = f"tmux restarted {times}; recovered from epoch {recovered}"
+    if walked:
+        out["source_epochs"] = sources
+        out["walked"] = walked
+    if back or left or skipped_closed or walked:
         (notify or inbox.enqueue)(
             "restore_boot",
             f"{head} — came back: {', '.join(back) or 'none'}; "
             f"not resumed: {'; '.join(left) or 'none'}"
             + (f"; skipped, closed: {'; '.join(skipped_closed.values())}"
-               if skipped_closed else ""),
+               if skipped_closed else "")
+            + (f"; skipped, already live: {'; '.join(skipped_live.values())}"
+               if skipped_live else "")
+            + (f"; walked back past: {', '.join(walked)}" if walked else ""),
             out)
     return out

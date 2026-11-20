@@ -1060,6 +1060,18 @@ RESTORE_RESUME_ENABLED = os.environ.get("CHELA_RESTORE_RESUME", "false").strip()
     "true", "1", "yes", "on",
 )
 
+# CMX-449: the boot restore pass walks back past every ended tmux epoch that lived less than
+# this many seconds (observed by the roster: ``last_seen - first_seen``) and resumes the
+# union of the epochs it walked plus the first one that lived longer. A crash loop's
+# short-lived middle epoch then cannot hide the real working set behind it.
+RESTORE_SHORT_EPOCH_DEFAULT_S = 900
+
+
+def restore_short_epoch_seconds() -> int:
+    """``CHELA_RESTORE_SHORT_EPOCH_S`` (default 900, clamped to 0..86400). 0 turns the walk
+    back off: only an epoch the roster recorded with no windows is walked past (CMX-152)."""
+    return _env_int("CHELA_RESTORE_SHORT_EPOCH_S", RESTORE_SHORT_EPOCH_DEFAULT_S, 0, 86400)
+
 # A Dispatch-tab knob (CMX-220), restart_required — same latched-constant shape as
 # JUDGE_ENABLED/CRITIC_ENABLED above.
 _dispatch_raw = dispatch_value("dispatch_workflows")
