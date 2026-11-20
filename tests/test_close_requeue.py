@@ -798,6 +798,7 @@ _IDENTITY = frozenset({
     "task_id", "workflow_path", "title", "status", "attempt", "started_at", "task_number",
     "brief", "risk", "risk_reason", "tracker_url", "review_history", "requeue_count",
     "last_error", "cap_requeues", "requeue_addendum",
+    "priority",            # ⏳ CMX-445: the tracker's priority, copied at claim like `risk`
 })
 
 

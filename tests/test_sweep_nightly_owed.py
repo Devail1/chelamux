@@ -451,3 +451,14 @@ def test_a_fake_battery_unrun_is_owed_under_its_blamed_pr(tmp_path, monkeypatch)
     _run(repo, chela, Filer())
     [e] = _owed(chela, repo)
     assert e["pr"].endswith(f"` {PR1}") and (e["file"], e["line"]) == ("size.py", 2)
+
+
+def test_the_nightly_sweep_queues_for_the_slot_last(tmp_path, monkeypatch):
+    """⏳ CMX-445: the nightly battery queues at the sweep's rank (6) — behind every judge
+    round and every hand-in, whatever their priority."""
+    from chela import suite_guard
+    repo, chela, _ = _night_one(tmp_path)
+    _budget(repo, tmp_path, 3)
+    spy = _Spy(monkeypatch)
+    _run(repo, chela, Filer())
+    assert spy.calls and spy.calls[0][0]["rank"] == 6 == suite_guard.RANK_SWEEP

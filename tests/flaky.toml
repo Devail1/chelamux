@@ -6,7 +6,3 @@
 # on an expired entry, or one whose issue is missing (or, where the tracker is readable,
 # Done/Canceled) — fix the test, then delete it.
 
-[[flaky]]
-test = "tests/test_suite_containment.py::test_any_gh_a_test_runs_by_name_meets_the_failing_stub"
-issue = "CMX-281"
-expires = "2026-11-19"

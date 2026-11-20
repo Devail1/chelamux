@@ -368,9 +368,9 @@ def battery_spy(monkeypatch):
     calls = []
 
     @contextlib.contextmanager
-    def spy(cwd, kind, on_wait=None, max_wait=None, poll=None):
+    def spy(cwd, kind, on_wait=None, max_wait=None, poll=None, rank=None):
         calls.append({"cwd": Path(cwd), "kind": kind, "on_wait": on_wait,
-                      "max_wait": max_wait, "inside": True})
+                      "max_wait": max_wait, "rank": rank, "inside": True})
         yield
         calls[-1]["inside"] = False
     monkeypatch.setattr(suite_guard, "battery", spy)
@@ -384,7 +384,7 @@ def test_sweep_runs_its_battery_inside_one_slot(battery_spy, monkeypatch, tmp_pa
                         lambda *a, **k: seen.append(dict(battery_spy[-1])) or sweep.SweepReport())
     sweep.sweep(tmp_path, "origin/dev", "true", timeout=30)
     assert seen == [{"cwd": tmp_path.resolve(), "kind": "sweep", "on_wait": None,
-                     "max_wait": 360.0, "inside": True}]
+                     "max_wait": 360.0, "rank": None, "inside": True}]
 
 
 def test_self_check_runs_its_battery_inside_one_slot(battery_spy, monkeypatch, tmp_path):
@@ -393,7 +393,7 @@ def test_self_check_runs_its_battery_inside_one_slot(battery_spy, monkeypatch, t
                         lambda *a, **k: seen.append(dict(battery_spy[-1])) or judge.Report())
     judge.self_check(tmp_path, "true", {"experiments": []}, timeout=30)
     assert seen == [{"cwd": tmp_path, "kind": "self-check", "on_wait": None,
-                     "max_wait": 360.0, "inside": True}]
+                     "max_wait": 360.0, "rank": None, "inside": True}]
 
 
 def test_the_judge_battery_runs_inside_one_slot_with_its_wait_hook(battery_spy, monkeypatch,
@@ -405,7 +405,7 @@ def test_the_judge_battery_runs_inside_one_slot_with_its_wait_hook(battery_spy, 
                         lambda *a, **k: seen.append(dict(battery_spy[-1])) or judge.Report())
     judge.run_experiments(tmp_path, "true", {"experiments": []}, timeout=30)
     assert seen == [{"cwd": tmp_path, "kind": "judge", "on_wait": hook,
-                     "max_wait": 360.0, "inside": True}]
+                     "max_wait": 360.0, "rank": None, "inside": True}]
 
 
 @pytest.fixture
@@ -508,15 +508,18 @@ def test_task_finished_that_never_gets_a_slot_refuses(tf_run, monkeypatch, capsy
 def test_hand_in_battery_reads_the_runs_worktree_and_suite_timeout(tf_run, monkeypatch):
     got = []
     monkeypatch.setattr(suite_guard, "battery",
-                        lambda cwd, kind, max_wait=None: got.append((cwd, kind, max_wait)))
+                        lambda cwd, kind, max_wait=None, rank=None:
+                        got.append((cwd, kind, max_wait, rank)))
     dispatcher.hand_in_battery("t9")
-    assert got == [(str(tf_run), "task-finished", 540.0)]       # 12 x the workflow's 45s
+    # 12 x the workflow's 45s; no priority on the row ranks as an unknown hand-in (5)
+    assert got == [(str(tf_run), "task-finished", 540.0, 5)]
 
 
 def test_hand_in_battery_without_a_run_or_workflow_falls_back(tf_run, monkeypatch, tmp_path):
     got = []
     monkeypatch.setattr(suite_guard, "battery",
-                        lambda cwd, kind, max_wait=None: got.append((cwd, kind, max_wait)))
+                        lambda cwd, kind, max_wait=None, rank=None:
+                        got.append((cwd, kind, max_wait)))
     monkeypatch.chdir(tmp_path)
     dispatcher.hand_in_battery("nope")
     with dispatcher._db() as conn:
@@ -543,7 +546,8 @@ def test_battery_max_wait_env_then_config_then_twelve_timeouts(one_slot, monkeyp
 
 
 def test_a_hand_in_with_an_unreadable_workflow_says_so(tf_run, monkeypatch, tmp_path, caplog):
-    monkeypatch.setattr(suite_guard, "battery", lambda cwd, kind, max_wait=None: max_wait)
+    monkeypatch.setattr(suite_guard, "battery",
+                        lambda cwd, kind, max_wait=None, rank=None: max_wait)
     with dispatcher._db() as conn:
         conn.execute("UPDATE runs SET workflow_path=? WHERE task_id='t9'",
                      (str(tmp_path / "missing.md"),))
