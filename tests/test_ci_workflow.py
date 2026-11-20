@@ -683,10 +683,12 @@ def test_the_workflow_has_exactly_one_job(workflow):
 
     CMX-176 added `frontend`; `test_the_frontend_job_mapping_is_pinned_exactly` pins it whole.
     CMX-363 added `package`; `test_the_package_job_mapping_is_pinned_exactly` pins it whole.
+    CMX-444 added `fresh-install`; `test_the_fresh_install_job_mapping_is_pinned_exactly`
+    pins it whole.
     """
-    assert set(workflow["jobs"]) == {"test", "package", "frontend"}, (
+    assert set(workflow["jobs"]) == {"test", "package", "frontend", "fresh-install"}, (
         f"the workflow defines jobs {sorted(workflow['jobs'])!r}, expected exactly "
-        "{'test', 'package', 'frontend'} — another job runs independently of the `test` job's steps and can "
+        "{'test', 'package', 'frontend', 'fresh-install'} — another job runs independently of the `test` job's steps and can "
         "carry its own gate (e.g. a branch-naming check) that fails the workflow run "
         "while jobs.test.steps stays completely untouched, invisible to every other "
         "assertion in this file"
@@ -906,6 +908,77 @@ _EXPECTED_PACKAGE_JOB: dict = {
 
 def test_the_package_job_mapping_is_pinned_exactly(workflow):
     assert workflow["jobs"]["package"] == _EXPECTED_PACKAGE_JOB
+
+
+# CMX-444: the network-bound clean-container check, out of the unit suite, pinned whole.
+# The retry step's own branches are EXECUTED in tests/test_check_fresh_install.py.
+_FRESH_TAG = "${{ steps.prereqs.outputs.tag }}"
+_EXPECTED_FRESH_INSTALL_JOB: dict = {
+    "runs-on": "ubuntu-latest",
+    "timeout-minutes": 40,
+    "steps": [
+        {"uses": "actions/checkout@v4"},
+        {
+            "name": "Name the prereqs image",
+            "id": "prereqs",
+            "run": (
+                'tag="$(scripts/check_fresh_install.sh --image-tag)"\n'
+                'echo "tag=$tag" >> "$GITHUB_OUTPUT"\n'
+                'echo "key=fresh-install-${tag//:/-}-$(date -u +%Y-%m)" >> "$GITHUB_OUTPUT"\n'
+            ),
+        },
+        {
+            "name": "Cache the prereqs image",
+            "id": "cache",
+            "uses": "actions/cache@v4",
+            "with": {"path": "/tmp/fresh-install-prereqs.tar",
+                     "key": "${{ steps.prereqs.outputs.key }}"},
+        },
+        {
+            "name": "Load the cached prereqs image",
+            "if": "steps.cache.outputs.cache-hit == 'true'",
+            "run": "docker load -i /tmp/fresh-install-prereqs.tar",
+        },
+        {
+            "name": "Fresh install (one retry on an infra timeout)",
+            "run": (
+                "for attempt in 1 2; do\n"
+                "  rc=0\n"
+                "  scripts/check_fresh_install.sh || rc=$?\n"
+                '  case "$rc" in\n'
+                "    0) exit 0 ;;\n"
+                '    75) echo "::warning title=infra: did not complete::attempt $attempt timed '
+                'out (the phase is named above)" ;;\n'
+                '    77) echo "::error title=fresh install did NOT run::no usable docker on '
+                'the runner"; exit 1 ;;\n'
+                '    *) exit "$rc" ;;\n'
+                "  esac\n"
+                "done\n"
+                'echo "::error title=infra: did not complete::the fresh-install check timed '
+                'out twice — not a pass"\n'
+                "exit 1\n"
+            ),
+        },
+        {
+            "name": "Save the prereqs image for the cache",
+            "if": "steps.cache.outputs.cache-hit != 'true'",
+            "run": (
+                f'if docker image inspect "{_FRESH_TAG}" >/dev/null 2>&1; then\n'
+                f'  docker save -o /tmp/fresh-install-prereqs.tar "{_FRESH_TAG}"\n'
+                "fi\n"
+            ),
+        },
+    ],
+}
+
+
+def test_the_fresh_install_job_mapping_is_pinned_exactly(workflow):
+    assert workflow["jobs"]["fresh-install"] == _EXPECTED_FRESH_INSTALL_JOB
+
+
+def test_the_unit_suite_job_never_runs_the_container_check(workflow):
+    """CMX-444: the network-bound check left the unit suite; nothing in `test` names it."""
+    assert "check_fresh_install" not in repr(workflow["jobs"]["test"])
 
 
 # The workflow's trigger block, as PyYAML actually parses it. The bare `on:` key is a YAML
