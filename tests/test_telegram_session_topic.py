@@ -384,3 +384,18 @@ def test_cli_rebind(monkeypatch, capsys, window, thread, ok):
         with pytest.raises(SystemExit) as e:
             chela_main.main()
         assert e.value.code == 1 and seen == []
+
+
+def test_the_folder_match_skips_a_topic_of_a_session_another_window_runs(ledger):
+    """The folder match alone (the session pass found nothing to reopen for this window):
+    a topic recorded for a session another window is being placed for is never taken."""
+    from chela.telegram.reconcile import _reopen_for_cwd
+
+    reg, wire = BindingRegistry(CHAT), _Wire()
+    api = TopicManager("tok", CHAT, transport=wire)
+    ledger.opened("500", "@1", "/p/app", session_id=OTHER)
+    ledger.closed("500")
+    ledger.opened("600", "@2", "/p/app")
+    ledger.closed("600")
+    assert _reopen_for_cwd(api, ledger, reg, "/p/app", skip_sessions={OTHER}) == "600"
+    assert _reopen_for_cwd(api, ledger, reg, "/p/app") == "500"      # control: oldest first
