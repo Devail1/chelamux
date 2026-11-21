@@ -191,8 +191,9 @@ test('a refused assignment snaps the row back to its group and says why', async 
 const customPosts = () => posts.filter(p => 'custom' in p).map(p => p.custom as { assign: unknown; seen?: unknown });
 
 test('moving one session keeps every OTHER session\'s last-seen stamp, and drops its own when unassigned', async () => {
-  const t = Date.now() - 1000;
+  const t = Date.now() - 3 * 3600_000; // fresh (under a day): no render re-stamps it
   await load({ ...CUSTOM, custom: { ...CUSTOM.custom, assign: { 's:S-a1': 'g1', 's:S-b1': 'g2' }, seen: { 's:S-a1': t, 's:S-b1': t } } });
+  await flush();
   expect(posts).toEqual([]); // negative control: loading writes nothing
   moveToGroup('s:S-a1', null);
   await flush();
@@ -200,14 +201,16 @@ test('moving one session keeps every OTHER session\'s last-seen stamp, and drops
 });
 
 test('moving a session to another group keeps the other sessions\' stamps and re-stamps its own', async () => {
-  const t = Date.now() - 1000;
+  const t = Date.now() - 3 * 3600_000; // fresh (under a day): no render re-stamps it
   await load({ ...CUSTOM, custom: { ...CUSTOM.custom, assign: { 's:S-a1': 'g1', 's:S-b1': 'g2' }, seen: { 's:S-a1': t, 's:S-b1': t } } });
+  await flush();
+  expect(posts).toEqual([]); // negative control: loading writes nothing
   moveToGroup('s:S-a1', 'g2');
   await flush();
   const first = customPosts()[0] as { assign: unknown; seen: Record<string, number> };
   expect(first.assign).toEqual({ 's:S-a1': 'g2', 's:S-b1': 'g2' });
   expect(first.seen['s:S-b1']).toBe(t);
-  expect(first.seen['s:S-a1']).toBeGreaterThan(t);
+  expect(first.seen['s:S-a1']).toBeGreaterThan(t + 3600_000);
 });
 
 test('Move to a group that does not exist unassigns the session, it never names the unknown id', async () => {
