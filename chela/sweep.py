@@ -47,6 +47,8 @@ killed, never a pass.
 from __future__ import annotations
 
 import ast
+import contextlib
+import fcntl
 import hashlib
 import json
 import os
@@ -1013,15 +1015,29 @@ def _journal(worktree: Path, rel: str, line: int, mutated: str,
         record["orig"] = _blob_id(original.encode())
     entry = json.dumps(record)
     try:
-        if path.exists() and path.stat().st_size > JOURNAL_MAX_BYTES:
-            keep = path.read_text().splitlines()[-JOURNAL_KEEP:]
-            tmp = path.with_suffix(".tmp")
-            tmp.write_text("".join(f"{k}\n" for k in keep))
-            os.replace(tmp, path)            # a kill mid-trim never leaves half a journal
-        with path.open("a") as f:
-            f.write(entry + "\n")
+        with _journal_lock(path):
+            if path.exists() and path.stat().st_size > JOURNAL_MAX_BYTES:
+                keep = path.read_text().splitlines()[-JOURNAL_KEEP:]
+                tmp = path.with_suffix(".tmp")
+                tmp.write_text("".join(f"{k}\n" for k in keep))
+                os.replace(tmp, path)        # a kill mid-trim never leaves half a journal
+            with path.open("a") as f:
+                f.write(entry + "\n")
     except (OSError, UnicodeDecodeError) as e:
         sys.stderr.write(f"chela sweep: could not journal the mutation of {rel}: {e}\n")
+
+
+@contextlib.contextmanager
+def _journal_lock(path: Path):
+    """CMX-456: serialize every journal write (an append, a trim, a prune). A separate lock
+    file, because a trim or prune REPLACES the journal's inode — a lock on the journal itself
+    would let an appender holding the old inode write into a file nobody reads again."""
+    with open(path.with_suffix(".lock"), "a") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(lock, fcntl.LOCK_UN)
 
 
 def _recorded(worktree: Path) -> tuple[list[dict], str]:
@@ -1094,6 +1110,14 @@ def prune_stale(worktree: Path) -> tuple[list[dict], str]:
     if path is None or not path.exists():
         return [], ""
     try:
+        with _journal_lock(path):
+            return _prune_locked(worktree, path)
+    except OSError as e:
+        return [], f"could not lock the mutation journal {path}: {e}"
+
+
+def _prune_locked(worktree: Path, path: Path) -> tuple[list[dict], str]:
+    try:
         text = path.read_text()
     except (OSError, UnicodeDecodeError) as e:
         return [], f"the mutation journal {path} is unreadable ({e})"
@@ -1119,7 +1143,7 @@ def prune_stale(worktree: Path) -> tuple[list[dict], str]:
         return [], ""
     # A torn tail (a killed append) is not written back: `_recorded` already ignores it,
     # and re-terminating it would turn it into an unreadable line that blocks every push.
-    tmp = path.with_suffix(".tmp")
+    tmp = path.with_suffix(".prune.tmp")
     try:
         tmp.write_text("".join(f"{k}\n" for k in keep))
         os.replace(tmp, path)
@@ -1217,7 +1241,12 @@ def restore_and_check(worktree: Path) -> tuple[str, str]:
     done, err = recover(worktree)
     if err:
         return done, err
-    prune_stale(worktree)            # CMX-456: logged per entry; an error re-surfaces below
+    # CMX-456: each drop is logged. A failed prune never refuses on its own: a stale entry is
+    # not a blocker either way (`mutation_blockers` skips it), and an unreadable journal or
+    # HEAD is reported by `mutation_blockers` itself.
+    _dropped, perr = prune_stale(worktree)
+    if perr:
+        sys.stderr.write(f"chela: could not prune stale mutation-journal entries: {perr}\n")
     blockers = mutation_blockers(worktree)
     return done, "; ".join(blockers)
 

@@ -3603,7 +3603,13 @@ def prune_mutation_journal(ident: str) -> dict:
     if not run.get("worktree_path"):
         return {"ok": False, "task_id": run["task_id"],
                 "error": f"no worktree on record for {run['task_id']}"}
-    dropped, err = sweep.prune_stale(Path(run["worktree_path"]))
+    worktree = Path(run["worktree_path"])
+    if sweep.journal_path(worktree) is None:
+        # Nothing could be checked — never report that as "nothing stale".
+        return {"ok": False, "task_id": run["task_id"],
+                "error": f"{worktree} is not a git worktree (gone, or never created) — "
+                         "its journal cannot be checked"}
+    dropped, err = sweep.prune_stale(worktree)
     if err:
         return {"ok": False, "task_id": run["task_id"], "error": err}
     return {"ok": True, "task_id": run["task_id"], "dropped": dropped}

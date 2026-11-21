@@ -4,6 +4,7 @@ of a clean, committed file — while a real leftover mutation still does."""
 from __future__ import annotations
 
 import json
+import subprocess
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -312,3 +313,85 @@ def test_a_later_judge_subcommand_is_not_routed_to_journal(monkeypatch):
     monkeypatch.setattr(sys, "argv", ["chela", "judge", "timings"])
     main.main()
     assert seen == ["timings"]
+
+
+# --- review follow-ups: the journal lock, a gone worktree, a failed prune ------------------
+
+
+def _lock_is_free(path: Path) -> bool:
+    """Probe the lock from ANOTHER process — flock is per open file description."""
+    probe = ("import fcntl, sys\n"
+             "f = open(sys.argv[1], 'a')\n"
+             "try:\n    fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)\n"
+             "except OSError:\n    sys.exit(1)\n")
+    return subprocess.run([sys.executable, "-c", probe, str(path)]).returncode == 0
+
+
+def test_the_journal_lock_is_a_real_exclusive_flock_on_a_sibling_file(tmp_path):
+    root = _repo(tmp_path / "r")
+    journal = sweep.journal_path(root)
+    lock = journal.parent / "chela-mutations.lock"
+    with sweep._journal_lock(journal):
+        assert not _lock_is_free(lock)
+    assert _lock_is_free(lock)
+
+
+@pytest.mark.parametrize("act", ["append", "prune"])
+def test_every_journal_write_happens_under_the_lock(tmp_path, monkeypatch, act):
+    root = _repo(tmp_path / "r")
+    _write_journal(root, LEGACY_NOOP)
+    journal = sweep.journal_path(root)
+    lock = journal.parent / "chela-mutations.lock"
+    seen: list[bool] = []
+    real_open, real_replace = Path.open, sweep.os.replace
+
+    def spy_open(self, mode="r", *a, **k):
+        if self == journal and "a" in mode:
+            seen.append(_lock_is_free(lock))
+        return real_open(self, mode, *a, **k)
+
+    def spy_replace(src, dst):
+        seen.append(_lock_is_free(lock))
+        return real_replace(src, dst)
+
+    monkeypatch.setattr(Path, "open", spy_open)
+    monkeypatch.setattr(sweep.os, "replace", spy_replace)
+    if act == "append":
+        sweep._journal(root, "feat.py", 2, MUTATED, FEAT)
+    else:
+        assert len(sweep.prune_stale(root)[0]) == 1
+    assert seen == [False]                      # the write ran while the lock was held
+
+
+def test_prune_stale_reports_a_lock_it_cannot_take(tmp_path, monkeypatch):
+    root = _repo(tmp_path / "r")
+    _write_journal(root, LEGACY_NOOP)
+
+    def boom(*a, **k):
+        raise PermissionError("no lock")
+
+    monkeypatch.setattr(sweep.fcntl, "flock", boom)
+    dropped, err = sweep.prune_stale(root)
+    assert dropped == []
+    assert err == f"could not lock the mutation journal {sweep.journal_path(root)}: no lock"
+    assert _entries(root) == [LEGACY_NOOP]
+
+
+def test_prune_mutation_journal_refuses_a_worktree_that_is_gone(tmp_path):
+    gone = tmp_path / "gone"
+    with dispatcher._db() as conn:
+        _row(conn, task_id="t3", status="running", worktree_path=str(gone), pr_url=None)
+    assert dispatcher.prune_mutation_journal("t3") == {
+        "ok": False, "task_id": "t3",
+        "error": f"{gone} is not a git worktree (gone, or never created) — its journal "
+                 "cannot be checked"}
+
+
+def test_restore_and_check_logs_a_failed_prune_and_a_stale_entry_still_never_blocks(
+        tmp_path, monkeypatch, capsys):
+    root = _repo(tmp_path / "r")
+    _write_journal(root, LEGACY_NOOP)
+    monkeypatch.setattr(sweep, "prune_stale", lambda wt: ([], "disk full"))
+    assert sweep.restore_and_check(root) == ("", "")
+    assert capsys.readouterr().err == (
+        "chela: could not prune stale mutation-journal entries: disk full\n")
