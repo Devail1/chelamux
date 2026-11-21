@@ -70,6 +70,10 @@ export function renderShell() {
         .replace(/\{\{\s*app_src\s*\}\}/g, `static/v/${ASSET_VERSION}/app/${main.file}`)
         .replace(/\{\{\s*app_css\s*\}\}/g, `static/v/${ASSET_VERSION}/app/${main.css[0]}`)
         .replace(/\{\{\s*asset_path\('([^']+)'\)\s*\}\}/g, (_, rel) => `static/v/${ASSET_VERSION}/${rel}`)
+        // CMX-457: chela.dashboard.pwa's defaults (no CHELA_DASHBOARD_ICON_VARIANT / _APP_NAME).
+        .replace(/\{\{\s*pwa\.title\s*\}\}/g, 'chela – Mission Control')
+        .replace(/\{\{\s*pwa\.app_name\s*\}\}/g, 'chela')
+        .replace(/\{\{\s*pwa\.theme_color\s*\}\}/g, '#1b1f24')
         .replace(/\{\{\s*boot\|tojson\s*\}\}/g, JSON.stringify({
             assetVersion: ASSET_VERSION, terminalsEnabled: flags.terminals_enabled,
             wallTileDispatched: flags.wall_tile_dispatched,
@@ -136,6 +140,11 @@ export async function routeFixture(context, api = {}) {
         const path = url.pathname;
         if (path === '/') {
             return route.fulfill({ status: 200, contentType: 'text/html', body: renderShell() });
+        }
+        if (path === '/manifest.webmanifest') {
+            // CMX-457: the page links it; a browser may fetch it. Icons are tested in Python.
+            return route.fulfill({ status: 200, contentType: 'application/manifest+json',
+                body: JSON.stringify({ name: 'chela – Mission Control', short_name: 'chela', icons: [] }) });
         }
         if (path.startsWith('/static/')) {
             const rel = path.slice('/static/'.length).replace(/^v\/[^/]+\//, '');   // CMX-426

@@ -30,7 +30,7 @@ from flask import abort, Flask, jsonify, render_template, request, Response, sen
 from chela import config
 from chela.config import DISPATCH_WORKFLOWS, CHELA_DIR, TMUX_SESSION, NOTIFY_INTERVAL
 from chela import agent_manager, capabilities, claude_account, collab, concurrency, collab_host, collab_stream, context, diffsurface, discovery, dismissed_sessions, dispatcher, epoch, event_log, fleet, gateanswer, hold, hooks, inbox, judge, launcher, messenger, notify, okf, parentage, park, personas, pr_status, probecache, rc_rename, restore, rooms, sandbox_status, scheduler, session_names, sessionids, share_requests, share_sandbox, share_store, sidebar_archive, sidebar_layout, spawn, starter, suggest_names, tasklists, transcripts, update, usage, userconfig
-from chela.dashboard import humanproof, identity, resources, term_fonts, term_themes
+from chela.dashboard import humanproof, identity, pwa, resources, term_fonts, term_themes
 from chela import topic_ledger as tg_topics
 from chela.personas import autolaunch, lease
 from chela.backlog import _BULLET_RE, parse_backlog
@@ -354,14 +354,56 @@ def _telegram_configured() -> bool:
     return all((env.get(k) or "").strip() for k in ("TELEGRAM_BOT_TOKEN", "TELEGRAM_CHAT_ID"))
 
 
+def _pwa_settings() -> pwa.Settings | Response:
+    """CMX-457: the icon variant and app name (env-only), or a 503 when the variant is
+    unknown: a typo must not make a work dashboard look like the personal one."""
+    try:
+        return pwa.settings()
+    except pwa.ConfigError as exc:
+        log.error("dashboard PWA settings are misconfigured: %s", exc)
+        return Response(f"dashboard misconfigured: {exc}\n", status=503, mimetype="text/plain")
+
+
+@app.route("/manifest.webmanifest")
+@require_auth
+def web_manifest():
+    """CMX-457: the web manifest, so a phone installs the dashboard as a standalone app."""
+    s = _pwa_settings()
+    if isinstance(s, Response):
+        return s
+    resp = Response(json.dumps(pwa.manifest(s), ensure_ascii=False, indent=1),
+                    mimetype="application/manifest+json")
+    resp.headers["Cache-Control"] = "no-cache"
+    return resp
+
+
+@app.route("/<any('apple-touch-icon.png', 'icon-192.png', 'icon-512.png', "
+           "'icon-512-maskable.png'):name>")
+@require_auth
+def pwa_icon(name):
+    """CMX-457: a home-screen icon, drawn from the chela mark for the configured variant."""
+    s = _pwa_settings()
+    if isinstance(s, Response):
+        return s
+    size, purpose = pwa.ICONS[name]
+    resp = Response(pwa.icon_png(s.variant, size, purpose), mimetype="image/png")
+    resp.headers["Cache-Control"] = "no-cache"
+    resp.add_etag()
+    return resp.make_conditional(request)
+
+
 @app.route("/")
 @require_auth
 def index():
+    pwa_settings = _pwa_settings()
+    if isinstance(pwa_settings, Response):
+        return pwa_settings
     # 🔐 CMX-392: this page's browser session, the cookie plus its token in the boot block,
     # which an override decision must return (chela.dashboard.humanproof).
     sid = humanproof.session_for(request)
     resp = app.make_response(render_template(
         "index.html",
+        pwa=pwa_settings,
         terminals_enabled=config.TERMINALS_ENABLED,
         wall_tile_dispatched=config.WALL_TILE_DISPATCHED,
         asset_path=asset_path,
