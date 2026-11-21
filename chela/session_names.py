@@ -137,6 +137,16 @@ def record_name(session_id: str | None, name: str | None) -> bool:
     return _set(session_id, "name", name)
 
 
+def name_for(session_id: str | None) -> str | None:
+    """The manual window name stored for ``session_id``, else None (CMX-460: a restore
+    relaunches the session under it, and its Remote Control name with it). An unreadable
+    store reads as no name, never a crash."""
+    if not session_id:
+        return None
+    name = (_read().get(session_id) or {}).get("name")
+    return name if isinstance(name, str) and name else None
+
+
 def record_title(session_id: str | None, title: str | None) -> bool:
     """Remember ``title`` as queued for ``session_id`` (None: it was typed, or dropped).
     False when there is no session id to key it by: nothing is written.

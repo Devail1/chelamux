@@ -338,11 +338,11 @@ typing (`/api/config`); env-locked like Remote Control.
 | `CHELA_IGNORE_WINDOWS` | empty | `hot` | Comma-separated window names hidden from discovery |
 | `CHELA_WID` | none | `identity` | Injected into every dispatched window's env; not a preference |
 
-**WIRED (CMX-382):** `CHELA_REMOTE_CONTROL` (default `true`) — Claude Code's own
+**WIRED (CMX-382):** `CHELA_REMOTE_CONTROL` (default `off` since CMX-460) — Claude Code's own
 `--remote-control <window name>` (CMX-39; renames follow via `/rename`, `chela/rc_rename.py`) on every window chela opens FOR A HUMAN (`chela/spawn.py`,
 `chela/personas/autolaunch.py`), never on a dispatcher-launched agent/judge
 (`chela/dispatcher.py::resolve_agent_cmd`). Now `config.remote_control_enabled()`, read per
-call through `dashboard_setting("remote_control", …)` — env beats `config.json` beats ON —
+call through `dashboard_setting("remote_control", …)` — env beats `config.json` beats OFF —
 and toggled from Settings → General → Remote Control (`/api/config`). `hot` for new
 sessions; a running window keeps the flag it launched with. When the env var is set the
 switch shows the effective value and is disabled.

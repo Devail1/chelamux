@@ -93,15 +93,22 @@ def test_missing_file_falls_back_to_defaults(chela_dir, monkeypatch):
     assert config.current_session() == "chela"
 
 
-def test_remote_control_env_default_is_on(chela_dir, monkeypatch):
-    """CMX-375/CMX-376, re-pointed at CMX-382's per-call resolver: the real
+def test_remote_control_env_default_is_off(chela_dir, monkeypatch):
+    """CMX-460 (was ON through CMX-375/CMX-376/CMX-382): the real
     `config.remote_control_enabled()` against a clean environment and no config.json
     (most `--remote-control` tests elsewhere monkeypatch the resolver itself, so they
     never read its built-in default — DEFEAT_SHAPES 352c shape)."""
     from chela import userconfig
     monkeypatch.delenv("CHELA_REMOTE_CONTROL", raising=False)
     monkeypatch.setattr(userconfig, "_PATH", chela_dir / "no-such-config.json")
-    assert config.remote_control_enabled() is True
+    assert config.remote_control_enabled() is False
+
+
+@pytest.mark.parametrize("raw, expected", [("on", True), ("off", False), ("ON", True)])
+def test_remote_control_env_takes_on_and_off(chela_dir, monkeypatch, raw, expected):
+    """CMX-460: the documented spelling is ``CHELA_REMOTE_CONTROL=on|off``."""
+    monkeypatch.setenv("CHELA_REMOTE_CONTROL", raw)
+    assert config.remote_control_enabled() is expected
 
 
 def test_remote_control_env_var_turns_it_off(chela_dir, monkeypatch):

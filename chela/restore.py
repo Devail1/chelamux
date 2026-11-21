@@ -121,6 +121,7 @@ from chela import (
     launch_settings,
     resume_state,
     roster,
+    session_names,
     sessionids,
     sessions,
 )
@@ -539,6 +540,8 @@ def resume(verdicts: list[Verdict], runs: list[dict] | None = None, *,
            closed=None,
            launch_settings_for=None,
            replay_settings=None,
+           name_for=None,
+           remote_control_on=None,
            **apply_kwargs) -> list[ApplyResult]:
     """CMX-350/issue #468: actually relaunch a MANUAL row's dead agent — the one write path
     in this module that starts a NEW process rather than editing a JSON store.
@@ -628,6 +631,16 @@ def resume(verdicts: list[Verdict], runs: list[dict] | None = None, *,
     session gets a plain ``claude --resume <sid>`` instead: the extras must never be what
     keeps it down. A session with no record launches exactly as before.
 
+    📱 **CMX-460 — Remote Control.** A session with a persisted manual name
+    (``name_for``, :func:`chela.session_names.name_for`, CMX-450) is relaunched in a window
+    of that name, so ``spawn_window``'s ``--remote-control <window name>`` carries it (else
+    the window's folder name). When Remote Control is on (``remote_control_on``,
+    :func:`chela.config.remote_control_enabled`) and the plain launch WITH it fails or never
+    comes up alive — Claude Code refusing the flag (a managed ``disableRemoteControl``, the
+    org toggle) — its window is closed, the reason is logged and carried in the detail, and
+    the session is launched once more with ``allow_remote_control=False``: Remote Control
+    must never be what keeps a session down either.
+
     Returns one :class:`ApplyResult` per input verdict, same order, same contract as
     :func:`apply`/:func:`retire_empty`.
     """
@@ -637,6 +650,10 @@ def resume(verdicts: list[Verdict], runs: list[dict] | None = None, *,
         replay_settings = launch_settings.replay
     if spawn_window is None:
         spawn_window = spawn_mod.spawn_window
+    if name_for is None:
+        name_for = session_names.name_for
+    if remote_control_on is None:
+        remote_control_on = config.remote_control_enabled
     if register_orchestrator is None:
         register_orchestrator = inbox.register
     if check_resumed is None:
@@ -697,40 +714,68 @@ def resume(verdicts: list[Verdict], runs: list[dict] | None = None, *,
             continue
 
         plain = f"claude --resume {v.session_id}"
-        result, settings_note, replayed = None, "", False
+        settings_note = ""
         settings = launch_settings_for(v.session_id)
         flags, env, path_prefix, notes = (replay_settings(settings) if settings
                                           else ([], {}, [], []))
         for note in notes:
             log.warning("restore: session %s: %s", v.session_id, note)
-        if flags or env or path_prefix:
-            command = " ".join([plain, *(shlex.quote(f) for f in flags)])
-            result = spawn_window(v.cwd, command=command, launch_env=env or None,
-                                  path_prefix=path_prefix or None)
-            replayed = result.ok and check_resumed(result.wid, v.session_id)
-            if replayed:
-                settings_note = " with its launch settings"
-            else:
-                why = (result.error or "spawn failed") if not result.ok else (
-                    f"window {result.wid or '?'} opened but never came up alive")
+        # Each launch to try, in order, until one comes up alive. With recorded settings:
+        # them, then a plain --resume. Remote Control on: each of those first WITH it, then
+        # without it — a refused --remote-control must not cost the session its settings.
+        # Only the LAST one's failure is the session's; an earlier one is closed and logged.
+        has_settings = bool(flags or env or path_prefix)
+        if notes and not has_settings:
+            settings_note = f", plain --resume: {'; '.join(notes)}"
+        rc = remote_control_on()
+        attempts = [(with_settings, with_rc)
+                    for with_settings in ([True, False] if has_settings else [False])
+                    for with_rc in ([True, False] if rc else [True])]
+        name = name_for(v.session_id)
+        named = {"name": name} if name else {}
+        result, alive, rc_why, settings_why = None, False, "", ""
+        for i, (with_settings, with_rc) in enumerate(attempts):
+            command, kw = plain, {}
+            if with_settings:
+                command = " ".join([plain, *(shlex.quote(f) for f in flags)])
+                kw = {"launch_env": env or None, "path_prefix": path_prefix or None}
+            if not with_rc:
+                kw["allow_remote_control"] = False
+            result = spawn_window(v.cwd, command=command, **named, **kw)
+            alive = result.ok and check_resumed(result.wid, v.session_id)
+            if alive or i == len(attempts) - 1:
+                break
+            why = (result.error or "spawn failed") if not result.ok else (
+                f"window {result.wid or '?'} opened but never came up alive")
+            if result.ok and result.wid:
+                kill_window(result.wid)
+            if with_settings:
+                settings_why = why
+            if rc and with_rc:
+                rc_why = rc_why or why
+            next_settings, next_rc = attempts[i + 1]
+            if rc and with_rc and not next_rc:
+                log.warning("restore: session %s did not come back with --remote-control "
+                            "(%s: %s) — Claude Code may refuse it here (a managed "
+                            "disableRemoteControl, or the org's Remote Control toggle); "
+                            "relaunching without it", v.session_id, command, why)
+            elif with_settings and not next_settings:
                 log.warning("restore: session %s did not come back with its launch settings "
                             "(%s: %s) — falling back to a plain --resume",
                             v.session_id, command, why)
-                if result.ok and result.wid:
-                    kill_window(result.wid)
-                settings_note = f", plain --resume: its launch settings failed ({why})"
-                result = None
-        elif notes:
-            settings_note = f", plain --resume: {'; '.join(notes)}"
-        if result is None:
-            result = spawn_window(v.cwd, command=plain)
-        if replayed:
-            pass                        # the replayed launch is already confirmed alive
+        if alive:
+            if with_settings:
+                settings_note = " with its launch settings"
+            elif has_settings:
+                settings_note = f", plain --resume: its launch settings failed ({settings_why})"
+            if rc and not with_rc:
+                settings_note += (", without Remote Control: the launch with "
+                                  f"--remote-control failed ({rc_why})")
         elif not result.ok:
             record_resume_failure(v.session_id, result.error or "spawn failed")
             resumed_by_id[id(v)] = ApplyResult(v, RESUME_FAILED, result.error or "")
             continue
-        elif not check_resumed(result.wid, v.session_id):
+        else:
             reason = (f"window {result.wid or '?'} opened but claude --resume "
                       f"{v.session_id} never came up alive")
             record_resume_failure(v.session_id, reason)
