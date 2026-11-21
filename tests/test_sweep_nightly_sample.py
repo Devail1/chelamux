@@ -353,6 +353,31 @@ def test_a_night_sizes_its_sample_by_the_measured_pace(tmp_path):
     assert (res["mutations"], res["sampled"], res["sample_dropped"]) == (2, 2, 2)
 
 
+def test_a_night_takes_the_measured_overhead_off_its_budget_before_it_sizes(tmp_path):
+    """(1000 - 500) // 300 = 1 → the floor of one per PR (2); 1000 // 300 would take 3."""
+    repo = _repo(tmp_path, extra="sweep:\n  budget_seconds: 1000\n")
+    chela = tmp_path / "chela"
+    _pace(chela, load_workflow(repo / "WORKFLOW.md"), [300.0], [500.0])
+    res = _run(repo, chela, Filer())
+    assert (res["mutations"], res["sampled"], res["sample_dropped"]) == (2, 2, 2)
+
+
+def test_a_night_orders_its_prs_newest_first_by_the_bases_log(tmp_path, monkeypatch):
+    """PR 2 (other.py) merged after PR 1 (size.py): its mutation leads even when the
+    battery collected size.py's first."""
+    repo, chela = _repo(tmp_path), tmp_path / "chela"
+    seen = {}
+
+    def fake(worktree, base, test_cmd, **kw):
+        seen.update(kw)
+        return sweep.SweepReport()
+    monkeypatch.setattr(sweep_nightly.sweep, "sweep", fake)
+    _run(repo, chela, Filer())
+    newer = sweep.Mutation("other.py", 2, "if-false", "    if x > 100:",
+                           "    if False and (x > 100):")
+    assert seen["order"]([WEAK_MUT, newer]) == [newer, WEAK_MUT]
+
+
 def test_a_night_holds_the_owed_backlog_to_k_per_pr(tmp_path):
     repo = _repo(tmp_path, extra="sweep:\n  per_pr_sample: 1\n")
     chela = tmp_path / "chela"
