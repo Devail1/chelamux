@@ -52,5 +52,6 @@ export function actions() {
     closeRecentUndo: vi.fn<SidebarActions['closeRecentUndo']>(),
     toggleDispatcherSessions: vi.fn<SidebarActions['toggleDispatcherSessions']>(),
     suggestNames: vi.fn<SidebarActions['suggestNames']>(),
+    retitle: vi.fn<SidebarActions['retitle']>(() => Promise.resolve()),
   };
 }

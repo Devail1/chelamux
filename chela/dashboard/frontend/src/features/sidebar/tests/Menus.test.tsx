@@ -86,7 +86,8 @@ test('the row menu: a run opens its panes; Archive is enabled only for a finishe
   const { el, acts } = draw(s);
   const rowMore = (name: string) => el.querySelector(`.agent-row[data-agent="${name}"] .row-more`);
   open(rowMore('busy'));
-  expect(items()).toEqual(['Archive']);
+  // CMX-459: a live session's row leads with Rename title…; a run's row has none
+  expect(items()).toEqual(['Rename title…', 'Archive']);
   expect(disabled('Archive')).toBe(true);
   fireEvent.keyDown(screen.getByRole('menu'), { key: 'Escape' });
   open(rowMore(run.name ?? ''));
@@ -117,7 +118,7 @@ test('Move to group… only under Custom groups; its page moves the row, and sta
   cleanup();
   ({ el, acts } = draw({ ...base, view: { ...base.view, groupBy: 'custom' } }));
   fireEvent.contextMenu(el.querySelector('.agent-row[data-agent="a"]') as Element);
-  expect(items()).toEqual(['Move to group…', 'Archive']);
+  expect(items()).toEqual(['Rename title…', 'Move to group…', 'Archive']);
   pick('Move to group…');
   expect(menuOpen()).toBe(true);
   expect(items()).toEqual(['Move to group', 'Infra', 'Ops', 'Ungrouped', 'New group…']);
@@ -128,10 +129,10 @@ test('Move to group… only under Custom groups; its page moves the row, and sta
   expect(menuOpen()).toBe(false);
   // reopened, it starts on its first page again
   fireEvent.contextMenu(el.querySelector('.agent-row[data-agent="a"]') as Element);
-  expect(items()[0]).toBe('Move to group…');
+  expect(items()[1]).toBe('Move to group…');
   pick('Move to group…');
   pick('Move to group');   // ‹ back
-  expect(items()).toEqual(['Move to group…', 'Archive']);
+  expect(items()).toEqual(['Rename title…', 'Move to group…', 'Archive']);
   pick('Move to group…');
   pick('Ungrouped');
   expect(acts.moveToGroup.mock.calls[1]).toEqual([key, null]);
@@ -306,4 +307,87 @@ test('Move to group: a row assigned to a DELETED group reads Ungrouped, unassign
       .toEqual(['Ungrouped']);
     cleanup();
   }
+});
+
+// --- CMX-459: the row menu's Rename title… -------------------------------------------------
+
+const settle = () => act(() => new Promise(r => setTimeout(r, 0)));
+const field = (el: HTMLElement) => el.querySelector<HTMLInputElement>('input.row-retitle-edit');
+
+test('Rename title… opens the title in place of the row\'s label, prefilled, at most 40; Enter sets it through the title action', async () => {
+  const a = win('a', { ai_title: 'Rally design milestone 1' });
+  const { el, acts } = draw(state([a, win('b')]));
+  const row = el.querySelector('.agent-row[data-agent="a"]') as HTMLElement;
+  open(row.querySelector('.row-more'));
+  expect(items()[0]).toBe('Rename title…');
+  expect(disabled('Rename title…')).toBe(false);
+  expect(item('Rename title…').getAttribute('title')).toBe("Set this session's Claude title");
+  pick('Rename title…');
+  await settle();
+  expect(menuOpen()).toBe(false);
+  const input = field(row);
+  if (!input) throw new Error('no title field');
+  expect(input.value).toBe('Rally design milestone 1');
+  expect(input.maxLength).toBe(40);
+  expect(document.activeElement).toBe(input);
+  // a click in the field never opens the row
+  fireEvent.click(input);
+  expect(acts.selectAgent).not.toHaveBeenCalled();
+  fireEvent.change(input, { target: { value: '  Rally 2 ' } });
+  fireEvent.keyDown(input, { key: 'Enter' });
+  expect(acts.retitle.mock.calls).toEqual([[a.window_id, 'Rally 2']]);
+  expect(field(row)).toBeNull();
+  expect(row.querySelector('.agent-row-name')?.textContent).toBe('a');
+});
+
+test.each([
+  ['Escape', 'Other', 'Escape'],
+  ['an unchanged title', 'T', 'Enter'],
+  ['an empty title', '  ', 'Enter'],
+])('row title: %s calls nothing', async (_, value, key) => {
+  const { el, acts } = draw(state([win('a', { ai_title: 'T' })]));
+  const row = el.querySelector('.agent-row[data-agent="a"]') as HTMLElement;
+  open(row.querySelector('.row-more'));
+  pick('Rename title…');
+  await settle();
+  const input = field(row) as HTMLInputElement;
+  fireEvent.change(input, { target: { value } });
+  fireEvent.keyDown(input, { key });
+  expect(acts.retitle).not.toHaveBeenCalled();
+  expect(field(row)).toBeNull();
+});
+
+test('a queued title is what the row field opens with', async () => {
+  const { el } = draw(state([win('a', { ai_title: 'Old', title_pending: 'Queued' })]));
+  const row = el.querySelector('.agent-row[data-agent="a"]') as HTMLElement;
+  open(row.querySelector('.row-more'));
+  pick('Rename title…');
+  await settle();
+  expect(field(row)?.value).toBe('Queued');
+});
+
+test('Rename title… is disabled on a pane with no Claude in it (a bash pane, or one that does not say)', () => {
+  const unsaid = win('unsaid');
+  delete unsaid.claude_running;
+  const { el, acts } = draw(state([win('sh', { claude_running: false }), unsaid]));
+  for (const name of ['sh', 'unsaid']) {
+    open(el.querySelector(`.agent-row[data-agent="${name}"] .row-more`));
+    expect(disabled('Rename title…')).toBe(true);
+    expect(item('Rename title…').getAttribute('title')).toBe('No Claude session runs in this pane');
+    pick('Rename title…');
+    fireEvent.keyDown(screen.getByRole('menu'), { key: 'Escape' });
+  }
+  expect(el.querySelector('input')).toBeNull();
+  expect(acts.retitle).not.toHaveBeenCalled();
+});
+
+test('no Rename title… on a run\'s row or an archived row', () => {
+  const run = runWin('CMX-1', 'agent', { status: 'done' });
+  const fin = win('fin', { done: true });
+  const { el } = draw(state([fin, run], { archived: [`w:${fin.window_id}`] }));
+  open(el.querySelector(`.agent-row[data-agent="${run.name}"] .row-more`));
+  expect(items()).not.toContain('Rename title…');
+  fireEvent.keyDown(screen.getByRole('menu'), { key: 'Escape' });
+  open(el.querySelector('.side-archived .agent-row[data-agent="fin"] .row-more'));
+  expect(items()).not.toContain('Rename title…');
 });

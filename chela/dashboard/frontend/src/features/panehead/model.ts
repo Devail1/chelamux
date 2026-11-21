@@ -11,6 +11,8 @@ export type HeadAgent = WallAgent & {
   ai_title?: string | null;
   /** CMX-434: the title set with `/rename` (customTitle); it outranks ai_title, as in Claude Code. */
   custom_title?: string | null;
+  /** CMX-434: a title queued for this session; it is typed in once the session is idle. */
+  title_pending?: string | null;
   session_name?: string | null;
   needs_human?: boolean;
   /** CMX-418: 'web' on a sandboxed session launched with web access. */
@@ -37,7 +39,9 @@ export function claudeTitle(a: MaybeAgent): string {
 /**
  * A window's display label, shared by the sidebar row, the palette and the dock (CMX-62): a
  * MANUAL name > Claude's session title > the window name. The window name is a stable key
- * that never follows the title. A window the poll has not listed reads as its id.
+ * that never follows the title. A window the poll has not listed reads as its id. CMX-459: the
+ * pane HEADER no longer leads with it (headLabel: the name first, the title second); these
+ * one-slot surfaces keep it, since only one of the two fits.
  */
 export function displayLabel(a: MaybeAgent, wid: string): string {
   if (!a) return wid;
@@ -46,16 +50,15 @@ export function displayLabel(a: MaybeAgent, wid: string): string {
 }
 
 /**
- * The dim text beside the title: whatever the title did NOT take. The window name when
- * Claude's title leads (CMX-62), else Claude's `ai_title` beside a manual or window name
- * (CMX-146); '' when there is nothing distinct to add.
+ * The dim text beside the header's name: Claude's session title (its `/rename` title, else its
+ * `ai_title`, else the live session's name), '' when there is none or it only repeats the name.
+ * CMX-459 (Liav, 11-21): a FIXED order, the name first and the title second, whoever named the
+ * window. Before, CMX-62 let the title lead an un-renamed window, so the two swapped places.
  */
 export function paneSubtitle(a: MaybeAgent, wid: string): string {
   if (!a) return '';
-  const label = displayLabel(a, wid);
-  if (a.name && label !== a.name) return a.name;
-  const t = a.custom_title || a.ai_title || '';
-  return t && t !== label ? t : '';
+  const t = claudeTitle(a);
+  return t && t !== (a.name || wid) ? t : '';
 }
 
 /**
@@ -81,7 +84,19 @@ export interface HeadLabel {
  */
 export function headLabel(a: MaybeAgent, wid: string): HeadLabel {
   if (isShell(a)) return { title: a?.manual_name ? displayLabel(a, wid) : 'Shell', subtitle: a?.shell_cwd || '', cwd: true };
-  return { title: displayLabel(a, wid), subtitle: paneSubtitle(a, wid), cwd: false };
+  // CMX-459: the WINDOW name first (bold), Claude's title second (dim), always.
+  return { title: (a && a.name) || wid, subtitle: paneSubtitle(a, wid), cwd: false };
+}
+
+/** CMX-459: Claude runs in the pane (the server said so): only then can its title be set. A row
+ * that does not say is not assumed to (the server would refuse it anyway). */
+export function canRetitle(a: MaybeAgent): boolean {
+  return !!a && a.claude_running === true;
+}
+
+/** CMX-459: what "Rename title" opens with: a title already queued, else the current one. */
+export function titleDraft(a: MaybeAgent): string {
+  return (a && (a.title_pending || claudeTitle(a))) || '';
 }
 
 /**

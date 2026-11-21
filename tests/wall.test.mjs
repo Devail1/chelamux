@@ -350,7 +350,9 @@ test('relabelling a session updates the pane title in place — it does NOT rebu
     const srcs = { '@1': before['@1'].src, '@2': before['@2'].src };
     const gridEl = grid();
     const titleFor = wid => document.querySelector(`.grid-stack-item[gs-id="${wid}"] .pane-title`);
+    const subFor = wid => document.querySelector(`.grid-stack-item[gs-id="${wid}"] .pane-subtitle`);
     assert.equal(titleFor('@1').textContent, 'shell', 'the fixture starts on the generic label');
+    assert.equal(subFor('@1'), null, 'the fixture starts with no session title');
     const srcWrites = [];
     Object.values(before).forEach(f => watchSrcWrites(f, srcWrites));
 
@@ -361,10 +363,13 @@ test('relabelling a session updates the pane title in place — it does NOT rebu
     try {
         await terminals.termTick();
 
-        // The relabel REALLY landed — otherwise "nothing rebuilt" is a tautology.
-        assert.equal(titleFor('@1').textContent, 'porting the wall',
-            'the pane title did not pick up the new session name');
+        // The relabel REALLY landed — otherwise "nothing rebuilt" is a tautology. CMX-459: the
+        // window name keeps the lead, so the session's name lands as the subtitle beside it.
+        assert.equal(subFor('@1')?.textContent, 'porting the wall',
+            'the pane header did not pick up the new session name');
+        assert.equal(titleFor('@1').textContent, 'shell', 'the window name keeps the lead');
         assert.equal(titleFor('@2').textContent, 'shell', 'the other pane is untouched');
+        assert.equal(subFor('@2'), null, 'the other pane is untouched');
 
         // termTick's relabel path is surgical (_refreshPaneLabels) and never touches
         // `_termSig`, so the assertions above prove the title updated in place but say

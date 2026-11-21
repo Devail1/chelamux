@@ -134,16 +134,19 @@ describe('CMX-313 390×844: the phone pane is the Claude app\'s full-bleed pane'
         ready();
         const w = await page.evaluate(sel => {
             const banner = document.querySelector(`${sel} .gs-unsafe-banner`);
+            // CMX-459: the title is the window NAME now, often short: measure it unsqueezed first
+            const alone = document.querySelector(`${sel} .pane-title`).getBoundingClientRect().width;
             banner.hidden = false;
             banner.textContent = 'UNSANDBOXED · typing allowed for another 59 minutes';
             const title = document.querySelector(`${sel} .pane-title`).getBoundingClientRect();
             const end = document.querySelector(`${sel} .gs-head-end`).getBoundingClientRect();
-            const out = { title: title.width, endRight: end.right };
+            const out = { title: title.width, alone, endRight: end.right };
             banner.hidden = true;
             banner.textContent = '';
             return out;
         }, PANE);
-        assert.ok(w.title >= 100, `the title is squeezed to ${w.title}px`);
+        assert.ok(w.alone > 0, 'the title has no width even without the banner');
+        assert.ok(w.title >= Math.min(100, w.alone), `the title is squeezed to ${w.title}px (${w.alone}px alone)`);
         assert.ok(w.endRight <= 390, `the bar's right side overflows the screen (${w.endRight}px)`);
     });
 

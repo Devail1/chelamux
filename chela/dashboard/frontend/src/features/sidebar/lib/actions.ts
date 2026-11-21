@@ -39,4 +39,6 @@ export interface SidebarActions {
   toggleDispatcherSessions(): void;
   /** CMX-434: open the "Suggest names" dialog. */
   suggestNames(): void;
+  /** CMX-459: set one session's Claude title (the row menu's "Rename title…"). */
+  retitle(wid: string, title: string): Promise<unknown>;
 }

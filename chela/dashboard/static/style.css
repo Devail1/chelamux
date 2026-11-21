@@ -325,7 +325,8 @@ body {
    `.wall-movable` with enableMove); in Auto and Focus the header keeps the
    default cursor, or the Focus strip's pointer (below). */
 .wall-movable .gs-grip { cursor: move; }
-.pane-title { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* CMX-459: a FIXED order, the window name first and bold, Claude's title second and dim. */
+.pane-title { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 600; }
 .gs-label .pane-subtitle, .gs-grip .pane-subtitle { flex: 1 1 0; min-width: 0; }
 /* CMX-241: a shell's cwd beside its `Shell` title reads `Shell · ~`. */
 .pane-subtitle.pane-cwd::before { content: '· '; }
@@ -608,6 +609,11 @@ body {
 .gs-grip .pane-title { cursor: default; }
 .wall-movable .gs-grip .pane-title { cursor: move; }
 .pane-title:hover { text-decoration: underline dotted; text-underline-offset: 2px; }
+/* CMX-459: Claude's title (the subtitle) is the second rename target: the session title. */
+.pane-subtitle[data-edit="title"] { cursor: text; }
+.pane-subtitle[data-edit="title"]:hover { text-decoration: underline dotted; text-underline-offset: 2px; }
+/* CMX-459: the sidebar row's title field takes the label's whole width. */
+.pane-title-edit.row-retitle-edit { max-width: none; width: 100%; box-sizing: border-box; }
 .pane-title-edit {
     font: inherit; color: var(--text); background: var(--bg);
     border: 1px solid var(--accent); border-radius: 3px;

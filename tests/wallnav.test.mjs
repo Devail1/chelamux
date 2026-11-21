@@ -350,7 +350,8 @@ test('the "⋯" overflow renders a labeled vertical list, like the topbar #prima
         'the menu must carry the topbar #primary-menu\'s `overflow-menu` class');
 
     const rows = menu.querySelectorAll('.popover-item.ov-item');
-    assert.equal(rows.length, 4, 'all four actions (Wire/Share/Orchestrator/Pin) render as labeled rows');
+    // CMX-459: Rename and Rename title… lead the list
+    assert.equal(rows.length, 6, 'all six actions (Rename/Rename title/Wire/Share/Orchestrator/Pin) render as labeled rows');
     rows.forEach(row => {
         assert.ok(row.querySelector('svg'), 'every row must carry a lucide icon — dropping it is the icon-only regression');
         assert.ok(row.textContent.trim().length > 0, 'every row must carry a non-empty text label, not just an icon');
@@ -1779,11 +1780,11 @@ test('CMX-130: --term-keybar-h (declared on :root) is consumed by EXACT name in 
         'when the keyboard opens, which is the opposite of the fix.');
 });
 
-// CMX-146 + CMX-62 — Claude's own auto-generated session title LEADS the pane header
-// (CMX-62: manual name > Claude's title > window name), and the short window NAME rides
-// as the dim `.pane-subtitle` under it. It must (a) render on first paint when
+// CMX-146 + CMX-459 — the pane header's order is FIXED (Liav, 11-21; a deliberate change
+// from CMX-62, which let Claude's title lead an un-renamed window): the window NAME leads,
+// and Claude's own session title rides as the dim `.pane-subtitle` beside it. It must (a) render on first paint when
 // `/api/agents` carries `ai_title`, (b) stay ABSENT for a pane with none (the name alone
-// is the title then), and (c) track live updates through `_refreshPaneLabels` (the poll
+// is the whole header then), and (c) track live updates through `_refreshPaneLabels` (the poll
 // path) without a full rebuild — added, updated, and removed again as `ai_title` comes
 // and goes.
 const paneTitle = wid => tile(wid).querySelector('.gs-grip .pane-title').textContent;
@@ -1794,9 +1795,9 @@ test('CMX-146: a pane\'s ai_title renders as a dim subtitle under the name, and 
         terminals.refreshPaneLabels();
         const sub1 = tile('@1').querySelector('.gs-grip .pane-subtitle');
         assert.ok(sub1, '@1 carries an ai_title — its pane header must show a .pane-subtitle');
-        assert.equal(paneTitle('@1'), 'Fix the flaky wall test', 'Claude\'s title leads the header');
-        assert.equal(sub1.textContent, 'alpha', 'the window name rides as the secondary label');
-        assert.equal(sub1.getAttribute('title'), 'alpha', 'full text on hover via the title attr');
+        assert.equal(paneTitle('@1'), 'alpha', 'the window name leads the header');
+        assert.equal(sub1.textContent, 'Fix the flaky wall test', 'Claude\'s title rides as the secondary label');
+        assert.equal(sub1.getAttribute('title'), 'Fix the flaky wall test', 'full text on hover via the title attr');
         // @2 has no ai_title in this fixture — its header must carry no subtitle at all,
         // not an empty one (an always-present-but-blank span would still pass a truthiness
         // check on a corrupted "hide when falsy" guard).
@@ -1822,8 +1823,8 @@ test('CMX-146: a NEW pane (never refreshed) still shows its ai_title from PaneHe
         await terminals.renderTerminals();
         const sub = tile('@4').querySelector('.gs-grip .pane-subtitle');
         assert.ok(sub, 'a freshly-built tile (via PaneHead, not _refreshPaneLabels) must carry the subtitle');
-        assert.equal(paneTitle('@4'), 'Ship the delta feature');
-        assert.equal(sub.textContent, 'delta');
+        assert.equal(paneTitle('@4'), 'delta');
+        assert.equal(sub.textContent, 'Ship the delta feature');
     } finally {
         agentsStore.set(AGENTS);
         await terminals.renderTerminals();
@@ -1831,26 +1832,26 @@ test('CMX-146: a NEW pane (never refreshed) still shows its ai_title from PaneHe
     }
 });
 
-// CMX-62 — the pane HEADER follows the same ladder as the sidebar row: a MANUAL name
-// beats Claude's title (and the title then rides as the subtitle, not the lead), the
-// title beats the window name, and with no title the header is the window name.
-test('CMX-62: pane header — manual name beats the title, the title beats the window name', () => {
+// CMX-459 — the pane HEADER no longer follows the sidebar row's CMX-62 ladder (the row has one
+// slot, the header two): the name leads whether or not a human chose it, Claude's title is the
+// dim subtitle, and with no title the header is the window name alone.
+test('CMX-459: pane header — the name leads, manual or not; Claude\'s title is the subtitle', () => {
     try {
         agentsStore.set(AGENTS.map(a =>
             a.window_id === '@1' ? { ...a, manual_name: true, ai_title: 'Review the auth PR' }
                 : a.window_id === '@2' ? { ...a, ai_title: 'Open-MMO game on Windows PC' } : a));
         terminals.refreshPaneLabels();
-        assert.equal(paneTitle('@1'), 'alpha', 'a manual name must beat Claude\'s title on the header');
+        assert.equal(paneTitle('@1'), 'alpha', 'a manual name leads the header');
         assert.equal(tile('@1').querySelector('.gs-grip .pane-subtitle').textContent, 'Review the auth PR',
             'with a manual name leading, Claude\'s title is the dim subtitle');
-        assert.equal(paneTitle('@2'), 'Open-MMO game on Windows PC', 'the title must beat the window name');
-        assert.equal(tile('@2').querySelector('.gs-grip .pane-subtitle').textContent, 'bravo');
+        assert.equal(paneTitle('@2'), 'bravo', 'an un-renamed window\'s name leads too (CMX-62 had the title lead)');
+        assert.equal(tile('@2').querySelector('.gs-grip .pane-subtitle').textContent, 'Open-MMO game on Windows PC');
         assert.equal(paneTitle('@3'), 'charlie', 'no title ⇒ the window name');
         assert.equal(tile('@3').querySelector('.gs-grip .pane-subtitle'), null);
 
         // A manual name whose ai_title says the same thing: nothing distinct to add,
         // so no subtitle repeating the header. And with both titles present the
-        // ai_title — not the live session name — leads a non-manual header.
+        // ai_title — not the live session name — is the subtitle.
         agentsStore.set(AGENTS.map(a =>
             a.window_id === '@1' ? { ...a, manual_name: true, ai_title: 'alpha' }
                 : a.window_id === '@2' ? { ...a, ai_title: 'Open-MMO game', session_name: 'stale session' } : a));
@@ -1858,7 +1859,9 @@ test('CMX-62: pane header — manual name beats the title, the title beats the w
         assert.equal(paneTitle('@1'), 'alpha');
         assert.equal(tile('@1').querySelector('.gs-grip .pane-subtitle'), null,
             'a subtitle that only repeats the header must not render');
-        assert.equal(paneTitle('@2'), 'Open-MMO game', 'ai_title must outrank the live session name');
+        assert.equal(paneTitle('@2'), 'bravo');
+        assert.equal(tile('@2').querySelector('.gs-grip .pane-subtitle').textContent, 'Open-MMO game',
+            'ai_title must outrank the live session name');
     } finally {
         agentsStore.set(AGENTS);
         terminals.refreshPaneLabels();
@@ -1874,16 +1877,16 @@ test('CMX-146: _refreshPaneLabels tracks ai_title live — added, changed, and r
         terminals.refreshPaneLabels();
         let sub = tile('@3').querySelector('.gs-grip .pane-subtitle');
         assert.ok(sub, 'a fresh ai_title must appear on the next refresh, no full rebuild required');
-        assert.equal(paneTitle('@3'), 'Investigate flaky CI');
-        assert.equal(sub.textContent, 'charlie');
+        assert.equal(paneTitle('@3'), 'charlie');
+        assert.equal(sub.textContent, 'Investigate flaky CI');
 
         // a revised title (Claude re-titles as the conversation evolves) must replace it in place
         agentsStore.set(AGENTS.map(a => a.window_id === '@3' ? { ...a, ai_title: 'Investigate and fix flaky CI' } : a));
         terminals.refreshPaneLabels();
         sub = tile('@3').querySelector('.gs-grip .pane-subtitle');
         assert.ok(sub, 'the subtitle element must still be there after a revision');
-        assert.equal(paneTitle('@3'), 'Investigate and fix flaky CI');
-        assert.equal(sub.textContent, 'charlie');
+        assert.equal(paneTitle('@3'), 'charlie');
+        assert.equal(sub.textContent, 'Investigate and fix flaky CI');
 
         // and it must be removed again once the field goes back to empty/absent — not left
         // stale, which would read as a title Claude never actually confirmed.
@@ -1891,7 +1894,7 @@ test('CMX-146: _refreshPaneLabels tracks ai_title live — added, changed, and r
         terminals.refreshPaneLabels();
         assert.equal(tile('@3').querySelector('.gs-grip .pane-subtitle'), null,
             'the subtitle must be REMOVED once ai_title is gone, not left stale from the prior refresh');
-        assert.equal(paneTitle('@3'), 'charlie', 'no title ⇒ the window name is the header again');
+        assert.equal(paneTitle('@3'), 'charlie', 'no title ⇒ the window name alone again');
     } finally {
         agentsStore.set(AGENTS);
         terminals.refreshPaneLabels();

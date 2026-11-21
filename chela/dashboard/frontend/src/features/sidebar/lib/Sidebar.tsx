@@ -4,7 +4,9 @@
 // drawn under its parent (`model.children`), in a `.tree-kids` box with a guide line.
 import { useEffect, useRef, useState, type CSSProperties, type MouseEvent, type PointerEvent, type ReactNode } from 'react';
 import { icons } from '../../../shared/icons/index.ts';
-import { TextButton } from '../../../shared/ui/index.ts';
+import { InlineEdit, TextButton } from '../../../shared/ui/index.ts';
+import { titleDraft, type HeadAgent } from '../../panehead/model.ts';
+import { TITLE_MAX } from '../../suggestnames/index.ts';
 import {
   ARCHIVED_SECTION_KEY, DISPATCHED_KEY, type Group, INDENT_LEVELS, type Item, NEEDS_YOU_KEY, PINNED_KEY, type SidebarState,
   assignKey, canDragGroup, canOrderRows, descendants, dropAssignee, folderLines, isSingleFolder, kidsKey, showsFolderLine,
@@ -135,9 +137,19 @@ const Grip = () => <span className="drag-grip" aria-hidden="true"><icons.grip si
 function Row({ it, s, actions, archived = false, altNum, folder, group, drag, depth = 0, tree, children }: RowProps) {
   const menu = useMenuOpen();
   const press = useLongPress();
+  // CMX-459: the row menu's "Rename title…" edits the title in place of the row's label
+  const [retitling, setRetitling] = useState(false);
+  // the menu pick opens the field once the menu has CLOSED (the open menu traps focus)
+  const fieldAfterMenu = useRef(false);
   const v = rowView(it, s);
   if (!v) return null;
   const name = v.agent.name ?? '';
+  const wid = v.agent.window_id;
+  const commitTitle = (value: string) => {
+    setRetitling(false);
+    const t = value.trim();
+    if (wid && t && t !== titleDraft(v.agent as HeadAgent)) void actions.retitle(wid, t);
+  };
   // A plain shell already shows its live cwd as a chip (CMX-330): no second copy under it.
   const hasCwd = v.meta.some(m => m.kind === 'cwd');
   if (hasCwd) folder = undefined;
@@ -150,7 +162,13 @@ function Row({ it, s, actions, archived = false, altNum, folder, group, drag, de
       <span className={`term-status-dot ${v.dotCls}`} role="img" aria-label={v.dotLabel} title={v.dotLabel} />
       {/* no title of its own (CMX-331): hovering the name shows the row's tooltip, which opens
           with the full title, then the window key */}
-      <span className="agent-row-name" data-key={v.windowKey || undefined}>{v.label}</span>
+      {retitling ? (
+        // a click in the field must not also open the row
+        <span className="agent-row-name" onClick={(e: MouseEvent) => e.stopPropagation()}>
+          <InlineEdit className="pane-title-edit row-retitle-edit" label="Session title" maxLength={TITLE_MAX}
+            initial={titleDraft(v.agent as HeadAgent)} onCommit={commitTitle} onCancel={() => setRetitling(false)} />
+        </span>
+      ) : <span className="agent-row-name" data-key={v.windowKey || undefined}>{v.label}</span>}
       {/* CMX-399: only a shell's strip (its cwd chip) may shrink to nothing (style.css) */}
       <span className={hasCwd ? 'ar-meta has-cwd' : 'ar-meta'}>
         {v.meta.map(m => <MetaChip key={m.kind} m={m} />)}
@@ -158,7 +176,16 @@ function Row({ it, s, actions, archived = false, altNum, folder, group, drag, de
         {v.agent.window_id && <span className="ar-more"><span className="ar-wid">{v.agent.window_id}</span></span>}
       </span>
       {tree && <TreeButton t={tree} />}
-      <RowMenu it={it} s={s} actions={actions} menu={menu} group={group} archived={archived} />
+      <RowMenu it={it} s={s} actions={actions} menu={menu} group={group} archived={archived}
+        onRetitle={archived ? undefined : () => {
+          fieldAfterMenu.current = true;
+        }}
+        onCloseAutoFocus={(e) => {
+          if (!fieldAfterMenu.current) return;
+          fieldAfterMenu.current = false;
+          e.preventDefault();   // the field takes focus, not the ⋯
+          setRetitling(true);
+        }} />
       {children}
     </>
   );

@@ -2,7 +2,7 @@
 // and the apply, which reports each half of each row on its own.
 import { expect, test } from 'vitest';
 import type { AgentRow } from '../../sidebar/model.ts';
-import { type Row, type Suggestion, applyRows, candidateWids, initialRows, outcomeFailed, outcomeText, rowProblems } from '../model.ts';
+import { type Row, type Suggestion, applyRows, candidateWids, initialRows, outcomeFailed, outcomeText, postTitle, rowProblems, titleNote } from '../model.ts';
 
 const ag = (wid: string, name: string, over: Partial<AgentRow> = {}): AgentRow =>
   ({ window_id: wid, name, claude_running: true, ...over });
@@ -143,4 +143,34 @@ test('applyRows: a partial failure is reported per row and never stops the other
 test('applyRows: a rename answer without ok: true is a failure, never a success', async () => {
   const { post } = poster({ '/api/agents/%401/rename': { name: 'x' } });
   expect(await applyRows([row({ newName: 'x', newTitle: 'T' })], post)).toEqual({ '@1': { name: { ok: false, error: 'rename failed' } } });
+});
+
+// --- CMX-459: postTitle, the ONE title write (the dialog and Rename title… both call it) ----
+
+test.each([
+  ['applied', { ok: true, state: 'applied', reason: null }, { state: 'applied', reason: null }],
+  ['pending', { ok: true, state: 'pending', reason: 'dialog' }, { state: 'pending', reason: 'dialog' }],
+  ['pending without a reason', { state: 'pending' }, { state: 'pending', reason: null }],
+  ['refused', { ok: false, state: 'refused', reason: 'no Claude session runs in this pane' }, { state: 'refused', reason: 'no Claude session runs in this pane' }],
+  ['an answer with no state', { error: 'boom' }, { state: 'refused', reason: 'title failed' }],
+  ['no answer', null, { state: 'refused', reason: 'title failed' }],
+])('postTitle: %s', async (_, reply, want) => {
+  const calls: [string, unknown][] = [];
+  const out = await postTitle('@4', 'Rally 2', (path, body) => {
+    calls.push([path, body]);
+    return Promise.resolve(reply);
+  });
+  expect(out).toEqual(want);
+  expect(calls).toEqual([['/api/agents/%404/title', { title: 'Rally 2' }]]);
+});
+
+test('postTitle: a request that throws is refused, never applied', async () => {
+  expect(await postTitle('@4', 'T', () => Promise.reject(new Error('offline')))).toEqual({ state: 'refused', reason: 'title request failed' });
+});
+
+test('titleNote: nothing for applied; why it waits; why it failed', () => {
+  expect(titleNote({ state: 'applied', reason: null })).toBe('');
+  expect(titleNote({ state: 'pending', reason: 'busy' })).toBe('Title pending (busy): applied when the session is idle');
+  expect(titleNote({ state: 'pending', reason: null })).toBe('Title pending (waits for idle): applied when the session is idle');
+  expect(titleNote({ state: 'refused', reason: 'no Claude session runs in this pane' })).toBe('Title failed: no Claude session runs in this pane');
 });
