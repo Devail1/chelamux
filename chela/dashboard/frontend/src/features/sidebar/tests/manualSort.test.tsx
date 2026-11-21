@@ -160,6 +160,9 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  // A drag's click guard (drag.ts swallowClick) waits up to 400ms; the next pointerdown takes
+  // it down, so its timer never fires after this file's jsdom is gone.
+  fireEvent.pointerDown(window);
   cleanup();
   vi.unstubAllGlobals();
 });
