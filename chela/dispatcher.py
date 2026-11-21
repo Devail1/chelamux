@@ -3592,6 +3592,29 @@ def check_mutations(task_id: str) -> dict:
     return {"ok": True, "restored": restored}
 
 
+def prune_mutation_journal(ident: str) -> dict:
+    """⛔ CMX-456 — ``chela judge journal --prune-stale <run>``: drop the run's mutation-journal
+    entries that never changed their file (:func:`chela.sweep.prune_stale` re-checks each one
+    against the file). A real mutation's entry is never dropped. ``{"ok", "task_id",
+    "dropped"}`` or ``{"ok": False, "error"}``."""
+    run = resolve_run(ident)
+    if run is None:
+        return {"ok": False, "error": f"no run matches {ident!r} (task id, branch, or window name)"}
+    if not run.get("worktree_path"):
+        return {"ok": False, "task_id": run["task_id"],
+                "error": f"no worktree on record for {run['task_id']}"}
+    worktree = Path(run["worktree_path"])
+    if sweep.journal_path(worktree) is None:
+        # Nothing could be checked — never report that as "nothing stale".
+        return {"ok": False, "task_id": run["task_id"],
+                "error": f"{worktree} is not a git worktree (gone, or never created) — "
+                         "its journal cannot be checked"}
+    dropped, err = sweep.prune_stale(worktree)
+    if err:
+        return {"ok": False, "task_id": run["task_id"], "error": err}
+    return {"ok": True, "task_id": run["task_id"], "dropped": dropped}
+
+
 def check_review_section(task_id: str, no_review_reason: str | None = None) -> dict:
     """🔎 CMX-209: the self-review gate — a code PR's body must carry ``## Review`` (see
     :mod:`chela.reviewgate`). ``{"ok", "record"}``; a prose-only diff needs none, and

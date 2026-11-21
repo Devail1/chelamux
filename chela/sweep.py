@@ -47,6 +47,8 @@ killed, never a pass.
 from __future__ import annotations
 
 import ast
+import contextlib
+import fcntl
 import hashlib
 import json
 import os
@@ -830,14 +832,20 @@ def _write_marker(worktree: Path, rel: str, original: str, mutated: str) -> None
     """The marker for one mutation, written BEFORE it lands. ⛔ CMX-398: it also carries the
     kernel's ``boot_id`` — after a reboot the pid is reused by unrelated processes, and a
     marker whose owner "looks alive" would never be recovered — and the mutated ``line``, so
-    every refusal can name ``file:line``. The mutation is journalled (:func:`_journal`) too."""
+    every refusal can name ``file:line``. The mutation is journalled (:func:`_journal`) too.
+
+    ⛔ CMX-456: a "mutation" that changes nothing (an anchor that did not match, so the
+    replace was a no-op) writes NEITHER — it is INVALID, not mutated, and journalling it
+    would record the clean file's own bytes as a mutation that later refuses its push."""
+    if mutated == original:
+        return
     path = marker_path(worktree)
     line = _first_changed_line(original, mutated)
     tmp = path.with_suffix(".tmp")
     tmp.write_text(json.dumps({"pid": os.getpid(), "boot_id": _boot_id(), "file": rel,
                                "line": line, "original": original, "mutated": mutated}))
     os.replace(tmp, path)
-    _journal(worktree, rel, line, mutated)
+    _journal(worktree, rel, line, mutated, original)
 
 
 BOOT_ID = Path("/proc/sys/kernel/random/boot_id")
@@ -858,9 +866,12 @@ def _first_changed_line(original: str, mutated: str) -> int:
     return min(len(a), len(b)) + 1
 
 
+NO_SUCH_LINE = "(no such line)"
+
+
 def _line_text(text: str, line: int) -> str:
     lines = text.split("\n")
-    return lines[line - 1].strip() if 0 < line <= len(lines) else "(no such line)"
+    return lines[line - 1].strip() if 0 < line <= len(lines) else NO_SUCH_LINE
 
 
 def _owner_alive(data: dict) -> bool:
@@ -989,25 +1000,47 @@ def _blob_id(data: bytes) -> str:
     return hashlib.sha1(b"blob %d\0" % len(data) + data).hexdigest()
 
 
-def _journal(worktree: Path, rel: str, line: int, mutated: str) -> None:
+def _journal(worktree: Path, rel: str, line: int, mutated: str,
+             original: str | None = None) -> None:
     """Record one mutation's exact bytes (as a blob id) — what a later hand-in or push is
     checked against even once the marker is gone. Best-effort: the marker is the primary
-    record, and a journal that cannot be written must never stop the mutation's restore."""
+    record, and a journal that cannot be written must never stop the mutation's restore.
+
+    CMX-456: ``original`` is recorded too (as ``orig``, its blob id), so an entry can be
+    proven stale — a mutation whose bytes equal the pre-mutation bytes never changed
+    anything — instead of being guessed at."""
     path = journal_path(worktree)
     if path is None:
         return
-    entry = json.dumps({"file": rel, "line": line, "blob": _blob_id(mutated.encode()),
-                        "text": _line_text(mutated, line)[:200]})
+    record = {"file": rel, "line": line, "blob": _blob_id(mutated.encode()),
+              "text": _line_text(mutated, line)[:200]}
+    if original is not None:
+        record["orig"] = _blob_id(original.encode())
+    entry = json.dumps(record)
     try:
-        if path.exists() and path.stat().st_size > JOURNAL_MAX_BYTES:
-            keep = path.read_text().splitlines()[-JOURNAL_KEEP:]
-            tmp = path.with_suffix(".tmp")
-            tmp.write_text("".join(f"{k}\n" for k in keep))
-            os.replace(tmp, path)            # a kill mid-trim never leaves half a journal
-        with path.open("a") as f:
-            f.write(entry + "\n")
+        with _journal_lock(path):
+            if path.exists() and path.stat().st_size > JOURNAL_MAX_BYTES:
+                keep = path.read_text().splitlines()[-JOURNAL_KEEP:]
+                tmp = path.with_suffix(".tmp")
+                tmp.write_text("".join(f"{k}\n" for k in keep))
+                os.replace(tmp, path)        # a kill mid-trim never leaves half a journal
+            with path.open("a") as f:
+                f.write(entry + "\n")
     except (OSError, UnicodeDecodeError) as e:
         sys.stderr.write(f"chela sweep: could not journal the mutation of {rel}: {e}\n")
+
+
+@contextlib.contextmanager
+def _journal_lock(path: Path):
+    """CMX-456: serialize every journal write (an append, a trim, a prune). A separate lock
+    file, because a trim or prune REPLACES the journal's inode — a lock on the journal itself
+    would let an appender holding the old inode write into a file nobody reads again."""
+    with open(path.with_suffix(".lock"), "a") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(lock, fcntl.LOCK_UN)
 
 
 def _recorded(worktree: Path) -> tuple[list[dict], str]:
@@ -1024,9 +1057,7 @@ def _recorded(worktree: Path) -> tuple[list[dict], str]:
                 # is written WITH its newline in one write, so only the last can be partial.
                 lines.pop()
             for raw in lines:
-                e = json.loads(raw)
-                out.append({"file": str(e["file"]), "line": int(e["line"]),
-                            "blob": str(e["blob"]), "text": str(e.get("text", ""))})
+                out.append(_entry(json.loads(raw)))
         except (OSError, ValueError, KeyError, TypeError, UnicodeDecodeError) as e:
             return [], f"the mutation journal {path} is unreadable ({e})"
     marker = marker_path(worktree)
@@ -1036,10 +1067,95 @@ def _recorded(worktree: Path) -> tuple[list[dict], str]:
             line = _first_changed_line(data["original"], data["mutated"])
             out.append({"file": str(data["file"]), "line": line,
                         "blob": _blob_id(data["mutated"].encode()),
-                        "text": _line_text(data["mutated"], line)})
+                        "text": _line_text(data["mutated"], line),
+                        "orig": _blob_id(data["original"].encode())})
         except (OSError, ValueError, KeyError, TypeError, AttributeError) as e:
             return [], f"{marker} is unreadable ({e})"
     return out, ""
+
+
+def _entry(e: dict) -> dict:
+    """One journal line, normalized. ``orig`` is ``""`` on an entry written before CMX-456."""
+    return {"file": str(e["file"]), "line": int(e["line"]), "blob": str(e["blob"]),
+            "text": str(e.get("text", "")), "orig": str(e.get("orig", ""))}
+
+
+def _is_stale(entry: dict, disk: str | None, head: str) -> bool:
+    """⛔ CMX-456: is ``entry`` a record of a mutation that never changed its file? Such an
+    entry's blob IS the clean content, so it would refuse a push of the untouched file.
+
+    * An entry carrying ``orig``: stale exactly when the mutated bytes equal the
+      pre-mutation bytes — provable from the entry alone, whatever the file holds now.
+    * An entry written before ``orig`` existed: stale only when it names no line (the
+      ``(no such line)`` a no-op leaves — the first changed line of two equal texts is past
+      the end) AND both the working tree (``disk``) and HEAD hold exactly its blob, i.e.
+      ``git diff HEAD`` is empty for that file. Anything less is not proof, so it still
+      counts as a live mutation."""
+    if entry["orig"]:
+        return entry["orig"] == entry["blob"]
+    return entry["text"] == NO_SUCH_LINE and disk == head == entry["blob"]
+
+
+def _disk_blob(worktree: Path, rel: str) -> str | None:
+    try:
+        return _blob_id((Path(worktree) / rel).read_bytes())
+    except OSError:
+        return None
+
+
+def prune_stale(worktree: Path) -> tuple[list[dict], str]:
+    """⛔ CMX-456 — ``chela judge journal --prune-stale``: drop every journal entry that
+    re-checks as stale against its file right now (:func:`_is_stale`) and keep every other
+    entry byte-for-byte. Returns ``(dropped, error)``; an unreadable journal or HEAD is an
+    error and nothing is written (unknown is not "stale")."""
+    worktree = Path(worktree)
+    path = journal_path(worktree)
+    if path is None or not path.exists():
+        return [], ""
+    try:
+        with _journal_lock(path):
+            return _prune_locked(worktree, path)
+    except OSError as e:
+        return [], f"could not lock the mutation journal {path}: {e}"
+
+
+def _prune_locked(worktree: Path, path: Path) -> tuple[list[dict], str]:
+    try:
+        text = path.read_text()
+    except (OSError, UnicodeDecodeError) as e:
+        return [], f"the mutation journal {path} is unreadable ({e})"
+    raws = text.splitlines()
+    torn = bool(raws) and not text.endswith("\n")
+    whole = raws[:-1] if torn else raws
+    try:
+        entries = [_entry(json.loads(r)) for r in whole]
+    except (ValueError, KeyError, TypeError) as e:
+        return [], f"the mutation journal {path} is unreadable ({e})"
+    head, err = _head_blobs(worktree, sorted({e["file"] for e in entries}))
+    if err:
+        return [], err
+    disk = {f: _disk_blob(worktree, f) for f in {e["file"] for e in entries}}
+    keep: list[str] = []
+    dropped: list[dict] = []
+    for raw, e in zip(whole, entries):
+        if _is_stale(e, disk[e["file"]], head.get(e["file"], "")):
+            dropped.append(e)
+        else:
+            keep.append(raw)
+    if not dropped:
+        return [], ""
+    # A torn tail (a killed append) is not written back: `_recorded` already ignores it,
+    # and re-terminating it would turn it into an unreadable line that blocks every push.
+    tmp = path.with_suffix(".prune.tmp")
+    try:
+        tmp.write_text("".join(f"{k}\n" for k in keep))
+        os.replace(tmp, path)
+    except OSError as e:
+        return [], f"could not rewrite the mutation journal {path}: {e}"
+    for e in dropped:
+        sys.stderr.write(f"chela: dropped a stale mutation-journal entry — {e['file']}:"
+                         f"{e['line']} (`{e['text']}`) never changed the file\n")
+    return dropped, ""
 
 
 def _head_blobs(worktree: Path, files: list[str]) -> tuple[dict[str, str], str]:
@@ -1077,20 +1193,29 @@ def mutation_blockers(worktree: Path, *, head_only: bool = False) -> list[str]:
     if not recorded:
         return out
     had = len(out)
-    by_blob = {(r["file"], r["blob"]): r for r in recorded}
     files = sorted({r["file"] for r in recorded})
     head, err = _head_blobs(worktree, files)
     if err:
         return [*out, err]
+    disk: dict[str, str | None] = {}
+    disk_err: dict[str, OSError] = {}
+    for rel in files:
+        try:
+            disk[rel] = _blob_id((worktree / rel).read_bytes())
+        except FileNotFoundError:
+            disk[rel] = None
+        except OSError as e:
+            disk[rel] = None
+            disk_err[rel] = e
+    # ⛔ CMX-456: an entry that never changed its file is not a mutation — never a blocker.
+    by_blob = {(r["file"], r["blob"]): r for r in recorded
+               if not _is_stale(r, disk[r["file"]], head.get(r["file"], ""))}
     for rel in files:
         if not head_only:
-            try:
-                hit = by_blob.get((rel, _blob_id((worktree / rel).read_bytes())))
-            except FileNotFoundError:
-                hit = None
-            except OSError as e:
-                out.append(f"{rel} could not be read to check it for a mutation: {e}")
-                hit = None
+            if rel in disk_err:
+                out.append(f"{rel} could not be read to check it for a mutation: "
+                           f"{disk_err[rel]}")
+            hit = by_blob.get((rel, disk[rel])) if disk[rel] is not None else None
             if hit:
                 out.append(f"{rel}:{hit['line']} is a sweep/self-check MUTATION "
                            f"(`{hit['text']}`) in the working tree — restore it")
@@ -1099,9 +1224,16 @@ def mutation_blockers(worktree: Path, *, head_only: bool = False) -> list[str]:
             out.append(f"{rel}:{hit['line']} is a sweep/self-check MUTATION "
                        f"(`{hit['text']}`) COMMITTED in HEAD — revert it before pushing")
     if len(out) > had:
-        out.append(f"(only if that exact content is deliberate: remove its entry from "
-                   f"{journal_path(worktree)})")
+        # ⛔ CMX-456: never tell an agent to edit the journal by hand — that is undermining
+        # the very record that keeps a mutation from shipping.
+        out.append(f"(an entry that never changed its file is dropped by `{PRUNE_HINT}`, "
+                   "which re-checks each entry against the file first; a real mutation is "
+                   "never dropped — restore the file, or if that exact content is "
+                   "deliberate, ask the orchestrator to resolve it)")
     return out
+
+
+PRUNE_HINT = "chela judge journal --prune-stale <run>"
 
 
 def restore_and_check(worktree: Path) -> tuple[str, str]:
@@ -1112,6 +1244,12 @@ def restore_and_check(worktree: Path) -> tuple[str, str]:
     done, err = recover(worktree)
     if err:
         return done, err
+    # CMX-456: each drop is logged. A failed prune never refuses on its own: a stale entry is
+    # not a blocker either way (`mutation_blockers` skips it), and an unreadable journal or
+    # HEAD is reported by `mutation_blockers` itself.
+    _dropped, perr = prune_stale(worktree)
+    if perr:
+        sys.stderr.write(f"chela: could not prune stale mutation-journal entries: {perr}\n")
     blockers = mutation_blockers(worktree)
     return done, "; ".join(blockers)
 

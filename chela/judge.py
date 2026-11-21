@@ -2131,12 +2131,18 @@ def _mark_mutation(worktree: Path, path: Path, exp: Experiment) -> None:
     kill at any point after the write is recoverable. A file that cannot be read is not
     marked — :func:`apply_mutation` will refuse it too, so nothing lands. A marker that
     cannot be written leaves the ``finally`` and SIGTERM paths intact; only a SIGKILL is
-    then unrecoverable, so it is logged, not fatal."""
+    then unrecoverable, so it is logged, not fatal.
+
+    ⛔ CMX-456: an experiment :func:`apply_mutation` will refuse BEFORE writing — an anchor
+    that does not occur exactly once — is not marked or journalled either: it is INVALID,
+    never mutated, and a journal entry for it would refuse the clean file's push."""
     from chela import sweep
 
     try:
         original = path.read_text()
     except (OSError, UnicodeDecodeError):
+        return
+    if original.count(exp.before) != 1:
         return
     try:
         sweep._write_marker(worktree, str(path.relative_to(worktree.resolve())), original,

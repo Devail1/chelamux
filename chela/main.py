@@ -3658,6 +3658,26 @@ def cmd_judge_ack_blocked_race(args) -> None:
         print(f"  {result['pr_url']}")
 
 
+def cmd_judge_journal(args) -> None:
+    """⛔ CMX-456: ``chela judge journal --prune-stale <run>`` — the sanctioned way to clear a
+    mutation-journal entry that never changed its file. Never edit the journal by hand."""
+    if not args.prune_stale:
+        print("judge journal: nothing to do — pass --prune-stale")
+        sys.exit(2)
+    result = dispatcher.prune_mutation_journal(args.run)
+    if not result.get("ok"):
+        print(f"judge journal: {result.get('error', 'unknown error')}")
+        sys.exit(1)
+    dropped = result["dropped"]
+    if not dropped:
+        print(f"{result['task_id']}: no stale mutation-journal entry — nothing dropped")
+        return
+    print(f"{result['task_id']}: dropped {len(dropped)} stale mutation-journal "
+          f"entr{'y' if len(dropped) == 1 else 'ies'}:")
+    for e in dropped:
+        print(f"  {e['file']}:{e['line']} (`{e['text']}`) — never changed the file")
+
+
 def cmd_update(args) -> None:
     """``chela update`` — pull the checkout, re-sync deps, restart services. ``--check``
     only reports how far behind it is; it changes nothing.
@@ -4826,6 +4846,17 @@ def main() -> None:
         help="Optional free-text note recorded alongside the acknowledgement",
     )
 
+    p_jjournal = judge_sub.add_parser(
+        "journal",
+        help="⛔ The sweep/self-check mutation journal — `--prune-stale` drops each entry "
+             "that never changed its file, re-checked against the file first",
+    )
+    p_jjournal.add_argument("run", help="Run id, branch name, or window name (e.g. cmx-84)")
+    p_jjournal.add_argument(
+        "--prune-stale", action="store_true",
+        help="Drop entries whose mutation never changed the file; a real one is kept",
+    )
+
     # adopt — enroll a hand-opened PR into the judge/merge gate (CMX-276)
     p_adopt = sub.add_parser(
         "adopt",
@@ -5359,6 +5390,8 @@ def main() -> None:
             cmd_judge_nightly_sweep(args)
         elif args.judge_cmd == "ack-blocked-race":
             cmd_judge_ack_blocked_race(args)
+        elif args.judge_cmd == "journal":
+            cmd_judge_journal(args)
         elif args.judge_cmd == "eval":
             from chela.judge_eval import cli as judge_eval_cli
             judge_eval_cli.main(args)
