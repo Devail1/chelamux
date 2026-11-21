@@ -82,11 +82,13 @@ def test_a_baseline_flake_is_reported_and_the_battery_runs_without_it(tmp_path, 
     assert (res["status"], res["filed"], filer.sites) == ("survivors", ["CMX-901"],
                                                           ["size.py:2"])
     assert res["baseline_flakes"] == ["tests/test_flaky.py::test_flaky"]
-    (_, summary, _), = notices
+    (_, summary, payload), = notices
     assert ("⚠️ baseline flake: tests/test_flaky.py::test_flaky (red once, green alone; "
             "deselected from the battery)") in summary
     kept = _kept(chela, res)
-    assert f"evidence in {kept}" in summary
+    # CMX-455: the notice is capped (this tmp path runs past it); the payload keeps it whole.
+    assert "evidence in " in summary and payload["kept"] == str(kept)
+    assert len(summary) <= sweep_nightly.MAX_NOTICE_CHARS
     assert 'name="test_flaky"' in (kept / "baseline-junit.xml").read_text()
 
 
