@@ -617,3 +617,66 @@ def test_the_pane_map_reads_the_pending_title_column(tmp_path, monkeypatch, stdo
     panes = sessions._load_panes()
     assert {w: p.title_pending for w, p in panes.items()} == want
     assert seen[0][-1].endswith("\t#{@chela_manual_name}\t#{@chela_title_pending}")
+
+
+# ---------------------------------------------------------------------------
+# CMX-459: "Rename title…" (the pane and row ⋯ menus) and the pane header's double-click
+# on the title set ONE session's title through the SAME route as the dialog's apply, so
+# CMX-434's safety cases hold for it unchanged. These drive that route, as the menu does.
+# ---------------------------------------------------------------------------
+
+def _retitle(client, wid, title):
+    r = client.post(f"/api/agents/{wid}/title", json={"title": title})
+    return r.status_code, r.get_json()
+
+
+def test_rename_title_on_an_idle_session_applies_at_once_and_reaches_custom_title(monkeypatch, client, tmp_path):
+    """Acceptance: idle ⇒ typed now; the transcript gets a `custom-title` the row then reads."""
+    monkeypatch.setattr(discovery, "get_windows_by_id", lambda: {"@1": "rally-proto"})
+    p = _transcript(tmp_path, [{"type": "ai-title", "aiTitle": "Rally design milestone 1"}])
+    f = _Fleet(monkeypatch, pids={"@1": 11}, status={"@1": "idle"}, panes={"@1": GHOST})
+
+    def claude_code(wid, text, **kw):
+        f.sent.append((wid, text, kw))
+        with p.open("a") as fh:
+            fh.write(json.dumps({"type": "custom-title", "customTitle": text[len("/rename "):]}) + "\n")
+        return True
+    monkeypatch.setattr(messenger, "send_tmux", claude_code)
+    assert _retitle(client, "@1", "  Rally milestone 2 ") == (200, {"ok": True, "state": "applied", "reason": None})
+    assert f.sent == [("@1", "/rename Rally milestone 2", {"interrupt": False})]
+    assert suggest_names.current_title(p) == "Rally milestone 2"
+    assert f.tmux.pending("@1") is None
+
+
+def test_rename_title_on_a_bash_pane_is_refused_and_never_typed(monkeypatch, client):
+    """Acceptance: a pane with no Claude in it refuses (409); nothing typed, nothing queued."""
+    monkeypatch.setattr(discovery, "get_windows_by_id", lambda: {"@3": "sh"})
+    f = _Fleet(monkeypatch, pids={}, status={}, panes={"@3": BASH})
+    assert _retitle(client, "@3", "Oops") == (
+        409, {"ok": False, "state": "refused", "reason": suggest_names.NO_CLAUDE})
+    assert f.sent == [] and f.captures == []
+    assert f.tmux.pending("@3") is None
+
+
+@pytest.mark.parametrize("pane,why", [
+    (TRUST, "dialog"), (PERMISSION, "dialog"), (DIALOG_OVER_EMPTY, "dialog"), (DRAFT, "draft")])
+def test_rename_title_never_types_over_a_dialog_or_a_typed_draft(monkeypatch, client, pane, why):
+    """CMX-434's safety cases through the menu's route: queued (pending), never typed."""
+    monkeypatch.setattr(discovery, "get_windows_by_id", lambda: {"@1": "a"})
+    f = _Fleet(monkeypatch, pids={"@1": 11}, status={"@1": "idle"}, panes={"@1": pane})
+    assert _retitle(client, "@1", "Rally 2") == (200, {"ok": True, "state": "pending", "reason": why})
+    assert f.sent == []
+    assert f.tmux.pending("@1") == "Rally 2"
+
+
+def test_rename_title_on_a_busy_session_is_pending_and_applies_on_idle(monkeypatch, client):
+    """Acceptance: busy ⇒ pending (the row's chip reads the queue), typed by the flush on idle."""
+    monkeypatch.setattr(discovery, "get_windows_by_id", lambda: {"@1": "a"})
+    f = _Fleet(monkeypatch, pids={"@1": 11}, status={"@1": "busy"}, panes={"@1": EMPTY})
+    assert _retitle(client, "@1", "Rally 2") == (200, {"ok": True, "state": "pending", "reason": "busy"})
+    assert f.sent == [] and suggest_names.pending_titles() == {"@1": "Rally 2"}
+    assert suggest_names.flush_pending() == {"@1": "busy"}
+    f.status["@1"] = "idle"
+    assert suggest_names.flush_pending() == {"@1": "sent"}
+    assert f.sent == [("@1", "/rename Rally 2", {"interrupt": False})]
+    assert suggest_names.pending_titles() == {}

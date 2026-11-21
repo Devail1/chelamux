@@ -272,9 +272,9 @@ describe('the list', () => {
     expect([...first.querySelectorAll<HTMLElement>('.agent-row')].map(r => r.dataset.agent)).toEqual(['P', 'C2', 'C1', 'G']);
     fireEvent.keyDown(row('P')[0]?.querySelector('.row-more') as Element, { key: 'Enter' });
     const entries = [...document.querySelectorAll<HTMLElement>('[role="menu"] [role^="menuitem"]')];
-    expect(entries.map(e => e.textContent)).toEqual(['Unpin', `Archive${PINNED_NO_ARCHIVE}`]);
-    expect(entries[1]?.hasAttribute('data-disabled')).toBe(true);
-    fireEvent.keyDown(entries[0] as HTMLElement, { key: 'Enter' });
+    expect(entries.map(e => e.textContent)).toEqual(['Rename title…', 'Unpin', `Archive${PINNED_NO_ARCHIVE}`]);
+    expect(entries[2]?.hasAttribute('data-disabled')).toBe(true);
+    fireEvent.keyDown(entries[1] as HTMLElement, { key: 'Enter' });
     expect(acts.rowMenuAction.mock.calls).toEqual([[(row('P')[0] as HTMLElement).dataset.item, 'unpin']]);
   });
 

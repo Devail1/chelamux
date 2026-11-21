@@ -1,6 +1,7 @@
-// CMX-241 (CMX-212 P26): a Wall pane's header: the status dot, the title (double-click to
-// rename the WINDOW), the facepile and room badge slots, the web chip, the UNSANDBOXED
-// banner, the state pill, the ⋯ menu (Wire, Share, Orchestrator, Pin) and the window controls
+// CMX-241 (CMX-212 P26): a Wall pane's header: the status dot, the window name (double-click
+// to rename the WINDOW) then Claude's session title (CMX-459: double-click to set it), the
+// facepile and room badge slots, the web chip, the UNSANDBOXED banner, the state pill, the ⋯
+// menu (Rename, Rename title, Wire, Share, Orchestrator, Pin) and the window controls
 // (minimize, maximize, kill with its confirm). From terminals.js `paneHead` and its handlers.
 // `wall` is a Gridstack tile; otherwise it is the single pane. CMX-313: on a phone the single
 // pane's header is the screen's one title bar (the Claude app's): the drawer's hamburger on
@@ -16,7 +17,8 @@ import { IconButton, InlineEdit, Menu, TextButton, useMediaQuery, type MenuItem 
 import { switchBadge } from '../../claudeaccount/model.ts';
 import { toggleSidebar } from '../../sidebar/controller.ts';
 import { paneToast, SHARE_MODE_UI, shareSession, unsafeBannerText, type ShareEntry, type ShareMode } from '../../share/index.ts';
-import { dotState, headLabel, headState, type HeadAgent } from '../model.ts';
+import { retitle, TITLE_MAX, titleNote } from '../../suggestnames/index.ts';
+import { canRetitle, dotState, headLabel, headState, titleDraft, type HeadAgent } from '../model.ts';
 
 /** What the header asks of the Wall around it (terminals.js `configurePaneHeads`). */
 export interface PaneHeadHost {
@@ -54,6 +56,15 @@ const PIN_TITLE = {
 const WEB_TITLE = 'Sandboxed session with web access: public hosts only, rate-limited, every request logged';
 
 type Kill = { phase: 'idle' } | { phase: 'confirm' } | { phase: 'killing' } | { phase: 'error'; msg: string };
+/** Which record the inline field edits: the window name or Claude's session title. */
+type Edit = 'name' | 'title';
+const RETITLE_TITLE = { on: "Set this session's Claude title", off: 'No Claude session runs in this pane' };
+
+/** Reread /api/agents into the store (a non-list reply leaves an empty list, never the body). */
+async function rereadAgents(): Promise<void> {
+  const rows = await api('/api/agents');
+  agents.set(Array.isArray(rows) ? rows : []);
+}
 
 /** Rename the WINDOW (POST, tmux rename-window), then reread /api/agents: every client, tmux and
  * the bound Telegram topic see the new name. There is deliberately no local label store. */
@@ -64,8 +75,7 @@ async function renameWindow(wid: string, name: string): Promise<void> {
     body: JSON.stringify({ name }),
   })) as { ok?: boolean; error?: string } | null;
   if (!res || !res.ok) throw new Error((res && res.error) || 'rename failed');
-  const rows = await api('/api/agents');
-  agents.set(Array.isArray(rows) ? rows : []);
+  await rereadAgents();
 }
 
 /** POST /api/agents/kill; '' on success, else what went wrong. */
@@ -92,7 +102,10 @@ async function killWindow(wid: string): Promise<string> {
 
 export function PaneHead({ wid, wall, agent, orchWid, share, pinned, now, host }: PaneHeadProps) {
   const head = useRef<HTMLDivElement>(null);
-  const [editing, setEditing] = useState(false);
+  const [editing, setEditing] = useState<Edit | null>(null);
+  // A menu pick that opens a field. It opens once the menu has CLOSED: the open menu traps
+  // focus, so a field opened under it would lose focus at once and commit unchanged.
+  const editAfterMenu = useRef<Edit | null>(null);
   const [menuOpen, setMenuOpen] = useState(false);
   const [orchBusy, setOrchBusy] = useState(false);
   const [maxed, setMaxed] = useState(false);
@@ -106,7 +119,7 @@ export function PaneHead({ wid, wall, agent, orchWid, share, pinned, now, host }
   const orch = orchWid === wid;
 
   const commitRename = async (value: string) => {
-    setEditing(false);
+    setEditing(null);
     const name = value.trim();
     if (!name || name === (agent?.name ?? wid)) return;
     try {
@@ -116,6 +129,28 @@ export function PaneHead({ wid, wall, agent, orchWid, share, pinned, now, host }
       console.error('renamePane', e);
       paneToast(head.current, `Rename failed: ${e instanceof Error ? e.message : String(e)}`);
     }
+  };
+
+  // CMX-459: Claude's session title, through the ONE title write (suggest_names.apply_title):
+  // typed now into an idle, empty, dialog-free session, else queued and applied on idle.
+  const commitTitle = async (value: string) => {
+    setEditing(null);
+    const title = value.trim();
+    if (!title || title === titleDraft(agent)) return;
+    const o = await retitle(wid, title);
+    const note = titleNote(o);
+    if (note) paneToast(head.current, note);
+    if (o.state === 'refused') return;
+    try {
+      await rereadAgents();
+      host.labelsChanged();
+    } catch (e) {
+      console.error('retitlePane', e);
+    }
+  };
+  const retitleOk = canRetitle(agent);
+  const openFromMenu = (what: Edit) => {
+    editAfterMenu.current = what;
   };
 
   const toggleOrch = async () => {
@@ -160,6 +195,16 @@ export function PaneHead({ wid, wall, agent, orchWid, share, pinned, now, host }
 
   const ModeIcon = mode ? MODE_ICON[mode] : null;
   const items: MenuItem[] = [
+    { label: 'Rename', icon: icons.rename, className: 'gs-rename-item', title: 'Rename this window', onSelect: () => openFromMenu('name') },
+    {
+      label: 'Rename title…',
+      icon: icons.retitle,
+      className: 'gs-retitle-item',
+      disabled: !retitleOk,
+      title: retitleOk ? RETITLE_TITLE.on : RETITLE_TITLE.off,
+      onSelect: () => openFromMenu('title'),
+    },
+    'separator',
     ...(wall
       ? [{
           label: 'Wire to…',
@@ -231,18 +276,30 @@ export function PaneHead({ wid, wall, agent, orchWid, share, pinned, now, host }
   ];
 
   const Max = maxed ? icons.restore : icons.maximize;
-  const titleEl = editing ? (
-    <InlineEdit className="pane-title-edit" label="Window name" initial={agent?.name ?? wid} onCommit={(v) => void commitRename(v)} onCancel={() => setEditing(false)} />
+  // CMX-459: two hit targets in a FIXED order (headLabel): the name (the title slot) renames
+  // the window, Claude's title (the subtitle slot) sets the session title, only where Claude
+  // runs. A field opens in place of the text it edits; a title not set yet opens where it will show.
+  const titleEl = editing === 'name' ? (
+    <InlineEdit className="pane-title-edit" label="Window name" initial={agent?.name ?? wid} onCommit={(v) => void commitRename(v)} onCancel={() => setEditing(null)} />
   ) : (
     <span className="pane-title" title="double-click to rename" onDoubleClick={(e) => {
         e.stopPropagation();
-        setEditing(true);
+        setEditing('name');
       }}>
       {label.title}
     </span>
   );
-  const subtitle = label.subtitle && (
-    <span className={label.cwd ? 'pane-subtitle pane-cwd' : 'pane-subtitle'} title={label.subtitle}>
+  const titleEditable = !label.cwd && retitleOk;
+  const subtitle = editing === 'title' ? (
+    <InlineEdit className="pane-title-edit pane-retitle-edit" label="Session title" maxLength={TITLE_MAX} initial={titleDraft(agent)}
+      onCommit={(v) => void commitTitle(v)} onCancel={() => setEditing(null)} />
+  ) : label.subtitle && (
+    <span className={label.cwd ? 'pane-subtitle pane-cwd' : 'pane-subtitle'} data-edit={titleEditable ? 'title' : undefined}
+      title={titleEditable ? `${label.subtitle}\ndouble-click to set the session title` : label.subtitle}
+      onDoubleClick={titleEditable ? (e) => {
+        e.stopPropagation();
+        setEditing('title');
+      } : undefined}>
       {label.subtitle}
     </span>
   );
@@ -278,6 +335,13 @@ export function PaneHead({ wid, wall, agent, orchWid, share, pinned, now, host }
   const menu = (
     <span className="gs-menu-wrap">
       <Menu className="pane-overflow-menu" open={menuOpen} onOpenChange={setMenuOpen} items={items}
+        onCloseAutoFocus={() => {
+          // the trap is gone: the field mounts now and focuses itself (after the trigger did)
+          const what = editAfterMenu.current;
+          if (!what) return;
+          editAfterMenu.current = null;
+          setEditing(what);
+        }}
         trigger={
           <IconButton className="gs-menu-btn" label="Session actions">
             <icons.paneMenu size={titleBar ? 18 : 14} aria-hidden />

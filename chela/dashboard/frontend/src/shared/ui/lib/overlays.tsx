@@ -435,6 +435,9 @@ export type MenuProps = {
   onOpenChange?: (open: boolean) => void;
   /** Read-only content under the items (the gear menu's usage readouts). */
   footer?: ReactNode;
+  /** Runs as the closed menu hands focus back to its trigger, once its focus trap is gone: where
+   * a pick opens an inline field (CMX-459), which then takes focus itself. */
+  onCloseAutoFocus?: (e: Event) => void;
 };
 
 // A portal still bubbles React events up the React tree: a pick inside the menu must not
@@ -447,7 +450,7 @@ const containContext = (e: SyntheticEvent) => {
 };
 
 /** A dropdown menu, named by its trigger: arrow keys move, Enter picks, typing jumps, Escape closes. */
-export function Menu({ trigger, items, className, open, onOpenChange, footer }: MenuProps) {
+export function Menu({ trigger, items, className, open, onOpenChange, footer, onCloseAutoFocus }: MenuProps) {
   // A trigger with an id of its own keeps it (Radix's would be overwritten), so name the menu by it.
   const triggerId = (trigger.props as { id?: string }).id;
   return (
@@ -455,7 +458,7 @@ export function Menu({ trigger, items, className, open, onOpenChange, footer }: 
       <RM.Trigger asChild>{trigger}</RM.Trigger>
       <RM.Portal>
         <RM.Content className={cx('popover overflow-menu ui-floating', className)} align="end" sideOffset={GAP} collisionPadding={MARGIN}
-          onClick={contain} onContextMenu={containContext} {...(triggerId ? { 'aria-labelledby': triggerId } : {})}>
+          onClick={contain} onContextMenu={containContext} onCloseAutoFocus={onCloseAutoFocus} {...(triggerId ? { 'aria-labelledby': triggerId } : {})}>
           {items.map((it, i) =>
             // keyed by label too: a new page's items are new nodes, so refocus() sees focus leave
             it === 'separator' ? <RM.Separator key={i} className="popover-sep" /> : <MenuEntry key={`${i}:${it.label}`} it={it} />,

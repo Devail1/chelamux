@@ -12,7 +12,7 @@ import { Button, Dialog, DialogClose, TextInput, Toggle } from '../../../shared/
 import type { AgentRow } from '../../sidebar/model.ts';
 import {
   type Outcome, type Row, type Suggestion, NAME_MAX, TITLE_MAX, applyRows, candidateWids, initialRows,
-  nameChanges, outcomeFailed, outcomeText, rowProblems, titleChanges,
+  nameChanges, outcomeFailed, outcomeText, postTitle, rowProblems, titleChanges, type TitleOutcome,
 } from '../model.ts';
 
 /** Every open is a fresh load (`seq`), so nothing from the last open lingers. */
@@ -28,8 +28,15 @@ export function closeSuggestNames() {
   opened.set(0);
 }
 
-const post = (path: string, body: unknown) =>
+/** A JSON POST through the dashboard's API (its reply body, whatever the status). */
+export const post = (path: string, body: unknown) =>
   api(path, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+
+/** CMX-459: one session's title, set by hand (the pane and row menus' "Rename title…"), through
+ * the same title write as the dialog's apply. */
+export function retitle(wid: string, title: string): Promise<TitleOutcome> {
+  return postTitle(wid, title, post);
+}
 
 type Load = { kind: 'loading' } | { kind: 'error'; message: string } | { kind: 'rows'; error: string | null };
 

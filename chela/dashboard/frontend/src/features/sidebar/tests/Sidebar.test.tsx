@@ -553,7 +553,7 @@ describe('a folder with one session (CMX-379)', () => {
     const { el, acts } = draw(byFolder(agents()));
     openRowMenu(rowOf(el, 'solo-b'));
     expect(menuItems().map(i => i.textContent)).toEqual([
-      'New session in this folder', 'Move up', 'Move down', 'Collapse all', 'Expand all', 'Archive']);
+      'New session in this folder', 'Move up', 'Move down', 'Collapse all', 'Expand all', 'Rename title…', 'Archive']);
     expect(menuItem('Move up').hasAttribute('data-disabled')).toBe(false);
     expect(menuItem('Move down').hasAttribute('data-disabled')).toBe(false);
     pick('New session in this folder');
@@ -573,7 +573,7 @@ describe('a folder with one session (CMX-379)', () => {
   test('a row in a headed folder keeps the plain row menu', () => {
     const { el } = draw(byFolder(agents()));
     openRowMenu(rowOf(el, 'a1'));
-    expect(menuItems().map(i => i.textContent)).toEqual(['Archive']);
+    expect(menuItems().map(i => i.textContent)).toEqual(['Rename title…', 'Archive']);
   });
 
   test('collapsing does not apply: a stored collapsed key still shows the row, and Alt numbers it', () => {
