@@ -26,6 +26,11 @@ from tests.test_judge_kill_recovery import AFTER, FEAT, NO_GUARDIAN, _git, _repo
 REAL_MUTATION_GATE = True            # the conftest stub must not hide the gate under test
 
 MUTATED = FEAT.replace("    if x == 3:", AFTER, 1)
+# CMX-456: the refusal's advice — a chela command, never "edit the journal by hand".
+HINT = ("(an entry that never changed its file is dropped by `chela judge journal "
+        "--prune-stale <run>`, which re-checks each entry against the file first; a real "
+        "mutation is never dropped — restore the file, or if that exact content is "
+        "deliberate, ask the orchestrator to resolve it)")
 
 
 @pytest.fixture(autouse=True)
@@ -194,9 +199,7 @@ def test_request_push_with_a_mutated_tracked_file_is_refused_naming_file_and_lin
     result = dispatcher.request_push("t1", pr_title="CMX-1: x", pr_body="b")
     assert result == {"ok": False, "task_id": "t1", "restored": "", "error": (
         "refusing to push — a sweep/self-check mutation: feat.py:2 is a sweep/self-check "
-        "MUTATION (`if False and (x == 3):`) in the working tree — restore it"
-        "; (only if that exact content is deliberate: remove its entry from "
-        f"{sweep.journal_path(root)})")}
+        "MUTATION (`if False and (x == 3):`) in the working tree — restore it; " + HINT)}
     assert not (root / ".chela-push-request.json").exists()
 
 
@@ -211,7 +214,7 @@ def test_request_push_refuses_a_mutation_already_committed(tmp_path):
     result = dispatcher.request_push("t1")
     assert result["ok"] is False
     assert ("feat.py:2 is a sweep/self-check MUTATION (`if False and (x == 3):`) COMMITTED in "
-            "HEAD — revert it before pushing; (only if") in result["error"]
+            "HEAD — revert it before pushing; (an entry that never") in result["error"]
 
 
 def test_request_push_restores_a_provable_mutation_first_then_proceeds(tmp_path):
@@ -251,8 +254,7 @@ def test_the_daemon_push_refuses_a_committed_mutation_and_never_runs_git_push(tm
     git.assert_not_called()
     assert out == {"ok": False, "error": "refusing to push a sweep/self-check mutation: "
                    "feat.py:2 is a sweep/self-check MUTATION (`if False and (x == 3):`) "
-                   "COMMITTED in HEAD — revert it before pushing; (only if that exact content "
-                   f"is deliberate: remove its entry from {sweep.journal_path(root)})"}
+                   "COMMITTED in HEAD — revert it before pushing; " + HINT}
 
 
 def test_the_daemon_push_ignores_a_live_self_checks_marker_on_disk(tmp_path):
@@ -338,7 +340,7 @@ def test_the_journal_lives_in_the_git_dir_never_in_the_tree(tmp_path):
     assert sweep.journal_path(root) == journal
     assert [json.loads(x) for x in journal.read_text().splitlines()] == [
         {"file": "feat.py", "line": 2, "blob": sweep._blob_id(MUTATED.encode()),
-         "text": "if False and (x == 3):"}]
+         "text": "if False and (x == 3):", "orig": sweep._blob_id(FEAT.encode())}]
     sweep.marker_path(root).unlink()
     assert _git(root, "status", "--porcelain") == ""
 
