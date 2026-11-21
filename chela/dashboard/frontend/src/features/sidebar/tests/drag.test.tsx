@@ -359,6 +359,26 @@ test('the Archived section rejects a drop', () => {
   expect(el.querySelector('.agent-row[data-agent="old"]')?.classList.contains('draggable')).toBe(false);
 });
 
+test('outside Custom groups no session is assigned: a row dropped below every folder writes nothing', () => {
+  // CMX-452: Manual sort makes a folder's rows draggable (to reorder), and the list below
+  // every group reads as Ungrouped, which dropAssignee would take: only Custom groups assign.
+  const rows = ['a', 'b'].flatMap(f => [win(`${f}1`, { cwd: `/srv/${f}`, session_id: `S-${f}1` }), win(`${f}2`, { cwd: `/srv/${f}`, session_id: `S-${f}2` })]);
+  const { el, acts } = drawList(rows, { view: normalizeView({ groupBy: 'folder', sort: 'manual', activity: 'all' }) });
+  const secs = [...el.querySelectorAll('.side-group')];
+  expect(secs.map(g => (g as HTMLElement).dataset.g)).toEqual(['/srv/a', '/srv/b']);
+  secs.forEach((g, i) => box(g, i * 80, i * 80 + 80));
+  box(el, 0, 300);
+  const a1 = el.querySelector('.agent-row[data-agent="a1"]') as HTMLElement;
+  // negative control: the row does drag (Manual), so the drop below is really reached
+  expect(a1.classList.contains('draggable')).toBe(true);
+  fireEvent.pointerDown(a1, pt(20, 30));
+  fireEvent.pointerMove(window, pt(20, 250)); // on the list, under every group
+  expect(el.querySelector('.drop-target')).toBeNull();
+  fireEvent.pointerUp(window, pt(20, 250));
+  expect(acts.dropOnGroup).not.toHaveBeenCalled();
+  expect(acts.dropRow).not.toHaveBeenCalled();
+});
+
 // --- the phone: a long press starts it, a swipe scrolls --------------------------------
 
 describe('touch', () => {
