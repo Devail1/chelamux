@@ -520,8 +520,8 @@ def test_the_nightly_battery_is_handed_the_yield_check_and_the_days_budget(tmp_p
 
 
 @pytest.mark.parametrize("trigger, says", [
-    ("idle", "on idle (queue and suite slot quiet)"),
-    ("fallback", "ran on fallback: the queue was never idle"),
+    ("idle", " on idle: "),
+    ("fallback", " on fallback (never idle): "),
 ])
 def test_an_idle_or_fallback_run_reports_back_to_the_day_and_says_why_it_started(
         tmp_path, monkeypatch, notices, trigger, says):
@@ -606,16 +606,16 @@ def _notice(**kw) -> str:
 @pytest.mark.parametrize("kw, want", [
     ({"trigger": "idle", "yielded_to": "CMX-12", "sweep_seconds": 2400.0,
       "budget_seconds": 10800.0},
-     "🧹🌙 nightly sweep (repo), started 01:00 on idle (queue and suite slot quiet): UNRUN, "
+     "🧹🌙 nightly sweep (repo), started 01:00 on idle: UNRUN, "
      "not clean — nothing filed — 1 standard-tier PR(s), 9 mutation(s), 7 UNRUN — 2 measured "
      "in 0.5 h: 4 mutations/hour — 7 owed to the next night — ⏳ yielded the suite slot to "
      "CMX-12 — 40 min used of 180"),
     ({"trigger": "fallback", "sweep_seconds": 1800.0, "budget_seconds": 1800.0},
-     "🧹🌙 nightly sweep (repo), started 01:00 — ran on fallback: the queue was never idle: "
+     "🧹🌙 nightly sweep (repo), started 01:00 on fallback (never idle): "
      "UNRUN, not clean — nothing filed — 1 standard-tier PR(s), 9 mutation(s), 7 UNRUN — 2 "
      "measured in 0.5 h: 4 mutations/hour — 7 owed to the next night — 30 min used of 30"),
     ({"trigger": "fixed", "sweep_seconds": 60.0},
-     "🧹🌙 nightly sweep (repo), started 01:00 at the fixed time (sweep.mode: fixed): UNRUN, "
+     "🧹🌙 nightly sweep (repo), started 01:00 at the fixed time: UNRUN, "
      "not clean — nothing filed — 1 standard-tier PR(s), 9 mutation(s), 7 UNRUN — 2 measured "
      "in 0.5 h: 4 mutations/hour — 7 owed to the next night — 1 min used"),
     ({"sweep_seconds": 60.0, "yielded_to": ""},
