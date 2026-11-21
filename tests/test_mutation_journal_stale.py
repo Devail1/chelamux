@@ -212,6 +212,17 @@ def test_prune_stale_with_nothing_stale_writes_nothing(tmp_path):
     assert sweep.journal_path(root).read_text() == real
 
 
+def test_prune_stale_with_nothing_stale_never_rewrites_the_journal(tmp_path, monkeypatch):
+    """No stale entry ⇒ no rewrite at all: a torn tail stays exactly as found, and the
+    journal is never replaced under a concurrent appender for nothing."""
+    root = _repo(tmp_path / "r")
+    real = json.dumps({"file": "feat.py", "line": 2, "blob": "a" * 40, "text": "t"}) + "\n"
+    sweep.journal_path(root).write_text(real + '{"torn')
+    monkeypatch.setattr(sweep.os, "replace", lambda *a: pytest.fail("rewrote the journal"))
+    assert sweep.prune_stale(root) == ([], "")
+    assert sweep.journal_path(root).read_text() == real + '{"torn'
+
+
 def test_prune_stale_fails_closed_on_an_unreadable_journal(tmp_path):
     root = _repo(tmp_path / "r")
     sweep.journal_path(root).write_text("{not json\n")
@@ -292,3 +303,12 @@ def test_the_cli_parser_wires_judge_journal(monkeypatch):
     assert seen[0].run == "cmx-9" and seen[0].prune_stale is True
 
 
+
+
+def test_a_later_judge_subcommand_is_not_routed_to_journal(monkeypatch):
+    seen = []
+    monkeypatch.setattr(main, "cmd_judge_journal", lambda a: pytest.fail("routed to journal"))
+    monkeypatch.setattr(main, "cmd_judge_timings", lambda a: seen.append(a.judge_cmd))
+    monkeypatch.setattr(sys, "argv", ["chela", "judge", "timings"])
+    main.main()
+    assert seen == ["timings"]
