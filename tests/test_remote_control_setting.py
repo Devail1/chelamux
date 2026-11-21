@@ -51,12 +51,13 @@ def _spawn_launch(monkeypatch, tmp_path) -> str:
     return launch[0]
 
 
-# --- (e) the default is unchanged: no env, no config ⇒ ON --------------------
+# --- (e) the default: no env, no config ⇒ OFF (CMX-460; it was ON before) ------
 
-def test_no_env_no_config_defaults_on(monkeypatch, tmp_path, scratch_config):
+def test_no_env_no_config_defaults_off(monkeypatch, tmp_path, scratch_config):
     assert not scratch_config.exists()
-    assert config.remote_control_setting() == (True, "default")
-    assert "--remote-control" in _spawn_launch(monkeypatch, tmp_path)
+    assert config.remote_control_setting() == (False, "default")
+    assert _spawn_launch(monkeypatch, tmp_path).startswith("claude --session-id ")
+    assert "--remote-control" not in _spawn_launch(monkeypatch, tmp_path)
 
 
 # --- (a) config.json drives it, read per call (never latched) ----------------

@@ -26,6 +26,10 @@ the ecosystem file, so a cold `pm2 start` cannot bring them back. In `chela.env`
 
 - `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID`, `CHELA_TELEGRAM_ALLOWED_USERS`
 - `CHELA_COLLAB_RELAY` (it defaults to empty, which turns sharing off)
+- `CHELA_REMOTE_CONTROL` (or set it to `off`; off is the default). Remote Control is
+  disabled by policy at work, so chela does not add `--remote-control` to the sessions it
+  launches. Leave Settings → General → Remote Control off too
+  ([CONFIG.md](CONFIG.md#remote-control-chela_remote_control))
 
 `chela doctor` then reports `Telegram bridge: not configured (optional)`, and Settings →
 *Connections & Status* shows Collaboration as `Off`.

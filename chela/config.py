@@ -1177,16 +1177,19 @@ WALL_TILE_DISPATCHED = os.environ.get("CHELA_WALL_TILE_DISPATCHED", "false").str
 # defaults ON safely; set CHELA_INBOX_ENABLED=false to disable it outright.
 INBOX_ENABLED = os.environ.get("CHELA_INBOX_ENABLED", "true").strip().lower() not in ("false", "0", "no", "off")
 
-# Claude Code's own `--remote-control [name]` (2.1.280+): lets that session be driven
-# from claude.ai. chela passes it BARE (CMX-34) so claude.ai shows Claude's own title. ON by default for every window chela opens FOR THE USER — the
-# dashboard launcher, the Telegram `/new` bridge, and the auto-launched orchestrator
-# persona (`chela/spawn.py`, `chela/personas/autolaunch.py`) — so a session started
-# from a phone or the wall is reachable from claude.ai too. ⛔ NEVER applied to a
-# dispatcher-launched agent/rework/judge (`chela/dispatcher.py::resolve_agent_cmd`
-# builds those commands on its own, entirely separate from `spawn_window`) — those
-# are unattended workers, not sessions a human sits at. Set CHELA_REMOTE_CONTROL=false
-# to turn it off everywhere it would otherwise apply, or flip it from the dashboard's
-# Settings (CMX-382) — env beats ``~/.chela/config.json`` beats the ON default.
+# Claude Code's own `--remote-control <name>` (2.1.280+): lets that session be driven
+# from claude.ai and the phone. When ON, every window chela opens FOR THE USER — `chela
+# spawn`, the dashboard's New session, the Telegram `/new` bridge, the auto-launched
+# orchestrator persona, and a restore relaunch (the boot pass and `chela restore --resume`,
+# under the session's persisted manual name, CMX-460) — starts with it (`chela/spawn.py`,
+# `chela/personas/autolaunch.py`). ⛔ NEVER applied to a dispatcher-launched
+# agent/rework/judge (`chela/dispatcher.py::resolve_agent_cmd` builds those commands on its
+# own, entirely separate from `spawn_window`) — those are unattended workers, not sessions a
+# human sits at. CMX-460: OFF by default (`CHELA_REMOTE_CONTROL=on` turns it on; an org where
+# Remote Control is disabled by policy leaves it off). If Claude Code refuses the flag, a
+# restore relaunches without it and logs why (`chela/restore.py::resume`).
+# `CHELA_REMOTE_CONTROL=on|off`, or the dashboard's Settings (CMX-382) — env beats
+# ``~/.chela/config.json`` beats the OFF default.
 #
 # CMX-382: read PER CALL through :func:`dashboard_setting`, never latched at import —
 # the dashboard, the Telegram bridge and the daemon are three separate processes, and
@@ -1194,6 +1197,7 @@ INBOX_ENABLED = os.environ.get("CHELA_INBOX_ENABLED", "true").strip().lower() no
 # launched AFTER the change; a running session keeps the flag it was launched with.
 REMOTE_CONTROL_KEY = "remote_control"
 REMOTE_CONTROL_ENV = "CHELA_REMOTE_CONTROL"
+REMOTE_CONTROL_DEFAULT = False
 _BOOL_TRUE = ("true", "1", "yes", "on")
 _BOOL_FALSE = ("false", "0", "no", "off")
 
@@ -1216,12 +1220,14 @@ def remote_control_setting() -> tuple[bool, str]:
     """``(enabled, source)`` — ``source`` is ``"env"``, ``"dashboard"`` or ``"default"``,
     the level that actually won (the Settings UI locks the toggle when it is ``"env"``)."""
     return _resolve_dashboard_setting(
-        REMOTE_CONTROL_KEY, REMOTE_CONTROL_ENV, True, cast_strict_bool)
+        REMOTE_CONTROL_KEY, REMOTE_CONTROL_ENV, REMOTE_CONTROL_DEFAULT, cast_strict_bool)
 
 
 def remote_control_enabled() -> bool:
-    """Whether a window chela opens FOR A HUMAN gets ``--remote-control``. Read per call."""
-    return dashboard_setting(REMOTE_CONTROL_KEY, REMOTE_CONTROL_ENV, True, cast_strict_bool)
+    """Whether a window chela opens FOR A HUMAN gets ``--remote-control``. Default False
+    (CMX-460). Read per call."""
+    return dashboard_setting(REMOTE_CONTROL_KEY, REMOTE_CONTROL_ENV, REMOTE_CONTROL_DEFAULT,
+                             cast_strict_bool)
 
 
 # 🔐 Guest typing into a shared terminal (CMX-403, docs/SHARE_SANDBOX.md). OFF by default:

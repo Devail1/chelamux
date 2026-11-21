@@ -233,7 +233,8 @@ def spawn_window(cwd: str | os.PathLike, *, command: str | None = None,
                  name: str | None = None,
                  remote_control_name: str | None = None,
                  launch_env: dict[str, str] | None = None,
-                 path_prefix: list[str] | None = None) -> SpawnResult:
+                 path_prefix: list[str] | None = None,
+                 allow_remote_control: bool = True) -> SpawnResult:
     """Open ONE tmux window in ``cwd`` and, if given, launch ``command`` in it.
 
     The single window-creation path both the dashboard launcher and the Telegram ``/new``
@@ -287,6 +288,12 @@ def spawn_window(cwd: str | os.PathLike, *, command: str | None = None,
     ``env PATH=…:"$PATH" NAME=value`` (:func:`_env_prefix`), after the session-id pin and the
     ``--remote-control`` insertion, both of which need the command to start with ``claude``.
     The caller has already allowlisted them (:mod:`chela.launch_settings`).
+
+    CMX-460 — ``allow_remote_control=False`` launches with NO Remote Control at all: no
+    ``--remote-control`` on ``command`` (whatever the setting or ``remote_control_name``
+    say) and no :data:`RC_SHELL_FILE` wrapper in the shell. It is the restore's fallback
+    when Claude Code refused the flag (a managed ``disableRemoteControl``, the org toggle),
+    so a refusal never keeps a session down.
     """
     real = os.path.realpath(os.path.expanduser(str(cwd)))
     if not os.path.isdir(real):
@@ -330,7 +337,8 @@ def spawn_window(cwd: str | os.PathLike, *, command: str | None = None,
     agent_manager.lock_window_name(wid if have_wid else target)
     # CMX-84: with Remote Control on, the wrapper is defined BEFORE `command`, which then
     # runs through it untouched (it already carries --remote-control).
-    setup = _setup_line(wid if have_wid else None, name, config.remote_control_enabled())
+    rc_on = allow_remote_control and config.remote_control_enabled()
+    setup = _setup_line(wid if have_wid else None, name, rc_on)
     if setup:
         _send(target, setup)
         _clear_history(target)
@@ -347,7 +355,7 @@ def spawn_window(cwd: str | os.PathLike, *, command: str | None = None,
             if session_id and _record_session_id(wid, session_id):
                 to_send = pinned
                 pinned_sid = session_id
-        if remote_control_name or config.remote_control_enabled():
+        if allow_remote_control and (remote_control_name or rc_on):
             # Applied AFTER session-id pinning (on `to_send`, not `command`): both
             # insert right after the leading `claude` token regardless of what the
             # other already inserted there, so the order is harmless either way —
