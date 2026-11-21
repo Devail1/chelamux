@@ -442,3 +442,107 @@ describe('no row reordering under another sort, or grouped by state', () => {
     expect(acts.dropOnGroup.mock.calls).toEqual([['s:S-c', customKey('g2')]]);
   });
 });
+
+// CMX-458: under a sort other than Manual a row has no place to go within its own group, so a
+// drag there draws no line between rows and writes nothing; the dragged row says why. A drop
+// on ANOTHER custom group still moves the row (CMX-380). Manual is the negative control.
+describe('Custom groups: the drag within a group under a sort other than Manual', () => {
+  const groups = [{ id: 'g2', name: 'Web' }];
+  const custom = { groups, assign: { 's:S-a': 'g2' } };
+  const HINT = 'Reorder needs Manual sort';
+  // Web 0-60 (head, a 30-60), Ungrouped 60-150 (head, b 90-120, c 120-150)
+  const hold = (row: HTMLElement, from: number, to: number) => {
+    fireEvent.pointerDown(row, pt(20, from));
+    fireEvent.pointerMove(window, pt(20, (from + to) / 2));
+    fireEvent.pointerMove(window, pt(20, to));
+  };
+  /** The load's own writes (a group's `seen` stamps) are not the drag's: start from none. */
+  const settle = async () => { await flush(); posts = []; };
+  const lines = (el: HTMLElement) => el.querySelectorAll('.drop-before, .drop-after').length;
+  const hints = (el: HTMLElement) => [...el.querySelectorAll('.drag-hint')].map(h => [
+    (h.closest('.agent-row') as HTMLElement).dataset.agent, h.textContent]);
+
+  test('ACCEPTANCE: under Activity, dragging over a row draws no insertion line, and the drop writes nothing', async () => {
+    await load({ view: { groupBy: 'custom', sort: 'activity', activity: 'all' }, custom });
+    const { el, acts, row } = drawList({ dropRow: vi.fn(dropRow), dropOnGroup: vi.fn(dropOnGroup) });
+    await settle();
+    expect(row('c').classList.contains('draggable')).toBe(true); // it still drags (onto a group)
+    hold(row('c'), 135, 95); // c onto the top half of b, its own group
+    expect(row('c').classList.contains('dragging')).toBe(true);
+    expect(lines(el)).toBe(0);
+    // the dragged row says why, and only it
+    expect(hints(el)).toEqual([['c', HINT]]);
+    expect(row('c').classList.contains('reorder-off')).toBe(true);
+    expect(row('b').classList.contains('reorder-off')).toBe(false);
+    expect(el.querySelector('.drop-target')).toBeNull();
+    fireEvent.pointerUp(window, pt(20, 95));
+    expect(acts.dropRow).not.toHaveBeenCalled();
+    expect(acts.dropOnGroup).not.toHaveBeenCalled();
+    await flush();
+    expect(posts).toEqual([]);
+    expect(drawn(UNGROUPED_KEY)).toEqual(['b', 'c']);
+    // the drag is over: no hint is left behind
+    expect(hints(el)).toEqual([]);
+  });
+
+  test.each(['name', 'created'])('under %s too: no insertion line, the hint, and nothing written', async sort => {
+    await load({ view: { groupBy: 'custom', sort, activity: 'all' }, custom });
+    const { el, acts, row } = drawList({ dropRow: vi.fn(dropRow) });
+    await settle();
+    hold(row('c'), 135, 95);
+    expect(lines(el)).toBe(0);
+    expect(hints(el)).toEqual([['c', HINT]]);
+    fireEvent.pointerUp(window, pt(20, 95));
+    expect(acts.dropRow).not.toHaveBeenCalled();
+    await flush();
+    expect(posts).toEqual([]);
+  });
+
+  test('ACCEPTANCE: under Activity, dropping on another custom group moves the row there', async () => {
+    await load({ view: { groupBy: 'custom', sort: 'activity', activity: 'all' }, custom });
+    const { el, acts, row } = drawList({ dropRow: vi.fn(dropRow), dropOnGroup: vi.fn(dropOnGroup) });
+    await settle();
+    hold(row('c'), 135, 45); // onto Web
+    // the group-drop highlight, unchanged; no line, and no hint: this drop does something
+    expect(el.querySelector(`.side-group[data-g="${customKey('g2')}"]`)?.classList.contains('drop-target')).toBe(true);
+    expect(lines(el)).toBe(0);
+    expect(hints(el)).toEqual([]);
+    fireEvent.pointerUp(window, pt(20, 45));
+    expect(acts.dropRow).not.toHaveBeenCalled();
+    expect(acts.dropOnGroup.mock.calls).toEqual([['s:S-c', customKey('g2')]]);
+    await flush();
+    expect(posts.map(p => (p.custom as { assign?: unknown } | undefined)?.assign)).toEqual([{ 's:S-a': 'g2', 's:S-c': 'g2' }]);
+    expect(drawn(customKey('g2'))?.sort()).toEqual(['a', 'c']);
+    expect(drawn(UNGROUPED_KEY)).toEqual(['b']);
+  });
+
+  test('the hint follows the pointer: off over another group, back over its own', async () => {
+    await load({ view: { groupBy: 'custom', sort: 'activity', activity: 'all' }, custom });
+    const { el, row } = drawList();
+    await settle();
+    hold(row('c'), 135, 95);
+    expect(hints(el)).toEqual([['c', HINT]]);
+    fireEvent.pointerMove(window, pt(20, 45));
+    expect(hints(el)).toEqual([]);
+    fireEvent.pointerMove(window, pt(20, 100));
+    expect(hints(el)).toEqual([['c', HINT]]);
+    fireEvent.keyDown(window, { key: 'Escape' });
+    expect(hints(el)).toEqual([]);
+  });
+
+  test('ACCEPTANCE (negative control): under Manual the same drag draws the line and the drop reorders', async () => {
+    await load({ view: { groupBy: 'custom', sort: 'manual', activity: 'all' }, custom });
+    const { el, acts, row } = drawList({ dropRow: vi.fn(dropRow) });
+    await settle();
+    hold(row('c'), 135, 95);
+    expect(row('b').classList.contains('drop-before')).toBe(true);
+    expect(lines(el)).toBe(1);
+    expect(hints(el)).toEqual([]);
+    expect(row('c').classList.contains('reorder-off')).toBe(false);
+    fireEvent.pointerUp(window, pt(20, 95));
+    expect(acts.dropRow.mock.calls).toEqual([[UNGROUPED_KEY, itemOf('c'), itemOf('b')]]);
+    await flush();
+    expect(posts).toEqual([{ rows: { [UNGROUPED_KEY]: { keys: ['s:S-c', 's:S-b'], at: expect.any(Number) } } }]);
+    expect(drawn(UNGROUPED_KEY)).toEqual(['c', 'b']);
+  });
+});
