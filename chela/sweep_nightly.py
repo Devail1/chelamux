@@ -62,6 +62,15 @@ every same-shape site; slice 3/3 (CMX-305) files them in the tracker and tells t
   it moved since the day before, and when it grew :data:`OWED_GROWTH_ALERT_DAYS` days running
   it says that too — a backlog that only grows is not a quiet night. An unreadable history is
   a warning in the notice, never "no growth".
+* **Sampled** (CMX-455). 11-21: 15 PRs merged 1,145 mutations while the battery measures ~50
+  an hour, so owing every one grew the backlog every night (620 → 1,007). A night now takes
+  at most ``sweep.per_pr_sample`` (default 20) of each merged PR, stratified by operator, its
+  PRs interleaved so each gets its first before any gets its second, and no more in all than
+  the budget fits at the MEASURED pace (``pace.json``: the median seconds per mutation and
+  per run's baseline) — never below one per PR. The rest is DROPPED, counted in the notice,
+  never owed; the owed backlog is held to the same per-PR share. A daemon-started run with
+  less of the day's budget left than one mutation needs (baseline + one, at the median; 5 min
+  with no pace yet) does not start: it is ``budget_spent``, quiet, and ends the day.
 * **The covered window.** The last 24 h — or, after a night that could not look, back to the
   last run that did (at most :data:`MAX_CATCHUP_SECONDS`). An idle run (CMX-400) that comes
   more than 24 h after the last one is caught up the same way; a same-day resume measures its
@@ -91,7 +100,8 @@ every same-shape site; slice 3/3 (CMX-305) files them in the tracker and tells t
   :class:`WouldFile`, which files nothing and records what it would have filed.
 * **Told.** ONE inbox notice per run (:func:`summary`): what was filed or appended and how
   many survivors went into each issue, clean, or skipped and why, and the UNRUN / UNKNOWN
-  counts. A run that filed nothing says so in that line. A night with no standard-tier merge (:data:`NO_MERGES`) is the one exception (CMX-371): nobody can
+  counts — CMX-455: as counts, at most :data:`MAX_NOTICE_CHARS` (a dropped owed line goes to
+  the log, never the notice; a CANNOT VERIFY why is never cut). A run that filed nothing says so in that line. A night with no standard-tier merge (:data:`NO_MERGES`) is the one exception (CMX-371): nobody can
   act on it, so it is logged and appended to the event log, never queued to the inbox.
 * **Recorded.** EVERY run — quiet or not — writes its time, status and reason to
   ``$CHELA_DIR/sweep-nightly/runs.json`` (:func:`record_run`). ``chela doctor``'s
@@ -156,7 +166,9 @@ DISPATCH_PAUSED, BLOCKED_HOURS = "dispatch_paused", "blocked_hours"
 # end the idle day (the box reads busy meanwhile, so it is not retried in a loop).
 RETRY_REASONS = frozenset({FLEET_PAUSED, ALREADY_RUNNING, DISPATCH_PAUSED, BLOCKED_HOURS})
 # A SKIPPED reason no human can act on: recorded and logged, never queued to the inbox.
-QUIET_REASONS = frozenset({NO_MERGES})
+# CMX-455: a day whose budget is spent (or has less left than one mutation) is one too.
+BUDGET_SPENT = "budget_spent"
+QUIET_REASONS = frozenset({NO_MERGES, BUDGET_SPENT})
 # `chela doctor` reads a last recorded run older than this as a dead scheduler (a day plus slack).
 STALE_SECONDS = 36 * 3600
 
@@ -174,7 +186,6 @@ DEFAULT_FALLBACK_FLOOR_SECONDS = 900.0
 # ⏳ CMX-439: the owed count growing this many days running is said in the notice.
 OWED_GROWTH_ALERT_DAYS = 3
 OWED_HISTORY_DAYS = 14
-BUDGET_SPENT = "budget_spent"
 # ⏳ CMX-436: local hours the sweep never starts in (and yields at): the host's own cron load —
 # ~25 memory-capped nautilus jobs between 03:03 and 04:17 on the reference box.
 DEFAULT_BLOCKED_HOURS = ("03:00-04:30",)
@@ -182,6 +193,20 @@ DAY_MINUTES = 24 * 60
 # ⚡ CMX-436: a mutations/hour figure only above this sample — n=1 in 0.0 h rates nothing.
 MIN_RATE_MUTATIONS = 10
 MIN_RATE_SECONDS = 600.0
+# ⏳ CMX-455: at most this many mutations of ONE merged PR a night (`sweep.per_pr_sample`),
+# stratified by operator; the rest of that PR's are dropped, not owed.
+DEFAULT_PER_PR_SAMPLE = 20
+# ⏳ CMX-455: the measured pace — per-mutation seconds and per-run overhead (the baseline before
+# the first mutation) — kept this deep; its medians size a night and a start's minimum.
+PACE_KEEP_MUTATIONS = 200
+PACE_KEEP_RUNS = 14
+# ⏳ CMX-455: the least a daemon-started run needs left when no pace has been measured yet.
+DEFAULT_MIN_START_SECONDS = 300.0
+# ⏳ CMX-455: the inbox notice is at most this long; the full record rides in its payload.
+MAX_NOTICE_CHARS = 400
+MAX_PART_CHARS = 80       # one free-text part (a why, a warning, a refused filing) in it
+# What an over-long notice leaves out first, in order (the result keys that print them).
+LOW_VALUE_PARTS = ("measured", "sweep_seconds", "held_off", "trigger")
 
 _RE_AT = re.compile(r"^([01]?\d|2[0-3]):([0-5]\d)$")
 _RE_SPAN = re.compile(r"^([01]?\d|2[0-3]):([0-5]\d)\s*-\s*([01]?\d|2[0-3]):([0-5]\d)\Z")
@@ -625,9 +650,10 @@ def start_reason(wf, now: datetime, quiet_for: float, chela_dir: Path | None = N
         log.warning("nightly sweep: %s — not sweeping until it is fixed or removed", e)
         return None
     # A run still pending (or one that never reported back) and a day that ran to its end
-    # are both the day's one run; a yielded day goes on until its budget is spent.
+    # are both the day's one run; a yielded day goes on until its budget is spent — CMX-455:
+    # until less is left than one mutation needs (:func:`min_start_seconds`).
     if rec.get("pending") or rec.get("done") or \
-            (rec and _used(rec) >= nightly_budget(wf).seconds):
+            (rec and nightly_budget(wf).seconds - _used(rec) < min_start_seconds(wf, chela_dir)):
         return None
     if hold_off(wf, now, chela_dir)[0]:
         return None             # CMX-436: a dispatch pause or blocked hours — no start at all
@@ -1203,19 +1229,6 @@ def locate_owed(worktree: Path, entry: dict, taken: set) -> int | None:
     return hits[0][1] if hits else None
 
 
-def owed_first(muts: list[sweep.Mutation], owed: list[tuple], blamed: dict[str, set[int]],
-               ) -> list[sweep.Mutation]:
-    """The order tonight's battery measures in: every OWED mutation first (oldest first), then
-    tonight's merges' in the sweep's own priority. Another mutation of a line swept only
-    because it is owed is left out — an earlier night measured it."""
-    by_id = {mutation_id(m): m for m in muts}
-    first = [by_id[i] for i in owed if i in by_id]
-    owed_ids = set(owed)
-    rest = [m for m in muts
-            if mutation_id(m) not in owed_ids and m.line in blamed.get(m.file, ())]
-    return first + rest
-
-
 def settle_owed(report: sweep.SweepReport, located: list[tuple[dict, int]], gone: list[dict],
                 pr_of: dict[tuple[str, int], str], now: float, keep_survivors: bool,
                 ) -> tuple[list[dict], list[dict]]:
@@ -1244,6 +1257,170 @@ def settle_owed(report: sweep.SweepReport, located: list[tuple[dict, int]], gone
             keep.append({"file": m.file, "line": m.line, "kind": m.kind, "before": m.before,
                          "after": m.after, "pr": pr_of.get((m.file, m.line), ""), "since": now})
     return keep, dropped
+
+
+# --- the sample and the pace (CMX-455) ------------------------------------------------------
+#
+# 11-21: 15 PRs merged 1,145 mutations in a day and the battery measures ~50 an hour, so owing
+# every one grew the backlog every night (620 → 1,007) and the oldest PRs were never reached.
+# A night now measures at most `sweep.per_pr_sample` of each merged PR, stratified by operator,
+# its PRs interleaved so each gets its first before any gets its second (what one night does
+# not reach is owed, and the owed run first the next night), and no more in all
+# than the measured pace says the budget fits. The rest is DROPPED — counted, never owed.
+
+
+def per_pr_sample(wf) -> int:
+    """``sweep.per_pr_sample``: the most mutations of ONE merged PR a night measures (default
+    :data:`DEFAULT_PER_PR_SAMPLE`). Anything but a positive whole number is the default, said
+    in the log."""
+    raw = wf.get("sweep", "per_pr_sample", default=None)
+    if raw is None:
+        return DEFAULT_PER_PR_SAMPLE
+    if isinstance(raw, int) and not isinstance(raw, bool) and raw > 0:
+        return raw
+    log.warning("%s: sweep.per_pr_sample %r is not a positive whole number — using %d",
+                wf.path, raw, DEFAULT_PER_PR_SAMPLE)
+    return DEFAULT_PER_PR_SAMPLE
+
+
+def stratified(items: list, k: int, kind=lambda m: m.kind) -> list:
+    """At most ``k`` of ``items``, stratified by operator: one of each kind in turn (kinds in
+    the order they first appear, each kind's in its own order) until ``k`` are taken."""
+    by_kind: dict[str, list] = {}
+    for it in items:
+        by_kind.setdefault(kind(it), []).append(it)
+    out: list = []
+    depth = 0
+    while len(out) < k and any(depth < len(v) for v in by_kind.values()):
+        for v in by_kind.values():
+            if depth < len(v) and len(out) < k:
+                out.append(v[depth])
+        depth += 1
+    return out
+
+
+def sample_order(muts: list[sweep.Mutation], owed: list[tuple], blamed: dict[str, set[int]],
+                 origin: dict[tuple[str, int], str], k: int, cap: int | None,
+                 pr_rank: dict[str, int] | None = None) -> tuple[list[sweep.Mutation], dict]:
+    """``(order, counts)``: what tonight's battery measures, in order. Every OWED mutation
+    first (oldest first); then tonight's merges' — at most ``k`` per PR (``origin``: the PR a
+    line blames to), :func:`stratified` by operator, the PRs interleaved in ``pr_rank`` order
+    (the base's log) so every PR gets its first before any gets its second, and cut at ``cap``
+    in all, owed included — never below one per PR. What is not taken is DROPPED, not owed:
+    ``counts`` says how many (``new``, ``sampled``, ``dropped``, ``prs``). Another mutation
+    of a line swept only because it is owed is left out — an earlier night measured it."""
+    by_id = {mutation_id(m): m for m in muts}
+    first = [by_id[i] for i in owed if i in by_id]
+    owed_ids = set(owed)
+    rest = [m for m in muts
+            if mutation_id(m) not in owed_ids and m.line in blamed.get(m.file, ())]
+    groups: dict[str, list[sweep.Mutation]] = {}
+    for m in rest:
+        groups.setdefault(origin.get((m.file, m.line), ""), []).append(m)
+    rank = pr_rank or {}
+    prs = sorted(groups, key=lambda sha: rank.get(sha, len(rank)))
+    picks = [stratified(groups[sha], k) for sha in prs]
+    new = [p[i] for i in range(max(map(len, picks), default=0)) for p in picks if i < len(p)]
+    if cap is not None:
+        new = new[:max(cap - len(first), len(prs))]
+    return first + new, {"new": len(rest), "sampled": len(new),
+                         "dropped": len(rest) - len(new), "prs": len(prs)}
+
+
+def trim_owed(owed: list[dict], k: int) -> tuple[list[dict], int]:
+    """``(kept, dropped)``: at most ``k`` owed mutations per PR (by file when the PR is
+    unknown), :func:`stratified` by operator, oldest first — the backlog a night owed before
+    the sample existed is held to the same share. ``dropped`` counts the rest."""
+    groups: dict[tuple[str, str], list[dict]] = {}
+    for e in owed:
+        groups.setdefault(("pr", e["pr"]) if e["pr"] else ("file", e["file"]), []).append(e)
+    keep = {id(e) for g in groups.values() for e in stratified(g, k, kind=lambda e: e["kind"])}
+    kept = [e for e in owed if id(e) in keep]
+    for e in owed:
+        if id(e) not in keep:
+            log.info("nightly sweep: owed mutation dropped over the per-PR share: %s:%d %s (%s)",
+                     e["file"], e["line"], e["kind"], e["pr"] or "PR unknown")
+    return kept, len(owed) - len(kept)
+
+
+def _pace_path(chela_dir: Path | None) -> Path:
+    return state_dir(chela_dir) / "pace.json"
+
+
+def _numbers(value: object) -> bool:
+    return isinstance(value, list) and all(
+        isinstance(v, (int, float)) and not isinstance(v, bool) and v >= 0 for v in value)
+
+
+def read_pace(wf, chela_dir: Path | None = None) -> dict:
+    """``wf``'s measured pace: ``{"mutation": [seconds…], "overhead": [seconds…]}``, newest
+    last (``{}`` with none yet). Raises ``ValueError`` for a store that cannot be read."""
+    rec = _read_json(_pace_path(chela_dir)).get(str(wf.path), {})
+    if not isinstance(rec, dict) or not all(_numbers(rec.get(f, [])) for f in
+                                            ("mutation", "overhead")):
+        raise ValueError(f"{_pace_path(chela_dir)} holds a malformed pace for {wf.path}")
+    return rec
+
+
+def record_pace(wf, report: sweep.SweepReport, chela_dir: Path | None = None) -> None:
+    """Keep the seconds each measured mutation of ``report`` took and its overhead (the sweep
+    before its first mutation: the baseline). A run that measured nothing adds nothing. An
+    unreadable store is started over. Never raises: the record is not the work."""
+    secs = [r.seconds for r in report.results if r.status != sweep.UNRUN and r.seconds > 0]
+    if not secs:
+        return
+    path = _pace_path(chela_dir)
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with open(path.with_name("pace.lock"), "a") as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            try:
+                data = _read_json(path)
+                rec = read_pace(wf, chela_dir)
+            except ValueError as e:
+                log.warning("nightly sweep: %s — the pace starts over", e)
+                data, rec = {}, {}
+            over = max(report.seconds - report.battery_seconds, 0.0)
+            data[str(wf.path)] = {
+                "mutation": (list(rec.get("mutation", [])) + secs)[-PACE_KEEP_MUTATIONS:],
+                "overhead": (list(rec.get("overhead", [])) + [over])[-PACE_KEEP_RUNS:]}
+            _write_json(path, data)
+    except Exception:  # noqa: BLE001 — logged; the next night sizes on the default
+        log.exception("nightly sweep: could not record the pace in %s", path)
+
+
+def pace(wf, chela_dir: Path | None = None) -> tuple[float | None, float]:
+    """``(per mutation, overhead)``: the MEDIAN seconds one mutation took and the median
+    overhead of a run, from :func:`read_pace`. ``(None, 0.0)`` when none was measured or the
+    store cannot be read (said in the log) — the callers then size on their defaults."""
+    try:
+        rec = read_pace(wf, chela_dir)
+    except ValueError as e:
+        log.warning("nightly sweep: %s — the pace is unknown", e)
+        return None, 0.0
+    muts, over = rec.get("mutation") or [], rec.get("overhead") or []
+    if not muts:
+        return None, 0.0
+    return (judge_timing.percentile(muts, 50),
+            judge_timing.percentile(over, 50) if over else 0.0)
+
+
+def min_start_seconds(wf, chela_dir: Path | None = None) -> float:
+    """⏳ CMX-455: the least budget a daemon-started run needs left to start at all — one
+    mutation's median plus a run's median overhead (its baseline comes first), or
+    :data:`DEFAULT_MIN_START_SECONDS` with no pace measured. 11-21: a 04:30 start with ~2 min
+    left ran nothing, used 8 min on its baseline, and sent an "UNRUN" notice."""
+    per, over = pace(wf, chela_dir)
+    return DEFAULT_MIN_START_SECONDS if per is None else per + over
+
+
+def capacity(budget: sweep.SweepBudget, per: float | None, over: float = 0.0) -> int | None:
+    """How many mutations ``budget``'s seconds fit at the measured pace: less one run's
+    overhead, at the median per mutation. ``None`` (no cut) with no pace measured. Its
+    ``max_mutations`` is the battery's own cap: what is over it is UNRUN and owed."""
+    if not per:
+        return None
+    return int(max(budget.seconds - over, 0.0) // per)
 
 
 # --- the run --------------------------------------------------------------------------------
@@ -1407,6 +1584,13 @@ def run(wf, *, now: float | None = None, chela_dir: Path | None = None,
     elif budget.seconds <= 0:
         result.update(status=SKIPPED, reason=BUDGET_SPENT,
                       why="today's sweep budget is already spent")
+    elif trigger in (IDLE, FALLBACK) and \
+            budget.seconds < (need := min_start_seconds(wf, chela_dir)):
+        # ⏳ CMX-455: a start that cannot finish one mutation measures nothing — the day's
+        # budget counts as spent, and nobody is told (QUIET_REASONS).
+        result.update(status=SKIPPED, reason=BUDGET_SPENT,
+                      why=f"{budget.seconds / 60:.0f} min of today's budget left, under one "
+                          f"mutation's {need / 60:.0f} min")
     elif paused(chela_dir):
         result.update(status=SKIPPED, reason=FLEET_PAUSED,
                       why="a fleet pause (`chela dispatch --pause --all`) is active")
@@ -1534,6 +1718,9 @@ def _sweep_and_file(wf, worktree: Path, head: str, ref: str, standard: list[dict
     except _Git as e:
         result.update(status=CANNOT_VERIFY, why=f"could not blame the merged lines: {e}")
         return
+    # ⏳ CMX-455: the backlog is held to the same per-PR share as tonight's sample.
+    k = per_pr_sample(wf)
+    owed, result["owed_trimmed"] = trim_owed(owed, k)
     # CMX-374: where each owed mutation sits tonight — or that its line is gone.
     located, gone, taken = [], [], set()
     for e in owed:
@@ -1565,6 +1752,15 @@ def _sweep_and_file(wf, worktree: Path, head: str, ref: str, standard: list[dict
     prune_evidence(chela_dir)
     cfg = judge.judge_suite_config(wf)
     budget = budget if budget is not None else nightly_budget(wf)
+    per, over = pace(wf, chela_dir)
+    cap = capacity(budget, per, over)
+    rank = {c["sha"]: i for i, c in enumerate(standard)}      # the base's log: newest first
+    counts: dict = {}
+
+    def order(muts: list[sweep.Mutation]) -> list[sweep.Mutation]:
+        out, n = sample_order(muts, first, lines, origin, k, cap, rank)
+        counts.update(n)
+        return out
     # ⏳ CMX-400: an agent waiting for the suite slot stops the battery between mutations —
     # and (CMX-436) so does a dispatch pause or blocked hours, for a daemon-started run.
     trigger = result.get("trigger")
@@ -1575,10 +1771,13 @@ def _sweep_and_file(wf, worktree: Path, head: str, ref: str, standard: list[dict
                              cfg.test_cmd, timeout=cfg.suite_timeout_seconds,
                              select_tests=cfg.select_tests, provision=False, budget=budget,
                              lines=swept, keep=evidence_dir(wf, result["at"], chela_dir),
-                             order=lambda muts: owed_first(muts, first, lines),
+                             order=order,
                              should_yield=check or slot_wanted,
                              rank=suite_guard.RANK_SWEEP)
+    record_pace(wf, report, chela_dir)
     unrun = [r.mutation.key for r in report._with(sweep.UNRUN)]
+    result.update(per_pr=k, sampled=counts.get("sampled", 0),
+                  sample_dropped=counts.get("dropped", 0), sample_prs=counts.get("prs", 0))
     result.update(yielded_to=report.yielded, sweep_seconds=report.seconds,
                   budget_seconds=budget.seconds,
                   yield_reason=check.reason if (check and report.yielded) else "",
@@ -1613,6 +1812,9 @@ def _sweep_and_file(wf, worktree: Path, head: str, ref: str, standard: list[dict
                   owed_ran=sum(1 for d in dropped if d["why"] == RAN),
                   owed_dropped=[f"{d['file']}:{d['line']} {d['kind']} — {d['why']}"
                                 for d in dropped if d["why"] != RAN])
+    # ⏳ CMX-455: each dropped line goes to the log; the notice gives only their count.
+    for line in result["owed_dropped"]:
+        log.info("nightly sweep (%s): owed mutation dropped: %s", wf.path, line)
     if result.get("status") is None:
         result.update(status=_quiet_status(result), why=_quiet_why(result))
 
@@ -1764,12 +1966,38 @@ def _file(wf, worktree: Path, head: str, ref: str, survivors: list[sweep.Mutatio
 # --- the notice -----------------------------------------------------------------------------
 
 
+def clip(text: object, limit: int = MAX_PART_CHARS) -> str:
+    """``text`` cut to ``limit`` characters, an ellipsis marking the cut."""
+    text = str(text)
+    return text if len(text) <= limit else text[:limit - 1] + "…"
+
+
 def summary(result: dict) -> str:
     """The ONE inbox line for a run: its outcome (and why), what was filed — or that nothing
-    was — and the battery's counts, UNRUN and UNKNOWN included."""
+    was — and the battery's counts, UNRUN and UNKNOWN included. ⏳ CMX-455: at most
+    :data:`MAX_NOTICE_CHARS` — counts, never lists (each free-text part cut to
+    :data:`MAX_PART_CHARS`); the full record rides in the notice's payload and the log. A
+    CANNOT VERIFY night is the exception: its why (a red baseline's failing tests) is what
+    the operator must act on, so it is never cut."""
+    line = _summary(result)
+    if result["status"] == CANNOT_VERIFY:
+        return line
+    # Over the cap, whole low-value parts go first — the rate, the minutes, who waited, when
+    # it started — so the owed count, its growth alert and the warnings stay; a cut is last.
+    for key in LOW_VALUE_PARTS:
+        if len(line) <= MAX_NOTICE_CHARS:
+            break
+        result = {**result, key: None}
+        line = _summary(result)
+    if len(line) > MAX_NOTICE_CHARS:
+        line = _summary(result, compact=True)      # the same counts in fewer words
+    return clip(line, MAX_NOTICE_CHARS)
+
+
+def _summary(result: dict, compact: bool = False) -> str:
     name = Path(result["workflow"]).parent.name or result["workflow"]
     status = result["status"]
-    outcome = {SKIPPED: f"skipped — {result.get('why')}",
+    outcome = {SKIPPED: f"skipped — {clip(result.get('why'))}",
                CANNOT_VERIFY: f"CANNOT VERIFY — {result.get('why')}",
                SURVIVORS: f"{result['survivors']} survivor(s) in "
                           f"{len(result['groups'])} group(s)",
@@ -1778,7 +2006,7 @@ def summary(result: dict) -> str:
     counts = {(i["issue"], i["appended"]): i["survivors"] for i in result.get("issues") or ()}
 
     def each(idents: list[str], appended: bool) -> str:
-        return ", ".join(f"{i} ({counts[(i, appended)]} survivor(s))"
+        return ", ".join(f"{i} ({counts[(i, appended)]}{'' if compact else ' survivor(s)'})"
                          if (i, appended) in counts else i for i in idents)
     filing = [f"filed {each(result['filed'], False)}" if result["filed"]
               else "no new issue" if result.get("appended") else "nothing filed"]
@@ -1790,60 +2018,69 @@ def summary(result: dict) -> str:
     if result["already_filed"]:
         filing.append(f"{result['already_filed']} PR/file group(s) already filed")
     if result["failed"]:
-        filing.append(f"{len(result['failed'])} NOT filed ({result['failed'][0]})")
+        filing.append(f"{len(result['failed'])} NOT filed ({clip(result['failed'][0])})")
     if result["would_file"]:
         filing.append(f"{len(result['would_file'])} would be filed (the tracker cannot file "
                       "issues; see would-file.jsonl)")
     line = f"🧹🌙 nightly sweep ({name}){started(result)}: {outcome} — {'; '.join(filing)}"
     if "mutations" in result:
-        line += (f" — {len(result['prs'])} standard-tier PR(s), {result['mutations']} "
+        line += (f" — {len(result['prs'])}{'' if compact else ' standard-tier'} PR(s), "
+                 f"{result['mutations']} "
                  f"mutation(s), {result.get('unrun', 0)} UNRUN")
         if result.get("unsupported"):
             line += f", {len(result['unsupported'])} file(s) UNKNOWN (no mutator)"
         line += throughput(result)
+        if result.get("sample_dropped"):
+            new = result["sampled"] + result["sample_dropped"]
+            line += (f" — sampled {result['sampled']} of {new} new (≤{result['per_pr']}/PR), "
+                     f"{result['sample_dropped']} dropped")
     if result.get("owed_carried"):
-        line += f" — {result['owed_carried']} owed from earlier nights"
+        line += (f" — {result['owed_carried']} owed "
+                 + ("carried" if compact else "from earlier nights"))
         if "owed_ran" in result:
             line += f" ({result['owed_ran']} ran"
             if result["owed_dropped"]:
-                line += (f"; {len(result['owed_dropped'])} dropped, line gone: "
-                         f"{', '.join(result['owed_dropped'])}")
+                line += f"; {len(result['owed_dropped'])} dropped (line gone)"
+            if result.get("owed_trimmed"):
+                line += f"; {result['owed_trimmed']} over ≤{result['per_pr']}/PR dropped"
             line += ")"
     if "owed" in result:
-        line += f" — {result['owed']} owed to the next night"
+        line += f" — {result['owed']} owed " + ("next" if compact else "to the next night")
         if "owed_delta" in result:
             line += f" ({result['owed_delta']:+d} since {result['owed_since']})"
         if result.get("owed_growth_days", 0) >= OWED_GROWTH_ALERT_DAYS:
+            trail = result["owed_trail"]
+            trail = trail[::len(trail) - 1] if compact and len(trail) > 2 else trail
             line += (f" — ⚠️ owed has grown {result['owed_growth_days']} days running: "
-                     f"{' → '.join(str(n) for n in result['owed_trail'])}")
+                     f"{' → '.join(str(n) for n in trail)}")
     if result.get("yielded_to"):
         line += f" — ⏳ {_yielded(result)}"
     if result.get("held_off"):
         line += (f" — held the suite slot for its floor ({result.get('floor')}) while "
-                 f"{', '.join(result['held_off'])} waited")
+                 f"{clip(', '.join(result['held_off']))} waited")
     if result.get("trigger") and result.get("sweep_seconds"):
         line += f" — {result['sweep_seconds'] / 60:.0f} min used"
         if result.get("budget_seconds"):
             line += f" of {result['budget_seconds'] / 60:.0f}"
     if result.get("baseline_flakes"):
-        line += (f" — ⚠️ baseline flake: {', '.join(result['baseline_flakes'])} (red once, green "
+        line += (f" — ⚠️ baseline flake: {clip(', '.join(result['baseline_flakes']))} (red once, green "
                  "alone; deselected from the battery)"
                  + (f" — evidence in {result['kept']}" if result.get("kept") else ""))
     if result["warnings"]:
-        line += f" — ⚠️ {len(result['warnings'])} warning(s): {result['warnings'][0]}"
+        line += f" — ⚠️ {len(result['warnings'])} warning(s): {clip(result['warnings'][0])}"
     return line
 
 
 def started(result: dict) -> str:
-    """⏳ CMX-400: `` — started HH:MM on idle`` / `` — ran on fallback: the queue was never
-    idle`` / `` — started HH:MM at the fixed time``; ``""`` for a hand run."""
+    """⏳ CMX-400: ``, started HH:MM on idle`` / ``, started HH:MM on fallback (never idle)``
+    / ``, started HH:MM at the fixed time``; ``""`` for a hand run (CMX-455: kept short)."""
     trigger = result.get("trigger")
     if trigger not in (IDLE, FALLBACK, FIXED):
         return ""
     at = datetime.fromtimestamp(result["at"]).strftime("%H:%M")
-    return {IDLE: f", started {at} on idle (queue and suite slot quiet)",
-            FALLBACK: f", started {at} — ran on fallback: the queue was never idle",
-            FIXED: f", started {at} at the fixed time (sweep.mode: fixed)",
+    return {IDLE: f", started {at} on idle",
+            FALLBACK: f", started {at} on fallback (never idle)",
+            FIXED: f", started {at} at the fixed time",
             }[trigger]
 
 

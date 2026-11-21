@@ -152,6 +152,9 @@ class SweepResult:
     # ⚡ CMX-145: why this mutation ran the FULL suite instead of its selected tests ("" when
     # it ran a selection) — a fallback is said out loud, never silent.
     full_suite: str = ""
+    # ⏳ CMX-455: wall-clock this one mutation took (0.0 for one never run) — the nightly
+    # sweep's measured pace, what it sizes a night's sample and a start's minimum by.
+    seconds: float = 0.0
 
     def as_dict(self) -> dict:
         m = self.mutation
@@ -1521,9 +1524,11 @@ def _sweep(worktree: Path, base: str, test_cmd: str, *, timeout: float, select_t
                     report.paused_for.append(yielded)
             if progress is not None:
                 progress(n, len(chosen), mut)
+            one = _now()
             with judge_timing.within("mutations"):
                 result, contamination = _run_one(worktree, test_cmd, mut, baseline, timeout,
                                                  selector)
+            result.seconds = _now() - one
             report.results.append(result)
             if contamination:
                 report.cannot_verify = contamination

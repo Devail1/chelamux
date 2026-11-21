@@ -167,8 +167,9 @@ def test_a_deleted_line_drops_out_and_the_report_says_so(tmp_path, monkeypatch):
     assert ("size.py", 2, "if-false") not in spy.statuses()
     assert _owed(chela, repo) == []
     assert res["owed_dropped"] == ["size.py:2 if-false — line_gone"]
-    assert ("3 owed from earlier nights (2 ran; 1 dropped, line gone: size.py:2 if-false — "
-            "line_gone)") in res["summary"]
+    # CMX-455: a count in the notice; the line itself goes to the log.
+    assert "3 owed from earlier nights (2 ran; 1 dropped (line gone))" in res["summary"]
+    assert "size.py:2" not in res["summary"]
 
 
 def test_a_deleted_file_drops_its_owed_ones(tmp_path):
@@ -316,18 +317,23 @@ def _e(m: sweep.Mutation, pr="`abc` PR (#1)", since=1.0) -> dict:
             "after": m.after, "pr": pr, "since": since}
 
 
+def _owed_first(muts, owed, blamed):
+    """CMX-455's :func:`sample_order` with no sample cut: one PR, room for all."""
+    return sweep_nightly.sample_order(muts, owed, blamed, {}, k=100, cap=None)[0]
+
+
 def test_owed_first_puts_the_owed_first_in_owed_order_and_drops_unowed_extras():
     a, b, c = _m(line=1), _m(line=2), _m(line=3)
     extra = _m(line=3, kind="compare-flip", after="    if not x:")   # same owed-only line
     blamed = {"a.py": {1, 2}}
     owed = [sweep_nightly.mutation_id(c), sweep_nightly.mutation_id(b),
             ("gone.py", 9, "if-false", "x")]
-    assert sweep_nightly.owed_first([a, b, c, extra], owed, blamed) == [c, b, a]
+    assert _owed_first([a, b, c, extra], owed, blamed) == [c, b, a]
 
 
 def test_owed_first_with_nothing_owed_keeps_the_sweeps_order():
     a, b = _m(line=2), _m(line=1)
-    assert sweep_nightly.owed_first([a, b], [], {"a.py": {1, 2}}) == [a, b]
+    assert _owed_first([a, b], [], {"a.py": {1, 2}}) == [a, b]
 
 
 def test_locate_owed_finds_the_nearest_matching_line_not_taken(tmp_path):
