@@ -134,6 +134,15 @@ def test_per_pr_sample_is_a_positive_whole_number_or_the_default(tmp_path, raw, 
     assert sweep_nightly.per_pr_sample(_wf(tmp_path, extra)) == want
 
 
+def test_an_unset_per_pr_sample_is_the_default_without_a_warning(tmp_path, caplog):
+    with caplog.at_level(logging.WARNING, logger="chela.sweep_nightly"):
+        assert sweep_nightly.per_pr_sample(_wf(tmp_path)) == 20
+    assert "per_pr_sample" not in caplog.text
+    with caplog.at_level(logging.WARNING, logger="chela.sweep_nightly"):
+        sweep_nightly.per_pr_sample(_wf(tmp_path, "sweep:\n  per_pr_sample: 0\n"))
+    assert "sweep.per_pr_sample 0 is not a positive whole number — using 20" in caplog.text
+
+
 def test_trim_owed_logs_each_entry_it_drops(caplog):
     e = {"file": "a.py", "line": 3, "kind": "if-false", "before": "b", "after": "a", "pr": ""}
     with caplog.at_level(logging.INFO, logger="chela.sweep_nightly"):
