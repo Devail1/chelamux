@@ -176,7 +176,7 @@ function Row({ it, s, actions, archived = false, altNum, folder, group, drag, de
       {folder && <span className="ar-folder-line">{folder}</span>}
       {altNum ? <span className="ar-altnum" aria-hidden="true">{altNum}</span> : null}
       {drag && <Grip />}
-      {drag?.hint && <span className="drag-hint" role="status">{drag.hint}</span>}
+      {drag?.hint && <span className="drag-hint">{drag.hint}</span>}
     </div>
   );
 }
@@ -289,9 +289,13 @@ function GroupView({ g, index, count, s, actions, alt, folders, drag, kids }: Gr
     // CMX-438: a run in the pinned Runs / Dispatched group drags nowhere
     if (g.key === DISPATCHED_KEY) return undefined;
     const d = handle({ kind: 'row', assign: assignKey(it), group: g.key, item: it.key, reorder });
-    // CMX-458: no reorder here (a sort other than Manual): a row held over its own group
-    // draws no line between rows and drops nothing, and says why instead.
-    if (!reorder) return d.dragging && drag.view?.over?.key === g.key ? { ...d, hint: REORDER_HINT } : d;
+    // CMX-458: no reorder here: a row held over its own group draws no line between rows and
+    // drops nothing. Under a sort other than Manual it says why (under Manual, a one-row group
+    // has nowhere to move it, and the hint would be false).
+    if (!reorder) {
+      const hint = s.view.sort !== 'manual' && d.dragging && drag.view?.over?.key === g.key;
+      return hint ? { ...d, hint: REORDER_HINT } : d;
+    }
     return rowLine?.key === it.key ? { ...d, drop: rowLine.side } : d;
   };
   const draw: DrawRow = (it, depth, tree, parent) => (

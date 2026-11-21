@@ -530,6 +530,21 @@ describe('Custom groups: the drag within a group under a sort other than Manual'
     expect(hints(el)).toEqual([]);
   });
 
+  test('under Manual, a row alone in its group draws no line and says nothing: Manual IS the sort', async () => {
+    await load({ view: { groupBy: 'custom', sort: 'manual', activity: 'all' }, custom });
+    const { el, acts, row } = drawList({ dropRow: vi.fn(dropRow) });
+    await settle();
+    hold(row('a'), 45, 35); // a, alone in Web, held over Web
+    expect(row('a').classList.contains('dragging')).toBe(true);
+    expect(lines(el)).toBe(0);
+    expect(hints(el)).toEqual([]);
+    expect(row('a').classList.contains('reorder-off')).toBe(false);
+    fireEvent.pointerUp(window, pt(20, 35));
+    expect(acts.dropRow).not.toHaveBeenCalled();
+    await flush();
+    expect(posts).toEqual([]);
+  });
+
   test('ACCEPTANCE (negative control): under Manual the same drag draws the line and the drop reorders', async () => {
     await load({ view: { groupBy: 'custom', sort: 'manual', activity: 'all' }, custom });
     const { el, acts, row } = drawList({ dropRow: vi.fn(dropRow) });
