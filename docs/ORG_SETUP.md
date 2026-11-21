@@ -26,6 +26,10 @@ the ecosystem file, so a cold `pm2 start` cannot bring them back. In `chela.env`
 
 - `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID`, `CHELA_TELEGRAM_ALLOWED_USERS`
 - `CHELA_COLLAB_RELAY` (it defaults to empty, which turns sharing off)
+- `CHELA_REMOTE_CONTROL` (or set it to `off`; off is the default). Remote Control is
+  disabled by policy at work, so chela does not add `--remote-control` to the sessions it
+  launches. Leave Settings → General → Remote Control off too
+  ([CONFIG.md](CONFIG.md#remote-control-chela_remote_control))
 
 `chela doctor` then reports `Telegram bridge: not configured (optional)`, and Settings →
 *Connections & Status* shows Collaboration as `Off`.
@@ -158,6 +162,25 @@ tailscale serve reset              # stop serving
 from a user's (untagged) device. The difference from (a): here the **whole host** is a
 tailnet node, so the policy in section 3 must keep it from reaching anything, not just the
 dashboard.
+
+### On the phone: a home-screen app that does not look like your personal one
+
+The dashboard installs as a standalone app: in Safari, Share → **Add to Home Screen**; in
+Chrome, **Install app**. If you also run a personal chela, the two must not be confused on
+the home screen. Set, in the dashboard's environment (`chela.env`):
+
+| Variable | Values | Effect |
+|---|---|---|
+| `CHELA_DASHBOARD_ICON_VARIANT` | `default` (unset) or `work` | `work` draws the same chela mark with a **briefcase badge** in its bottom-right corner, so the two icons differ in shape, not only in colour, and gives the browser bar a different `theme-color` |
+| `CHELA_DASHBOARD_APP_NAME` | any text (default `chela`) | the label under the icon (the manifest's `short_name` and the iOS title) and the page title, `<name> – Mission Control` |
+
+For example `CHELA_DASHBOARD_ICON_VARIANT=work` and `CHELA_DASHBOARD_APP_NAME="chela work"`;
+put your organisation's name in the label if you want it, since nothing org-specific ships with
+chela. Both are read from the environment only, never from `~/.chela/config.json` (a file the
+dashboard itself can write), like the identity settings in section 4. An unknown variant is
+refused: the dashboard answers 503 and names the bad value, rather than quietly drawing the
+default icon. `pm2 restart chela-dashboard` after a change, then remove and re-add the
+home-screen icon: a phone keeps the icon and label it saved.
 
 ## 3. The tailnet policy
 

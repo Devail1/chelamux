@@ -251,6 +251,23 @@ the log; `chela digest` prints it now, and `chela digest --send` sends it now. A
 unreadable or wrong-typed field falls back to its default, and an unreadable config never
 holds anything back.
 
+## Remote Control: `CHELA_REMOTE_CONTROL`
+
+`CHELA_REMOTE_CONTROL=on|off` (default **off**). On, every interactive session chela
+launches gets Claude Code's own `--remote-control <name>`, so it shows up in claude.ai and
+the phone app: `chela spawn`, the dashboard's New session, Telegram `/new`, the boot restore
+and `chela restore --resume`. The name is the session's manual name if it has one (it
+survives a reboot), else its window name. Renaming the window later renames the
+remote-control session with it.
+
+- **Never for dispatched runs or judges.** The dispatcher builds those launch commands
+  itself, without the flag.
+- **A refusal never keeps a session down.** If Claude Code refuses the flag (a managed
+  `disableRemoteControl`, or the org's Remote Control toggle), a restore relaunches the
+  session without it and logs why.
+- Settings → General → Remote Control sets it from the dashboard. The env var, when set,
+  wins and locks that switch. It only affects sessions launched after the change.
+
 ## `chela doctor`
 
 ```

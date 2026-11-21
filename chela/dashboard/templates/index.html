@@ -3,8 +3,16 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
-    <title>chela – Mission Control</title>
+    <title>{{ pwa.title }}</title>
     <link rel="icon" href="{{ asset_path('img/favicon.svg') }}" type="image/svg+xml">
+    <!-- CMX-457: installable (chela.dashboard.pwa). iOS takes apple-touch-icon, never the SVG;
+         the manifest is fetched with credentials so a login proxy in front lets it through. -->
+    <link rel="apple-touch-icon" sizes="180x180" href="apple-touch-icon.png">
+    <link rel="manifest" href="manifest.webmanifest" crossorigin="use-credentials">
+    <meta name="theme-color" content="{{ pwa.theme_color }}">
+    <meta name="mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-title" content="{{ pwa.app_name }}">
     <link rel="stylesheet" href="{{ asset_path('vendor/gridstack.min.css') }}">
     <!-- CMX-248: style.css is the build entry's (frontend/src/main.tsx imports it). -->
     {% if app_css %}<link rel="stylesheet" href="{{ app_css }}">{% endif %}

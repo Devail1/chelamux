@@ -2957,6 +2957,17 @@ body.sidebar-dragging iframe { pointer-events: none; }
 .agent-row.rich.drop-after::after { bottom: -1px; }
 .side-group.drop-target { outline: 1.5px dashed var(--accent); outline-offset: 1px; border-radius: 7px; }
 .side-group.drop-reject, .side-triage.drop-reject { opacity: 0.5; cursor: no-drop; }
+/* CMX-458: a row dragged within its own group under a sort other than Manual draws no line
+   between rows; it says why on itself instead. The hint is not dimmed with the row's own
+   content, though the group's drop-reject still fades the whole group, hint included. */
+.agent-row.rich.dragging.reorder-off { opacity: 1; }
+.agent-row.rich.dragging.reorder-off > :not(.drag-hint) { opacity: 0.45; }
+.drag-hint {
+    position: absolute; right: 6px; top: 50%; transform: translateY(-50%);
+    padding: 1px 6px; border-radius: 4px; font-size: 10.5px; white-space: nowrap;
+    background: var(--surface); color: var(--text); border: 1px solid var(--border);
+    pointer-events: none;
+}
 /* A compact menu, dividers between action groups (.popover-sep). */
 .side-menu { min-width: 168px; }
 .side-menu .popover-item { padding: 6px 10px; }
