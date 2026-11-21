@@ -3,7 +3,7 @@
 // then names nothing and the groups came back empty.
 import { expect, test } from 'vitest';
 import {
-  type AgentRow, type Custom, assignKey, buildItems, groupSidebar, reconcileAssign, sidebarModel,
+  type AgentRow, type Custom, type SessionRecord, assignKey, buildItems, groupSidebar, reconcileAssign, sidebarModel,
 } from '../model.ts';
 import { NOW, runWin, state, wants, win } from './fixtures.ts';
 
@@ -130,6 +130,16 @@ test('a null hole in the agent list is skipped, not read (the rows after it stil
   const c = custom({ 'w:@7': 'g1' });
   const agents = [null, undefined, win('m', { window_id: '@7', session_id: 'S' })];
   expect(reconcileAssign(c, agents, [], NOW)).toEqual(custom({ 's:S': 'g1' }, { 's:S': NOW }));
+});
+
+test('a null hole in the archive list is skipped, not read (the records after it still count)', () => {
+  // CMX-454: the archive guard `r && r.session_id` must hold for a hole, not only for a
+  // record with no session id; read through, the hole throws and the reconcile dies.
+  const past30 = custom({ 's:S': 'g1' }, { 's:S': NOW - 31 * DAY });
+  const sessions = [null, { key: 's:S', session_id: 'S' }] as unknown as SessionRecord[];
+  expect(reconcileAssign(past30, [], sessions, NOW)).toEqual(custom({ 's:S': 'g1' }, { 's:S': NOW }));
+  // negative control: without the record after the hole, the key is pruned
+  expect(reconcileAssign(past30, [], [null] as unknown as SessionRecord[], NOW)).toEqual(custom({}, {}));
 });
 
 test('a window with no previous session, or the same one, moves no assignment', () => {
