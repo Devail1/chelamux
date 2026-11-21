@@ -205,6 +205,8 @@ DEFAULT_MIN_START_SECONDS = 300.0
 # ⏳ CMX-455: the inbox notice is at most this long; the full record rides in its payload.
 MAX_NOTICE_CHARS = 400
 MAX_PART_CHARS = 80       # one free-text part (a why, a warning, a refused filing) in it
+# What an over-long notice leaves out first, in order (the result keys that print them).
+LOW_VALUE_PARTS = ("measured", "sweep_seconds", "held_off", "trigger")
 
 _RE_AT = re.compile(r"^([01]?\d|2[0-3]):([0-5]\d)$")
 _RE_SPAN = re.compile(r"^([01]?\d|2[0-3]):([0-5]\d)\s*-\s*([01]?\d|2[0-3]):([0-5]\d)\Z")
@@ -1334,6 +1336,10 @@ def trim_owed(owed: list[dict], k: int) -> tuple[list[dict], int]:
         groups.setdefault(("pr", e["pr"]) if e["pr"] else ("file", e["file"]), []).append(e)
     keep = {id(e) for g in groups.values() for e in stratified(g, k, kind=lambda e: e["kind"])}
     kept = [e for e in owed if id(e) in keep]
+    for e in owed:
+        if id(e) not in keep:
+            log.info("nightly sweep: owed mutation dropped over the per-PR share: %s:%d %s (%s)",
+                     e["file"], e["line"], e["kind"], e["pr"] or "PR unknown")
     return kept, len(owed) - len(kept)
 
 
@@ -1974,10 +1980,21 @@ def summary(result: dict) -> str:
     CANNOT VERIFY night is the exception: its why (a red baseline's failing tests) is what
     the operator must act on, so it is never cut."""
     line = _summary(result)
-    return line if result["status"] == CANNOT_VERIFY else clip(line, MAX_NOTICE_CHARS)
+    if result["status"] == CANNOT_VERIFY:
+        return line
+    # Over the cap, whole low-value parts go first — the rate, the minutes, who waited, when
+    # it started — so the owed count, its growth alert and the warnings stay; a cut is last.
+    for key in LOW_VALUE_PARTS:
+        if len(line) <= MAX_NOTICE_CHARS:
+            break
+        result = {**result, key: None}
+        line = _summary(result)
+    if len(line) > MAX_NOTICE_CHARS:
+        line = _summary(result, compact=True)      # the same counts in fewer words
+    return clip(line, MAX_NOTICE_CHARS)
 
 
-def _summary(result: dict) -> str:
+def _summary(result: dict, compact: bool = False) -> str:
     name = Path(result["workflow"]).parent.name or result["workflow"]
     status = result["status"]
     outcome = {SKIPPED: f"skipped — {clip(result.get('why'))}",
@@ -1989,7 +2006,7 @@ def _summary(result: dict) -> str:
     counts = {(i["issue"], i["appended"]): i["survivors"] for i in result.get("issues") or ()}
 
     def each(idents: list[str], appended: bool) -> str:
-        return ", ".join(f"{i} ({counts[(i, appended)]} survivor(s))"
+        return ", ".join(f"{i} ({counts[(i, appended)]}{'' if compact else ' survivor(s)'})"
                          if (i, appended) in counts else i for i in idents)
     filing = [f"filed {each(result['filed'], False)}" if result["filed"]
               else "no new issue" if result.get("appended") else "nothing filed"]
@@ -2007,7 +2024,8 @@ def _summary(result: dict) -> str:
                       "issues; see would-file.jsonl)")
     line = f"🧹🌙 nightly sweep ({name}){started(result)}: {outcome} — {'; '.join(filing)}"
     if "mutations" in result:
-        line += (f" — {len(result['prs'])} standard-tier PR(s), {result['mutations']} "
+        line += (f" — {len(result['prs'])}{'' if compact else ' standard-tier'} PR(s), "
+                 f"{result['mutations']} "
                  f"mutation(s), {result.get('unrun', 0)} UNRUN")
         if result.get("unsupported"):
             line += f", {len(result['unsupported'])} file(s) UNKNOWN (no mutator)"
@@ -2017,7 +2035,8 @@ def _summary(result: dict) -> str:
             line += (f" — sampled {result['sampled']} of {new} new (≤{result['per_pr']}/PR), "
                      f"{result['sample_dropped']} dropped")
     if result.get("owed_carried"):
-        line += f" — {result['owed_carried']} owed from earlier nights"
+        line += (f" — {result['owed_carried']} owed "
+                 + ("carried" if compact else "from earlier nights"))
         if "owed_ran" in result:
             line += f" ({result['owed_ran']} ran"
             if result["owed_dropped"]:
@@ -2026,12 +2045,14 @@ def _summary(result: dict) -> str:
                 line += f"; {result['owed_trimmed']} over ≤{result['per_pr']}/PR dropped"
             line += ")"
     if "owed" in result:
-        line += f" — {result['owed']} owed to the next night"
+        line += f" — {result['owed']} owed " + ("next" if compact else "to the next night")
         if "owed_delta" in result:
             line += f" ({result['owed_delta']:+d} since {result['owed_since']})"
         if result.get("owed_growth_days", 0) >= OWED_GROWTH_ALERT_DAYS:
+            trail = result["owed_trail"]
+            trail = trail[::len(trail) - 1] if compact and len(trail) > 2 else trail
             line += (f" — ⚠️ owed has grown {result['owed_growth_days']} days running: "
-                     f"{' → '.join(str(n) for n in result['owed_trail'])}")
+                     f"{' → '.join(str(n) for n in trail)}")
     if result.get("yielded_to"):
         line += f" — ⏳ {_yielded(result)}"
     if result.get("held_off"):

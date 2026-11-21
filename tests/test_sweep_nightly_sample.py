@@ -134,6 +134,14 @@ def test_per_pr_sample_is_a_positive_whole_number_or_the_default(tmp_path, raw, 
     assert sweep_nightly.per_pr_sample(_wf(tmp_path, extra)) == want
 
 
+def test_trim_owed_logs_each_entry_it_drops(caplog):
+    e = {"file": "a.py", "line": 3, "kind": "if-false", "before": "b", "after": "a", "pr": ""}
+    with caplog.at_level(logging.INFO, logger="chela.sweep_nightly"):
+        sweep_nightly.trim_owed([dict(e, line=1), e], 1)
+    assert "over the per-PR share: a.py:3 if-false (PR unknown)" in caplog.text
+    assert "a.py:1" not in caplog.text
+
+
 def test_trim_owed_keeps_k_per_pr_stratified_oldest_first_and_counts_the_rest():
     def e(file, line, kind, pr):
         return {"file": file, "line": line, "kind": kind, "before": "b", "after": "a",
@@ -373,6 +381,8 @@ def _night_1121(**kw) -> dict:
 
 def test_the_11_21_notice_counts_the_dropped_lines_and_stays_under_the_cap():
     line = sweep_nightly.summary(_night_1121())
+    # Over the cap only by the rate: that part alone is left out.
+    assert "mutations/hour" not in line and "170 min used of 180" in line
     assert "620 owed from earlier nights (93 ran; 49 dropped (line gone))" in line
     assert "x0.py" not in line and "line_gone" not in line
     assert "sampled 147 of 1145 new (≤20/PR), 998 dropped" in line
@@ -384,6 +394,23 @@ def test_the_notice_cuts_long_free_text_and_caps_its_length():
     line = sweep_nightly.summary(_night_1121(warnings=[long], failed=[long]))
     assert len(line) == 400 and line.endswith("…")
     assert "w" * 80 not in line and "w" * 79 + "…" in line
+
+
+def test_an_over_long_notice_leaves_out_whole_low_value_parts_before_it_cuts():
+    """The rate and the minutes go; the owed count, its growth alert and the warning stay."""
+    res = _night_1121(owed_growth_days=3, owed_trail=[620, 1007, 1100, 1200],
+                      warnings=["the owed history could not be kept"],
+                      prs=["p"] * 15, owed_delta=100)
+    full = sweep_nightly._summary(res)
+    assert len(full) > 400
+    line = sweep_nightly.summary(res)
+    assert len(line) <= 400 and not line.endswith("…")
+    assert "mutations/hour" not in line and "min used" not in line
+    # Still over after that: the same counts in fewer words.
+    assert "filed CMX-460 (2), CMX-461 (2), CMX-462 (1)" in line and "15 PR(s)" in line
+    assert "620 owed carried (93 ran; 49 dropped (line gone))" in line
+    assert "25 owed next" in line and "owed has grown 3 days running: 620 → 1200" in line
+    assert "warning(s): the owed history could not be kept" in line
 
 
 def test_a_cannot_verify_notice_keeps_its_whole_why():
