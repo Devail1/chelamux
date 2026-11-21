@@ -180,10 +180,10 @@ function Row({ it, s, actions, archived = false, altNum, folder, group, drag, de
         onRetitle={archived ? undefined : () => {
           fieldAfterMenu.current = true;
         }}
-        onCloseAutoFocus={(e) => {
+        onCloseAutoFocus={() => {
+          // the trap is gone: the field mounts now and focuses itself (after the ⋯ did)
           if (!fieldAfterMenu.current) return;
           fieldAfterMenu.current = false;
-          e.preventDefault();   // the field takes focus, not the ⋯
           setRetitling(true);
         }} />
       {children}

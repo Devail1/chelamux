@@ -335,11 +335,11 @@ export function PaneHead({ wid, wall, agent, orchWid, share, pinned, now, host }
   const menu = (
     <span className="gs-menu-wrap">
       <Menu className="pane-overflow-menu" open={menuOpen} onOpenChange={setMenuOpen} items={items}
-        onCloseAutoFocus={(e) => {
+        onCloseAutoFocus={() => {
+          // the trap is gone: the field mounts now and focuses itself (after the trigger did)
           const what = editAfterMenu.current;
           if (!what) return;
           editAfterMenu.current = null;
-          e.preventDefault();   // the field takes focus, not the trigger
           setEditing(what);
         }}
         trigger={

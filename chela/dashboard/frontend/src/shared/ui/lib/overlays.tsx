@@ -435,8 +435,8 @@ export type MenuProps = {
   onOpenChange?: (open: boolean) => void;
   /** Read-only content under the items (the gear menu's usage readouts). */
   footer?: ReactNode;
-  /** Runs as the closed menu hands focus back to its trigger; `preventDefault()` stops that, for
-   * a pick that opens an inline field now that the menu's focus trap is gone (CMX-459). */
+  /** Runs as the closed menu hands focus back to its trigger, once its focus trap is gone: where
+   * a pick opens an inline field (CMX-459), which then takes focus itself. */
   onCloseAutoFocus?: (e: Event) => void;
 };
 

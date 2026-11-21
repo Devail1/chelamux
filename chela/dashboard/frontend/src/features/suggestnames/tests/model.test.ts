@@ -153,6 +153,8 @@ test.each([
   ['pending without a reason', { state: 'pending' }, { state: 'pending', reason: null }],
   ['refused', { ok: false, state: 'refused', reason: 'no Claude session runs in this pane' }, { state: 'refused', reason: 'no Claude session runs in this pane' }],
   ['an answer with no state', { error: 'boom' }, { state: 'refused', reason: 'title failed' }],
+  ['a state it does not know', { state: 'queued', reason: 'x' }, { state: 'refused', reason: 'x' }],
+  ['a refusal with no reason', { state: 'refused' }, { state: 'refused', reason: 'title failed' }],
   ['no answer', null, { state: 'refused', reason: 'title failed' }],
 ])('postTitle: %s', async (_, reply, want) => {
   const calls: [string, unknown][] = [];
