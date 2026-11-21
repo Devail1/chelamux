@@ -89,15 +89,42 @@ export function rowProblems(rows: readonly Row[], windows: readonly AgentRow[]):
   return out;
 }
 
+/** What one title request did: typed now, queued (`reason` says what it waits for), or refused. */
+export type TitleOutcome = { state: 'applied' | 'pending'; reason?: string | null } | { state: 'refused'; reason: string };
+
 /** What applying one row did: each half is absent when it did not change. */
 export interface Outcome {
   name?: { ok: true } | { ok: false; error: string };
-  title?: { state: 'applied' | 'pending'; reason?: string | null } | { state: 'refused'; reason: string };
+  title?: TitleOutcome;
 }
 
 export type Post = (path: string, body: unknown) => Promise<unknown>;
 
 const enc = (wid: string) => encodeURIComponent(wid);
+
+/**
+ * Set one session's title through the title API (chela/suggest_names.py `apply_title`): typed
+ * only into an idle Claude session with no dialog and an empty prompt, else queued and applied
+ * on idle. The ONE title write: the dialog's apply and CMX-459's "Rename title…" both call it.
+ * A request that throws, or a reply that is neither applied nor pending, reads as refused.
+ */
+export async function postTitle(wid: string, title: string, post: Post): Promise<TitleOutcome> {
+  try {
+    const res = (await post(`/api/agents/${enc(wid)}/title`, { title })) as { state?: string; reason?: string | null } | null;
+    return res?.state === 'applied' || res?.state === 'pending'
+      ? { state: res.state, reason: res.reason ?? null }
+      : { state: 'refused', reason: res?.reason || 'title failed' };
+  } catch {
+    return { state: 'refused', reason: 'title request failed' };
+  }
+}
+
+/** What a single title edit tells the user: nothing when it applied, else why it waits or failed. */
+export function titleNote(o: TitleOutcome): string {
+  if (o.state === 'applied') return '';
+  if (o.state === 'pending') return `Title pending (${o.reason || 'waits for idle'}): applied when the session is idle`;
+  return `Title failed: ${o.reason}`;
+}
 
 /**
  * Apply the checked rows, one at a time (a rename then a title, per row), and report each half
@@ -118,16 +145,7 @@ export async function applyRows(rows: readonly Row[], post: Post): Promise<Recor
         o.name = { ok: false, error: 'rename request failed' };
       }
     }
-    if (titleChanges(r)) {
-      try {
-        const res = (await post(`/api/agents/${enc(r.wid)}/title`, { title: r.newTitle.trim() })) as { state?: string; reason?: string | null } | null;
-        o.title = res?.state === 'applied' || res?.state === 'pending'
-          ? { state: res.state, reason: res.reason ?? null }
-          : { state: 'refused', reason: res?.reason || 'title failed' };
-      } catch {
-        o.title = { state: 'refused', reason: 'title request failed' };
-      }
-    }
+    if (titleChanges(r)) o.title = await postTitle(r.wid, r.newTitle.trim(), post);
     out[r.wid] = o;
   }
   return out;

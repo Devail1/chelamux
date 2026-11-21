@@ -2,7 +2,7 @@
 // judge_battery_badge, orchestrator_ui, share_web_chip, wall_proxy_status_title,
 // share_dialog (the Share row and the banner) and wallnav (labels, the menu rows, the window
 // controls, kill) .test.mjs, plus Liav's 10-19 ask: a plain shell reads `Shell · <cwd>`.
-import { act, fireEvent, render } from '@testing-library/react';
+import { act, cleanup, fireEvent, render } from '@testing-library/react';
 import { expect, test, vi } from 'vitest';
 import { BOOT } from '../../../shared/api/index.ts';
 import { agents } from '../../../shared/store/agents.ts';
@@ -59,8 +59,9 @@ test('the header switches to the session name and state the moment Claude starts
   const h = head({ agent: SHELL });
   expect(text(h.q('.pane-title'))).toBe('Shell');
   h.again({ agent: { ...SHELL, claude_running: true, shell_cwd: null, session_name: 'fix-the-bug', session_status: 'busy' } });
-  expect(text(h.q('.pane-title'))).toBe('fix-the-bug');
-  expect(text(h.q('.pane-subtitle'))).toBe('liavedunix-2');
+  // CMX-459: the name first, Claude's title second
+  expect(text(h.q('.pane-title'))).toBe('liavedunix-2');
+  expect(text(h.q('.pane-subtitle'))).toBe('fix-the-bug');
   expect(h.q('.pane-subtitle')?.classList.contains('pane-cwd')).toBe(false);
   expect(text(h.q('.gs-state'))).toBe('working');
 });
@@ -108,15 +109,20 @@ test('the single pane (a phone) labels a shell the same, and draws no state pill
 
 // --- labels (CMX-62, CMX-146) -------------------------------------------------------------
 
-test('a manual name beats Claude\'s title, which beats the window name; the subtitle takes what is left', () => {
+// CMX-459 (Liav, 11-21): a DELIBERATE change from CMX-62, which let Claude's title lead an
+// un-renamed window. The order is fixed now: the name first, the title second, whoever named it.
+test('the name always leads and the session title follows, renamed or not', () => {
   const titled = { ...SESSION, ai_title: 'Refactor the flux capacitor' };
   const h = head({ agent: titled });
-  expect(text(h.q('.pane-title'))).toBe('Refactor the flux capacitor');
-  expect(text(h.q('.pane-subtitle'))).toBe('liavedunix-2');
+  expect(text(h.q('.pane-title'))).toBe('liavedunix-2');
+  expect(text(h.q('.pane-subtitle'))).toBe('Refactor the flux capacitor');
   h.again({ agent: { ...titled, name: 'mine', manual_name: true } });
   expect(text(h.q('.pane-title'))).toBe('mine');
   expect(text(h.q('.pane-subtitle'))).toBe('Refactor the flux capacitor');
-  expect(h.q('.pane-subtitle')?.getAttribute('title')).toBe('Refactor the flux capacitor');
+  expect(h.q('.pane-subtitle')?.getAttribute('title')).toBe('Refactor the flux capacitor\ndouble-click to set the session title');
+  // a /rename title outranks ai_title in the subtitle too
+  h.again({ agent: { ...titled, custom_title: 'Tipstack' } });
+  expect([text(h.q('.pane-title')), text(h.q('.pane-subtitle'))]).toEqual(['liavedunix-2', 'Tipstack']);
 });
 
 test('a window the poll has not listed yet reads as its id', () => {
@@ -320,14 +326,14 @@ test('picking Pin pins this pane (persisted), and the row reads checked while pi
 test('the wall menu lists Wire, Share, Orchestrator, Pin as labeled rows with icons', () => {
   const h = head();
   const rows = [...openMenu(h.tile).querySelectorAll('.popover-item.ov-item')];
-  expect(rows.map((r) => text(r.querySelector('.ov-label')))).toEqual(['Wire to…', 'Share current session', 'Orchestrator', 'Pin']);
+  expect(rows.map((r) => text(r.querySelector('.ov-label')))).toEqual(['Rename', 'Rename title…', 'Wire to…', 'Share current session', 'Orchestrator', 'Pin']);
   for (const r of rows) expect(r.querySelector('svg')).not.toBeNull();
 });
 
 test('the single pane\'s menu has no Wire or Pin (nothing to wire to, nothing to reflow)', () => {
   const h = head({ wall: false });
   const rows = [...openMenu(h.tile).querySelectorAll('.ov-label')].map(text);
-  expect(rows).toEqual(['Share current session', 'Orchestrator']);
+  expect(rows).toEqual(['Rename', 'Rename title…', 'Share current session', 'Orchestrator']);
   expect(h.q('.gs-room')).toBeNull();
   expect(h.q('.gs-min-btn')).toBeNull();
 });
@@ -393,8 +399,8 @@ test('on a phone the single pane is the title bar: hamburger, title over subtitl
   const bar = must(h.q('.gs-head'));
   expect(bar.classList.contains('gs-head-bar')).toBe(true);
   expect([...bar.children].map((c) => c.className)).toEqual(['gs-head-menu', 'gs-label', 'gs-head-end']);
-  expect(text(h.q('.gs-label .pane-title'))).toBe('fix-the-bug');
-  expect(text(h.q('.gs-label .pane-subtitle'))).toBe('liavedunix-2');
+  expect(text(h.q('.gs-label .pane-title'))).toBe('liavedunix-2');
+  expect(text(h.q('.gs-label .pane-subtitle'))).toBe('fix-the-bug');
   const dot = must(h.q('.gs-head-end .gs-status-chip .gs-dot'));
   expect(dot.getAttribute('data-status-for')).toBe('@1');
   expect(must(h.q('.gs-head-end > .gs-menu-wrap .gs-menu-btn')).getAttribute('aria-label')).toBe('Session actions');
@@ -622,6 +628,181 @@ test('keys typed in the rename field never reach a page shortcut', () => {
   expect(seen).not.toHaveBeenCalled();
 });
 
+// --- CMX-459: Claude's session TITLE, the second hit target ---------------------------------
+
+const TITLED: HeadAgent = { ...SESSION, ai_title: 'Rally design milestone 1' };
+
+/** Double-click Claude's title (the subtitle) and return the field it opens. */
+function retitleField(h: ReturnType<typeof head>) {
+  fireEvent.doubleClick(must(h.q('.pane-subtitle')));
+  return must(h.tile.querySelector<HTMLInputElement>('input.pane-retitle-edit'), 'title field');
+}
+
+/** Pick a ⋯ menu row by its label, the way the keyboard does. */
+function pickRow(h: ReturnType<typeof head>, label: string) {
+  const row = [...openMenu(h.tile).querySelectorAll<HTMLElement>('[role^="menuitem"]')].find((r) => text(r.querySelector('.ov-label')) === label);
+  fireEvent.keyDown(must(row, label), { key: 'Enter' });
+}
+
+test('double-click on the session title edits the TITLE inline, prefilled, at most 40 characters; the name is untouched', async () => {
+  const calls = stubFetch((url) => [200, url.endsWith('/title') ? { ok: true, state: 'applied', reason: null } : [TITLED]]);
+  const h = head({ agent: TITLED });
+  const input = retitleField(h);
+  expect(input.value).toBe('Rally design milestone 1');
+  expect(input.maxLength).toBe(40);
+  expect(input.getAttribute('aria-label')).toBe('Session title');
+  expect(document.activeElement).toBe(input);
+  // the name keeps its place, and is not a field
+  expect(text(h.q('.pane-title'))).toBe('liavedunix-2');
+  expect(h.q('input.pane-title-edit:not(.pane-retitle-edit)')).toBeNull();
+  fireEvent.change(input, { target: { value: '  Rally milestone 2 ' } });
+  fireEvent.keyDown(input, { key: 'Enter' });
+  await settle();
+  expect(calls).toEqual([
+    { url: '/api/agents/%401/title', method: 'POST', body: { title: 'Rally milestone 2' } },
+    { url: '/api/agents', method: 'GET', body: undefined },
+  ]);
+  expect(h.host.labelsChanged).toHaveBeenCalledTimes(1);
+  expect(h.q('.gs-head .term-share-toast')).toBeNull();   // applied: nothing to say
+  expect(h.q('input.pane-retitle-edit')).toBeNull();
+});
+
+test('double-clicking the NAME still renames the window, never the title', async () => {
+  const calls = stubFetch((url) => [200, url.endsWith('/rename') ? { ok: true } : []]);
+  const h = head({ agent: TITLED });
+  fireEvent.doubleClick(must(h.q('.pane-title')));
+  const input = must(h.tile.querySelector<HTMLInputElement>('input.pane-title-edit'));
+  expect(input.classList.contains('pane-retitle-edit')).toBe(false);
+  expect(input.value).toBe('liavedunix-2');
+  fireEvent.change(input, { target: { value: 'rally' } });
+  fireEvent.keyDown(input, { key: 'Enter' });
+  await settle();
+  expect(calls[0]).toEqual({ url: '/api/agents/%401/rename', method: 'POST', body: { name: 'rally' } });
+});
+
+test('a busy session: the title is pending, the pane says it waits for idle, and the agents are reread', async () => {
+  const pendingRow = [{ ...TITLED, title_pending: 'Rally 2' }];
+  const calls = stubFetch((url) => [200, url.endsWith('/title') ? { ok: true, state: 'pending', reason: 'busy' } : pendingRow]);
+  const h = head({ agent: { ...TITLED, session_status: 'busy' } });
+  const input = retitleField(h);
+  fireEvent.change(input, { target: { value: 'Rally 2' } });
+  fireEvent.keyDown(input, { key: 'Enter' });
+  await settle();
+  expect(text(h.q('.gs-head .term-share-toast'))).toBe('Title pending (busy): applied when the session is idle');
+  expect(calls.map((c) => c.url)).toEqual(['/api/agents/%401/title', '/api/agents']);
+  expect(agents.get()).toEqual(pendingRow);
+  expect(h.host.labelsChanged).toHaveBeenCalledTimes(1);
+});
+
+test.each([
+  ['the server refuses it (no Claude in the pane)', () => [409, { ok: false, state: 'refused', reason: 'no Claude session runs in this pane' }] as [number, unknown], 'Title failed: no Claude session runs in this pane'],
+  ['the reply is not a title outcome', () => [500, { error: 'boom' }] as [number, unknown], 'Title failed: title failed'],
+  ['the request throws', () => { throw new Error('offline'); }, 'Title failed: title request failed'],
+])('%s: the pane says why and nothing is reread', async (_, answer, said) => {
+  const calls = stubFetch(answer);
+  const h = head({ agent: TITLED });
+  const input = retitleField(h);
+  fireEvent.change(input, { target: { value: 'New' } });
+  fireEvent.keyDown(input, { key: 'Enter' });
+  await settle();
+  expect(text(h.q('.gs-head .term-share-toast'))).toBe(said);
+  expect(calls).toHaveLength(1);
+  expect(h.host.labelsChanged).not.toHaveBeenCalled();
+});
+
+test.each([
+  ['Escape', 'Other', { key: 'Escape' }],
+  ['an unchanged title', 'Rally design milestone 1', { key: 'Enter' }],
+  ['an empty title', '   ', { key: 'Enter' }],
+])('title: %s sends nothing', async (_, value, key) => {
+  const calls = stubFetch(() => [200, {}]);
+  const h = head({ agent: TITLED });
+  const input = retitleField(h);
+  fireEvent.change(input, { target: { value } });
+  fireEvent.keyDown(input, key);
+  await settle();
+  expect(calls).toEqual([]);
+  expect(text(h.q('.pane-subtitle'))).toBe('Rally design milestone 1');
+});
+
+test('a queued title is what the field opens with, and re-sending it unchanged sends nothing', async () => {
+  const calls = stubFetch(() => [200, {}]);
+  const h = head({ agent: { ...TITLED, custom_title: 'Old', title_pending: 'Queued one' } });
+  const input = retitleField(h);
+  expect(input.value).toBe('Queued one');
+  fireEvent.keyDown(input, { key: 'Enter' });
+  await settle();
+  expect(calls).toEqual([]);
+});
+
+test('no title to double-click where Claude does not run: a shell\'s cwd and an unknown pane open nothing', () => {
+  const sh = head({ agent: { ...SHELL, shell_cwd: '~/src' } });
+  fireEvent.doubleClick(must(sh.q('.pane-subtitle')));
+  expect(sh.tile.querySelector('input')).toBeNull();
+  expect(sh.q('.pane-subtitle')?.hasAttribute('data-edit')).toBe(false);
+  cleanup();
+  const unsaid: HeadAgent = { ...TITLED };
+  delete unsaid.claude_running;
+  const h = head({ agent: unsaid });
+  expect(text(h.q('.pane-subtitle'))).toBe('Rally design milestone 1');
+  expect(h.q('.pane-subtitle')?.getAttribute('title')).toBe('Rally design milestone 1');
+  fireEvent.doubleClick(must(h.q('.pane-subtitle')));
+  expect(h.tile.querySelector('input')).toBeNull();
+  // where Claude runs it IS a target
+  cleanup();
+  const live = head({ agent: TITLED });
+  expect(live.q('.pane-subtitle')?.getAttribute('data-edit')).toBe('title');
+});
+
+test.each([
+  ['a Claude session', TITLED, false, "Set this session's Claude title"],
+  ['a bash pane', { ...SHELL }, true, 'No Claude session runs in this pane'],
+  ['a pane that does not say', (() => { const a: HeadAgent = { ...TITLED }; delete a.claude_running; return a; })(), true, 'No Claude session runs in this pane'],
+  ['an unlisted pane', undefined, true, 'No Claude session runs in this pane'],
+])('the ⋯ menu\'s Rename title… on %s: disabled=%s', (_, agent, off, tip) => {
+  const h = head({ agent });
+  const row = must(openMenu(h.tile).querySelector<HTMLElement>('.gs-retitle-item'));
+  expect(text(row.querySelector('.ov-label'))).toBe('Rename title…');
+  expect(row.hasAttribute('data-disabled')).toBe(off);
+  expect(row.getAttribute('title')).toBe(tip);
+  // Rename (the window) is always there, right before it
+  expect(text(must(row.previousElementSibling).querySelector('.ov-label'))).toBe('Rename');
+});
+
+test('the ⋯ menu\'s Rename title… opens the title field (where the title shows, even before there is one) and keeps focus in it', async () => {
+  const calls = stubFetch((url) => [200, url.endsWith('/title') ? { ok: true, state: 'applied', reason: null } : []]);
+  const h = head({ agent: SESSION });   // Claude runs, no title yet: no subtitle to double-click
+  expect(h.q('.pane-subtitle')).toBeNull();
+  pickRow(h, 'Rename title…');
+  await settle();
+  const input = must(h.tile.querySelector<HTMLInputElement>('.gs-head input.pane-retitle-edit'));
+  expect(input.value).toBe('');
+  expect(document.activeElement).toBe(input);
+  expect(text(h.q('.pane-title'))).toBe('liavedunix-2');
+  fireEvent.change(input, { target: { value: 'First title' } });
+  fireEvent.keyDown(input, { key: 'Enter' });
+  await settle();
+  expect(calls[0]).toEqual({ url: '/api/agents/%401/title', method: 'POST', body: { title: 'First title' } });
+});
+
+test('the ⋯ menu\'s Rename opens the window-name field and keeps focus in it', async () => {
+  stubFetch(() => [200, {}]);
+  const h = head({ agent: TITLED });
+  pickRow(h, 'Rename');
+  await settle();
+  const input = must(h.tile.querySelector<HTMLInputElement>('input.pane-title-edit'));
+  expect(input.classList.contains('pane-retitle-edit')).toBe(false);
+  expect(input.value).toBe('liavedunix-2');
+  expect(document.activeElement).toBe(input);
+});
+
+test('a menu that opens no field hands focus back to its trigger as before', async () => {
+  const h = head();
+  pickRow(h, 'Pin');
+  await settle();
+  expect(document.activeElement).toBe(h.q('.gs-menu-btn'));
+});
+
 // --- the share store reaches a header through its props --------------------------------
 
 test('noteShare is what the page publishes; the header reads it through its share prop', () => {
@@ -633,10 +814,10 @@ test('noteShare is what the page publishes; the header reads it through its shar
 // --- CMX-387: no relay configured, no Share row --------------------------------------------
 
 test.each([
-  [true, true, ['Wire to…', 'Share current session', 'Orchestrator', 'Pin']],
-  [false, true, ['Wire to…', 'Orchestrator', 'Pin']],
-  [true, false, ['Share current session', 'Orchestrator']],
-  [false, false, ['Orchestrator']],
+  [true, true, ['Rename', 'Rename title…', 'Wire to…', 'Share current session', 'Orchestrator', 'Pin']],
+  [false, true, ['Rename', 'Rename title…', 'Wire to…', 'Orchestrator', 'Pin']],
+  [true, false, ['Rename', 'Rename title…', 'Share current session', 'Orchestrator']],
+  [false, false, ['Rename', 'Rename title…', 'Orchestrator']],
 ])('sharing configured=%s, wall=%s: the pane menu lists %j', (on, wall, labels) => {
   const was = BOOT.sharingConfigured;
   BOOT.sharingConfigured = on;

@@ -6,6 +6,7 @@
 import { useState, type MouseEvent } from 'react';
 import { icons } from '../../../shared/icons/index.ts';
 import { IconButton, Menu, type MenuItem } from '../../../shared/ui/index.ts';
+import { canRetitle, type HeadAgent } from '../../panehead/model.ts';
 import {
   ENV_KINDS, GROUP_MODES, SORTS, VIEW_ACTIVITY, VIEW_STATUS, type Group, type Item, type SidebarState,
   PINNED_NO_ARCHIVE, assignKey, isArchivable, isRunsRow, isPinned, normalizeView, pinKey,
@@ -77,16 +78,26 @@ function folderItems({ g, index, count }: RowGroup, actions: SidebarActions): Me
   ];
 }
 
-/** A row's menu: a run's panes, Move to group… (under Custom groups only, CMX-74), Pin / Unpin
- * (CMX-390), Archive. */
-export function RowMenu({ it, s, actions, menu, group, archived = false }: {
+/** CMX-459: the row menu's "Rename title…" tooltips: why it is off on a pane with no Claude. */
+export const RETITLE_TITLE = { on: "Set this session's Claude title", off: 'No Claude session runs in this pane' };
+
+/** A row's menu: Rename title… (a live session, CMX-459), a run's panes, Move to group… (under
+ * Custom groups only, CMX-74), Pin / Unpin (CMX-390), Archive. `onRetitle` opens the row's
+ * inline title field; without it there is no Rename title row. `onCloseAutoFocus` is the Menu's:
+ * the row opens that field there, once the menu (which traps focus) has closed. */
+export function RowMenu({ it, s, actions, menu, group, archived = false, onRetitle, onCloseAutoFocus }: {
   it: Item; s: SidebarState; actions: SidebarActions; menu: Open; group?: RowGroup; archived?: boolean;
+  onRetitle?: () => void; onCloseAutoFocus?: (e: Event) => void;
 }) {
   const [page, setPage] = useState<'main' | 'move'>('main');
   const onOpenChange = (o: boolean) => {
     menu.setOpen(o);
     if (!o) setPage('main');
   };
+  const retitleOk = !!it.agent && canRetitle(it.agent as HeadAgent);
+  const retitleItem: MenuItem | null = onRetitle && it.kind === 'agent' && it.agent?.window_id
+    ? { label: 'Rename title…', icon: icons.retitle, disabled: !retitleOk, title: retitleOk ? RETITLE_TITLE.on : RETITLE_TITLE.off, onSelect: onRetitle }
+    : null;
   const items: MenuItem[] = [];
   if (page === 'move') {
     const ak = assignKey(it);
@@ -105,6 +116,7 @@ export function RowMenu({ it, s, actions, menu, group, archived = false }: {
     });
   } else {
     if (group) items.push(...folderItems(group, actions));
+    if (retitleItem) items.push(retitleItem, 'separator');
     if (it.kind === 'run') {
       if (it.agent) items.push({ label: 'Open agent pane', onSelect: () => void actions.rowMenuAction(it.key, 'agent') });
       items.push({ label: 'Open judge pane', disabled: !it.judge, onSelect: () => void actions.rowMenuAction(it.key, 'judge') }, 'separator');
@@ -128,6 +140,7 @@ export function RowMenu({ it, s, actions, menu, group, archived = false }: {
   const label = it.kind === 'run' ? 'Run menu' : 'Row menu';
   return (
     <Menu className="side-menu" open={menu.open} onOpenChange={onOpenChange} items={items}
+      onCloseAutoFocus={onCloseAutoFocus}
       trigger={<IconButton className="row-more" label={label} onClick={stop}><icons.more size={14} aria-hidden="true" /></IconButton>} />
   );
 }

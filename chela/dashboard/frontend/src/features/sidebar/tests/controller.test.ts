@@ -4,7 +4,7 @@ import { afterEach, beforeEach, expect, test, vi } from 'vitest';
 import { installBridge } from '../../../shared/bridge/index.ts';
 import {
   clearRecentSessions, closeRecentUndo, dismissRecentSession, liveSessionIds, refreshLayout, refreshRecentSessions,
-  renderRecentSessions, resumeSession, setNav, setNavBadges, setSidebarWidth, undoDismissRecent,
+  renderRecentSessions, resumeSession, retitleWindow, setNav, setNavBadges, setSidebarWidth, undoDismissRecent,
 } from '../controller.ts';
 import type { RecentRow } from '../model.ts';
 
@@ -227,4 +227,27 @@ test('the nav store: items and the active view, and badges merged by id', () => 
   expect(bridge.nav.get()).toEqual({
     items: [{ id: 'work', label: 'Work' }], active: 'work', badges: { 'side-runs-count': '3', 'side-pr-count': '1 PR' },
   });
+});
+
+// --- CMX-459: the row menu's Rename title… -------------------------------------------------
+
+test.each([
+  ['applied', { ok: true, state: 'applied', reason: null }, { state: 'applied', reason: null }],
+  ['pending', { ok: true, state: 'pending', reason: 'busy' }, { state: 'pending', reason: 'busy' }],
+])('retitleWindow %s: the ONE title write, then a fresh /api/agents read; nothing is said', async (_, reply, outcome) => {
+  answers['POST /api/agents/%405/title'] = () => reply;
+  answers['GET /api/agents'] = () => [];
+  expect(await retitleWindow('@5', 'Rally 2')).toEqual(outcome);
+  expect(calls.slice(0, 2)).toEqual([
+    ['POST', '/api/agents/%405/title', { title: 'Rally 2' }],
+    ['GET', '/api/agents', undefined],
+  ]);
+  expect(alert).not.toHaveBeenCalled();
+});
+
+test('retitleWindow refused (a pane with no Claude): says why, and reads nothing', async () => {
+  answers['POST /api/agents/%405/title'] = () => ({ ok: false, state: 'refused', reason: 'no Claude session runs in this pane' });
+  expect(await retitleWindow('@5', 'X')).toEqual({ state: 'refused', reason: 'no Claude session runs in this pane' });
+  expect(calls).toEqual([['POST', '/api/agents/%405/title', { title: 'X' }]]);
+  expect(alert).toHaveBeenCalledWith('Title failed: no Claude session runs in this pane');
 });

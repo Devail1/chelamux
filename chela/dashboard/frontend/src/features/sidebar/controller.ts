@@ -8,6 +8,7 @@
 import { api, BOOT } from '../../shared/api/index.ts';
 // panehead's model, not its index: PaneHead imports this controller (no-circular)
 import { headLabel, isShell, type HeadAgent } from '../panehead/model.ts';
+import { retitle, titleNote, type TitleOutcome } from '../suggestnames/index.ts';
 import { registerLane } from '../../shared/scheduler/index.ts';
 import { type Agent, agents as agentsStore } from '../../shared/store/agents.ts';
 import { onOverlayOpen } from '../../shared/ui/index.ts';
@@ -336,6 +337,18 @@ export async function unarchiveRow(_btn: unknown, key: string): Promise<unknown>
   const res = await unarchiveKeys([key]);
   if (isObj(res) && Array.isArray(res.resumed) && res.resumed.length) await refreshSidebar();
   return res;
+}
+
+/**
+ * CMX-459: the row menu's "Rename title…": one session's Claude title through the ONE title
+ * write (suggest_names.apply_title), then a fresh read so the row shows it, or its pending chip
+ * when the session is busy. A refusal (no Claude in the pane) is said, never swallowed.
+ */
+export async function retitleWindow(wid: string, title: string): Promise<TitleOutcome> {
+  const o = await retitle(wid, title);
+  if (o.state === 'refused') say(titleNote(o));
+  else await refreshSidebar();
+  return o;
 }
 
 // --- The group, row and VIEW menus' commands (CMX-35, CMX-66, CMX-81) ------------------------

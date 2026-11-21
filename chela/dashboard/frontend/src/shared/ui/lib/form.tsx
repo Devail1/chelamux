@@ -87,9 +87,10 @@ export function TextInput({ value, onChange, lockedBy, disabled, label, placehol
  * A label edited in place (a pane title): it opens focused with its text selected; Enter or
  * leaving it commits, Escape cancels, and each fires once. Its keys and presses stay inside it:
  * a press must not start a drag of whatever it sits in (a Gridstack handle listens on its own
- * element, below React's root), and a key must not reach a page shortcut.
+ * element, below React's root), and a key must not reach a page shortcut. `maxLength` caps what
+ * can be typed (a session title's 40, CMX-459).
  */
-export function InlineEdit({ initial, label, className, onCommit, onCancel }: { initial: string; label: string; className?: string; onCommit: (value: string) => void; onCancel: () => void }) {
+export function InlineEdit({ initial, label, className, maxLength, onCommit, onCancel }: { initial: string; label: string; className?: string; maxLength?: number; onCommit: (value: string) => void; onCancel: () => void }) {
   const [value, setValue] = useState(initial);
   const done = useRef(false);
   const ref = useRef<HTMLInputElement>(null);
@@ -117,6 +118,7 @@ export function InlineEdit({ initial, label, className, onCommit, onCancel }: { 
       className={className}
       type="text"
       aria-label={label}
+      maxLength={maxLength}
       title="Enter to save, Esc to cancel"
       value={value}
       onChange={(e) => setValue(e.target.value)}

@@ -500,8 +500,8 @@ test('CMX-74: outside Custom groups no row offers "Move to group…" — a plain
         // CMX-379: grouped by folder, `plain` is its folder's only session, so its menu also
         // carries the folder's (absent) header actions, never a move
         const expected = mode === 'folder'
-            ? ['New session in this folder', 'Move up', 'Move down', 'Collapse all', 'Expand all', 'Archive']
-            : ['Archive'];
+            ? ['New session in this folder', 'Move up', 'Move down', 'Collapse all', 'Expand all', 'Rename title…', 'Archive']
+            : ['Rename title…', 'Archive'];   // CMX-459: a live session's row can set its title
         assert.deepEqual(menuRows().map(r => r.label), expected,
             `${mode}: the plain row's menu offers a move that would be invisible`);
         closeMenu();
@@ -523,7 +523,7 @@ test('CMX-74: under Custom groups, tapping "Move to group…" SHOWS its page and
     assert.ok(menu(), 'a plain row has no right-click menu under Custom groups');
     closeMenu();
     openMenu(plain.querySelector('.row-more'));
-    assert.deepEqual(menuRows().map(r => r.label), ['Move to group…', 'Archive']);
+    assert.deepEqual(menuRows().map(r => r.label), ['Rename title…', 'Move to group…', 'Archive']);
     clickMenu('Move to group…');
     // the tap's own handler hides every side menu first — the move page must come back
     assert.ok(menu(), 'the move page was drawn into a hidden popover');
