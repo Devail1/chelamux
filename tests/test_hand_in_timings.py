@@ -239,7 +239,9 @@ def test_the_sweep_times_its_baseline_and_mutations(chela_dir, monkeypatch, tmp_
     monkeypatch.setattr(sweep, "prioritise", lambda muts: muts)
     monkeypatch.setattr(sweep, "_start_guardian", lambda wt: None)
     monkeypatch.setattr(judge, "run_baseline", lambda *a, **k: (_wait(5), (GREEN, None, ""))[1])
-    monkeypatch.setattr(sweep, "_run_one", lambda *a, **k: (_wait(3), ("r", ""))[1])
+    # CMX-455: the battery stamps each result with its seconds — a real result, not a str.
+    monkeypatch.setattr(sweep, "_run_one", lambda *a, **k: (
+        _wait(3), (sweep.SweepResult(mut, "killed"), ""))[1])
     timer = judge_timing.RoundTimer()
     with judge_timing.activate(timer), judge_timing.within("sweep"):
         sweep._sweep(tmp_path, "origin/dev", "true", timeout=30, select_tests=True,
@@ -463,7 +465,8 @@ def test_judge_timings_hand_in_json(chela_dir, capsys):
 
 
 def test_a_nightly_run_records_its_provision_and_sweep_phases(chela_dir, monkeypatch, tmp_path):
-    wf = SimpleNamespace(path=tmp_path / "WORKFLOW.md")
+    # CMX-455: the night reads `sweep.per_pr_sample` — every key unset here.
+    wf = SimpleNamespace(path=tmp_path / "WORKFLOW.md", get=lambda *k, default=None: default)
     monkeypatch.setattr(judge, "judge_enabled", lambda wf: True)
     monkeypatch.setattr(judge, "judge_suite_config",
                         lambda wf: SimpleNamespace(test_cmd="true", suite_timeout_seconds=30,
