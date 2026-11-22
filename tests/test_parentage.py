@@ -97,6 +97,23 @@ def test_a_deeper_cycle_is_refused_too():
         "cycle: the parent is the session's own descendant"
 
 
+@pytest.mark.parametrize("child,parent", [(B, None), (None, A), (B, ""), ("", A), (None, None), ("", "")])
+def test_a_spawn_missing_either_session_id_is_refused_with_its_reason(child, parent):
+    # assign() re-checks the ids before writing, so the table alone cannot tell a refusal
+    # from a silent skip; the decision's reason is the observable (CMX-464).
+    table, decisions = run([spawned(child, parent, T0)])
+    assert table == {}
+    assert decisions == [{"child": child, "parent": parent, "source": "spawn", "ts": T0,
+                          "refused": "missing session id"}]
+
+
+@pytest.mark.parametrize("child,parent", [(B, None), (None, A), (B, ""), ("", A),
+                                          (None, None), ("", "")])
+def test_refusal_names_a_missing_session_id(child, parent):
+    assert parentage.refusal({}, child, parent, 3) == "missing session id"
+    assert parentage.assign({}, child, parent, "spawn", T0, 3) == "missing session id"
+
+
 def test_a_session_cannot_be_its_own_parent():
     table, decisions = run([spawned(A, A, T0)])
     assert table == {}
