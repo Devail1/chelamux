@@ -1736,6 +1736,48 @@ def statusline_script() -> Path:
     return Path(__file__).resolve().parent.parent / "scripts" / "cache-statusline.sh"
 
 
+def agent_terminals_script() -> Path:
+    """The terminal-wall supervisor to run (CMX-469): the copy packaged inside an installed
+    wheel (``chela/scripts/``, pyproject's ``force-include``), else the checkout's ``scripts/``."""
+    packaged = Path(__file__).resolve().parent / "scripts" / "agent-terminals.sh"
+    if packaged.is_file():
+        return packaged
+    return Path(__file__).resolve().parent.parent / "scripts" / "agent-terminals.sh"
+
+
+def cmd_agent_terminals(args) -> None:
+    """Run the terminal wall's ttyd supervisor in place of this process (CMX-469).
+
+    The supervisor is a bash script (bash 3.2 is enough, so macOS's /bin/bash runs it).
+    It is exec'd, not run as a child, so a process manager's SIGTERM reaches it directly and
+    its cleanup trap reaps the ttyds. It waits for the tmux session rather than creating it. ``PYTHON`` is set to THIS interpreter: the script's
+    ``python -c "from chela import discovery"`` needs the one chela is installed in, and a
+    ``uv tool``/``uvx`` install has no ``.venv`` next to the script to fall back on.
+    """
+    script = agent_terminals_script()
+    if not script.is_file():
+        print(f"agent-terminals: {script} is missing; reinstall chela", file=sys.stderr)
+        sys.exit(1)
+    bash = shutil.which("bash")
+    if bash is None:
+        print("agent-terminals: bash is not on PATH; the terminal wall needs it", file=sys.stderr)
+        sys.exit(1)
+    ttyd = os.environ.get("TTYD") or "ttyd"
+    if shutil.which(ttyd) is None:
+        print(f"agent-terminals: warning: {ttyd} is not on PATH, so the wall's tiles stay empty "
+              "(macOS: brew install ttyd; Debian/Ubuntu: apt install ttyd)", file=sys.stderr)
+    # Without TMUX/TMUX_PANE, as scripts/run-chela.sh starts every service: started from a
+    # pane, ttyd's `tmux new-session` would refuse to nest, and the discovery snippet would
+    # follow that pane's session instead of $CHELA_TMUX_SESSION.
+    env = {k: v for k, v in os.environ.items() if k not in ("TMUX", "TMUX_PANE")}
+    env["PYTHON"] = sys.executable
+    # Never CREATE the tmux session from here, only wait for it: this command is one argv
+    # away from any code that runs chela's CLI, and its heal once created a test's
+    # never-exists session on the live server (see heal_enabled in the script).
+    env["CHELA_TERM_HEAL"] = "false"
+    os.execve(bash, [bash, str(script)], env)
+
+
 def cmd_install_statusline(args) -> None:
     """Print (or write) the Claude Code statusLine hook that feeds the context bar.
 
@@ -5112,6 +5154,16 @@ def main() -> None:
     p_kexp.add_argument("--out", default=None, help="Output dir (default: ~/.chela/knowledge)")
     p_kexp.add_argument("--since", default=None, help="Only include runs started on/after this ISO date")
 
+    # agent-terminals — the terminal wall's ttyd supervisor (CMX-469)
+    sub.add_parser(
+        "agent-terminals",
+        help="Run the terminal wall's ttyd supervisor (one ttyd per agent window)",
+        description="Run the terminal wall's ttyd supervisor in the foreground: one "
+                    "localhost ttyd per window of the chela tmux session, and the port map "
+                    "the dashboard routes /term/<wid> by. Run it next to `chela dashboard` "
+                    "(e.g. under a process manager). Needs bash and ttyd.",
+    )
+
     # install-statusline — wire the context-bar producer into Claude Code
     p_sl = sub.add_parser(
         "install-statusline",
@@ -5444,6 +5496,8 @@ def main() -> None:
             cmd_knowledge_export(args)
         else:
             p_know.print_help()
+    elif args.command == "agent-terminals":
+        cmd_agent_terminals(args)
     elif args.command == "install-statusline":
         cmd_install_statusline(args)
     elif args.command == "telegram":

@@ -19,9 +19,15 @@
 # window list and mirror via grouped tmux sessions.
 # Run it alongside `chela run` (e.g. under a process manager).
 
-# NB: no `set -u` — bash errors on empty associative-array expansion
-# (${#arr[@]} / ${arr[$k]:-}) under nounset; all optional vars below use
-# explicit ${VAR:-default} defaults instead.
+# 🍎 BASH 3.2 (CMX-469). macOS ships /bin/bash 3.2, and `#!/usr/bin/env bash` picks it, so
+# this script uses nothing newer: NO associative arrays (`declare -A`, bash 4), no
+# `mapfile`/`readarray`, `${v,,}`/`${v^^}`, `[[ -v ]]`, `declare -n`, `wait -n`, `|&`, `&>>`
+# or `coproc`. Per-window state lives in scalar variables named after the window id (see
+# at_get/at_put below), and the set of windows is a space-separated list.
+# tests/test_agent_terminals_bash32.py rejects bash-4-only syntax in this file and in
+# chela-env.sh, and runs both under a real bash 3.2 when one is installed.
+#
+# NB: no `set -u`; all optional vars below use explicit ${VAR:-default} defaults instead.
 set -o pipefail
 
 cd "$(dirname "$0")/.."
@@ -91,7 +97,15 @@ TERM_THEME="${CHELA_TERM_THEME:-$TERM_THEME}"
 # to left. CHELA_TERM_RENDERER=webgl trades that for speed on a wall that never shows RTL.
 TERM_RENDERER="${CHELA_TERM_RENDERER:-dom}"
 
-declare -A PORT_OF PID_OF              # wid -> port / ttyd pid
+# wid -> port / ttyd pid, without associative arrays (bash 3.2, see the top). Each value is
+# a scalar named AT_<FIELD>_<wid with every non-identifier character as `_`>: `@12` keys
+# AT_PORT__12. A tmux window id is always `@<digits>`, so no two ids share a name.
+# TRACKED is the space-separated list of wids that have a ttyd.
+at_get() { local n="AT_$1_${2//[!A-Za-z0-9_]/_}"; printf '%s' "${!n:-}"; }
+at_put() { printf -v "AT_$1_${2//[!A-Za-z0-9_]/_}" '%s' "$3"; }
+at_del() { unset "AT_$1_${2//[!A-Za-z0-9_]/_}"; }
+in_list() { case " $2 " in *" $1 "*) return 0 ;; esac; return 1; }   # in_list wid "$LIST"
+TRACKED=""
 LAST_MAP=""
 
 # "wid\tname" per live chela window (wid is the key; name is for logging only)
@@ -114,12 +128,10 @@ WEBTERM_PREFIX="webterm_$(sanitize "${TMUX_SESSION}")_"
 
 # lowest free port >= BASE_PORT not already assigned
 free_port() {
-    local p="${BASE_PORT}" v used
+    local p="${BASE_PORT}" w used
     while :; do
         used=0
-        if (( ${#PORT_OF[@]} )); then
-            for v in "${PORT_OF[@]}"; do [[ "$v" == "$p" ]] && { used=1; break; }; done
-        fi
+        for w in ${TRACKED}; do [[ "$(at_get PORT "$w")" == "$p" ]] && { used=1; break; }; done
         [[ $used -eq 0 ]] && { echo "$p"; return; }
         p=$((p + 1))
     done
@@ -199,26 +211,28 @@ spawn() {
                  set-window-option -g aggressive-resize on ';' \
                  select-window -t "${wid}" \
         >/dev/null 2>&1 &
-    PID_OF["$wid"]=$!
-    PORT_OF["$wid"]=$port
+    at_put PID "$wid" "$!"
+    at_put PORT "$wid" "$port"
+    in_list "$wid" "${TRACKED}" || TRACKED="${TRACKED:+${TRACKED} }${wid}"
 }
 
 despawn() {
-    local wid="$1"
-    [[ -n "${PID_OF[$wid]:-}" ]] && kill "${PID_OF[$wid]}" 2>/dev/null
+    local wid="$1" pid w rest=""
+    pid="$(at_get PID "$wid")"
+    [[ -n "$pid" ]] && kill "$pid" 2>/dev/null
     tmux kill-session -t "${WEBTERM_PREFIX}$(sanitize "$wid")" 2>/dev/null
-    unset 'PID_OF[$wid]' 'PORT_OF[$wid]'
+    at_del PID "$wid"; at_del PORT "$wid"
+    for w in ${TRACKED}; do [[ "$w" == "$wid" ]] || rest="${rest:+${rest} }${w}"; done
+    TRACKED="$rest"
 }
 
 write_map() {
     local json="{" first=1 wid
-    if (( ${#PORT_OF[@]} )); then
-        for wid in "${!PORT_OF[@]}"; do
-            [[ $first -eq 0 ]] && json+=","
-            json+="\"${wid}\":${PORT_OF[$wid]}"
-            first=0
-        done
-    fi
+    for wid in ${TRACKED}; do
+        [[ $first -eq 0 ]] && json+=","
+        json+="\"${wid}\":$(at_get PORT "$wid")"
+        first=0
+    done
     json+="}"
     [[ "$json" == "$LAST_MAP" ]] && return
     ( umask 022; printf '%s\n' "$json" > "${MAP_FILE}.tmp" && mv "${MAP_FILE}.tmp" "${MAP_FILE}" )
@@ -257,9 +271,11 @@ cleanup() {
     # alone that sleep is reparented to PID 1 and outlives us for up to an hour (measured:
     # 32 orphaned `sleep 3600`s from the disabled-wall idle loop after hard teardown).
     [[ -n "${NAP_PID:-}" ]] && kill "${NAP_PID}" 2>/dev/null
-    if (( ${#PID_OF[@]} )); then
-        for wid in "${!PID_OF[@]}"; do kill "${PID_OF[$wid]}" 2>/dev/null; done
-    fi
+    local wid pid
+    for wid in ${TRACKED}; do
+        pid="$(at_get PID "$wid")"
+        [[ -n "$pid" ]] && kill "$pid" 2>/dev/null
+    done
     rm -f "${MAP_FILE}"
     # CMX-21: with our TMUX_TMPDIR gone, a bare `tmux` lands on the DEFAULT socket —
     # whose webterm_* sessions belong to the live supervisor, not to us.
@@ -347,12 +363,29 @@ ANCHOR_WINDOW="shell-1"   # a session needs >=1 window; match the wall's shell-N
 # markers, proxies, PERF_*/H) and `set-environment -gu`s the same set once it exists, so
 # the list lives in one file. A missing TMUX_TMPDIR dir is refused BEFORE any tmux call:
 # even has-session would fall back to the default socket from there.
+# CHELA_TERM_HEAL=false: never CREATE the session, only wait for it (CMX-469). `chela
+# agent-terminals` always runs this way. That command is reachable from anything that calls
+# chela's CLI (a test, a mutated dispatch line in a judge sweep), and a heal from there
+# created a test's "can never exist" session on the operator's LIVE tmux server
+# (2026-11-22). Started directly (the PM2 ecosystem entry) the heal stays on, per the
+# crash-loop note above.
+heal_enabled() {
+    case "$(printf '%s' "${CHELA_TERM_HEAL:-true}" | tr '[:upper:]' '[:lower:]')" in
+        false|0|no|off) return 1 ;;
+    esac
+    return 0
+}
+
 ensure_session() {
     if tmux_tmpdir_missing; then
         echo "agent-terminals: REFUSING to heal: TMUX_TMPDIR=${TMUX_TMPDIR} does not exist, and tmux would silently fall back to the DEFAULT socket (the live server)" >&2
         return 1
     fi
     tmux has-session -t "${TMUX_SESSION}" 2>/dev/null && return 0
+    if ! heal_enabled; then
+        echo "agent-terminals: tmux session '${TMUX_SESSION}' does not exist; waiting for it (CHELA_TERM_HEAL=${CHELA_TERM_HEAL}); start it with: tmux new-session -d -s '${TMUX_SESSION}'" >&2
+        return 1
+    fi
     "${PYTHON}" -c 'import sys
 from chela import discovery
 sys.exit(0 if discovery.ensure_session(sys.argv[1]) else 1)' "${TMUX_SESSION}" </dev/null >/dev/null
@@ -396,7 +429,7 @@ write_map               # write an (empty) map even before any agent is seen
 # kills real sessions. Genuinely dead sockets are already torn down by the
 # keepalive: a failed ping raises in the proxy pumps, ttyd drops the client, and
 # tmux detaches it — which frees the slot. --max-clients headroom absorbs the rest.
-declare -A CUR NAME_OF
+CUR=""          # this tick's live wids, space-separated
 while :; do
     # The session can vanish under us (tmux kill-server, a crashed server). Heal it
     # BEFORE discovery, so the tick that follows sees the fresh session rather than
@@ -405,18 +438,18 @@ while :; do
     wait_for_session
 
     # snapshot the live window set, keyed by stable window id
-    CUR=()
-    NAME_OF=()
+    for wid in ${CUR}; do at_del NAME "$wid"; done
+    CUR=""
     while IFS=$'\t' read -r wid name; do
         [[ -z "$wid" ]] && continue
-        CUR["$wid"]=1
-        NAME_OF["$wid"]="$name"
+        in_list "$wid" "${CUR}" || CUR="${CUR:+${CUR} }${wid}"
+        at_put NAME "$wid" "$name"
     done < <(list_windows)
 
     # Guard: an empty result while we have running ttyds is almost certainly a
     # transient discovery hiccup (python import / tmux mid-write), not
     # "every agent vanished" — skip this tick rather than nuke everything.
-    if (( ${#CUR[@]} == 0 && ${#PID_OF[@]} > 0 )); then
+    if [[ -z "${CUR}" && -n "${TRACKED}" ]]; then
         echo "agent-terminals: discovery returned empty; keeping current set"
         nap "${POLL}"; continue
     fi
@@ -425,25 +458,25 @@ while :; do
 
     # additions / dead-ttyd respawns. A rename keeps the same wid, so it never
     # lands here — the ttyd and its grouped session ride straight through.
-    for wid in "${!CUR[@]}"; do
-        if [[ -z "${PID_OF[$wid]:-}" ]]; then
+    for wid in ${CUR}; do
+        pid="$(at_get PID "$wid")"
+        if [[ -z "$pid" ]]; then
             port="$(free_port)"; spawn "$wid" "$port"
-            echo "agent-terminals: + ${NAME_OF[$wid]} (${wid}) -> :${port}"; changed=1
-        elif ! kill -0 "${PID_OF[$wid]}" 2>/dev/null; then
-            echo "agent-terminals: ! ${NAME_OF[$wid]:-$wid} (${wid}) ttyd died, respawn"
-            spawn "$wid" "${PORT_OF[$wid]}"; changed=1
+            echo "agent-terminals: + $(at_get NAME "$wid") (${wid}) -> :${port}"; changed=1
+        elif ! kill -0 "$pid" 2>/dev/null; then
+            name="$(at_get NAME "$wid")"
+            echo "agent-terminals: ! ${name:-$wid} (${wid}) ttyd died, respawn"
+            spawn "$wid" "$(at_get PORT "$wid")"; changed=1
         fi
     done
 
     # removals: window gone
-    if (( ${#PID_OF[@]} )); then
-        for wid in "${!PID_OF[@]}"; do
-            if [[ -z "${CUR[$wid]:-}" ]]; then
-                echo "agent-terminals: - ${wid} (window gone)"
-                despawn "$wid"; changed=1
-            fi
-        done
-    fi
+    for wid in ${TRACKED}; do
+        if ! in_list "$wid" "${CUR}"; then
+            echo "agent-terminals: - ${wid} (window gone)"
+            despawn "$wid"; changed=1
+        fi
+    done
 
     (( changed )) && write_map
     nap "${POLL}"

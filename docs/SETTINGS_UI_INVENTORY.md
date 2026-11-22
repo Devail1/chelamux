@@ -80,11 +80,12 @@ scan, and matter to a redesign precisely because they're invisible to it:
   from any settings surface: it's an actor stamp a launched orchestrator process exports
   into its own window, never a human preference (see `[[feedback_orchestrator...]]`-style
   guidance in `chela/config.py:345-352`).
-- **Seven ttyd/terminal-wall knobs read only by `scripts/agent-terminals.sh`** (shell, not
+- **Eight ttyd/terminal-wall knobs read only by `scripts/agent-terminals.sh`** (shell, not
   Python, so the Python-side grep never sees them): `CHELA_TERM_BASE`, `CHELA_TERM_POLL`,
   `CHELA_TERM_MAX_CLIENTS`, `CHELA_TERM_FONT`, `CHELA_TERM_FONTSIZE`,
   `CHELA_TERM_BACKOFF_MAX`, `CHELA_TERM_RENDERER` (xterm renderer, default `dom` for
-  Hebrew bidi, CMX-302). A "Terminal wall" tab that only covers the Python-side knobs
+  Hebrew bidi, CMX-302), `CHELA_TERM_HEAL` (default `true`: create a missing tmux session;
+  `chela agent-terminals` always runs it `false`, CMX-469). A "Terminal wall" tab that only covers the Python-side knobs
   (`CHELA_TERMINALS_ENABLED/EXPOSE/TERM_COLS/TERM_ROWS/TERM_THEME/WALL_TILE_DISPATCHED`)
   would still be missing the port range, font, and client cap the supervisor itself reads.
   (`CHELA_TERM_THEME` was one of them too until CMX-381: the dashboard now reads it too, so

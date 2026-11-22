@@ -126,6 +126,11 @@ Four commands; on a clean Ubuntu box the wall is up about 15s after the first on
 exactly this block in a clean container, times it and checks that `chela doctor` passes
 (CI runs it on every PR, in its own `fresh-install` job). If your shell does not find `chela`, run `uv tool update-shell`.
 
+The wall's tiles are live terminals once `chela agent-terminals` runs next to the
+dashboard: it starts one localhost [`ttyd`](https://github.com/tsl0922/ttyd) per agent
+window (`brew install ttyd` / `apt install ttyd`). It ships in the package, so a PyPI or
+`uvx` install has it too, and it runs on macOS's stock `/bin/bash` 3.2.
+
 > **`chela run` is the engine, not a helper.** The scheduler, the dispatcher, the
 > needs-input scan and the decisions inbox all live in its loop. Kill it and nothing *looks*
 > broken (the dashboard still works and agents still run), but the fleet stops doing
