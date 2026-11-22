@@ -53,5 +53,6 @@ export function actions() {
     toggleDispatcherSessions: vi.fn<SidebarActions['toggleDispatcherSessions']>(),
     suggestNames: vi.fn<SidebarActions['suggestNames']>(),
     retitle: vi.fn<SidebarActions['retitle']>(() => Promise.resolve()),
+    restartSession: vi.fn<SidebarActions['restartSession']>(() => Promise.resolve()),
   };
 }

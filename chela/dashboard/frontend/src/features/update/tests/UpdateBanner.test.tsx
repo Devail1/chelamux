@@ -6,8 +6,8 @@
 import { act, cleanup, fireEvent, render } from '@testing-library/react';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, test, vi } from 'vitest';
 import css from '../../../../../static/style.css?raw';
-import { UpdateBanner, applyStale, applyVersion, banner, checkForUpdate, reloadOffered, restartStale } from '../index.ts';
-import type { UpdateStatus } from '../flow.ts';
+import { UpdateBanner, applyClaude, applyStale, applyVersion, banner, checkClaude, checkForUpdate, reloadOffered, restartClaude, restartStale } from '../index.ts';
+import { claudeOffer, restartNote, type ClaudeVersion, type UpdateStatus } from '../flow.ts';
 
 // 🔐 CMX-447: seed the page's session token before the modules under test read it at import.
 // Unseeded it is '', and an assertion against '' passes for a request that sends an EMPTY
@@ -20,23 +20,27 @@ const PAGE = 'aaaaaaaaaaaa';
 let versionPayload: unknown;
 let statusPayload: unknown;
 let applyPayload: unknown;
-let calls: { url: string; method: string; token?: string }[] = [];
+let claudePayload: unknown;
+let restartPayload: unknown;
+let calls: { url: string; method: string; token?: string; body?: string }[] = [];
 let asked = '';
 let answer = true;
 const reload = vi.fn();
 
 beforeEach(() => {
-  banner.set({ reload: '', dismissed: '', stale: null, dismissedStale: '', progress: null });
+  banner.set({ reload: '', dismissed: '', stale: null, dismissedStale: '', claude: null, dismissedClaude: '', progress: null });
   versionPayload = { version: PAGE };
   statusPayload = null;
   applyPayload = {};
+  claudePayload = new Error('claude-version not stubbed');
+  restartPayload = {};
   calls = [];
   asked = '';
   answer = true;
   reload.mockClear();
   vi.stubGlobal('fetch', (url: string, opts?: RequestInit) => {
-    calls.push({ url, method: opts?.method ?? 'GET', token: (opts?.headers as Record<string, string> | undefined)?.['X-Chela-Session-Token'] });
-    const body = url.endsWith('/api/version') ? versionPayload : url.endsWith('/api/update/status') ? statusPayload : url.endsWith('/api/update/apply') ? applyPayload : new Error(`unexpected ${url}`);
+    calls.push({ url, method: opts?.method ?? 'GET', token: (opts?.headers as Record<string, string> | undefined)?.['X-Chela-Session-Token'], body: typeof opts?.body === 'string' ? opts.body : undefined });
+    const body = url.endsWith('/api/version') ? versionPayload : url.endsWith('/api/update/status') ? statusPayload : url.endsWith('/api/update/apply') ? applyPayload : url.endsWith('/api/sessions/claude-version') ? claudePayload : url.endsWith('/api/sessions/restart') ? restartPayload : new Error(`unexpected ${url}`);
     if (body instanceof Error) return Promise.reject(body);
     return Promise.resolve({ ok: true, json: () => Promise.resolve(body) });
   });
@@ -116,7 +120,7 @@ test('checkForUpdate asks /api/version and /api/update/status; the two reads are
   versionPayload = { version: 'eeeeeeeeeeee' };
   // the page's own version is its boot block's (none in this test page): never offers
   expect(await act(() => checkForUpdate())).toBe(false);
-  expect(calls.map((c) => c.url).sort()).toEqual(['/api/update/status', '/api/version']);
+  expect(calls.map((c) => c.url).sort()).toEqual(['/api/sessions/claude-version', '/api/update/status', '/api/version']);
   statusPayload = STALE;
   versionPayload = new Error('version route down');
   expect(await act(() => checkForUpdate())).toBe(false);
@@ -261,4 +265,81 @@ test('a restart that restarts THIS dashboard ends as success, not an error', asy
   applyPayload = { ok: true, started: true, run: 5, boot: 'b1', detail: 'restarting chela-dashboard' };
   const res = await act(() => restartStale(instant([{ ...STALE, boot: 'b2' }])));
   expect([res?.text, res?.cls]).toEqual(['The dashboard restarted, reloading…', 'ok']);
+});
+
+// --- CMX-467: "Restart onto the new Claude Code" ----------------------------------------------
+
+const CV: ClaudeVersion = { ok: true, installed: '2.1.330', stale: [{ wid: '@3', name: 'a', version: '2.1.329' }, { wid: '@7', name: 'b', version: '2.1.329' }] };
+const claude = (cv: ClaudeVersion | null) => sync(() => applyClaude(cv));
+const restarts = () => calls.filter((c) => c.url.endsWith('/api/sessions/restart'));
+
+test('claudeOffer: a readable payload naming the installed version and a stale session offers; unknown never does', () => {
+  expect(claudeOffer(CV)).toEqual({ wids: ['@3', '@7'], key: '2.1.330:@3,@7', text: '2 sessions run an older Claude Code than 2.1.330', label: 'Restart onto the new Claude Code' });
+  expect(claudeOffer({ ...CV, stale: [{ wid: '@3' }] })?.text).toBe('1 session runs an older Claude Code than 2.1.330');
+  expect(claudeOffer(null)).toBeNull();
+  expect(claudeOffer({ ...CV, ok: false })).toBeNull();
+  expect(claudeOffer({ ...CV, installed: null })).toBeNull();
+  expect(claudeOffer({ ...CV, stale: [] })).toBeNull();
+  expect(claudeOffer({ ...CV, stale: 'nope' })).toBeNull();
+  expect(claudeOffer({ ...CV, stale: [{ name: 'no wid' }] })).toBeNull();
+});
+
+test('restartNote: only ok AND started is a start; anything else says why', () => {
+  expect(restartNote({ ok: true, started: true, detail: 'Restarting' })).toEqual({ ok: true, text: 'Restarting' });
+  expect(restartNote({ ok: true, started: true })).toEqual({ ok: true, text: 'Restarting; the result lands in the inbox' });
+  expect(restartNote({ ok: true })).toEqual({ ok: false, text: 'Restart refused.' });
+  expect(restartNote({ ok: false, started: true, error: 'no' })).toEqual({ ok: false, text: 'no' });
+  expect(restartNote(null)).toEqual({ ok: false, text: 'Restart refused.' });
+});
+
+test('the banner shows the Claude Code fact with its own button, beside the others; dismiss is per offer', () => {
+  expect(claude(CV)).toBe(true);
+  expect(msg()).toBe('2 sessions run an older Claude Code than 2.1.330');
+  expect($('update-banner-claude')?.textContent).toBe('Restart onto the new Claude Code');
+  stale(STALE);
+  expect(msg()).toBe('2 services run old code · 2 sessions run an older Claude Code than 2.1.330');
+  expect([!!$('update-banner-restart'), !!$('update-banner-claude')]).toEqual([true, true]);
+  click('update-banner-close');
+  expect(claude(CV)).toBe(false);
+  expect(claude({ ...CV, installed: '2.1.331' })).toBe(true);
+  expect(claude({ ...CV, ok: false })).toBe(false);
+});
+
+test('checkClaude reads /api/sessions/claude-version; a failed read offers nothing', async () => {
+  claudePayload = CV;
+  expect(await act(() => checkClaude())).toBe(true);
+  claudePayload = new Error('down');
+  expect(await act(() => checkClaude())).toBe(false);
+  expect(shown()).toBe(false);
+});
+
+test('Restart onto the new Claude Code: confirm, POST {all: true} with the token, says it started', async () => {
+  claude(CV);
+  restartPayload = { ok: true, started: true, detail: 'Restarting; the result lands in the inbox' };
+  const res = await act(() => restartClaude((q) => ((asked = q), true)));
+  expect(asked).toMatch(/^Restart onto the new Claude Code\? .*dispatched runs and judges are not touched\.$/);
+  expect(restarts().map((c) => [c.method, c.token, c.body])).toEqual([['POST', 'tok-update', '{"all":true}']]);
+  expect([res?.text, msg(), $('update-banner-msg')?.className]).toEqual(['Restarting; the result lands in the inbox', 'Restarting; the result lands in the inbox', 's-savemsg ok']);
+  expect($('update-banner-claude')).toBeNull();
+});
+
+test('a declined confirm POSTs nothing; a refusal keeps the offer and says why', async () => {
+  claude(CV);
+  expect(await act(() => restartClaude(() => false))).toBeNull();
+  expect(restarts()).toHaveLength(0);
+  restartPayload = { ok: false, error: 'the browser proof is missing' };
+  const res = await act(() => restartClaude(() => true));
+  expect([res?.text, $('update-banner-msg')?.className]).toEqual(['the browser proof is missing', 's-savemsg err']);
+  restartPayload = new Error('dashboard down');
+  expect((await act(() => restartClaude(() => true)))?.text).toBe('request failed, the dashboard may be restarting');
+  expect(await act(() => (banner.set({ ...banner.get(), claude: null }), restartClaude(() => true)))).toBeNull();
+});
+
+test('the banner button runs it', async () => {
+  claude(CV);
+  restartPayload = { ok: true, started: true };
+  click('update-banner-claude');
+  await act(() => new Promise((r) => setTimeout(r, 0)));
+  expect(asked).toMatch(/^Restart onto the new Claude Code\?/);
+  expect(restarts()).toHaveLength(1);
 });

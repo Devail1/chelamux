@@ -87,7 +87,7 @@ test('the row menu: a run opens its panes; Archive is enabled only for a finishe
   const rowMore = (name: string) => el.querySelector(`.agent-row[data-agent="${name}"] .row-more`);
   open(rowMore('busy'));
   // CMX-459: a live session's row leads with Rename title…; a run's row has none
-  expect(items()).toEqual(['Rename title…', 'Archive']);
+  expect(items()).toEqual(['Rename title…', 'Restart session', 'Archive']);
   expect(disabled('Archive')).toBe(true);
   fireEvent.keyDown(screen.getByRole('menu'), { key: 'Escape' });
   open(rowMore(run.name ?? ''));
@@ -118,7 +118,7 @@ test('Move to group… only under Custom groups; its page moves the row, and sta
   cleanup();
   ({ el, acts } = draw({ ...base, view: { ...base.view, groupBy: 'custom' } }));
   fireEvent.contextMenu(el.querySelector('.agent-row[data-agent="a"]') as Element);
-  expect(items()).toEqual(['Rename title…', 'Move to group…', 'Archive']);
+  expect(items()).toEqual(['Rename title…', 'Restart session', 'Move to group…', 'Archive']);
   pick('Move to group…');
   expect(menuOpen()).toBe(true);
   expect(items()).toEqual(['Move to group', 'Infra', 'Ops', 'Ungrouped', 'New group…']);
@@ -129,10 +129,10 @@ test('Move to group… only under Custom groups; its page moves the row, and sta
   expect(menuOpen()).toBe(false);
   // reopened, it starts on its first page again
   fireEvent.contextMenu(el.querySelector('.agent-row[data-agent="a"]') as Element);
-  expect(items()[1]).toBe('Move to group…');
+  expect(items()[2]).toBe('Move to group…');
   pick('Move to group…');
   pick('Move to group');   // ‹ back
-  expect(items()).toEqual(['Rename title…', 'Move to group…', 'Archive']);
+  expect(items()).toEqual(['Rename title…', 'Restart session', 'Move to group…', 'Archive']);
   pick('Move to group…');
   pick('Ungrouped');
   expect(acts.moveToGroup.mock.calls[1]).toEqual([key, null]);
@@ -390,4 +390,29 @@ test('no Rename title… on a run\'s row or an archived row', () => {
   fireEvent.keyDown(screen.getByRole('menu'), { key: 'Escape' });
   open(el.querySelector('.side-archived .agent-row[data-agent="fin"] .row-more'));
   expect(items()).not.toContain('Rename title…');
+});
+
+// --- CMX-467: the row menu's Restart session -------------------------------------------------
+
+test('Restart session restarts THAT window through the restart action', () => {
+  const a = win('a');
+  const { el, acts } = draw(state([a, win('b')]));
+  open(el.querySelector('.agent-row[data-agent="a"] .row-more'));
+  expect(disabled('Restart session')).toBe(false);
+  expect(item('Restart session').getAttribute('title')).toBe('Restart this session onto the installed Claude Code (when idle)');
+  pick('Restart session');
+  expect(acts.restartSession.mock.calls).toEqual([[a.window_id]]);
+});
+
+test('Restart session is disabled on a pane with no Claude in it, and absent on a run\'s row', () => {
+  const run = runWin('CMX-1', 'agent', { status: 'running' });
+  const { el, acts } = draw(state([win('sh', { claude_running: false }), run]));
+  open(el.querySelector('.agent-row[data-agent="sh"] .row-more'));
+  expect(disabled('Restart session')).toBe(true);
+  expect(item('Restart session').getAttribute('title')).toBe('No Claude session runs in this pane');
+  pick('Restart session');
+  fireEvent.keyDown(screen.getByRole('menu'), { key: 'Escape' });
+  open(el.querySelector(`.agent-row[data-agent="${run.name}"] .row-more`));
+  expect(items()).not.toContain('Restart session');
+  expect(acts.restartSession).not.toHaveBeenCalled();
 });

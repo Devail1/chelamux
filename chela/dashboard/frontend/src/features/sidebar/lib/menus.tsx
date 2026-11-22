@@ -81,6 +81,9 @@ function folderItems({ g, index, count }: RowGroup, actions: SidebarActions): Me
 /** CMX-459: the row menu's "Rename title…" tooltips: why it is off on a pane with no Claude. */
 export const RETITLE_TITLE = { on: "Set this session's Claude title", off: 'No Claude session runs in this pane' };
 
+/** CMX-467: the row menu's "Restart session" tooltips: why it is off on a pane with no Claude. */
+export const RESTART_TITLE = { on: 'Restart this session onto the installed Claude Code (when idle)', off: 'No Claude session runs in this pane' };
+
 /** A row's menu: Rename title… (a live session, CMX-459), a run's panes, Move to group… (under
  * Custom groups only, CMX-74), Pin / Unpin (CMX-390), Archive. `onRetitle` opens the row's
  * inline title field; without it there is no Rename title row. `onCloseAutoFocus` is the Menu's:
@@ -97,6 +100,11 @@ export function RowMenu({ it, s, actions, menu, group, archived = false, onRetit
   const retitleOk = !!it.agent && canRetitle(it.agent as HeadAgent);
   const retitleItem: MenuItem | null = onRetitle && it.kind === 'agent' && it.agent?.window_id
     ? { label: 'Rename title…', icon: icons.retitle, disabled: !retitleOk, title: retitleOk ? RETITLE_TITLE.on : RETITLE_TITLE.off, onSelect: onRetitle }
+    : null;
+  // CMX-467: a session row only — a dispatched run is the dispatcher's, never restarted here.
+  const wid = it.kind === 'agent' ? it.agent?.window_id : undefined;
+  const restartItem: MenuItem | null = wid && !isRunsRow(it, { orchWid: s.orchWid, dispatchOff: s.dispatchOff })
+    ? { label: 'Restart session', disabled: !retitleOk, title: retitleOk ? RESTART_TITLE.on : RESTART_TITLE.off, onSelect: () => void actions.restartSession(wid) }
     : null;
   const items: MenuItem[] = [];
   if (page === 'move') {
@@ -116,7 +124,9 @@ export function RowMenu({ it, s, actions, menu, group, archived = false, onRetit
     });
   } else {
     if (group) items.push(...folderItems(group, actions));
-    if (retitleItem) items.push(retitleItem, 'separator');
+    if (retitleItem) items.push(retitleItem);
+    if (restartItem) items.push(restartItem);
+    if (retitleItem || restartItem) items.push('separator');
     if (it.kind === 'run') {
       if (it.agent) items.push({ label: 'Open agent pane', onSelect: () => void actions.rowMenuAction(it.key, 'agent') });
       items.push({ label: 'Open judge pane', disabled: !it.judge, onSelect: () => void actions.rowMenuAction(it.key, 'judge') }, 'separator');

@@ -4,7 +4,7 @@ import { afterEach, beforeEach, expect, test, vi } from 'vitest';
 import { installBridge } from '../../../shared/bridge/index.ts';
 import {
   clearRecentSessions, closeRecentUndo, dismissRecentSession, liveSessionIds, refreshLayout, refreshRecentSessions,
-  renderRecentSessions, resumeSession, retitleWindow, setNav, setNavBadges, setSidebarWidth, undoDismissRecent,
+  renderRecentSessions, restartSession, resumeSession, retitleWindow, setNav, setNavBadges, setSidebarWidth, undoDismissRecent,
 } from '../controller.ts';
 import type { RecentRow } from '../model.ts';
 
@@ -250,4 +250,23 @@ test('retitleWindow refused (a pane with no Claude): says why, and reads nothing
   expect(await retitleWindow('@5', 'X')).toEqual({ state: 'refused', reason: 'no Claude session runs in this pane' });
   expect(calls).toEqual([['POST', '/api/agents/%405/title', { title: 'X' }]]);
   expect(alert).toHaveBeenCalledWith('Title failed: no Claude session runs in this pane');
+});
+
+// --- CMX-467: the row menu's Restart session -------------------------------------------------
+
+test('restartSession: confirm names the window, POSTs {wid} to the restart route, says it started', async () => {
+  answers['POST /api/sessions/restart'] = () => ({ ok: true, started: true, detail: 'Restarting; the result lands in the inbox' });
+  let asked = '';
+  expect(await restartSession('@5', (q) => ((asked = q), true))).toBe(true);
+  expect(asked).toMatch(/^Restart @5 onto the installed Claude Code\?/);
+  expect(calls).toEqual([['POST', '/api/sessions/restart', { wid: '@5' }]]);
+  expect(alert).toHaveBeenCalledWith('Restarting; the result lands in the inbox');
+});
+
+test('restartSession: a declined confirm POSTs nothing; a refusal says why', async () => {
+  expect(await restartSession('@5', () => false)).toBe(false);
+  expect(calls).toEqual([]);
+  answers['POST /api/sessions/restart'] = () => ({ ok: false, error: 'no such window: @5' });
+  expect(await restartSession('@5', () => true)).toBe(false);
+  expect(alert).toHaveBeenCalledWith('no such window: @5');
 });

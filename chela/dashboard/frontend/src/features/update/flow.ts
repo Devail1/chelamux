@@ -3,7 +3,7 @@
 // so a click always ends in an outcome ("Restarted ...", the error, a reload, or "couldn't
 // confirm"), never an endless spinner. Moved from static/js/updateflow.js by CMX-219 (CMX-212
 // P06); legacy Settings imports it until P16.
-import { api } from '../../shared/api/index.ts';
+import { BASE_PATH, api, decideHeaders } from '../../shared/api/index.ts';
 
 export const POLL_MS = 2000;
 /** How long a page follows one click; past it, "couldn't confirm": unknown is never success. */
@@ -107,4 +107,49 @@ export async function followUpdate(
     }
     if (step.state !== 'polling') return step;
   }
+}
+
+// --- CMX-467: sessions on an older Claude Code -------------------------------------------------
+
+/** The parts of /api/sessions/claude-version this reads. */
+export type ClaudeVersion = { ok?: boolean; installed?: string | null; stale?: unknown };
+export type ClaudeOffer = { wids: string[]; key: string; text: string; label: string };
+export const CLAUDE_RESTART_LABEL = 'Restart onto the new Claude Code';
+
+const staleWid = (r: unknown): string =>
+  r && typeof r === 'object' && typeof (r as { wid?: unknown }).wid === 'string' ? (r as { wid: string }).wid : '';
+
+/** The banner's "Restart onto the new Claude Code" offer, or null. Only a readable payload that
+ * names the installed version AND at least one session on an older one offers: unknown is
+ * never an offer. */
+export function claudeOffer(cv: ClaudeVersion | null | undefined): ClaudeOffer | null {
+  if (!cv || cv.ok !== true || !cv.installed) return null;
+  const wids = (Array.isArray(cv.stale) ? cv.stale : []).map(staleWid).filter(Boolean);
+  if (!wids.length) return null;
+  const one = wids.length === 1;
+  return {
+    wids,
+    key: `${cv.installed}:${wids.join(',')}`,
+    text: `${wids.length} session${one ? '' : 's'} run${one ? 's' : ''} an older Claude Code than ${cv.installed}`,
+    label: CLAUDE_RESTART_LABEL,
+  };
+}
+
+export type RestartReply = { ok?: boolean; started?: boolean; error?: string; detail?: string };
+
+/** POST /api/sessions/restart: one session (`{wid}`) or every interactive one (`{all: true}`).
+ * A failed request is a refusal, never a start. */
+export async function postRestart(body: { wid: string } | { all: true }): Promise<RestartReply> {
+  try {
+    const res = await fetch(`${BASE_PATH}/api/sessions/restart`, { method: 'POST', headers: decideHeaders(), body: JSON.stringify(body) });
+    return (await res.json()) as RestartReply;
+  } catch {
+    return { ok: false, error: 'request failed, the dashboard may be restarting' };
+  }
+}
+
+/** What to say about a restart reply: started (the result lands in the inbox) or why not. */
+export function restartNote(r: RestartReply | null): { ok: boolean; text: string } {
+  if (r && r.ok === true && r.started === true) return { ok: true, text: r.detail || 'Restarting; the result lands in the inbox' };
+  return { ok: false, text: r?.error || 'Restart refused.' };
 }

@@ -2454,6 +2454,61 @@ def cmd_doctor(args) -> None:
     print("\nrequired checks: all pass")
 
 
+def cmd_restart(args) -> None:
+    """Restart interactive sessions in place onto a new Claude Code (CMX-467).
+
+    ``chela restart @N`` restarts one session — idle only (``--wait`` waits for idle), the
+    SAME session id relaunched with its recorded flags, name, Remote Control and topic — see
+    ``chela/restart.py``. ``--all`` restarts every interactive session one at a time, busy ones
+    retried at the end and the orchestrator last; dispatched runs and judges are never
+    touched. ``--self`` restarts the caller's own session through a detached helper.
+    ``--detach`` runs the whole command as that helper (the dashboard's path).
+    Exits 1 when a session it was asked to restart did not come back (with ``--all``, a
+    refused dispatched run or judge is expected and does not count).
+    """
+    from chela import inbox, restart
+
+    if args.detach:
+        target = ["--all"] if args.all else [_resolve_wid(None if args.self else args.wid)]
+        if not target[0]:
+            print("no window id (pass @N, --self or --all)", file=sys.stderr)
+            sys.exit(2)
+        if args.wait and not args.all:
+            target.append("--wait")
+        try:
+            pid, path = restart.spawn_helper([t for t in target if t])
+        except OSError as e:
+            print(f"restart: could not start the detached helper: {e}", file=sys.stderr)
+            sys.exit(1)
+        print(f"restart: detached helper pid {pid} (log: {path}); the result lands in "
+              "the inbox")
+        return
+    ops = restart.live_ops()
+    self_wid = None if args.helper else orchestrator.self_wid()
+    if args.all:
+        results = restart.restart_all(ops, wids=restart.interactive_windows(),
+                                      self_wid=self_wid, arm=restart.arm_helper)
+    else:
+        wid = _resolve_wid(None if args.self else args.wid)
+        if not wid:
+            print("no window id (pass @N, --self or --all)", file=sys.stderr)
+            sys.exit(2)
+        if wid == self_wid:
+            results = [restart.arm_helper(wid)]
+        else:
+            wait = restart.WAIT_IDLE_S if args.wait else 0.0
+            results = [restart.restart_one(wid, ops, wait_idle=wait)]
+    lines = [r.line() for r in results]
+    print("\n".join(lines) or "restart: no interactive session to restart")
+    if args.helper and lines:
+        inbox.enqueue("restart", "chela restart: " + "; ".join(lines),
+                      {"results": [vars(r) for r in results]})
+    # --all expects refusals (dispatched runs, judges); a single target asked for this one.
+    fine = {restart.RESTARTED, restart.ARMED} | ({restart.REFUSED} if args.all else set())
+    if any(r.outcome not in fine for r in results):
+        sys.exit(1)
+
+
 def cmd_restore(args) -> None:
     """Report every epoch-stamped row a hard tmux death orphaned (see ``chela/restore.py``).
 
@@ -5139,6 +5194,27 @@ def main() -> None:
         help="Check the running config against $CHELA_DIR/chela.env (exits 1 on a break)",
     )
 
+    # restart — restart interactive sessions in place onto a new Claude Code (CMX-467)
+    p_restart = sub.add_parser(
+        "restart",
+        help="Restart interactive sessions in place onto a new Claude Code: idle-safe "
+             "/exit, then the same session relaunched with its flags, name, Remote Control "
+             "and topic. Dispatched runs and judges are never touched.",
+    )
+    p_restart.add_argument("wid", nargs="?", help="Window to restart (@N or N)")
+    p_restart.add_argument("--all", action="store_true",
+                           help="Every interactive session, one at a time; busy ones are "
+                                "retried at the end, the orchestrator goes last")
+    p_restart.add_argument("--self", action="store_true",
+                           help="This session, through a detached helper that waits for "
+                                "it to go idle")
+    p_restart.add_argument("--wait", action="store_true",
+                           help="Wait for a busy session to go idle instead of skipping it")
+    p_restart.add_argument("--detach", action="store_true",
+                           help="Run the whole restart as a detached helper; the result "
+                                "lands in the inbox")
+    p_restart.add_argument("--helper", action="store_true", help=argparse.SUPPRESS)
+
     # restore — every epoch-stamped row a hard tmux death orphaned
     p_restore = sub.add_parser(
         "restore",
@@ -5333,6 +5409,8 @@ def main() -> None:
             cmd_events(args)
     elif args.command == "doctor":
         cmd_doctor(args)
+    elif args.command == "restart":
+        cmd_restart(args)
     elif args.command == "restore":
         cmd_restore(args)
     elif args.command == "drive":
