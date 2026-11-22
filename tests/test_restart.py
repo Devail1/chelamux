@@ -951,3 +951,28 @@ def test_one_at_a_time_waits_up_to_its_timeout(tmp_path):
 def test_lock_path_lives_in_the_chela_dir(tmp_path, monkeypatch):
     monkeypatch.setattr(restart.config, "CHELA_DIR", tmp_path)
     assert restart.lock_path() == tmp_path / "restart.lock"
+
+
+def test_relaunch_with_no_seams_uses_the_real_defaults(monkeypatch):
+    """restart's live_ops calls relaunch_session bare — every default must be the real one."""
+    seen = {}
+    monkeypatch.setattr(restore.launch_settings, "for_session",
+                        lambda sid: seen.setdefault("settings_for", sid) and {"rec": 1})
+    monkeypatch.setattr(restore.launch_settings, "replay",
+                        lambda s: seen.setdefault("replay", s) and (["--channels", "x"], {}, [], []))
+    monkeypatch.setattr(restore.session_names, "name_for", lambda sid: "kept")
+    monkeypatch.setattr(restore.config, "remote_control_enabled", lambda: False)
+
+    def spawn_window(cwd, **kw):
+        seen["spawn"] = (cwd, kw)
+        return SpawnResult(ok=True, wid="@61", name=kw.get("name"))
+    monkeypatch.setattr(restore.spawn_mod, "spawn_window", spawn_window)
+    answers = iter([False, True])
+    monkeypatch.setattr(restore, "_default_check_resumed", lambda wid, sid: next(answers))
+    killed = []
+    monkeypatch.setattr(restore, "_default_kill_window", killed.append)
+    r = restore.relaunch_session(SID, "/srv/tap")
+    assert (seen["settings_for"], seen["replay"]) == (SID, {"rec": 1})
+    # the settings rung failed and was closed; the plain rung (no RC: it is off) came up
+    assert seen["spawn"] == ("/srv/tap", {"command": f"claude --resume {SID}", "name": "kept"})
+    assert (r.alive, r.step, killed) == (True, "plain", ["@61"])
