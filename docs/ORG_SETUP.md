@@ -135,10 +135,11 @@ https://<node-name>.<tailnet-name>.ts.net {
 	tls {
 		get_certificate tailscale
 	}
+	tailscale_auth
 	reverse_proxy 127.0.0.1:5001 {
 		# The dashboard records Tailscale-User-Login as who approved (section 4).
-		# Drop any copy a client sent, so it cannot claim to be someone else.
-		header_up -Tailscale-User-Login
+		header_up Tailscale-User-Login {http.auth.user.tailscale_user}
+		header_up Tailscale-User-Name {http.auth.user.tailscale_name}
 	}
 }
 ```
@@ -146,6 +147,22 @@ https://<node-name>.<tailnet-name>.ts.net {
 Replace `5001` if you set `CHELA_DASHBOARD_PORT`. Generate the auth key **with
 `tag:org-chela`** so the node is tagged from its first login. Check the global options and
 key handling against the plugin's README for the version you build.
+
+`tailscale_auth` asks the embedded node who is calling, and the two `header_up` lines pass
+that to chela. Without them the dashboard never learns a name, and every approval reads
+`dashboard` instead of the person who made it. Three details:
+
+- **`tailscale_user`, not `tailscale_login`.** `tailscale_user` is the full login (an email
+  address), which is what chela records. The plugin's `tailscale_login` is only the part
+  before the `@`.
+- **No separate strip line.** `header_up` with a value replaces any copy the client sent, so
+  a client cannot claim to be someone else.
+- **User-owned devices only.** `tailscale_auth` identifies a request only from a device
+  owned by a user on the tailnet, such as your phone or laptop. A request from a tagged
+  device carries no user, so it gets no name.
+
+Then set `CHELA_DASHBOARD_IDENTITY_HEADER=tailscale` (section 4). The name is attribution,
+not authority: it records who approved, and the tailnet policy still decides who gets in.
 
 ### (b) `tailscale serve`
 
@@ -248,8 +265,8 @@ which of your devices are let in, it does not prove a device is a phone.
       approve. Set `CHELA_DASHBOARD_IDENTITY_HEADER=tailscale` so the header is believed only
       from a loopback peer (refused and logged from anywhere else), and every mutating action
       is recorded with its `by`; see "Who did it" in [DASHBOARD.md](DASHBOARD.md). A process
-      on the host itself can still send the header, and a second proxy must strip it from
-      client requests (as in the Caddy block above). For a login that cannot be forged even
+      on the host itself can still send the header, and a second proxy must overwrite or strip
+      it on client requests (the Caddy block above overwrites it). For a login that cannot be forged even
       locally, use the `cloudflare-access` mode (a verified JWT). In `off` and `tailscale`
       mode a local process can also approve over the dashboard's HTTP API, which the
       merge-gate hook misses (CMX-392).
