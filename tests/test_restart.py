@@ -698,6 +698,7 @@ def test_cli_restarts_one_window_without_waiting(monkeypatch, capsys):
 
 
 def test_cli_wait_waits_up_to_the_idle_budget(monkeypatch):
+    assert restart.WAIT_IDLE_S == 1800
     _, seen = _cli(monkeypatch, ["@3", "--wait"])
     assert seen["one"] == [("@3", "OPS", 1800.0)]
 
