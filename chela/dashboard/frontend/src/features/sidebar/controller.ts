@@ -9,6 +9,7 @@ import { api, BOOT } from '../../shared/api/index.ts';
 // panehead's model, not its index: PaneHead imports this controller (no-circular)
 import { headLabel, isShell, type HeadAgent } from '../panehead/model.ts';
 import { retitle, titleNote, type TitleOutcome } from '../suggestnames/index.ts';
+import { postRestart, restartNote } from '../update/flow.ts';
 import { registerLane } from '../../shared/scheduler/index.ts';
 import { type Agent, agents as agentsStore } from '../../shared/store/agents.ts';
 import { onOverlayOpen } from '../../shared/ui/index.ts';
@@ -349,6 +350,18 @@ export async function retitleWindow(wid: string, title: string): Promise<TitleOu
   if (o.state === 'refused') say(titleNote(o));
   else await refreshSidebar();
   return o;
+}
+
+/**
+ * CMX-467: the row menu's "Restart session": `chela restart @N`, detached on the server. The
+ * session exits only when idle and comes back as the SAME session; the result lands in the
+ * inbox. Started or refused, it is said.
+ */
+export async function restartSession(wid: string, confirm: (msg: string) => boolean = (m) => window.confirm(m)): Promise<boolean> {
+  if (!confirm(`Restart ${wid} onto the installed Claude Code? It exits only when idle and comes back with the same session, name, flags, Remote Control and topic.`)) return false;
+  const note = restartNote(await postRestart({ wid }));
+  say(note.text);
+  return note.ok;
 }
 
 // --- The group, row and VIEW menus' commands (CMX-35, CMX-66, CMX-81) ------------------------

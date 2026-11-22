@@ -41,4 +41,7 @@ export interface SidebarActions {
   suggestNames(): void;
   /** CMX-459: set one session's Claude title (the row menu's "Rename title…"). */
   retitle(wid: string, title: string): Promise<unknown>;
+  /** CMX-467: restart one session in place onto the installed Claude Code (the row menu's
+   * "Restart session"), after a confirm. */
+  restartSession(wid: string): Promise<unknown>;
 }

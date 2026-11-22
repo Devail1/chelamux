@@ -29,7 +29,7 @@ from flask import abort, Flask, jsonify, render_template, request, Response, sen
 
 from chela import config
 from chela.config import DISPATCH_WORKFLOWS, CHELA_DIR, TMUX_SESSION, NOTIFY_INTERVAL
-from chela import agent_manager, capabilities, claude_account, collab, concurrency, collab_host, collab_stream, context, diffsurface, discovery, dismissed_sessions, dispatcher, epoch, event_log, fleet, gateanswer, hold, hooks, inbox, judge, launcher, messenger, notify, okf, parentage, park, personas, pr_status, probecache, rc_rename, restore, rooms, sandbox_status, scheduler, session_names, sessionids, share_requests, share_sandbox, share_store, sidebar_archive, sidebar_layout, spawn, starter, suggest_names, tasklists, transcripts, update, usage, userconfig
+from chela import agent_manager, capabilities, claude_account, collab, concurrency, collab_host, collab_stream, context, diffsurface, discovery, dismissed_sessions, dispatcher, epoch, event_log, fleet, gateanswer, hold, hooks, inbox, judge, launcher, messenger, notify, okf, parentage, park, personas, pr_status, probecache, rc_rename, restart, restore, rooms, sandbox_status, scheduler, session_names, sessionids, share_requests, share_sandbox, share_store, sidebar_archive, sidebar_layout, spawn, starter, suggest_names, tasklists, transcripts, update, usage, userconfig
 from chela.dashboard import humanproof, identity, pwa, resources, term_fonts, term_themes
 from chela import topic_ledger as tg_topics
 from chela.personas import autolaunch, lease
@@ -2820,6 +2820,65 @@ def api_agents_title(wid):
         status = {suggest_names.NO_CLAUDE: 409, suggest_names.NOT_QUEUED: 500}.get(result["reason"], 400)
         return jsonify(result), status
     return jsonify(result)
+
+
+# CMX-467: a window id as the restart route takes it — `@N`, nothing else reaches argv.
+_RESTART_WID_RE = re.compile(r"@\d+\Z")
+
+
+@app.route("/api/sessions/claude-version")
+@require_auth
+def api_sessions_claude_version():
+    """CMX-467: the Claude Code a new launch gets (``installed``) and the interactive
+    sessions still running an older one (``stale``: ``[{wid, name, version}]``) — what the
+    update banner's "Restart onto the new Claude Code" offer reads. Read-only. An unknown
+    installed version offers nothing (``stale`` empty)."""
+    installed = restart.installed_version()
+    stale = restart.stale_sessions(
+        installed=installed, windows=discovery.get_windows_by_id(),
+        pid_of=agent_manager.claude_pid, runs=dispatcher.list_runs(),
+        cwd_of=discovery.get_window_cwd_by_id) if installed else []
+    resp = jsonify({"ok": True, "installed": installed, "stale": stale})
+    resp.headers["Cache-Control"] = "no-cache"
+    return resp
+
+
+@app.route("/api/sessions/restart", methods=["POST"])
+@require_auth
+def api_sessions_restart():
+    """CMX-467: restart sessions in place onto the installed Claude Code — ``chela restart``
+    run DETACHED (it outlives this request, and this process: an orchestrator's restart can
+    take minutes). Body ``{"wid": "@N"}`` for one session (it waits for idle),
+    ``{"wids": [...]}`` for those (the banner's stale set), or ``{"all": true}`` for every
+    interactive one (busy ones retried, the orchestrator last, dispatched runs and judges
+    never touched). Only one restart runs at a time (``restart.one_at_a_time``). The per-session result lands in the orchestrator's inbox. Acts as the
+    operator, so the browser proof is required (CMX-392)."""
+    if refused := _browser_refusal():
+        return refused
+    body = request.get_json(silent=True) or {}
+    live = discovery.get_windows_by_id()
+    if body.get("all") is True:
+        args = ["--all"]
+    else:
+        wids = body.get("wids") if "wids" in body else [body.get("wid")]
+        if (not isinstance(wids, list) or not wids
+                or not all(isinstance(w, str) and _RESTART_WID_RE.match(w) for w in wids)):
+            return jsonify({"ok": False, "error": "pass {\"wid\": \"@N\"}, {\"wids\": [\"@N\", …]} "
+                                                  "or {\"all\": true}"}), 400
+        gone = [w for w in wids if w not in live]
+        if gone:
+            return jsonify({"ok": False, "error": f"no such window: {', '.join(gone)}"}), 404
+        # one session waits for idle (the row menu says "when idle"); a list goes one at a time
+        args = list(dict.fromkeys(wids)) + (["--wait"] if len(set(wids)) == 1 else [])
+    if restart.running():
+        return jsonify({"ok": False, "error": "a restart is already running; its result "
+                                              "lands in the inbox"}), 409
+    try:
+        pid, _path = restart.spawn_helper(args)
+    except OSError as e:
+        return jsonify({"ok": False, "error": f"could not start the restart: {e}"}), 500
+    return jsonify({"ok": True, "started": True, "pid": pid,
+                    "detail": "Restarting; the result lands in the inbox"})
 
 
 @app.route("/api/agents/spawn", methods=["POST"])

@@ -12,7 +12,7 @@ import { icons } from '../../../shared/icons/index.ts';
 import { registerLane } from '../../../shared/scheduler/index.ts';
 import { createStore, useStore } from '../../../shared/store/index.ts';
 import { Button, IconButton } from '../../../shared/ui/index.ts';
-import { followUpdate, staleOffer, type FollowDeps, type StaleOffer, type UpdateStatus } from '../flow.ts';
+import { claudeOffer, followUpdate, postRestart, restartNote, staleOffer, type ClaudeOffer, type ClaudeVersion, type FollowDeps, type StaleOffer, type UpdateStatus } from '../flow.ts';
 
 type Progress = { text: string; cls: '' | 'ok' | 'err'; done?: boolean };
 type State = {
@@ -23,11 +23,15 @@ type State = {
   stale: StaleOffer | null;
   /** The stale set (names) the banner was closed for. */
   dismissedStale: string;
+  /** CMX-467: sessions on an older Claude Code than the installed one. */
+  claude: ClaudeOffer | null;
+  /** The offer key (installed version + wids) the banner was closed for. */
+  dismissedClaude: string;
   /** While a restart is followed, then its outcome. */
   progress: Progress | null;
 };
 
-export const banner = createStore<State>({ reload: '', dismissed: '', stale: null, dismissedStale: '', progress: null });
+export const banner = createStore<State>({ reload: '', dismissed: '', stale: null, dismissedStale: '', claude: null, dismissedClaude: '', progress: null });
 const patch = (p: Partial<State>) => banner.set({ ...banner.get(), ...p });
 
 /** Offer a reload only when BOTH versions are known and they differ. An unknown side never
@@ -42,11 +46,15 @@ export function view(s: State) {
   const showReload = !!s.reload && s.reload !== s.dismissed;
   const busy = !!s.progress && !s.progress.done;
   const showStale = !!s.stale && s.stale.key !== s.dismissedStale && !busy;
+  const showClaude = !!s.claude && s.claude.key !== s.dismissedClaude && !busy;
   const parts: string[] = [];
   if (showReload) parts.push('chela was updated');
   if (s.progress) parts.push(s.progress.text);
-  else if (showStale && s.stale) parts.push(s.stale.text);
-  return { show: showReload || showStale || !!s.progress, showReload, showStale, text: parts.join(' · ') };
+  else {
+    if (showStale && s.stale) parts.push(s.stale.text);
+    if (showClaude && s.claude) parts.push(s.claude.text);
+  }
+  return { show: showReload || showStale || showClaude || !!s.progress, showReload, showStale, showClaude, text: parts.join(' · ') };
 }
 
 /** Set the reload half for this server version. Returns whether it is shown. */
@@ -63,7 +71,39 @@ export function applyStale(status: UpdateStatus | null): boolean {
 
 export function dismiss() {
   const s = banner.get();
-  patch({ dismissed: s.reload, dismissedStale: s.stale?.key ?? '', progress: s.progress?.done ? null : s.progress });
+  patch({ dismissed: s.reload, dismissedStale: s.stale?.key ?? '', dismissedClaude: s.claude?.key ?? '', progress: s.progress?.done ? null : s.progress });
+}
+
+/** CMX-467: the Claude Code half for an /api/sessions/claude-version payload; unknown offers nothing. */
+export function applyClaude(cv: ClaudeVersion | null): boolean {
+  patch({ claude: claudeOffer(cv) });
+  return view(banner.get()).showClaude;
+}
+
+export async function checkClaude(): Promise<boolean> {
+  let cv: ClaudeVersion | null = null;
+  try {
+    cv = (await api('/api/sessions/claude-version')) as ClaudeVersion | null;
+  } catch {
+    cv = null;
+  }
+  return applyClaude(cv);
+}
+
+/** CMX-467: "Restart onto the new Claude Code": the sessions the offer names, after a confirm.
+ * The restart runs detached on the server (minutes, the orchestrator last); its result lands in
+ * the inbox, so the banner says it started, or why not. */
+export async function restartClaude(confirm: (msg: string) => boolean = (m) => window.confirm(m)): Promise<Progress | null> {
+  const { claude: offer, progress } = banner.get();
+  if (!offer || (progress && !progress.done)) return null;
+  if (!confirm(`${offer.label}? ${offer.text}: each exits when idle and comes back with the same session, name, flags, Remote Control and topic. Busy ones are retried, the orchestrator goes last.`)) return null;
+  patch({ progress: { text: 'Starting…', cls: '' } });
+  // only the sessions on an older Claude Code: one already current is not restarted for nothing
+  const note = restartNote(await postRestart({ wids: offer.wids }));
+  const p: Progress = { text: note.text, cls: note.ok ? 'ok' : 'err', done: true };
+  // started: this offer is not made again while the restart runs (the next poll re-decides)
+  patch(note.ok ? { progress: p, claude: null, dismissedClaude: offer.key } : { progress: p });
+  return p;
 }
 
 /** Restart the stale services (the one existing route, /api/update/apply), after a confirm. */
@@ -106,6 +146,7 @@ export async function checkStale(): Promise<boolean> {
 /** Both reads, independent: a failed one must not hide what the other found. */
 export async function checkForUpdate(): Promise<boolean> {
   checkStale().catch(() => {});
+  checkClaude().catch(() => {});
   let v = '';
   try {
     v = ((await api('/api/version')) as { version?: string } | null)?.version || '';
@@ -127,6 +168,7 @@ export function UpdateBanner() {
       <div id="update-banner" className="update-banner" role="status">
         <span id="update-banner-msg" className={s.progress?.cls ? `s-savemsg ${s.progress.cls}` : ''}>{v.text}</span>
         {v.showStale && <Button variant="primary" id="update-banner-restart" onClick={() => void restartStale()}>{s.stale?.label}</Button>}
+        {v.showClaude && <Button variant="primary" id="update-banner-claude" onClick={() => void restartClaude()}>{s.claude?.label}</Button>}
         {v.showReload && <Button variant="primary" id="update-banner-reload" onClick={() => window.location.reload()}>Reload</Button>}
         <IconButton className="icon-btn" id="update-banner-close" label="Dismiss" onClick={dismiss}><icons.close size={14} aria-hidden /></IconButton>
       </div>

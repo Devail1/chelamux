@@ -40,6 +40,7 @@ export const sidebarActions: SidebarActions = {
   toggleDispatcherSessions: sb.toggleDispatcherSessions,
   suggestNames: openSuggestNames,
   retitle: sb.retitleWindow,
+  restartSession: (wid) => sb.restartSession(wid),
 };
 
 // The sidebar's stores repaint before a publish returns: its controller reads the rows back.
