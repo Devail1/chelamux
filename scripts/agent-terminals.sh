@@ -363,12 +363,29 @@ ANCHOR_WINDOW="shell-1"   # a session needs >=1 window; match the wall's shell-N
 # markers, proxies, PERF_*/H) and `set-environment -gu`s the same set once it exists, so
 # the list lives in one file. A missing TMUX_TMPDIR dir is refused BEFORE any tmux call:
 # even has-session would fall back to the default socket from there.
+# CHELA_TERM_HEAL=false: never CREATE the session, only wait for it (CMX-469). `chela
+# agent-terminals` always runs this way. That command is reachable from anything that calls
+# chela's CLI (a test, a mutated dispatch line in a judge sweep), and a heal from there
+# created a test's "can never exist" session on the operator's LIVE tmux server
+# (2026-11-22). Started directly (the PM2 ecosystem entry) the heal stays on, per the
+# crash-loop note above.
+heal_enabled() {
+    case "$(printf '%s' "${CHELA_TERM_HEAL:-true}" | tr '[:upper:]' '[:lower:]')" in
+        false|0|no|off) return 1 ;;
+    esac
+    return 0
+}
+
 ensure_session() {
     if tmux_tmpdir_missing; then
         echo "agent-terminals: REFUSING to heal: TMUX_TMPDIR=${TMUX_TMPDIR} does not exist, and tmux would silently fall back to the DEFAULT socket (the live server)" >&2
         return 1
     fi
     tmux has-session -t "${TMUX_SESSION}" 2>/dev/null && return 0
+    if ! heal_enabled; then
+        echo "agent-terminals: tmux session '${TMUX_SESSION}' does not exist; waiting for it (CHELA_TERM_HEAL=${CHELA_TERM_HEAL}); start it with: tmux new-session -d -s '${TMUX_SESSION}'" >&2
+        return 1
+    fi
     "${PYTHON}" -c 'import sys
 from chela import discovery
 sys.exit(0 if discovery.ensure_session(sys.argv[1]) else 1)' "${TMUX_SESSION}" </dev/null >/dev/null

@@ -43,6 +43,7 @@ chela agent-terminals > ~/chela-terminals.log 2>&1 &   # one localhost ttyd per 
 It needs [`ttyd`](https://github.com/tsl0922/ttyd) (`brew install ttyd` on macOS,
 `apt install ttyd` on Debian/Ubuntu) and bash; macOS's stock `/bin/bash` 3.2 is enough. The
 supervisor ships inside the package, so `uvx chelamux agent-terminals` works from PyPI too.
+It waits for the tmux session (`chela` by default) rather than creating it.
 
 For a first look without installing anything, `uvx chelamux dashboard` runs the wall from
 PyPI (every `chela …` command works as `uvx chelamux …`). Install as above once you want

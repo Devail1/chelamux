@@ -1752,7 +1752,7 @@ def cmd_agent_terminals(args) -> None:
 
     The supervisor is a bash script (bash 3.2 is enough, so macOS's /bin/bash runs it).
     It is exec'd, not run as a child, so a process manager's SIGTERM reaches it directly and
-    its cleanup trap reaps the ttyds. ``PYTHON`` is set to THIS interpreter: the script's
+    its cleanup trap reaps the ttyds. It waits for the tmux session rather than creating it. ``PYTHON`` is set to THIS interpreter: the script's
     ``python -c "from chela import discovery"`` needs the one chela is installed in, and a
     ``uv tool``/``uvx`` install has no ``.venv`` next to the script to fall back on.
     """
@@ -1773,6 +1773,10 @@ def cmd_agent_terminals(args) -> None:
     # follow that pane's session instead of $CHELA_TMUX_SESSION.
     env = {k: v for k, v in os.environ.items() if k not in ("TMUX", "TMUX_PANE")}
     env["PYTHON"] = sys.executable
+    # Never CREATE the tmux session from here, only wait for it: this command is one argv
+    # away from any code that runs chela's CLI, and its heal once created a test's
+    # never-exists session on the live server (see heal_enabled in the script).
+    env["CHELA_TERM_HEAL"] = "false"
     os.execve(bash, [bash, str(script)], env)
 
 

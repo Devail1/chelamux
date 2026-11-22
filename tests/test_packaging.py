@@ -273,6 +273,7 @@ def test_agent_terminals_execs_bash_on_the_script_with_this_python(execs, monkey
     monkeypatch.setenv("CHELA_TMUX_SESSION", "kept")
     monkeypatch.setenv("TMUX", "/tmp/tmux-1000/default,1,0")
     monkeypatch.setenv("TMUX_PANE", "%3")
+    monkeypatch.setenv("CHELA_TERM_HEAL", "true")        # nor does an exported heal
     with pytest.raises(_Exec):
         main.cmd_agent_terminals(argparse.Namespace())
     [(path, argv, env)] = calls
@@ -281,6 +282,7 @@ def test_agent_terminals_execs_bash_on_the_script_with_this_python(execs, monkey
     assert env["PYTHON"] == sys.executable
     assert env["CHELA_TMUX_SESSION"] == "kept"
     assert "TMUX" not in env and "TMUX_PANE" not in env
+    assert env["CHELA_TERM_HEAL"] == "false"
     assert capsys.readouterr().err == ""
 
 
@@ -333,3 +335,13 @@ def test_chela_agent_terminals_dispatches_to_the_command(monkeypatch):
     monkeypatch.setattr(sys, "argv", ["chela", "agent-terminals"])
     main.main()
     assert seen == ["agent-terminals"]
+
+
+def test_an_unpatched_agent_terminals_run_in_a_test_is_refused(monkeypatch):
+    """The 2026-11-22 incident shape: a test reaching `chela agent-terminals` for real. The
+    conftest fence refuses the exec, so the pytest worker never becomes the supervisor."""
+    from conftest import LiveExecEscape
+
+    monkeypatch.setattr(sys, "argv", ["chela", "agent-terminals"])
+    with pytest.raises(LiveExecEscape):
+        main.main()

@@ -122,16 +122,25 @@ def _layout(tmp: Path) -> dict:
         shutil.copy2(ROOT / rel, tmp / rel)
     bin_ = tmp / "bin"
     bin_.mkdir()
-    # tmux: the session always exists; every other call succeeds and does nothing.
-    _stub(bin_ / "tmux", "exit 0\n")
+    # tmux: logs every call; `has-session` succeeds only while the `session` file exists;
+    # every other call succeeds and does nothing.
+    (tmp / "session").write_text("")
+    _stub(bin_ / "tmux",
+          f'echo "$*" >> "{tmp}/tmux.log"\n'
+          f'[ "$1" = has-session ] && {{ [ -e "{tmp}/session" ]; exit $?; }}\n'
+          "exit 0\n")
     # ttyd: record its port and pid, then idle until killed.
     _stub(bin_ / "ttyd",
           'while [ $# -gt 0 ]; do [ "$1" = --port ] && port="$2"; shift; done\n'
           f'echo $$ > "{tmp}/pids/$port"\n'
           "exec sleep 1000\n")
     (tmp / "pids").mkdir()
-    # python: list_windows reads the windows file; nothing else is called.
-    _stub(bin_ / "py", f'cat "{tmp}/windows"\n')
+    # python: list_windows reads the windows file; an ensure_session heal is logged and
+    # "creates" the session.
+    _stub(bin_ / "py",
+          f'case "$2" in *ensure_session*) echo "ensure_session $3" >> "{tmp}/py.log"; '
+          f': > "{tmp}/session"; exit 0 ;; esac\n'
+          f'cat "{tmp}/windows"\n')
     chela_dir = tmp / "chela"
     chela_dir.mkdir()
     # The base port comes from chela.env, so chela-env.sh's loader runs under the shell too.
@@ -257,3 +266,50 @@ def test_an_exported_value_beats_chela_env(shell, tmp_path):
     finally:
         proc.send_signal(signal.SIGTERM)
         proc.communicate(timeout=30)
+
+
+@pytest.mark.parametrize("shell", list(_shells()))
+def test_with_heal_off_a_missing_session_is_waited_for_never_created(shell, tmp_path):
+    """CMX-469: `chela agent-terminals` runs the script with CHELA_TERM_HEAL=false. A missing
+    session is then never created (no ensure_session, no `tmux new-session`); the supervisor
+    waits, and serves the session once something else starts it."""
+    env = _layout(tmp_path)
+    env["CHELA_TERM_HEAL"] = "False"          # any case of a false word
+    (tmp_path / "session").unlink()
+    _windows(tmp_path, "@5")
+    proc = _start(shell, tmp_path, env)
+    try:
+        deadline = time.monotonic() + 30
+        log = tmp_path / "tmux.log"
+        while not (log.exists() and log.read_text().count("has-session") >= 3):
+            assert time.monotonic() < deadline, "the supervisor never polled for the session"
+            time.sleep(0.2)
+        assert not (tmp_path / "py.log").exists()
+        assert "new-session" not in log.read_text()
+        assert not (tmp_path / "chela" / "agent_terminals.json").exists()
+        (tmp_path / "session").write_text("")      # someone else starts it
+        _wait_map(tmp_path, {"@5": 6200})
+    finally:
+        proc.send_signal(signal.SIGTERM)
+        out, _ = proc.communicate(timeout=30)
+    assert "tmux session 'chela' does not exist; waiting for it" in out, out
+    assert "tmux new-session -d -s 'chela'" in out, out
+    assert not (tmp_path / "py.log").exists()
+
+
+@pytest.mark.parametrize("heal", [None, "true"])
+def test_with_heal_on_a_missing_session_is_created(heal, tmp_path):
+    """Started directly (the PM2 entry), the self-heal still creates the session."""
+    env = _layout(tmp_path)
+    if heal is not None:
+        env["CHELA_TERM_HEAL"] = heal
+    (tmp_path / "session").unlink()
+    _windows(tmp_path, "@6")
+    proc = _start("host", tmp_path, env)
+    try:
+        _wait_map(tmp_path, {"@6": 6200})
+    finally:
+        proc.send_signal(signal.SIGTERM)
+        out, _ = proc.communicate(timeout=30)
+    assert (tmp_path / "py.log").read_text() == "ensure_session chela\n"
+    assert "tmux session 'chela' was missing" in out, out

@@ -24,7 +24,9 @@ Installed from PyPI (`uv tool install "chelamux[dashboard]"`), with no checkout 
 ecosystem file's `CHELA_REPO` to point at? The wall's supervisor ships in the package: run
 `chela agent-terminals` (under pm2: `pm2 start "$(command -v chela)" --name
 chela-agent-terminals --interpreter none -- agent-terminals`). It needs `ttyd` on PATH
-(`brew install ttyd` on macOS) and runs on macOS's stock `/bin/bash` 3.2.
+(`brew install ttyd` on macOS) and runs on macOS's stock `/bin/bash` 3.2. It never creates
+the tmux session, only waits for it: after a reboot the wall fills in once a session exists
+(starting one from the dashboard creates it).
 
 **Do not start** `chela-telegram` or `chela-collab`: delete those two lines from your copy of
 the ecosystem file, so a cold `pm2 start` cannot bring them back. In `chela.env` and
