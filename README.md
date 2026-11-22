@@ -151,6 +151,11 @@ To dispatch work, follow [**docs/GETTING_STARTED.md**](docs/GETTING_STARTED.md) 
 [`skills/chela-setup`](skills/chela-setup/SKILL.md) into `~/.claude/skills/`. Hacking on chela
 itself? Clone it and `uv sync --all-extras` ([CONTRIBUTING.md](CONTRIBUTING.md)).
 
+**Remote access.** The dashboard binds to `127.0.0.1` and has no login of its own. To reach
+it from a phone or another machine, put it on a Tailscale tailnet with Caddy
+(caddy-tailscale) or `tailscale serve`: see
+[docs/ORG_SETUP.md §2](docs/ORG_SETUP.md#2-remote-access-over-tailscale).
+
 ## Keeper mode
 
 A repo you work in by hand can still keep its board honest. Add `keeper: {enabled: true,
