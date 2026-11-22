@@ -4073,8 +4073,9 @@ def _update_status_payload() -> dict:
         status = update.commits_behind(fetch=False)
     except update.NotAGitCheckout:
         # CMX-471: a uv tool / uvx / pip install — the installed version against PyPI's
-        # latest (cached for an hour, shared with the daemon), plus the command that
-        # upgrades this kind of install. There is no pull and no "Update & restart".
+        # latest as the daemon's hourly check last cached it (never a network call from
+        # a poll), plus the command that upgrades this kind of install. There is no pull
+        # and no "Update & restart".
         return install.package_status().as_dict()
     if not status.ok:
         return {"ok": False, "install": install.GIT, "error": status.error}

@@ -778,7 +778,7 @@ def check_package_and_notify(previously_behind: int) -> int:
     Pushes a notification on the transition into "behind" only, like the git path. Returns
     1 (behind) / 0 (up to date), or ``previously_behind`` when PyPI could not be read.
     """
-    st = install.package_status()
+    st = install.package_status(fetch=True)
     log.info("update check: %s", install.describe(st))
     if not st.ok:
         return previously_behind  # can't tell right now; don't flap the edge on a blip
@@ -797,9 +797,12 @@ def daemon_tick(previously_behind: int) -> int:
     there gets the informing check, never ``apply()`` (whose ``repo_root()`` raised
     ``NotAGitCheckout`` and logged a traceback every hour).
     """
-    if auto_apply_enabled() and install.kind() == install.GIT:
-        auto_apply_sweep()
-        return previously_behind
+    if auto_apply_enabled():
+        if install.kind() == install.GIT:
+            auto_apply_sweep()
+            return previously_behind
+        log.info("auto-update (CHELA_AUTO_UPDATE) cannot upgrade a %s install; checking "
+                 "PyPI only", install.kind())
     return check_and_notify(previously_behind)
 
 

@@ -10,9 +10,12 @@ needs instead:
   (an ephemeral ``uvx chelamux`` environment) or ``pip`` (anything else: pip into a venv).
   Detected once per process.
 * :func:`package_status` — the installed version against PyPI's latest. The PyPI answer is
-  cached in a small file under ``CHELA_DIR`` for :data:`CACHE_TTL_SECONDS`, so the daemon,
-  the dashboard's status poll and ``chela doctor`` share one network call an hour, and an
-  offline host costs one short timeout per :data:`FAILED_TTL_SECONDS`, not one per poll.
+  cached in a small file under ``CHELA_DIR``. Only the daemon's hourly check and a human's
+  ``chela update`` ever ask PyPI (``fetch=True``, refreshing a cache older than
+  :data:`CACHE_TTL_SECONDS`, or :data:`FAILED_TTL_SECONDS` after a failure). The dashboard's
+  polls, the capability row and ``chela doctor`` read the cache only (``fetch=False``) — a
+  request path never waits on the network, the same trade ``commits_behind(fetch=False)``
+  makes for a checkout.
 
 Each kind has its own upgrade path (:func:`advice`); none of them is "Update & restart",
 because chela cannot upgrade a package it is running from.
@@ -21,10 +24,12 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import re
 import subprocess
 import sys
 import time
+import tomllib
 import urllib.request
 from dataclasses import dataclass
 from functools import lru_cache
@@ -71,13 +76,27 @@ def _uv_tool_lists_chela(run=subprocess.run) -> bool:
     return any(_UV_TOOL_LINE.match(line) for line in cp.stdout.splitlines())
 
 
+def _receipt_names_chela(env: Path) -> bool:
+    """Is ``env`` a ``uv tool`` environment for chelamux? uv writes ``uv-receipt.toml`` into
+    each tool's venv, naming the requirement it was installed for."""
+    try:
+        receipt = tomllib.loads((env / "uv-receipt.toml").read_text())
+    except (OSError, ValueError):
+        return False
+    reqs = (receipt.get("tool") or {}).get("requirements") or []
+    return any(isinstance(r, dict) and r.get("name") == PACKAGE for r in reqs)
+
+
 def detect(package_root: Path | None = None, prefix: str | None = None,
            run=subprocess.run) -> str:
     """The install kind, from scratch. Every input is injectable for the tests.
 
-    Order matters: a checkout is a checkout however its venv was made; a uvx environment
-    is ephemeral even on a host that ALSO has a ``uv tool`` install of chelamux (so the
-    prefix is read before ``uv tool list``); anything left is a pip-style venv install.
+    Classifies the RUNNING interpreter, never just the host: a pip venv on a host that ALSO
+    has a ``uv tool install chelamux`` is ``pip``, since ``uv tool upgrade`` would upgrade a
+    different copy. Order matters: a checkout is a checkout however its venv was made; a uvx
+    environment is ephemeral; a ``uv tool`` environment is known from its receipt, or — for
+    a uv that writes none — from a venv named ``chelamux`` that ``uv tool list`` shows;
+    anything left is a pip-style venv install.
     """
     root = package_root if package_root is not None else _package_root()
     if (root / ".git").exists():
@@ -85,7 +104,9 @@ def detect(package_root: Path | None = None, prefix: str | None = None,
     env = Path(prefix if prefix is not None else sys.prefix)
     if any(_UVX_DIR.match(part) for part in env.parts):
         return UVX
-    if _uv_tool_lists_chela(run):
+    if _receipt_names_chela(env):
+        return UV_TOOL
+    if env.name == PACKAGE and _uv_tool_lists_chela(run):
         return UV_TOOL
     return PIP
 
@@ -145,10 +166,14 @@ def _fetch_latest() -> str:
     return latest.strip()
 
 
-def latest_version(*, now: float | None = None) -> tuple[str, str]:
-    """``(latest, error)`` — exactly one is non-empty. Read from the cache file while it is
-    fresh; otherwise asks PyPI and caches the answer, a failure included (for a shorter
-    :data:`FAILED_TTL_SECONDS`), so an offline host does not pay a timeout on every poll.
+def latest_version(*, fetch: bool = False, now: float | None = None) -> tuple[str, str]:
+    """``(latest, error)`` — exactly one is non-empty.
+
+    ``fetch=False`` (every request path: dashboard, capability row, doctor) reads the cache
+    file only, at any age, and never touches the network; no cache yet is an error, never a
+    version. ``fetch=True`` (the daemon's hourly check, ``chela update``) uses the cache while
+    it is fresh, otherwise asks PyPI and caches the answer, a failure included (for the
+    shorter :data:`FAILED_TTL_SECONDS`), so an offline host does not retry every tick.
     """
     now = time.time() if now is None else now
     path = _cache_path()
@@ -156,17 +181,21 @@ def latest_version(*, now: float | None = None) -> tuple[str, str]:
         cached = json.loads(path.read_text())
         age = now - float(cached["checked_at"])
         ttl = CACHE_TTL_SECONDS if cached.get("latest") else FAILED_TTL_SECONDS
-        if 0 <= age < ttl:
+        if not fetch or 0 <= age < ttl:
             return cached.get("latest") or "", cached.get("error") or ""
-    except (OSError, ValueError, KeyError, TypeError):
-        pass  # no cache, or an unreadable one: ask PyPI
+    except (OSError, ValueError, KeyError, TypeError, AttributeError):
+        if not fetch:
+            return "", "PyPI not checked yet (the daemon checks hourly; `chela update --check` checks now)"
     try:
         latest, error = _fetch_latest(), ""
     except Exception as e:  # noqa: BLE001 — any failure is "couldn't tell", never a crash
         latest, error = "", f"could not read PyPI: {e}"
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps({"checked_at": now, "latest": latest, "error": error}))
+        # atomic: the dashboard and doctor read this while the daemon writes it
+        tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+        tmp.write_text(json.dumps({"checked_at": now, "latest": latest, "error": error}))
+        os.replace(tmp, path)
     except OSError as e:
         log.info("install: could not cache PyPI's answer: %s", e)
     return latest, error
@@ -193,11 +222,12 @@ class PackageStatus:
                 **({"error": self.error} if self.error else {})}
 
 
-def package_status(install: str | None = None, *, installed: str = __version__,
-                   now: float | None = None) -> PackageStatus:
-    """The installed version against PyPI's latest (cached, see :func:`latest_version`)."""
+def package_status(install: str | None = None, *, fetch: bool = False,
+                   installed: str = __version__, now: float | None = None) -> PackageStatus:
+    """The installed version against PyPI's latest — see :func:`latest_version` for
+    ``fetch`` (default: the cache only, never the network)."""
     install = install or kind()
-    latest, error = latest_version(now=now)
+    latest, error = latest_version(fetch=fetch, now=now)
     if not latest:
         return PackageStatus(install, installed, error=error or "PyPI's latest is unknown")
     behind = is_newer(latest, installed)

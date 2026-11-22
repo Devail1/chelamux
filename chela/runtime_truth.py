@@ -3102,9 +3102,10 @@ def _services_current_report(_declared: None, obs: Observation) -> list[Finding]
 # ``repo.upstream_synced`` is a fact of a git checkout only. A ``uv tool`` / ``uvx`` / pip
 # install has no upstream to compare against — its "behind" is the installed version
 # against PyPI's latest. This fact names the install kind and says whether a newer
-# release exists, with the command that upgrades THIS kind of install. Read through
-# ``chela.install``'s hourly cache, so doctor asks PyPI at most once an hour; an
-# unreachable PyPI is a normal state of an offline machine, so it is a WARN, not an ERROR.
+# release exists, with the command that upgrades THIS kind of install. Read from
+# ``chela.install``'s cache only (the daemon's hourly check refreshes it), so doctor never
+# waits on the network; an unreachable PyPI or a not-yet-checked cache is a normal state
+# of a machine, so it is a WARN, not an ERROR.
 
 def _package_current_applies() -> bool:
     return not _upstream_synced_applies()

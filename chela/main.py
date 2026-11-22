@@ -3751,7 +3751,7 @@ def cmd_update(args) -> None:
         repo = update.repo_root()
     except update.NotAGitCheckout:
         # CMX-471: a uv tool / uvx / pip install upgrades through its own installer.
-        st = install.package_status()
+        st = install.package_status(fetch=True)
         print(f"update: {install.describe(st)}")
         if getattr(args, "check", False) and st.ok:
             return

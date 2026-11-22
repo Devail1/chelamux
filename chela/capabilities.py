@@ -80,7 +80,8 @@ def _update_available_capability() -> Capability:
     try:
         status = update.commits_behind(fetch=False)
     except update.NotAGitCheckout:
-        # CMX-471: a package install — the installed version against PyPI's (cached) latest.
+        # CMX-471: a package install — the installed version against PyPI's latest, from
+        # the cache only (``fetch=False`` default): never a network call, like the git arm.
         st = install.package_status()
         return Capability(
             key="update_available", label="Update available", on=bool(st.behind),
