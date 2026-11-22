@@ -65,9 +65,10 @@ test('§3 row 6, parent → iframe contentDocument: the focus ring and the pane 
   expect(must(f.parentElement?.closest('[data-pane]')).classList.contains('term-focused')).toBe(true);
   const added: string[] = [];
   const orig = doc.addEventListener.bind(doc);
-  doc.addEventListener = ((type: string, fn: EventListener, opts?: boolean) => { added.push(`${type}:${String(opts)}`); orig(type, fn, opts); }) as typeof doc.addEventListener;
+  doc.addEventListener = ((type: string, fn: EventListener, opts?: boolean | AddEventListenerOptions) => { added.push(`${type}:${typeof opts === 'object' ? JSON.stringify(opts) : String(opts)}`); orig(type, fn, opts); }) as typeof doc.addEventListener;
   f.dispatchEvent(new Event('load'));
-  expect(added).toEqual(['keydown:true', 'keyup:true']); // capture phase, before xterm
+  const input = '{"capture":true,"passive":true}'; // CMX-476: input reporting, passive so it never delays xterm
+  expect(added).toEqual(['keydown:true', 'keyup:true', `keydown:${input}`, `pointerdown:${input}`, `touchstart:${input}`, `wheel:${input}`]); // capture phase, before xterm
 });
 
 test('§3 row 7, parent → iframe contentWindow.location.reload(): the share feature reloads the frames framesOf finds', () => {

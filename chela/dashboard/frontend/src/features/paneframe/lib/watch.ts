@@ -2,6 +2,9 @@
 // one size, and `window-size largest` lets a ghost wall in a background tab pin it to its size.
 // 1. Ignore-size (CMX-175), instant: POST /api/term/<wid>/watch {cid, watching} when a frame
 //    stops or starts being watched (tab hidden/shown, pane docked/restored).
+// 1b. The device in use (CMX-476): POST /api/term/<wid>/input {cid} on user input in a frame (a
+//    key, a tap or click, a scroll; focusing the pane from the page). The server makes the
+//    watched client with the latest input the only one `largest` sees. A resize is NEVER input.
 // 2. Teardown: hidden past the grace, blank the frames a second viewer shares (a lone client
 //    always fits), src kept in `data-suspended-src` (term-reconnect.js reads it, plan §3).
 import { api } from '../../../shared/api/index.ts';
@@ -40,6 +43,42 @@ export function reportWatch(ifr: HTMLIFrameElement): void {
   if (!wid || !cid) return;
   const body = JSON.stringify({ cid, watching: isWatched(wid) });
   api(`/api/term/${encodeURIComponent(wid)}/watch`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body }).catch(() => {});
+}
+
+/** At most one input report per connection per this long; the first is sent at once. */
+export const INPUT_REPORT_MS = 2000;
+const lastInput = new Map<string, number>();
+
+/** Report user input on one frame's connection (CMX-476). Leading-edge throttled per cid. */
+export function reportInput(ifr: HTMLIFrameElement): void {
+  const src = ifr.getAttribute('src') || '';
+  const wid = widOfSrc(src), cid = cidOfSrc(src);
+  if (!wid || !cid) return;
+  const now = Date.now(), last = lastInput.get(cid);
+  if (last !== undefined && now - last < INPUT_REPORT_MS) return;
+  lastInput.set(cid, now);
+  const body = JSON.stringify({ cid });
+  // Not tracked yet (the ws still connecting) or not delivered: the next input reports at once.
+  const retry = () => { if (lastInput.get(cid) === now) lastInput.delete(cid); };
+  api(`/api/term/${encodeURIComponent(wid)}/input`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body })
+    .then((r) => { if (!(r as { tracked?: boolean } | null)?.tracked) retry(); }, retry);
+}
+
+/** The events that are user input inside a pane. No `resize`, and no bare focus: ttyd focuses
+ * its terminal on load, which is not someone using the device (focusFrame reports a deliberate
+ * focus from the page). */
+export const INPUT_EVENTS = ['keydown', 'pointerdown', 'touchstart', 'wheel'] as const;
+
+/** Report input from a frame's own document, on every load (each navigation is a new Document). */
+export function wireInputReport(ifr: HTMLIFrameElement): void {
+  let doc: Document | null = null;
+  try {
+    doc = ifr.contentDocument;
+  } catch {
+    return; // a cross-document access the browser refuses
+  }
+  if (!doc) return;
+  for (const ev of INPUT_EVENTS) doc.addEventListener(ev, () => reportInput(ifr), { capture: true, passive: true });
 }
 
 async function teardown(): Promise<void> {

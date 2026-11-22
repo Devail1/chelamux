@@ -1496,6 +1496,20 @@ COLLAB_RELAY = os.environ.get("CHELA_COLLAB_RELAY", "").strip().rstrip("/")
 TERM_COLS = int(os.environ.get("CHELA_TERM_COLS", "120"))
 TERM_ROWS = int(os.environ.get("CHELA_TERM_ROWS", "30"))
 
+# CMX-476: "the device you're using wins". A terminal client counts as the ACTIVE one for its
+# window for this many minutes after its last user input (keypress, tap, scroll, focus); while
+# one is active every other client of that window gets tmux's per-client `ignore-size`. With no
+# input for this long the window falls back to `largest` among the visible clients (CMX-175).
+def _positive_float(raw: str, default: float) -> float:
+    try:
+        v = float(raw)
+    except (TypeError, ValueError):
+        return default
+    return v if v > 0 else default
+
+
+TERM_ACTIVE_INPUT_MINUTES = _positive_float(os.environ.get("CHELA_TERM_ACTIVE_INPUT_MINUTES", "10"), 10.0)
+
 
 _SIZE_SUFFIXES = {"": 1, "K": 1024, "M": 1024**2, "G": 1024**3, "T": 1024**4}
 
