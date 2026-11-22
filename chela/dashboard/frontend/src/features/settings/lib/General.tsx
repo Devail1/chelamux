@@ -70,7 +70,7 @@ function UpdateLine({ upd }: { upd: UpdateInfo | null | undefined }) {
   const v = updateView(upd);
   const unknownNote = 'unknown' in v && Array.isArray(v.unknown) && v.unknown.length ? ` · freshness unknown for ${v.unknown.join(', ')}` : '';
   let detail: React.ReactNode;
-  if (v.kind === 'unknown') detail = v.detail;
+  if (v.kind === 'unknown' || v.kind === 'package') detail = v.detail;
   else if (v.kind === 'behind') detail = `branch ${v.branch}: ${v.behind} commit(s) unpulled; running services are still serving what they last loaded${unknownNote}`;
   else if (v.kind === 'stale') {
     const w = staleWords(v.stale.length);
@@ -85,7 +85,7 @@ function UpdateLine({ upd }: { upd: UpdateInfo | null | undefined }) {
   } else detail = `branch ${v.branch}: nothing to pull${unknownNote}`;
   return (
     <div className="s-status-row" id="update-status-row">
-      <Badge on={v.kind === 'ok'}>{v.badge}</Badge>
+      <Badge on={v.kind === 'ok' || (v.kind === 'package' && !v.behind)}>{v.badge}</Badge>
       <span className="s-status-detail" id="update-status-detail">{detail}</span>
     </div>
   );
@@ -141,9 +141,14 @@ function UpdateCard({ data, reload }: { data: SettingsPayload | 'failed' | null;
           <span className="s-status-detail" id="update-status-detail"></span>
         </div>
       ) : <UpdateLine upd={upd} />}
-      <p className="s-desc">Pulls this checkout, re-syncs deps, and restarts every running <code>chela-*</code> PM2 service
-        (including this dashboard), the same as running <code>chela update</code> from the CLI. A dirty working tree or a
-        branch diverged from its upstream refuses rather than clobbering anything.</p>
+      {v.kind === 'package' ? (
+        <p className="s-desc" id="update-package-desc">This install came from PyPI, not a git checkout, so there is nothing to pull here.
+          {v.command ? <> Upgrade with <code className="s-cmd" id="update-package-cmd">{v.command}</code>, then restart the <code>chela-*</code> services.</> : null}</p>
+      ) : (
+        <p className="s-desc">Pulls this checkout, re-syncs deps, and restarts every running <code>chela-*</code> PM2 service
+          (including this dashboard), the same as running <code>chela update</code> from the CLI. A dirty working tree or a
+          branch diverged from its upstream refuses rather than clobbering anything.</p>
+      )}
       {(v.button || busy) && (
         <div className="s-row">
           <Button variant="primary" id="update-apply-btn" disabled={!!busy} onClick={() => void apply()}>{busy ?? v.button?.label}</Button>

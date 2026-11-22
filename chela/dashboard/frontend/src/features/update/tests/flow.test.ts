@@ -2,7 +2,7 @@
 // tests/settings_update.test.mjs's state-machine half and update_banner_stale's staleOffer
 // cases by CMX-219). A click always ends in an outcome; unknown is never success.
 import { afterEach, expect, test, vi } from 'vitest';
-import { FOLLOW_TIMEOUT_MS, POLL_MS, followUpdate, staleOffer, updateOutcome, type UpdateStatus } from '../flow.ts';
+import { FOLLOW_TIMEOUT_MS, POLL_MS, followUpdate, packageOffer, staleOffer, updateOutcome, type UpdateStatus } from '../flow.ts';
 
 const BOOT = 'boot-1';
 const status = (extra: UpdateStatus = {}): UpdateStatus => ({ ok: true, behind: 0, stale_ok: true, stale_services: [], boot: BOOT, applying: false, last_result: null, ...extra });
@@ -103,4 +103,18 @@ test('staleOffer: an affirmative, readable stale list offers; anything unknown o
     { ...STALE, stale_ok: undefined }, { ...STALE, stale_services: undefined }, { ...STALE, stale_services: 'chela-x' }]) {
     expect(staleOffer(st), JSON.stringify(st)).toBeNull();
   }
+});
+
+// CMX-471: a package install's banner offer.
+test('packageOffer: only an affirmative behind:true on a non-git install with a named latest', () => {
+  const pkg: UpdateStatus = { ok: true, install: 'pip', latest: '0.20.0', behind: true, command: 'pip install --upgrade chelamux', advice: 'run it' };
+  expect(packageOffer(pkg)).toEqual({ key: 'pip:0.20.0', text: 'chelamux 0.20.0 is out: run it', command: 'pip install --upgrade chelamux' });
+  expect(packageOffer({ ...pkg, advice: undefined, command: undefined })).toEqual({ key: 'pip:0.20.0', text: 'chelamux 0.20.0 is out: upgrade, then restart the services', command: '' });
+  for (const bad of [null, undefined, { ...pkg, ok: false }, { ...pkg, behind: false }, { ...pkg, behind: null }, { ...pkg, behind: 1 }, { ...pkg, latest: '' }, { ...pkg, install: 'git' }, { ...pkg, install: '' }]) {
+    expect(packageOffer(bad as UpdateStatus)).toBeNull();
+  }
+});
+
+test('staleOffer: a package install\'s boolean behind never labels Update & restart', () => {
+  expect(staleOffer({ ok: true, stale_ok: true, stale_services: ['a'], behind: true })?.label).toBe('Restart');
 });

@@ -14,7 +14,13 @@ export type UpdateStatus = {
   ok?: boolean;
   stale_ok?: boolean;
   stale_services?: unknown;
-  behind?: number;
+  /** git: commits behind. A package install (CMX-471): newer on PyPI, null = unknown. */
+  behind?: number | boolean | null;
+  /** CMX-471: 'git' | 'uv-tool' | 'uvx' | 'pip'. */
+  install?: string;
+  latest?: string | null;
+  command?: string;
+  advice?: string;
   boot?: string;
   applying?: boolean;
   last_result?: { run?: unknown; ok?: boolean; step?: string; error?: string; restarted?: string[]; behind_before?: number } | null;
@@ -37,7 +43,25 @@ export function staleOffer(st: UpdateStatus | null | undefined): StaleOffer | nu
     names,
     key: names.join(','),
     text: `${names.length} service${one ? '' : 's'} run${one ? 's' : ''} old code`,
-    label: (st.behind ?? 0) > 0 ? 'Update & restart' : 'Restart',
+    label: typeof st.behind === 'number' && st.behind > 0 ? 'Update & restart' : 'Restart',
+  };
+}
+
+export type PackageOffer = { key: string; text: string; command: string };
+
+/**
+ * CMX-471: what the banner says for a uv tool / uvx / pip install with a newer release on PyPI,
+ * or null. It is text, never "Update & restart": chela cannot upgrade the package it runs from,
+ * so it names the command that does (uvx has none: it runs the latest on its next start). Only
+ * an affirmative `behind: true` with a named `latest` offers; unknown offers nothing.
+ */
+export function packageOffer(st: UpdateStatus | null | undefined): PackageOffer | null {
+  if (!st || st.ok !== true || !st.install || st.install === 'git') return null;
+  if (st.behind !== true || !st.latest) return null;
+  return {
+    key: `${st.install}:${st.latest}`,
+    text: `chelamux ${st.latest} is out: ${st.advice || 'upgrade, then restart the services'}`,
+    command: st.command || '',
   };
 }
 
