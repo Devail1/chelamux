@@ -34,6 +34,16 @@ block on a clean Ubuntu container (only the prerequisites above, a stub `claude`
 checks that the dashboard answers and `chela doctor` passes; a test keeps the two in sync.
 If your shell does not find `chela`, run `uv tool update-shell` and open a new shell.
 
+The wall's tiles show live terminals once the ttyd supervisor runs as well:
+
+```bash
+chela agent-terminals > ~/chela-terminals.log 2>&1 &   # one localhost ttyd per agent window
+```
+
+It needs [`ttyd`](https://github.com/tsl0922/ttyd) (`brew install ttyd` on macOS,
+`apt install ttyd` on Debian/Ubuntu) and bash; macOS's stock `/bin/bash` 3.2 is enough. The
+supervisor ships inside the package, so `uvx chelamux agent-terminals` works from PyPI too.
+
 For a first look without installing anything, `uvx chelamux dashboard` runs the wall from
 PyPI (every `chela …` command works as `uvx chelamux …`). Install as above once you want
 the daemon running.
