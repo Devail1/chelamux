@@ -18,7 +18,15 @@ Run these PM2 apps from [`examples/ecosystem.config.js`](../examples/ecosystem.c
 |---|---|
 | `chela-daemon` (`chela run`) | scheduler and notifier (the dispatcher stays off, see below) |
 | `chela-dashboard` (`chela dashboard`) | the web dashboard; binds `CHELA_DASHBOARD_PORT` (default 5001) on `127.0.0.1` |
-| `chela-agent-terminals` | the ttyd supervisor behind the terminal wall. The wall's tiles are empty without it. Leave it out (and set `CHELA_TERMINALS_ENABLED=false`) only if you do not want terminals in the browser at all |
+| `chela-agent-terminals` (`chela agent-terminals`) | the ttyd supervisor behind the terminal wall. The wall's tiles are empty without it. Leave it out (and set `CHELA_TERMINALS_ENABLED=false`) only if you do not want terminals in the browser at all |
+
+Installed from PyPI (`uv tool install "chelamux[dashboard]"`), with no checkout for the
+ecosystem file's `CHELA_REPO` to point at? The wall's supervisor ships in the package: run
+`chela agent-terminals` (under pm2: `pm2 start "$(command -v chela)" --name
+chela-agent-terminals --interpreter none -- agent-terminals`). It needs `ttyd` on PATH
+(`brew install ttyd` on macOS) and runs on macOS's stock `/bin/bash` 3.2. It never creates
+the tmux session, only waits for it: after a reboot the wall fills in once a session exists
+(starting one from the dashboard creates it).
 
 **Do not start** `chela-telegram` or `chela-collab`: delete those two lines from your copy of
 the ecosystem file, so a cold `pm2 start` cannot bring them back. In `chela.env` and
@@ -83,8 +91,10 @@ dashboard, `~/Library/LaunchAgents/org.chela.dashboard.plist`:
 
 launchd does not expand `~` or `$HOME`: replace `<checkout>` and `<home>` with absolute
 paths. Copy the file for the daemon (`run` instead of `dashboard`, label
-`org.chela.daemon`) and for the terminal wall (`<checkout>/scripts/agent-terminals.sh`, no
-argument). Then:
+`org.chela.daemon`) and for the terminal wall (`agent-terminals`, label
+`org.chela.agent-terminals`). Installed from PyPI, with no checkout? Give `ProgramArguments`
+the absolute path of `chela` (`command -v chela`) and the subcommand, with no `/bin/bash` in
+front. Then:
 
 ```bash
 launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/org.chela.dashboard.plist  # load and start
