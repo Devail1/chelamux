@@ -12,7 +12,7 @@ import { icons } from '../../../shared/icons/index.ts';
 import { registerLane } from '../../../shared/scheduler/index.ts';
 import { createStore, useStore } from '../../../shared/store/index.ts';
 import { Button, IconButton } from '../../../shared/ui/index.ts';
-import { claudeOffer, followUpdate, postRestart, restartNote, staleOffer, type ClaudeOffer, type ClaudeVersion, type FollowDeps, type StaleOffer, type UpdateStatus } from '../flow.ts';
+import { claudeOffer, followUpdate, packageOffer, postRestart, restartNote, staleOffer, type ClaudeOffer, type ClaudeVersion, type FollowDeps, type PackageOffer, type StaleOffer, type UpdateStatus } from '../flow.ts';
 
 type Progress = { text: string; cls: '' | 'ok' | 'err'; done?: boolean };
 type State = {
@@ -27,6 +27,10 @@ type State = {
   claude: ClaudeOffer | null;
   /** The offer key (installed version + wids) the banner was closed for. */
   dismissedClaude: string;
+  /** CMX-471: a newer chelamux on PyPI for a uv tool / uvx / pip install. Text, no button. */
+  pkg?: PackageOffer | null;
+  /** The package offer key (install kind + latest) the banner was closed for. */
+  dismissedPkg?: string;
   /** While a restart is followed, then its outcome. */
   progress: Progress | null;
 };
@@ -47,14 +51,16 @@ export function view(s: State) {
   const busy = !!s.progress && !s.progress.done;
   const showStale = !!s.stale && s.stale.key !== s.dismissedStale && !busy;
   const showClaude = !!s.claude && s.claude.key !== s.dismissedClaude && !busy;
+  const showPkg = !!s.pkg && s.pkg.key !== (s.dismissedPkg ?? '') && !busy;
   const parts: string[] = [];
   if (showReload) parts.push('chela was updated');
   if (s.progress) parts.push(s.progress.text);
   else {
     if (showStale && s.stale) parts.push(s.stale.text);
     if (showClaude && s.claude) parts.push(s.claude.text);
+    if (showPkg && s.pkg) parts.push(s.pkg.text);
   }
-  return { show: showReload || showStale || showClaude || !!s.progress, showReload, showStale, showClaude, text: parts.join(' · ') };
+  return { show: showReload || showStale || showClaude || showPkg || !!s.progress, showReload, showStale, showClaude, showPkg, text: parts.join(' · ') };
 }
 
 /** Set the reload half for this server version. Returns whether it is shown. */
@@ -63,15 +69,16 @@ export function applyVersion(serverVersion: string, pageVersion = ASSET_VERSION)
   return view(banner.get()).showReload;
 }
 
-/** The stale half for an /api/update/status payload; unknown offers nothing. */
+/** The stale half for an /api/update/status payload; unknown offers nothing. CMX-471: the same
+ * payload carries a package install's "newer on PyPI" (`pkg`), read here too. */
 export function applyStale(status: UpdateStatus | null): boolean {
-  patch({ stale: staleOffer(status) });
+  patch({ stale: staleOffer(status), pkg: packageOffer(status) });
   return view(banner.get()).showStale;
 }
 
 export function dismiss() {
   const s = banner.get();
-  patch({ dismissed: s.reload, dismissedStale: s.stale?.key ?? '', dismissedClaude: s.claude?.key ?? '', progress: s.progress?.done ? null : s.progress });
+  patch({ dismissed: s.reload, dismissedStale: s.stale?.key ?? '', dismissedClaude: s.claude?.key ?? '', dismissedPkg: s.pkg?.key ?? '', progress: s.progress?.done ? null : s.progress });
 }
 
 /** CMX-467: the Claude Code half for an /api/sessions/claude-version payload; unknown offers nothing. */

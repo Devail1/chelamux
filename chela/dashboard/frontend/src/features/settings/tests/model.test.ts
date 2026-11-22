@@ -57,6 +57,21 @@ test('updateView: behind, stale, unreadable, up to date, unknown, each with its 
   expect(updateView({ ok: true, behind: 0, stale_ok: true, unknown_services: ['x'] })).toMatchObject({ kind: 'ok', badge: 'Up to date', unknown: ['x'], button: null });
 });
 
+test('updateView: a package install (CMX-471) names its upgrade path and never offers a button', () => {
+  const pkg = { ok: true, install: 'uv-tool', version: '0.19.1', latest: '0.20.0', command: 'uv tool upgrade chelamux', advice: 'run `uv tool upgrade chelamux`, then restart the services' };
+  expect(updateView({ ...pkg, behind: true })).toEqual({
+    kind: 'package', badge: '0.20.0 available', behind: true, command: 'uv tool upgrade chelamux', button: null,
+    detail: 'uv-tool install, chelamux 0.19.1: run `uv tool upgrade chelamux`, then restart the services',
+  });
+  expect(updateView({ ...pkg, behind: false, latest: '0.19.1' })).toEqual({
+    kind: 'package', badge: 'Up to date', behind: false, command: '', button: null, detail: 'uv-tool install, chelamux 0.19.1: the latest on PyPI',
+  });
+  // unreadable PyPI is ok:false: Unknown, never "Up to date"
+  expect(updateView({ ...pkg, ok: false, behind: null, error: 'could not read PyPI: offline' })).toMatchObject({ kind: 'unknown', detail: 'could not read PyPI: offline' });
+  // a git checkout keeps its own views
+  expect(updateView({ ok: true, install: 'git', behind: 2, branch: 'dev' })).toMatchObject({ kind: 'behind', button: { mode: 'update' } });
+});
+
 const knobs: Knob[] = [
   { key: 'n', label: 'N', kind: 'number', default: 3, stored: 5, effective: 5, source: 'dashboard' },
   { key: 't', label: 'T', kind: 'text', default: 'dev', stored: '', effective: 'dev', source: 'default' },

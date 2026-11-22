@@ -42,6 +42,7 @@ from chela import (
     hold,
     hooks,
     inbox,
+    install,
     judge,
     judge_timing,
     keeper,
@@ -511,10 +512,7 @@ def cmd_run(args) -> None:
             # and restarts on this same hourly tick, unattended.
             if now - last_update_check >= UPDATE_CHECK_INTERVAL_SECONDS:
                 try:
-                    if update.auto_apply_enabled():
-                        update.auto_apply_sweep()
-                    else:
-                        update_behind_seen = update.check_and_notify(update_behind_seen)
+                    update_behind_seen = update.daemon_tick(update_behind_seen)
                 except Exception:
                     log.exception("Update-availability check failed")
                 last_update_check = now
@@ -3751,9 +3749,15 @@ def cmd_update(args) -> None:
     """
     try:
         repo = update.repo_root()
-    except update.NotAGitCheckout as e:
-        print(f"update: {e}")
-        sys.exit(1)
+    except update.NotAGitCheckout:
+        # CMX-471: a uv tool / uvx / pip install upgrades through its own installer.
+        st = install.package_status()
+        print(f"update: {install.describe(st)}")
+        if getattr(args, "check", False) and st.ok:
+            return
+        if not st.ok or st.behind:
+            sys.exit(1)
+        return
 
     if getattr(args, "check", False):
         status = update.commits_behind(repo)

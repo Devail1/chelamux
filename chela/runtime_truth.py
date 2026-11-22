@@ -3097,6 +3097,40 @@ def _services_current_report(_declared: None, obs: Observation) -> list[Finding]
     )]
 
 
+# --- fact: a package install against PyPI (CMX-471) ---------------------------------
+#
+# ``repo.upstream_synced`` is a fact of a git checkout only. A ``uv tool`` / ``uvx`` / pip
+# install has no upstream to compare against — its "behind" is the installed version
+# against PyPI's latest. This fact names the install kind and says whether a newer
+# release exists, with the command that upgrades THIS kind of install. Read through
+# ``chela.install``'s hourly cache, so doctor asks PyPI at most once an hour; an
+# unreachable PyPI is a normal state of an offline machine, so it is a WARN, not an ERROR.
+
+def _package_current_applies() -> bool:
+    return not _upstream_synced_applies()
+
+
+def _package_current_read() -> Observation:
+    from chela import install                       # lazy: doctor must import cheaply
+
+    st = install.package_status()
+    if not st.ok:
+        return cannot_verify(install.describe(st))
+    return observed(st)
+
+
+def _package_current_report(_declared: None, obs: Observation) -> list[Finding]:
+    from chela import install                       # lazy: doctor must import cheaply
+
+    st = obs.value
+    if st.behind:
+        return [Finding(WARN, install.describe(st),
+                        "A newer chelamux release is on PyPI. This install is not a git "
+                        "checkout, so `chela update` cannot pull it — upgrade with the "
+                        "command above, then restart the chela-* services.")]
+    return [Finding(OK, install.describe(st))]
+
+
 # --- fact: rows a hard tmux death orphaned, that nothing else surfaces --------------
 
 def _restore_scan(now: str) -> int:
@@ -3861,6 +3895,18 @@ def facts() -> list[Fact]:
             read_back=_services_current_read,
             report=_services_current_report,
             applies=_upstream_synced_applies,     # same "is this a git checkout" gate
+        ),
+        Fact(
+            name="install.package_current",
+            declared_by="nothing — chela never records this; the installed version either "
+                        "matches PyPI's latest release or it doesn't",
+            owned_by="PyPI (pypi.org/pypi/chelamux/json, cached an hour in CHELA_DIR) "
+                     "against this process's installed package metadata",
+            declare=lambda: None,
+            read_back=_package_current_read,
+            report=_package_current_report,
+            unverifiable_level=WARN,      # offline is a normal state, not a broken fleet
+            applies=_package_current_applies,
         ),
         Fact(
             name="restore.dead_epoch_rows",

@@ -63,7 +63,7 @@ import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from chela import config, hooks, notify, service_code, ticklock
+from chela import config, hooks, install, notify, service_code, ticklock
 from chela.dispatcher import (
     GIT_NET_TIMEOUT_SECONDS,
     GIT_TIMEOUT_SECONDS,
@@ -748,7 +748,12 @@ def check_and_notify(previously_behind: int) -> int:
     with a genuine 0.
 
     ⛔ NEVER calls :func:`apply` / ``git pull`` — informing is this function's entire job.
+
+    CMX-471: a non-git install (``uv tool``, ``uvx``, pip) has no checkout to fetch — see
+    :func:`check_package_and_notify`.
     """
+    if install.kind() != install.GIT:
+        return check_package_and_notify(previously_behind)
     status = commits_behind(fetch=True)
     if not status.ok:
         return previously_behind  # can't tell right now; don't flap the edge on a blip
@@ -764,6 +769,38 @@ def check_and_notify(previously_behind: int) -> int:
             notify.send(f"{status.behind} commit(s) behind — run `chela update`",
                          title="chela: update available")
     return status.behind
+
+
+def check_package_and_notify(previously_behind: int) -> int:
+    """CMX-471: :func:`check_and_notify` for a non-git install. Compares the installed
+    version with PyPI's latest and logs ONE INFO line per check — never a traceback, which
+    is what ``commits_behind`` raising ``NotAGitCheckout`` used to log here every hour.
+    Pushes a notification on the transition into "behind" only, like the git path. Returns
+    1 (behind) / 0 (up to date), or ``previously_behind`` when PyPI could not be read.
+    """
+    st = install.package_status()
+    log.info("update check: %s", install.describe(st))
+    if not st.ok:
+        return previously_behind  # can't tell right now; don't flap the edge on a blip
+    if st.behind and previously_behind <= 0 and notify.enabled():
+        notify.send(f"{install.PACKAGE} {st.latest} is on PyPI (installed {st.version}) — "
+                    f"{install.advice(st.install)}", title="chela: update available")
+    return 1 if st.behind else 0
+
+
+def daemon_tick(previously_behind: int) -> int:
+    """The daemon's hourly update step: :func:`auto_apply_sweep` when ``CHELA_AUTO_UPDATE``
+    is on AND this is a git checkout, else :func:`check_and_notify`. Returns the next
+    ``previously_behind``.
+
+    CMX-471: a ``uv tool`` / ``uvx`` / pip install cannot be pulled, so ``CHELA_AUTO_UPDATE``
+    there gets the informing check, never ``apply()`` (whose ``repo_root()`` raised
+    ``NotAGitCheckout`` and logged a traceback every hour).
+    """
+    if auto_apply_enabled() and install.kind() == install.GIT:
+        auto_apply_sweep()
+        return previously_behind
+    return check_and_notify(previously_behind)
 
 
 def auto_apply_enabled() -> bool:

@@ -78,6 +78,25 @@ test('an unreadable checkout reports Unknown with its reason, and no button', as
   expect(btn()).toBeNull();
 });
 
+// CMX-471: a uv tool / uvx / pip install names its own upgrade path; nothing here pulls.
+const PKG = { ok: true, git: false, install: 'uv-tool', version: '0.19.1', latest: '0.20.0', command: 'uv tool upgrade chelamux', advice: 'run `uv tool upgrade chelamux`, then restart the services' };
+test('a package install behind PyPI shows the command, not a pull or a button', async () => {
+  await openWith({ ...PKG, behind: true });
+  expect(row()).toMatch(/0\.20\.0 available\s*uv-tool install, chelamux 0\.19\.1: run `uv tool upgrade chelamux`/);
+  expect(btn()).toBeNull();
+  expect(document.querySelector('#update-package-cmd')?.textContent).toBe('uv tool upgrade chelamux');
+  expect(document.querySelector('#update-package-desc')?.textContent).not.toMatch(/Pulls this checkout/);
+  expect(must(document.querySelector('#update-status-row .s-status-badge')).className).not.toMatch(/\bon\b/);
+});
+
+test('an up-to-date package install is Up to date, with no command', async () => {
+  await openWith({ ...PKG, behind: false, latest: '0.19.1' });
+  expect(row()).toMatch(/Up to date\s*uv-tool install, chelamux 0\.19\.1: the latest on PyPI/);
+  expect(document.querySelector('#update-package-cmd')).toBeNull();
+  expect(btn()).toBeNull();
+  expect(must(document.querySelector('#update-status-row .s-status-badge')).className).toMatch(/\bon\b/);
+});
+
 test('a failed /api/settings read renders Unknown (and the status list says so), not a stale state', async () => {
   routes['/api/settings'] = new Error('network down');
   await openOn();

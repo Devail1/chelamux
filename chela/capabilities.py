@@ -29,7 +29,7 @@ import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from chela import config, hold, inbox, memcap, notify, update
+from chela import config, hold, inbox, install, memcap, notify, update
 
 # The state file is written once at startup and deleted on a clean exit. A crash leaves
 # it behind; the pid check in live() is what makes a stale file harmless — same contract
@@ -79,10 +79,14 @@ def _update_available_capability() -> Capability:
     """
     try:
         status = update.commits_behind(fetch=False)
-    except update.NotAGitCheckout as e:
+    except update.NotAGitCheckout:
+        # CMX-471: a package install — the installed version against PyPI's (cached) latest.
+        st = install.package_status()
         return Capability(
-            key="update_available", label="Update available", on=False,
-            detail=f"not a git checkout — {e}", fix="pip install --upgrade chelamux",
+            key="update_available", label="Update available", on=bool(st.behind),
+            detail=install.describe(st),
+            fix=install.command(st.install) or install.advice(st.install),
+            extra={"install": st.install, "latest": st.latest or None, "behind": st.behind},
         )
     if not status.ok:
         return Capability(
