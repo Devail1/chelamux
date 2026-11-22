@@ -77,16 +77,16 @@ def _bound_before_restart(ledger):
 
 
 def test_a_restored_session_gets_its_old_topic_back_and_no_new_one(ledger):
-    """Acceptance: after a restart the session resumes at a NEW id (@0); its binding is
-    reaped (closed, never deleted, and the stranger now at @4 is never asked for a session),
-    and the restored window is bound to its OLD topic. No topic is created."""
+    """Acceptance: after a restart the session resumes at a NEW id (@0); the stranger now
+    at @4 loses the binding and is never asked for a session, and the restored window is
+    bound to its OLD topic. CMX-466: seen on one tick, the topic MOVES — never closed (nor
+    deleted), never reopened. No topic is created for it."""
     reg, wire = _bound_before_restart(ledger), _Wire()
     live = {"@0": "tapparty", "@4": "someone-else"}
     assert _tick(reg, ledger, wire, live, {"@0": "/p/elsewhere", "@4": "/p/x"},
                  {"@0": SID, "@4": OTHER}, now_epoch=NEW, delete_on_close=True) is True
-    assert reg.thread_for_window("@0") == "140624"
-    assert wire.calls[:2] == [("closeForumTopic", _thread("140624")),
-                              ("reopenForumTopic", _thread("140624"))]
+    assert reg.thread_for_window("@0") == "140624" and reg.epoch_for("@0") == NEW
+    assert not {"closeForumTopic", "reopenForumTopic", "deleteForumTopic"} & set(wire.methods())
     # Had the reap asked the stranger at @4, the topic would be filed under OTHER and
     # tapparty would have got a fresh one.
     assert ledger.get("140624")["session_id"] == SID

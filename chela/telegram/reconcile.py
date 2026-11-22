@@ -65,6 +65,11 @@ from chela.telegram.relay import Transport, _truncate_utf16, _urllib_transport
 
 log = logging.getLogger(__name__)
 
+# CMX-466: how long a gone window's topic waits for its session to come back in a new
+# window before it is closed. 11-22's relaunch took 38 s between the old window dying and
+# the new one running; a topic left open a minute and a half longer costs nothing.
+RELAUNCH_GRACE_SECONDS = 90.0
+
 
 def _is_not_modified(resp: dict) -> bool:
     """True for Telegram's ``TOPIC_NOT_MODIFIED`` — "you wrote what was already there".
@@ -344,6 +349,9 @@ def reconcile_bindings(
     delete_on_close: bool = False,
     session_for: Callable[[str], str | None] | None = None,
     force_rebinds=None,
+    relaunch_grace: dict[str, float] | None = None,
+    relaunch_grace_seconds: float = RELAUNCH_GRACE_SECONDS,
+    clock: Callable[[], float] = time.monotonic,
 ) -> bool:
     """Diff the registry against the live fleet; provision + reap. Return changed.
 
@@ -404,6 +412,15 @@ def reconcile_bindings(
       session id.
     * ``force_rebinds`` — window ids whose ``rebinds`` request moves them even when already
       bound elsewhere (``chela telegram rebind``, CMX-450): the current topic is closed.
+    * ``relaunch_grace`` — CMX-466: ``{window_id: when first seen gone}``, kept by the
+      caller across ticks. A window that is gone (or from a previous tmux epoch) whose
+      topic has a session recorded in the ledger is a RELAUNCH when that session is
+      running in an unbound agent window: the topic MOVES to that window, never closed and
+      reopened (no close-then-reopen flicker in Telegram, and no chance of a reopen
+      picking another topic of the session). That move needs no state when both are seen
+      on one tick. With this dict, a gone window (not one a stranger now wears) also keeps
+      its topic for ``relaunch_grace_seconds`` (by ``clock``) while its session comes back
+      in a new window; after that the topic is closed as before. ``None`` closes at once.
 
     **Provision** every agent window with no binding: create a topic named after
     the agent's project (:func:`topic_name_for`, falling back to the window name)
@@ -448,6 +465,8 @@ def reconcile_bindings(
     """
     changed = False
     dispatched = set(dispatched or ())
+    orphans: dict[str, tuple] = {}   # CMX-466: gone wid -> its topic, held for a relaunch
+    sid_cache: dict[str, str | None] = {}
 
     def _wants_topic(wid: str) -> bool:
         """A dispatched agent earns a topic only when it is BLOCKED on a human."""
@@ -475,6 +494,16 @@ def reconcile_bindings(
             _note_session(ledger, session_for, registry.thread_for_window(wid), wid)
             continue
         thread = registry.thread_for_window(wid)
+        if thread is not None and _recorded_session(ledger, session_for, thread):
+            # CMX-466: its session may be relaunching in another window; settled below,
+            # once the unbound windows' sessions are known. A stranger wearing the id
+            # (a dangling id, live) must not keep the topic meanwhile.
+            orphans[wid] = (thread, dangling, registry.topic_name(wid),
+                            registry.pinned_title(wid), registry.pinned_message_id(wid))
+            if wid in live_windows:
+                registry.unbind(wid)
+                changed = True
+            continue
         if thread is not None:
             # CMX-450: a dangling id now names a STRANGER, so asking it for a session id
             # would file the stranger's session on this topic; None keeps the one recorded
@@ -487,6 +516,18 @@ def reconcile_bindings(
         why = "the tmux server restarted; its id was reissued" if dangling else "gone"
         log.info("auto-topics: window %s %s — closed topic %s, unbound", wid, why, thread)
         changed = True
+
+    if orphans:
+        changed |= _settle_orphans(
+            orphans, registry, topic_api, ledger, session_for, live_windows, now_epoch,
+            [w for w in agent_ids if registry.thread_for_window(w) is None
+             and _wants_topic(w)],
+            cwd_for, sid_cache, delete_on_close, relaunch_grace, relaunch_grace_seconds,
+            clock)
+    if relaunch_grace is not None:
+        for wid in list(relaunch_grace):
+            if wid not in orphans:
+                relaunch_grace.pop(wid, None)   # bound to a live window again, or settled
 
     # Names first, for EVERY current agent window (bound or not) — so a collision
     # between two windows sharing a cwd + generic name (CMX-147) is visible before
@@ -508,6 +549,13 @@ def reconcile_bindings(
         current = registry.thread_for_window(wid)
         if current is not None and (wid not in (force_rebinds or ()) or current == str(thread)):
             continue                       # already bridged; nothing to restore
+        holder = registry.window_for_thread(thread)
+        if holder is not None and holder in orphans and holder not in live_windows:
+            # CMX-466: a gone window held for a relaunch; the resumed one takes it now.
+            registry.unbind(holder)
+            if relaunch_grace is not None:
+                relaunch_grace.pop(holder, None)
+            changed = True
         if registry.window_for_thread(thread) is not None:
             if current is not None:
                 log.warning("auto-topics: forced rebind of %s to %s dropped: another window "
@@ -542,6 +590,9 @@ def reconcile_bindings(
     sids: dict[str, str | None] = {}
     if ledger is not None and session_for is not None:
         for wid in needs:
+            if wid in sid_cache:
+                sids[wid] = sid_cache[wid]   # read once this tick, by the relaunch match
+                continue
             try:
                 sids[wid] = session_for(wid)
             except Exception:  # noqa: BLE001 — unknown is "no session match", never a crash
@@ -610,6 +661,77 @@ def reconcile_bindings(
         log.info("auto-topics: renamed topic %s for %s -> %s", thread, wid, desired)
         changed = True
 
+    return changed
+
+
+def _recorded_session(ledger, session_for, thread) -> str | None:
+    """The session the ledger recorded for ``thread`` — the authoritative record of what
+    ran there (CMX-466) — or None, also when there is no ledger or no session resolver
+    (nothing could ever match it)."""
+    if ledger is None or session_for is None or thread is None:
+        return None
+    return (ledger.get(thread) or {}).get("session_id") or None
+
+
+def _settle_orphans(orphans, registry, topic_api, ledger, session_for, live_windows,
+                    now_epoch, candidates, cwd_for, sid_cache, delete_on_close,
+                    grace, grace_seconds, clock) -> bool:
+    """Place the topic of each gone window whose session is recorded (CMX-466).
+
+    Its session running in an unbound agent window (``candidates``) is a relaunch: the
+    topic moves there as it is — no close, no reopen — with its name and pin carried over,
+    so the next sync edits that pin instead of posting another. Otherwise a gone window
+    no stranger wears keeps its topic while ``grace`` allows, and then, or at once, the
+    topic is closed (deleted when asked and not a restart) and unbound, as before."""
+    changed = False
+    by_sid: dict[str, str] = {}
+    for wid in candidates:
+        try:
+            sid_cache[wid] = session_for(wid)
+        except Exception:  # noqa: BLE001 — unknown is "no relaunch match", never a crash
+            log.debug("auto-topics: session of %s unreadable", wid, exc_info=True)
+            sid_cache[wid] = None
+        if sid_cache[wid]:
+            by_sid.setdefault(sid_cache[wid], wid)
+    now = clock()
+    for wid, (thread, dangling, name, title, pin_id) in orphans.items():
+        sid = _recorded_session(ledger, session_for, thread)
+        new = by_sid.pop(sid, None)
+        if new is not None:
+            registry.unbind(wid)
+            registry.bind(new, thread, now_epoch)
+            if name:
+                registry.set_topic_name(new, name)
+            if title:
+                registry.set_pinned_title(new, title)
+            if pin_id:
+                registry.set_pinned_message_id(new, pin_id)
+            ledger.opened(thread, new, cwd_for(new) if cwd_for is not None else None,
+                          session_id=sid)
+            if grace is not None:
+                grace.pop(wid, None)
+            log.info("auto-topics: window %s gone, its session %s relaunched in %s — "
+                     "topic %s moved, not closed", wid, sid, new, thread)
+            changed = True
+            continue
+        if grace is not None and wid not in live_windows:
+            first = grace.setdefault(wid, now)
+            if now - first < grace_seconds:
+                continue                   # its session may still come back for it
+        # As the reap did before CMX-466: a dangling id never asks the stranger.
+        live_sid = None
+        if not dangling:
+            try:
+                live_sid = session_for(wid)
+            except Exception:  # noqa: BLE001 — unknown keeps the recorded session
+                log.debug("auto-topics: session of %s unreadable", wid, exc_info=True)
+        _retire_topic(topic_api, ledger, thread, delete_on_close and not dangling, live_sid)
+        registry.unbind(wid)
+        if grace is not None:
+            grace.pop(wid, None)
+        why = "the tmux server restarted; its id was reissued" if dangling else "gone"
+        log.info("auto-topics: window %s %s — closed topic %s, unbound", wid, why, thread)
+        changed = True
     return changed
 
 

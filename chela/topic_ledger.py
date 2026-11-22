@@ -101,14 +101,26 @@ class TopicLedger:
         return True
 
     def for_session(self, session_id: str | None) -> list[str]:
-        """Every topic recorded for ``session_id``, the one it was bound to LAST first
-        (CMX-450): after a forced rebind onto an older topic, that one wins. None/empty
-        matches nothing."""
+        """Every topic recorded for ``session_id``, the one it USED last first (CMX-450,
+        CMX-466): after a forced rebind onto an older topic, that one wins. None/empty
+        matches nothing.
+
+        "Used last" is the latest of the topic's ``closed``, ``bound`` and ``created``
+        stamps, not ``bound`` alone: ``bound`` is written only when a session id was known
+        at bind time, so a topic reopened by folder or learnt from a close carries none,
+        and an old duplicate with a stamp outranked it (11-22: glide rebound to a topic
+        last used on 10-29). The reap closes the topic a session was on when its window
+        died, so that close is the freshest evidence of use. Ties go to ``bound``, then
+        ``created``."""
         if not session_id:
             return []
         hits = [t for t, e in self._topics.items() if e.get("session_id") == session_id]
-        return sorted(hits, key=lambda t: (self._topics[t].get("bound") or 0,
-                                           self._topics[t].get("created") or 0), reverse=True)
+
+        def rank(t):
+            e = self._topics[t]
+            bound, created = e.get("bound") or 0, e.get("created") or 0
+            return (max(e.get("closed") or 0, bound, created), bound, created)
+        return sorted(hits, key=rank, reverse=True)
 
     def forget(self, thread) -> None:
         if self._topics.pop(str(thread), None) is not None:
