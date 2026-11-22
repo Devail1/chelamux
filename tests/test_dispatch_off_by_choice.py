@@ -239,3 +239,40 @@ def test_a_hold_does_not_override_off_by_choice(monkeypatch):
     monkeypatch.setattr(dash.hold, "active", lambda: _Held())
     row = _dispatch_row(monkeypatch, True)
     assert row["state"] == "Off by choice"
+
+
+# --- CMX-463: the detail TEXT per branch (by choice / on / empty), literal values ----------
+
+def _details(monkeypatch, *, workflows, off):
+    _set(monkeypatch, workflows=workflows, off=off)
+    monkeypatch.setattr(config, "dispatch_tick_interval", lambda: 30)
+    return {c.key: c.detail for c in capabilities.effective()}
+
+
+def test_by_choice_detail_names_the_switch_not_the_empty_list(chela_dir, monkeypatch):
+    d = _details(monkeypatch, workflows=[], off=True)
+    assert d["dispatch"] == "OFF (by choice, CHELA_DISPATCH=off)"
+    assert d["reconcile"] == ("off by choice with dispatch (CHELA_DISPATCH=off) — no "
+                              "dispatched run exists to reconcile")
+
+
+def test_by_choice_detail_says_configured_workflows_are_ignored(chela_dir, monkeypatch, tmp_path):
+    d = _details(monkeypatch, workflows=[tmp_path / "A.md", tmp_path / "B.md"], off=True)
+    assert d["dispatch"] == ("OFF (by choice, CHELA_DISPATCH=off) — 2 workflow(s) in "
+                             "CHELA_DISPATCH_WORKFLOWS are IGNORED: the switch wins")
+    assert d["reconcile"] == ("off by choice with dispatch (CHELA_DISPATCH=off) — no "
+                              "dispatched run exists to reconcile")
+
+
+def test_empty_without_the_switch_detail_is_the_accident_text(chela_dir, monkeypatch):
+    d = _details(monkeypatch, workflows=[], off=False)
+    assert d["dispatch"] == ("CHELA_DISPATCH_WORKFLOWS is empty — NO task will ever be "
+                             "claimed from a tracker")
+    assert d["reconcile"].startswith("OFF FOR THE SAME REASON")
+
+
+@pytest.mark.parametrize("count,noun", [(1, "workflow"), (2, "workflows")])
+def test_on_detail_pluralises_the_workflow_count(chela_dir, monkeypatch, tmp_path, count, noun):
+    wfs = [tmp_path / f"W{i}.md" for i in range(count)]
+    d = _details(monkeypatch, workflows=wfs, off=False)
+    assert d["dispatch"] == f"{count} {noun}, every 30s: " + ", ".join(str(p) for p in wfs)

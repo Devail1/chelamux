@@ -369,6 +369,48 @@ describe('Manual + folder grouping', () => {
     expect(del[0]?.rows).toEqual({ '/srv/x': { keys: ['s:S-b'], at: 1 } });
     expect(server.rows).toEqual({ '/srv/x': { keys: ['s:S-b'], at: 1 } });
   });
+
+  test('deleting a custom group with no manual row order writes only `custom`, never `rows`', async () => {
+    // the server's rows hold an entry the reader skips: a `rows` write would clobber it
+    const groups = [{ id: 'g1', name: 'Infra' }];
+    const rows = { '/srv/x': { keys: ['s:S-b'], at: 1 }, '/srv/odd': { keys: 'nope', at: 1 } };
+    await load({ view: { groupBy: 'custom', sort: 'manual', activity: 'all' }, custom: { groups, assign: { 's:S-a': 'g1' } }, rows });
+    deleteCustomGroup('g1');
+    await flush();
+    const del = posts.filter(p => (p.custom as { groups?: unknown[] } | undefined)?.groups?.length === 0);
+    expect(del.length).toBeGreaterThan(0);
+    expect(del.map(p => Object.keys(p)).filter(k => k.join() !== 'custom')).toEqual([]);
+    expect(posts.filter(p => 'rows' in p)).toEqual([]);
+    expect(server.rows).toEqual(rows);
+  });
+});
+
+describe('a malformed server `rows` (CMX-462)', () => {
+  test.each([['null', null], ['a string', 'x'], ['an array', [{ keys: ['s:S-c'], at: 1 }]], ['absent', undefined]])(
+    'rows that is %s publishes as {}', async (_label, rows) => {
+      await load({ ...MANUAL, ...(rows === undefined ? {} : { rows }) });
+      expect(bridge.sidebarLayout.get().rows).toEqual({});
+      expect(drawn()).toEqual(['a', 'b', 'c']);
+    });
+
+  test('an entry whose keys is not an array is skipped, never read', async () => {
+    await load({ ...MANUAL, rows: { '/srv/x': { keys: 'nope', at: 1 } } });
+    expect(drawn()).toEqual(['a', 'b', 'c']);
+    // and a drop rewrites the group from the drawn order, not from the skipped entry
+    expect(dropRow('/srv/x', itemOf('c'), itemOf('a'))).toBe(true);
+    await flush();
+    expect(lastRows()).toEqual({ '/srv/x': { keys: ['s:S-c', 's:S-a', 's:S-b'], at: NOW - 10 * HOUR } });
+  });
+
+  test('an entry whose `at` is not a number is skipped: its keys do not order the group', async () => {
+    await load({ ...MANUAL, rows: { '/srv/x': { keys: ['s:S-c', 's:S-a', 's:S-b'], at: 'x' } } });
+    expect(drawn()).toEqual(['a', 'b', 'c']);
+  });
+
+  test('an entry that is not an object is skipped', async () => {
+    await load({ ...MANUAL, rows: { '/srv/x': null, '/srv/y': ['s:S-c'] } });
+    expect(drawn()).toEqual(['a', 'b', 'c']);
+  });
 });
 
 describe('the reboot (window ids change, session ids stay)', () => {
