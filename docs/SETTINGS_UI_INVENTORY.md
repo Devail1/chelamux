@@ -20,7 +20,7 @@ grep -rhoE 'os\.environ(\.get)?\(["'"'"']CHELA_[A-Z0-9_]+["'"'"']|os\.environ\[[
   | grep -oE 'CHELA_[A-Z0-9_]+' | sort -u | wc -l
 ```
 
-**69** (was 58, then 49 after CMX-217 wired the 9-strong "Daemon loop intervals" group
+**70** (was 58, then 49 after CMX-217 wired the 9-strong "Daemon loop intervals" group
 below through `chela.config.dashboard_setting()`, its precedence layer — CMX-220 then
 wired the 9-strong "Dispatch / judge / critic policy" group the same way (CMX-264 then
 added a tenth member, `memory_slice_budget_bytes`, straight onto that same registry, so it
@@ -40,7 +40,8 @@ until CMX-86 added the four orchestrator-inbox notice knobs, group 5 — then 66
 added `CHELA_SELFCHECK_ALERT_S`, group 5 — then 67, until CMX-103 added `CHELA_DASHBOARD_URL`,
 group 7 — then 66, until CMX-266 retired `CHELA_TERMINAL_TIMESTAMPS`, group 8 — then 67, until
 CMX-318 added `CHELA_PARK_MAX_S`, group 5 — then 68, until CMX-372 added `CHELA_RESTORE_ENV`,
-group 4 — then 69, until CMX-443 added `CHELA_STDIN_BLOCKED_ALERT_S`, group 5) — every literal `CHELA_*` name a Python module in
+group 4 — then 69, until CMX-443 added `CHELA_STDIN_BLOCKED_ALERT_S`, group 5 — then 70, when
+CMX-476 added `CHELA_TERM_ACTIVE_INPUT_MINUTES`, group 8) — every literal `CHELA_*` name a Python module in
 `chela/` reads straight off `os.environ`.
 `tests/test_settings_inventory.py::test_inventory_matches_env_reads` re-runs this scan and
 diffs it against the table below on every `pytest` run, so the count can't go stale the way
@@ -290,6 +291,7 @@ host." A dashboard writing its own bind host is a process editing the boundary t
 | `CHELA_TERMINALS_EXPOSE` | `false` | `trust-boundary` | Serve the writable wall on a non-loopback bind — RCE risk, opt-in |
 | `CHELA_TERM_COLS` | `120` | `hot` | Shared collab grid geometry (columns) |
 | `CHELA_TERM_ROWS` | `30` | `hot` | Shared collab grid geometry (rows) |
+| `CHELA_TERM_ACTIVE_INPUT_MINUTES` | `10` | `restart` | How long a terminal client's last input keeps it the window's active device (CMX-476): every other client gets `ignore-size`; past it, the largest visible client wins again |
 | `CHELA_WALL_TILE_DISPATCHED` | `false` | `hot` | Give dispatcher-spawned agents a full tile eagerly vs minimized |
 | `CHELA_TERM_THEME` | unset | `restart` | Operator override for the terminals' xterm palette (a JSON ITheme). Read by BOTH `scripts/agent-terminals.sh` (ttyd's launch theme) and the dashboard (`chela/dashboard/term_themes.py`), where it wins over every Settings > Appearance theme's per-theme terminal palette (CMX-381) |
 

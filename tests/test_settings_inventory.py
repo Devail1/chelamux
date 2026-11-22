@@ -59,7 +59,7 @@ def test_inventory_matches_env_reads():
     )
 
 
-def test_inventory_count_is_69():
+def test_inventory_count_is_70():
     # The number CMX-207's ticket and the doc's own prose both cite (58, until CMX-217
     # wired the 9-strong Daemon-intervals group through config.dashboard_setting() and
     # they stopped being literal os.environ.get("CHELA_...") call sites — see the doc's
@@ -77,9 +77,10 @@ def test_inventory_count_is_69():
     # knobs, then 66, until CMX-110 added CHELA_SELFCHECK_ALERT_S, then 67, until CMX-103
     # added CHELA_DASHBOARD_URL, then 66, when CMX-266 retired CHELA_TERMINAL_TIMESTAMPS,
     # then 67, until CMX-318 added CHELA_PARK_MAX_S, then 68, until CMX-372 added
-    # CHELA_RESTORE_ENV, then 69, until CMX-443 added CHELA_STDIN_BLOCKED_ALERT_S).
+    # CHELA_RESTORE_ENV, then 69, until CMX-443 added CHELA_STDIN_BLOCKED_ALERT_S, then 70,
+    # when CMX-476 added CHELA_TERM_ACTIVE_INPUT_MINUTES).
     # A change
     # here without a change to the doc's stated count is exactly the kind of drift this
     # file exists to catch — pinned as its own assertion so a future diff has to touch the
     # prose too.
-    assert len(_scan_env_reads()) == 69
+    assert len(_scan_env_reads()) == 70
