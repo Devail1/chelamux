@@ -89,8 +89,10 @@ dashboard, `~/Library/LaunchAgents/org.chela.dashboard.plist`:
 
 launchd does not expand `~` or `$HOME`: replace `<checkout>` and `<home>` with absolute
 paths. Copy the file for the daemon (`run` instead of `dashboard`, label
-`org.chela.daemon`) and for the terminal wall (`<checkout>/scripts/agent-terminals.sh`, no
-argument). Then:
+`org.chela.daemon`) and for the terminal wall (`agent-terminals`, label
+`org.chela.agent-terminals`). Installed from PyPI, with no checkout? Give `ProgramArguments`
+the absolute path of `chela` (`command -v chela`) and the subcommand, with no `/bin/bash` in
+front. Then:
 
 ```bash
 launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/org.chela.dashboard.plist  # load and start
