@@ -424,3 +424,14 @@ def test_a_topic_in_use_with_a_session_but_no_stamp_learns_its_bound_time(tmp_pa
     assert led.get(B)["bound"] == NOV22 + 60 and asked == ["@17"]
     assert led.set_session(B, OTHER) is False and led.get(B)["session_id"] == SID
     assert led.set_session(A, OTHER) is False          # A: complete record
+
+
+def test_a_restart_that_reissues_the_same_id_to_the_session_moves_without_closing(tmp_path):
+    """tmux restarted and the restored session came back at the SAME id: the stale binding
+    leaves the id first, so the window is a candidate and takes its topic back unclosed."""
+    led, wire = _ledger(tmp_path, b_closed=None), _Wire()
+    reg = BindingRegistry(CHAT)
+    reg.bind("@17", B, "e0-old")
+    _tick(reg, led, wire, {"@17": "glide"}, {"@17": SID}, relaunch_grace={}, clock=_Clock())
+    assert reg.thread_for_window("@17") == B and reg.epoch_for("@17") == EP
+    assert _mutations(wire) == MOVED_B
