@@ -10,6 +10,616 @@ history lives in `git log`.
 
 ## [Unreleased]
 
+## [0.20.0] — 2026-11-22
+
+### Added
+
+- **`chela telegram send-file <path>` posts a file to your own window's Telegram topic.**
+  The topic comes from the bridge's bindings. The bot token and chat id are read the way
+  `chela-telegram` reads them (environment, then `chela.env`, then `secrets.env`), so an
+  agent needs no setup. On success it prints the message id and topic. It exits 1 with one
+  line saying why when:
+  - Telegram is not set up: the `telegram` extra is missing, there is no bot token, or the
+    window has no topic. The message names what is missing and points at
+    `skills/telegram-setup/SKILL.md`.
+  - The file is over Telegram's 50 MB bot limit.
+  - Telegram refuses the file.
+
+  `--to @N` sends to another window's topic and `--caption` adds a caption. The command
+  lives under `chela telegram`, so core `chela --help` does not list it. (CMX-370)
+
+- **`chela doctor` flags a nightly sweep that has stopped running.** Every sweep run now
+  records itself in `$CHELA_DIR/sweep-nightly/runs.json`. The new `sweep.nightly_last_run`
+  check reads that file for each dispatched workflow with the sweep on. A last run more
+  than 36 hours old is an error, so quiet nights cannot hide a dead scheduler. A workflow
+  with no recorded run yet is a warning. (CMX-371)
+
+- **Drag to reorder sidebar groups, and drag a session onto a custom group.** A group
+  moves by dragging its header (or, grouped by folder, a one-session folder's row) up or
+  down; a line shows where it will land, and the new order is saved exactly as Move up /
+  Move down save it, so it follows you to other devices and survives a reboot. Under
+  Custom groups, dragging a session onto a group moves it there, and dropping it on
+  Ungrouped (or below every group) takes it out. Needs you, Dispatched and Archived stay
+  where they are and take no drop. On a desktop a drag starts after a small move, so a
+  click still opens the session, and Esc cancels; on a phone a long press starts it, so a
+  swipe still scrolls. A grip icon shows on hover. If saving fails, the list goes back to
+  how it was and says why. Move up / Move down and Move to group stay in the menus.
+  (CMX-380)
+
+- **A Manual sort in the sidebar: drag sessions into any order within their group.** Pick
+  Sort by ▸ Manual, then drag a session up or down inside its folder or custom group (or
+  the flat list when not grouped); a line shows where it will land. The order is saved on
+  the dashboard per group and keyed by the Claude session, so it follows you to other
+  devices and survives a reload or a reboot. A new session shows at the top of its group,
+  and a session you have not placed yet sits below the placed ones by last activity.
+  Switching to another sort and back brings your order back. Under any other sort, or
+  grouped by state or date (where sessions change group on their own), rows do not
+  reorder, and dragging a session onto a custom group still works. Drag works as for
+  groups: a small move on desktop, a long press on a phone, Esc to cancel, and a failed
+  save puts the list back and says why. (CMX-381)
+
+- **The dashboard can name who did something.** Set `CHELA_DASHBOARD_IDENTITY_HEADER` to
+  `tailscale` (reads the login `tailscale serve` sets) or `cloudflare-access` (verifies the
+  Access JWT: signature, `aud`, `iss`, `exp`). The header counts only from a loopback peer; from
+  any other address the request is refused and logged. Every approving or mutating action then
+  records a `dashboard.action` event with `by`, an override reads "approved by you@… via
+  dashboard", and the sidebar head shows who you are signed in as. Off by default. Tailscale mode
+  is attribution, not authentication: a local process can send the same header. See
+  `docs/DASHBOARD.md`, "Who did it". (CMX-385)
+
+- **`docs/ORG_SETUP.md`: running chela at work.** Which services to run (and which to leave
+  off: the Telegram bridge and the live-share host), what you lose without them and what
+  replaces it (the Pending approvals pill, `/override/<id>`, `chela merge-approve`, the
+  inbox, `chela digest`), two ways to reach the dashboard over Tailscale (Caddy with
+  caddy-tailscale, or `tailscale serve`), a tailnet policy sketch that lets one user in from
+  their phone only, a hardening checklist, and what the setup does not solve. (CMX-386)
+
+- **`CHELA_DISPATCH=off`: dispatch off by choice.** An explicit switch for an install that
+  runs no dispatcher. The daemon announces `dispatch: OFF (by choice, CHELA_DISPATCH=off)` at
+  INFO and `chela doctor` reports it as information instead of a warning; the dashboard hides
+  the Work board and nav row, **New task** and the sidebar's **Dispatched** section, and
+  Settings shows one line in place of the *Work dispatcher* row. An empty
+  `CHELA_DISPATCH_WORKFLOWS` without the switch still warns, exactly as before. The switch
+  with workflows configured is a contradiction: doctor reports it as an ERROR and dispatch
+  stays off. (CMX-388)
+
+- **chela records which session launched which.** `chela spawn` run from inside a session
+  records that session as the new one's parent; a session with no launch record whose first
+  cross-session message arrives within 10 minutes of its start (`CHELA_PARENT_WINDOW_MINUTES`)
+  gets that message's sender. Each parent is set once, never changed, cycles are refused and
+  nesting stops at `CHELA_PARENT_MAX_DEPTH` (3). Dispatched runs stay out. Parents are keyed
+  by session id in `$CHELA_DIR/session-parents.json`, so they survive a tmux restore, and
+  `/api/agents` rows carry `parent_session_id` and `parent_source`. `chela parents backfill`
+  derives parents for existing sessions from the event log (a dry run that prints the tree;
+  `--apply` writes it). (CMX-389)
+
+- **Sidebar: a session's child sessions nest under it, and you can pin a session.** A session
+  another session launched (`chela spawn`, or its first cross-session message) is drawn only
+  under its parent, indented with a guide line; the parent row gets a chevron and a count, and
+  folding it is remembered on this device by session, so a restart that renumbers the windows
+  keeps it. Children of children nest one level further, and the indent stops growing after
+  three levels so a phone keeps every row's ⋯ on screen. Siblings follow the sort; under
+  Manual they drag into their own order. Dragging the parent onto a custom group moves its
+  children with it. **Pin** / **Unpin** in a row's ⋯ menu puts the session (and its children)
+  in a **Pinned** section at the top. (CMX-390)
+
+- **The dashboard shows which Claude account the CLI is signed in to.** A line under the
+  sidebar head reads the account email (`name@… · Org` when there is an org); hover shows the
+  plan, the login method and when the login expires. It comes from `claude auth status --json`,
+  read every 5 minutes and on dashboard load, and cached. "Claude not logged in" and a login
+  that expires within 3 days (`CHELA_CLAUDE_LOGIN_WARN_DAYS`) show as warnings, and a CLI that
+  is missing or fails reads "account: unknown", never a blank. (CMX-395)
+- **A session started before an account switch says it may still use the old account.** chela
+  records each change of the signed-in account it sees; a session that started before the
+  latest one gets a muted badge with the old email on its sidebar row and pane header ("may
+  still use", since a running session's account is not knowable). (CMX-395)
+
+- **`chela task-finished` and the nightly sweep are now timed per phase, the way a judge
+  round is.** Each hand-in attempt prints one `⏱️ hand-in` line at its end and appends a
+  record to `$CHELA_DIR/hand-in-timings/<task>.jsonl`. The record has the time and slot wait
+  of lint, suite, self-check (its baseline, flake re-run and experiments), sweep (its
+  baseline, flake re-run and mutations) and re-merge, plus the hand-in's total slot wait.
+  Refused attempts are recorded too, because they held the suite slot as well. Each nightly
+  sweep appends the same kind of record to `$CHELA_DIR/sweep-nightly/timings.jsonl`.
+  `chela judge timings --hand-in` and `--nightly` print the median, p90 and max table for
+  these records. For hand-ins the table also has `task_total`, the sum of all of one task's
+  attempts. This only measures: nothing a hand-in, sweep or judge runs or decides has
+  changed. (CMX-397)
+
+- **The dashboard installs as a home-screen app.** The page now links an `apple-touch-icon`
+  (180×180) and a `manifest.webmanifest` (192, 512 and a maskable 512 PNG,
+  `display: standalone`), with `theme-color` and the iOS web-app tags, so "Add to Home Screen"
+  saves the chela mark instead of a page screenshot and opens without browser chrome. The
+  PNGs are drawn from the chela mark itself, with no new dependency.
+- **A `work` look for a second dashboard.** `CHELA_DASHBOARD_ICON_VARIANT=work` adds a
+  briefcase badge to the icon's corner (a shape difference, not only a colour one) and a
+  different `theme-color`; `CHELA_DASHBOARD_APP_NAME` sets the label under the icon and the
+  page title (default `chela`). Both are env-only; an unknown variant is refused (503) rather
+  than read as the default. See `docs/ORG_SETUP.md`. (CMX-457)
+
+- **Set a session's Claude title by hand.** Double-click the title in a pane header to edit it
+  in place (Enter saves, Esc cancels, at most 40 characters); the name beside it still renames
+  the window. For touch, **Rename title…** sits after **Rename** in the pane ⋯ menu and in the
+  sidebar row ⋯ menu. It uses the same title path as *Suggest names*: `/rename` is typed only
+  into an idle session with no dialog and an empty prompt, otherwise the title is queued, shown
+  as pending and applied once the session is idle. A pane with no Claude in it refuses, and the
+  menu item is disabled there. (CMX-459)
+
+- **`chela restart`: restart sessions in place onto a new Claude Code.** After a Claude Code
+  update, `chela restart @N` exits an idle session (`/exit`, waiting up to 120 s) and relaunches
+  the same session with its recorded flags, name, Remote Control and Telegram topic. `--all`
+  restarts every interactive session one at a time: busy ones are retried at the end, the
+  orchestrator goes last and is registered again, and dispatched runs and judges are never
+  touched. `--self` restarts your own session through a detached helper once it goes idle.
+  The report gives the old and new window, the fallback step used, and the topic. On the
+  dashboard, the update banner offers "Restart onto the new Claude Code" when sessions run an
+  older version than the installed one, and each session row's menu has "Restart session".
+  (CMX-467)
+
+### Changed
+
+- **The nightly sweep no longer pings the inbox on a night with no standard-tier merge.**
+  That run is still logged, appended to the event log and recorded. Every other outcome
+  still sends its notice, including the other skips (a fleet pause, the judge off, another
+  sweep running). (CMX-371)
+
+- **Each sidebar session row now names its folder on a dim second line.** Session titles
+  do not say which project a session belongs to, so most rows could not be placed at a
+  glance. The second line shows the session's folder name (`~` for the home folder). When
+  two folders share a name, it shows enough of the path to tell them apart
+  (`projects/foo` and `work/foo`). A dispatched worktree reads `<project> · <task id>`
+  (`chelamux · CMX-374`). The line is hidden while the sidebar is grouped by folder,
+  because the group header already names the folder. The title, badges, crown and `⋯`
+  menu stay on the first line, and each line truncates on its own. (CMX-377)
+
+- **Grouped by folder, a folder with one session is now a single sidebar row.** Most
+  folders hold one session, and each one took a group header, a row and a gap, so eight
+  sessions filled the screen. Now such a folder has no header. Its session is one row with
+  the folder name on the dim second line (`~` for the home folder, `<project> · <task id>`
+  for a worktree). Folders with two or more sessions keep their header. The bare row keeps
+  its place in the group order (folder name, or your Move up / Move down order), and its
+  `⋯` menu holds what the header had: New session in this folder, Move up / Move down and
+  Collapse / Expand all. A folder that gains or loses a second session switches between the
+  two forms on the next render. Custom groups and the other grouping modes are unchanged.
+  (CMX-379)
+
+- **The nightly sweep now gets 3 hours and 400 mutations a night.** chelamux's own
+  WORKFLOW.md gains a `sweep:` block (`budget_seconds: 10800`, `max_mutations: 400`) that only
+  the nightly battery reads; the per-PR sweep in `chela judge sweep` and `task-finished` keeps
+  `judge.sweep_budget_seconds`. The battery starts around 02:00 while the machine is idle, and
+  one night's backlog of owed mutations had outgrown the old budget. (CMX-382)
+
+- **A dashboard frontend mutation now runs only the tests that can see it.** A mutated file
+  under `chela/dashboard/frontend/src/` runs the Vitest specs whose imports reach it (plus any
+  spec that reads files with `import.meta.glob`) and the root JS suites that import or name
+  it. It no longer runs the Python suite. If that subset stays green, the mutation is checked
+  again on every JS suite rather than on the full suite. The full suite's
+  committed-bundle check fails on any source change, so it used to count every frontend
+  mutation as killed. A frontend mutation used to take about 7.5 minutes; a subset run now
+  takes about 45 seconds. (CMX-383)
+- **The nightly sweep's inbox notice reports its throughput**: how many mutations it measured,
+  in how many hours, and the rate per hour. A regression in test selection now shows up as a
+  number. (CMX-383)
+
+- **The dashboard hides the Share and Telegram controls when those services aren't
+  configured.** With `CHELA_COLLAB_RELAY` unset, "Share current session" is gone from the gear
+  menu, the pane menu and the command palette, and Settings > Collaboration is one line:
+  "Sharing is off: set `CHELA_COLLAB_RELAY` to enable (see docs/SHARE_SANDBOX.md)". With no
+  Telegram bridge configured (`TELEGRAM_BOT_TOKEN` and `TELEGRAM_CHAT_ID`, read from the env,
+  `chela.env` or `secrets.env` the way the bridge reads them), Settings > General > Telegram
+  topics is one line pointing at `docs/CONFIG.md`. Both come from configuration, not from
+  whether a process is up, so a bridge restart doesn't make the controls flicker. With either
+  service configured, its controls are unchanged. (CMX-387)
+
+- **Archiving a parent session archives its child sessions, and unarchiving it brings them
+  back.** The dashboard does this on the server, so every device agrees, and the Archived
+  section keeps the subtree nested. A pinned session is never archived, by hand or with its
+  parent: its Archive reads "Pinned: unpin to archive", and a pinned child stays out of its
+  parent's archive (with its own children) and shows under Pinned. Dispatched runs are
+  unchanged. (CMX-390)
+
+- **A `risk:high` task is never merged without a judge round.** The merge tier used to come
+  from the PR's file paths alone, so a `risk:high` trust-boundary change made in files that
+  look like UI came out STANDARD: no judge, no sweep, auto-merge on green CI. The task's
+  tracker risk level is now a floor: `risk:high` means at least CORE (the full judge round and
+  hand-in); `risk:normal` and `risk:low` keep the file-based tier. The level is the one recorded
+  on the run when the task was claimed. `chela merge`, the override question, `chela judge show`
+  and the clean-verdict inbox notice say when the floor set the tier ("CORE (floor:
+  risk:high)"). `chela/dashboard/identity.py` and `chela/share_requests.py` are now core paths
+  too. (CMX-396)
+
+- **The nightly sweep now starts when the queue is idle, not at a fixed hour.** With
+  `sweep.mode: idle` (the new default) the daemon starts it once no suite slot is held or
+  waited for, memory is above one suite's peak, and that has lasted `sweep.quiet_seconds`
+  (default 10 min). While it runs, it checks between mutations whether an agent is waiting
+  for the suite slot. If one is, the sweep finishes the current mutation, hands the slot over
+  and ends as "yielded". What it didn't reach is owed to the next run, which may come the same
+  day, up to `sweep.budget_seconds` in total. If the box was never idle by `nightly_at` +
+  `sweep.fallback_after_hours` (04:00 by default), it runs once on a 30-min fallback budget,
+  still yielding. The inbox notice says when and why it started, who it yielded to and how
+  many minutes it used. `sweep.mode: fixed` keeps the old clock. (CMX-400)
+
+- **The nightly sweep files one issue per merged PR, not one per survivor category.** It
+  groups survivors by the PR their lines blame to, or by file when the PR is unknown. Each
+  issue lists every mutation: category, `file:line`, before → after, and same-shape sites.
+  The PR is in the title. A night files at most `sweep.max_issues` new issues (default 5).
+  Any other groups are folded into the largest issues, never dropped, and the inbox notice
+  says how many survivors went into each issue. New survivors for a PR whose issue is still
+  open are added to it as a comment. On 2026-11-18 the old filer opened 29 issues for 4
+  PRs. (CMX-433)
+
+- **Sidebar "Suggest names…"** (CMX-434): the VIEW menu opens a dialog that proposes a window name and a Claude session title for each live interactive session, from its latest recap or last turns (one Haiku call), editable before anything applies. Names go through the rename API (manual, the Telegram topic follows); titles are typed as `/rename` only into an idle Claude pane with no prompt or dialog showing, and a busy or blocked session's title waits, shown as pending, until it is idle. A `/rename` title (`customTitle`) now outranks Claude's auto title in the sidebar and pane headers.
+
+- **The idle nightly sweep now stays out of a paused queue and the host's busy hours.** It
+  never starts while `chela dispatch --pause` holds the queue (until the hold is released or
+  its TTL runs out), nor inside `sweep.blocked_hours`: local `"HH:MM-HH:MM"` windows that may
+  wrap past midnight, default `["03:00-04:30"]`. A sweep that is already running stops between
+  two mutations when either begins, as it does for a waiting agent, and the rest is owed. The
+  inbox notice says which: "yielded: dispatch paused" or "yielded: blocked hours 03:00-04:30".
+- **The fallback moved to 05:00 and fires only in its own window.** `sweep.fallback_after_hours`
+  defaults to 3, so 02:00 + 3 h = 05:00. The fallback fires only within
+  `sweep.fallback_window_hours` (default 2, so 05:00–07:00), never later in the day, and a
+  fallback time that falls inside a blocked window moves to that window's end.
+- **The notice rates throughput only on a real sample.** Below 10 mutations and 10 minutes it
+  says "too few to rate" instead of a figure like 22885 mutations/hour.
+
+- **A frontend PR no longer needs a "merge dev" round because another one merged first.** Merge
+  the base with `chela merge-base <task-id>`: a conflict only in the committed dashboard bundle
+  is rebuilt from the merged source and committed, and a source conflict beside it leaves only
+  the source files for you. `chela task-finished` rebuilds a bundle-only conflict itself, before
+  and during its checks, instead of refusing the hand-in. (CMX-437)
+
+- **Grouped by Custom groups, dispatched runs have their own Runs group.** Every run now
+  lands in one automatic **Runs** group pinned at the top of the sidebar, whether or not
+  you have made any custom groups, instead of mixing with your sessions in Ungrouped. A
+  run's judge stays inside the run's row. A run can't be dragged or moved into a custom
+  group (it goes away when the run ends), and the orchestrator stays wherever you put it.
+  Runs is hidden when there are none, and always with `CHELA_DISPATCH=off`. Grouped by
+  folder, the Dispatched section is unchanged. (CMX-438)
+
+- **The fallback nightly sweep keeps the suite slot until it has measured a floor.** On a day
+  the queue is never idle, the fallback used to yield to every waiting agent after each
+  mutation, so it measured almost nothing (11-19: 1 of 620). It now keeps the slot until it has
+  measured `sweep.fallback_floor_mutations` (default 10) or held it
+  `sweep.fallback_floor_seconds` (default 900) past its first mutation, whichever comes first,
+  and then yields as before. A dispatch pause or blocked hours still stop it at once. The notice
+  names the agents that waited.
+- **The nightly notice tracks the owed backlog day over day.** It says how the owed count moved
+  since the day before, and says so when it has grown 3 days running.
+
+- **A 🧊 STUCK notice now names a process blocked reading its stdin.** When an agent goes
+  quiet, chela looks in `/proc` for a leaf process in the agent's worktree that is asleep
+  reading a pipe or terminal stdin (for example a `cat` left behind by a broken heredoc),
+  has existed at least `CHELA_STDIN_BLOCKED_ALERT_S` seconds (default 300), and started
+  no earlier than the agent's last activity (so a long-lived stdio server is not named). The notice
+  then says which one: "blocked on stdin: cat PID N, under background shell bash PID M,
+  started HH:MM. Killing it frees the agent without losing work." A busy process, such as
+  pytest writing output, is not named. (CMX-443)
+- The agent standing rules now say to write commit and PR messages to a file and pass it
+  with `git commit -F <file>` / `--body-file`, never a heredoc piped into `cat`. (CMX-443)
+
+- **The clean-container install check left the unit suite.** `pytest -q` no longer builds a
+  container: `scripts/check_fresh_install.sh` (apt, the astral uv installer, a git install —
+  all network-bound) now runs in CI's own `fresh-install` job, with its own deadline and one
+  retry. The script times each phase (apt, uv installer, git install, dashboard up) under its
+  own deadline; a phase that hangs exits 75 and names itself, and two hangs in a row end the
+  job red as "infra: did not complete", never green. The prereqs image is tagged by a hash
+  of its Dockerfiles and cached between CI runs, so apt and the uv installer are not fetched
+  on every PR. The install is pinned to the checked-out commit (`git+file:///src@<sha>`, so
+  CI's shallow, detached checkout installs) and runs on Python 3.13, the newest CI tests
+  (`CHELA_FRESH_INSTALL_PYTHON` overrides it). (CMX-444)
+
+- **The suite slot queue is ranked, and a self-check yields to a better-ranked waiter.** A
+  free slot now goes to a judge round first, then to hand-ins by their issue's priority
+  (Urgent, High, Medium, Low, then no priority), then to the nightly sweep. Equal ranks are
+  still served first come, first served. Between two experiments, a self-check or a
+  hand-in's sweep frees the slot when a judge or higher-priority hand-in is waiting, queues
+  again, and resumes once the slot is back. A waiting judge gets the slot within one
+  experiment instead of after the whole battery. The run row now records the issue's
+  priority at claim time.
+
+- **A test now pins the sidebar's archive-record guard in the custom-group reconcile.**
+  `reconcileAssign` skips a null hole in the archive list instead of reading through it; a
+  test with a hole ahead of a live record goes red if the guard's `&&` becomes `||` (the
+  nightly mutation sweep found no test could tell them apart). (CMX-454)
+
+- **Sidebar: a session dragged within its own group under a sort other than Manual says why
+  nothing happens.** Reordering rows exists only under the Manual sort (CMX-381). Under Last
+  activity, Name or Created, a row held over its own group draws no insertion line between
+  rows, its drop writes nothing, and the row shows *Reorder needs Manual sort*. Dragging a
+  session onto another custom group still moves it under every sort. (CMX-458)
+
+- **The pane header's order is fixed: the window name first (bold), Claude's title second
+  (dim).** Before, the title led any window nobody had renamed, so the two swapped places from
+  pane to pane. The sidebar row, the dock and the palette still show one label, as before.
+  (CMX-459)
+
+- **Remote Control is now a setting, off by default: `CHELA_REMOTE_CONTROL=on|off`.** When it
+  is on, a restored session (the boot restore and `chela restore --resume`) comes back with
+  `--remote-control` under its persisted manual name, so a reboot no longer leaves you
+  typing `/remote-control` into every pane. `chela spawn`, the dashboard's New session and
+  Telegram `/new` already added the flag. Dispatched runs and judges never get it. If Claude
+  Code refuses the flag (a managed `disableRemoteControl`, or the org toggle), the restore
+  relaunches the session without it and logs why. **If you relied on the old ON default,
+  set `CHELA_REMOTE_CONTROL=on` or turn it on in Settings.** (CMX-460)
+
+### Fixed
+
+- **A restored session comes back with the launch flags and env it ran with.** chela now
+  records each live session's extra CLI flags (an allowlist: `--channels`, `--model`,
+  `--permission-mode`, `--add-dir`, `--plugin-dir`, `--agent`, the permission-skip switches),
+  allowlisted env vars (`DISCORD_STATE_DIR`, plus any names in the new `CHELA_RESTORE_ENV`)
+  and its added PATH entries in `$CHELA_DIR/launch-settings.json`, keyed by session id. Both
+  `chela restore --resume` and the boot pass after a tmux restart replay them. A
+  secret-shaped env name is never recorded. If the replayed launch does not come up (a flag
+  Claude Code no longer knows, or a channel plugin that is no longer installed), the session
+  comes back with a plain `--resume` and the reason is logged. (CMX-372)
+
+- **The nightly sweep no longer forgets the mutations its budget never reached.** Each UNRUN
+  mutation (file, line, kind, the PR its line came from) is now owed, in
+  `$CHELA_DIR/sweep-nightly/owed.json`. The next night measures the owed ones first, inside
+  the same budget, and still runs them on a night with no new merge. An owed mutation leaves
+  the set only once it has run (killed or survived; a survivor whose filing failed stays
+  owed) or its line is gone from the base branch. The inbox notice says "N owed from earlier
+  nights", how many ran, which were dropped because their line is gone, and how many are
+  owed to the next night. Since nothing UNRUN is lost any more, a night whose budget ran out
+  now moves the covered window on. (CMX-374)
+
+- **A wall pane's font-atlas walk now runs to completion even when ttyd's preferences
+  arrive mid-walk.** To evict a texture atlas baked from a fallback font, the terminal
+  shim sets the font size to a neighbouring "decoy" value for two frames and then sets it
+  back. ttyd's `SET_PREFERENCES` message arrives on the WebSocket at no fixed time, and it
+  sets the font size too. In about 1 boot in 10 it arrived before xterm had rendered the
+  decoy. The walk still marked itself done, so stale glyphs could stay. The walk now
+  checks in each of its two frames that the decoy is still set, and runs again if it is
+  not (up to 3 times, all before the pane is revealed). The pane is revealed only once no
+  walk is still running. This also fixes
+  `tests/browser/term_boot_reveal.test.mjs`, which failed intermittently ("no hidden frame
+  at the decoy size"). (CMX-375)
+
+- **The chela-hooks Mod's band test passes on Claude Code 2.1.323 again.** In 2.1.323 the
+  band above the prompt became one row per plugin. A test's own `ui.render` hook now
+  draws a row of its own, and the Mod's `next(e)` resolves to the engine's own drawing
+  (`{ type: "engine" }`). The Mod still draws that node first and its "needs you" line
+  under it, so nothing changed for users; only the test's way of reading the band was
+  stale. The test now reads the Mod's own row and checks that the engine's node is kept
+  exactly once, with the line after it. `tests/test_mods_spike.py` pins the engine version
+  the Mod's suite last passed on (`ENGINE_PASSED_ON`). A red run now names both that
+  version and the installed one, so the next engine drift diagnoses itself. (CMX-376)
+
+- **Custom sidebar groups now keep their sessions through a reboot or tmux restart.** A
+  session's group was saved under its tmux window id, and a restore brings every session
+  back under a new window id, so the groups came back empty. A session is now remembered
+  by its Claude session id, which a restore keeps, so a resumed session lands back in its
+  group on the first render. Assignments you already have are moved to the new key the
+  first time their session is seen live. A `/clear`, which starts a new session in the
+  same window, keeps the window's group. A session that is briefly missing (a restore
+  still running) keeps its group. It is forgotten only after it has been neither running
+  nor archived for 30 days. A row with no Claude session (a plain shell) is still keyed
+  by its window and dropped when that window closes, as before. (CMX-378)
+
+- **A classifier that gave no verdict no longer reads as a denial.** When Claude Code's auto
+  mode classifier fails to answer ("gave no verdict (error) … a transient failure of the
+  check"), chela used to send the orchestrator the 🔒 "blocked by its permission classifier"
+  notice and a phone push, both telling it to hand the human a command. That is an outage, and
+  the right response is to wait and retry. A no-verdict now records a silent
+  `classifier_unavailable` event in the log instead ("classifier unavailable — agents
+  retrying"), with no notice and no push. A real denial still gets the 🔒 notice. If an agent's
+  turn stopped on the no-verdicts and it sits idle, chela re-prompts it to resume as soon as
+  another tool call shows the classifier answering again (logged as `classifier_resumed`),
+  instead of leaving it for the stuck alarm. (CMX-384)
+
+- **An unset relay reads "off" in Settings, not "(default)".** There is no default relay:
+  unset means sharing is off. (CMX-387)
+
+- **A sweep, self-check or hand-in now holds its suite slot from start to finish.** With
+  `suite_slots: 1`, three agents' batteries still ran interleaved: each took the slot for
+  one mutation's suite run and handed it to the next battery, so all three were mid-run when
+  the low-memory reaper killed them. `chela judge sweep`, `chela judge self-check`, a judge
+  round and all of `chela task-finished`'s checks now take ONE slot for the whole battery,
+  and each suite run inside re-enters it. A second agent waits for the first battery to
+  finish and names the holder while it waits. Batteries killed mid-run are named in ONE
+  inbox notice (`suite_runs_stopped`) once the slot is free and memory is back. (CMX-393)
+
+- **`task-finished` no longer hands in a PR that sits on an older commit.** Its last step
+  compares the worktree's HEAD with the branch on origin (read live with `git ls-remote`).
+  If they differ and the PR exists, it requests the push itself, and the daemon pushes before
+  handing the run in. If no PR exists yet, it refuses with
+  `HEAD <sha> not pushed (origin has <sha>): run request-push`. An unreadable HEAD or remote
+  refuses too. After every push the daemon reads origin back, so a push that exits 0 but
+  leaves origin off the worktree's HEAD is now an error (retried, then escalated) instead of
+  a silent "accepted". When the conflict check sends a PR back while the worktree's HEAD is
+  ahead of the pushed head it graded, the rework brief and an inbox notice
+  (`run_head_unpushed`) say so. (CMX-394)
+
+- **A sweep or self-check killed mid-mutation no longer hands its mutation to the next
+  agent.** A reboot kills the kill guardian too, so the mutated file and its
+  `.chela-sweep-recovery.json` used to sit in the worktree until a human noticed. Now every
+  entry point that works in a worktree restores first: the dispatcher's spawn and rework
+  re-spawn (before the agent's window exists), `task-finished`, `request-push`,
+  `judge self-check` / `sweep`, and the nightly sweep. A file that is neither the marker's
+  original nor its mutation is never overwritten; the refusal names the three-way state at
+  that line, and the run goes to `needs_human`. The marker records the kernel boot id, so a
+  pid reused after a reboot never counts as a live sweep. On start, the daemon scans the
+  worktree roots for markers with dead owners, restores those it can prove, and posts one
+  inbox notice (`sweep_recovery_boot`) listing what it restored and what it left. (CMX-398)
+- **Nothing pushes a mutation.** Every applied mutation is journalled (as a git blob id) in
+  the worktree's own git dir. `request-push` and `task-finished` refuse while a recovery
+  marker exists or any file, on disk or committed in HEAD, is byte-for-byte a recorded
+  mutation, naming `file:line`; the daemon checks HEAD again before it runs `git push`.
+  (CMX-398)
+
+- **The sidebar's context % badge and orchestrator crown show beside a long title.** A row's
+  metadata strip shrank first and could shrink to nothing, so a long-titled session (the
+  orchestrator at 64%, a 63% game prototype) drew no badge while a short-titled one at 51% did.
+  The strip now gives way only down to its chips; a plain shell's long cwd chip still truncates.
+- **A session whose folder is not known says "folder unknown"** on its folder line instead of
+  drawing none (a live Claude with no session-feed entry yet has no cwd). (CMX-399)
+
+- **A custom sidebar group no longer jumps to another session after a tmux restart.** A
+  `/clear` carries a window's group to its new session; a restart (or a reboot) hands the old
+  window ids to other sessions, and the session resumed first into a reused id took the group
+  of the one that had held it. The group now moves only while the window's Claude process is
+  the same one. (CMX-431)
+
+- **A long press on a sidebar list that is still gliding from a flick no longer starts a drag
+  that vanishes under the finger.** The browser sends a touch that lands mid-glide as an
+  uncancelable sequence, so the drag could not hold the list: the first move panned it and
+  cancelled the drag. Such a touch now only stops the glide; a long press on a list at rest
+  drags as before. This was also the cause of the intermittent CI failure in the sidebar drag
+  browser test, which now waits for the glide to end instead of sleeping. (CMX-435)
+
+- **`chela doctor` no longer reports a judge that is waiting for a suite slot as past its
+  wall.** As the watchdog already did, it leaves queued time out of the wall and reports it
+  separately ("waited 73min for the suite slot").
+
+- **The Wall's focus-ring poll now stops when you leave the Wall.** Entering the Wall
+  starts a 250 ms poll that marks the pane holding the keyboard. Leaving the Wall stopped
+  its 4 s refresh tick but not this poll or its window `focus` listener, so both kept
+  running on every other view for the life of the page. They now stop with the tick, and
+  the App's root lets go of every view's timers when it unmounts. This also fixes an
+  intermittent Vitest failure ("ReferenceError: document is not defined" in
+  `paneframe/lib/focus.ts`), where the leaked poll ticked after the test environment had
+  been torn down. (CMX-446)
+
+- **A flaky ticklock test no longer fails on a busy runner.**
+  `test_a_tick_that_outlives_the_bound_is_refused_and_holds_nothing` failed on a loaded CI
+  runner, but not because of its time bound. Its stand-in daemon rewrote the run-row file in
+  place while the test polled that file, so the test could read a half-written mix of the old
+  and new rows (`JSONDecodeError: Extra data`). The stand-in now writes the row atomically
+  (a temp file, then `os.replace`). The test's assertions are unchanged. (CMX-448)
+
+- **A reboot that restarts tmux twice brings back the whole fleet, not just the last few
+  windows.** The boot restore pass used to resume only the epoch right before the current
+  one. When that epoch lived only seconds (tmux restarted, came up with two windows, and
+  restarted again), the real working set in the epoch before it was skipped. The pass now
+  walks back past every ended epoch the roster saw live for less than
+  `CHELA_RESTORE_SHORT_EPOCH_S` seconds (default 900; `0` turns the walk off). It resumes
+  the union of those epochs, one launch per session from its newest epoch, and skips any
+  session that is already live. Its inbox notice names the epochs it walked past and why,
+  and the sessions it skipped because they were already live. A restore row with a session
+  but no cwd on record now takes the cwd from that session's own transcript, so `chela
+  restore` no longer lists it as "no cwd/session on record". (CMX-449)
+
+- **A reboot no longer loses window names, queued titles or a session's Telegram topic.**
+  A name set through the dashboard (a rename, or Suggest names) and a title Suggest names
+  queued for an idle moment lived only as tmux window options, so they died with the tmux
+  server. Both are now also kept by session id (`session-names.json`), and the `chela run`
+  daemon puts them back on whichever window that session is restored into: the name is
+  re-applied (only if no other window holds it), and the title is queued again and typed
+  once the session is idle. A title the transcript already shows as applied is dropped.
+  Auto-topics now records the session each topic is bound for, and a window that needs a
+  topic first takes back the topic its session had, before the folder match and before
+  creating one. A tmux restart closes a dead binding's topic but never deletes it, even
+  with "delete a topic when its window closes" on. New `chela telegram rebind @N THREAD`
+  moves a window that already has a topic onto another one (for a session that came back
+  in a new topic). (CMX-450)
+
+- **The ops scan no longer re-sends a judge-baseline flake finding it already reported.**
+  "`<test>` failed judge baselines of N tasks in 24h" carried no evidence signature, so the
+  scan re-sent it every 6 hours (and so after every daemon restart past that) while its tasks
+  stayed in the 24 h window, even after the cause was fixed. It is now signed by its task
+  set, like the CI quarantine finding, and a signed finding is re-sent only when it names a
+  task no earlier notice did: the same tasks, a task's later round, or a task aging out of
+  the window send nothing; a new task sends it once. A finding already notified before this
+  change adopts its signature on the first scan instead of being sent again. (CMX-451)
+
+- **Tests now pin three sidebar drag guards the nightly mutation sweep found unguarded.**
+  Moving a session between custom groups keeps every other session's last-seen stamp and
+  drops or re-stamps only its own; Move to group with an id that names no group unassigns
+  the session instead of writing the unknown id; and outside Custom groups, a row dragged
+  below every folder (which reads as Ungrouped) assigns nothing. (CMX-452)
+
+- **The nightly sweep keeps up with the merge rate.** It owed every mutation it did not reach,
+  so on busy days the backlog grew every night (620 owed, then 1,007) and the oldest PRs were
+  never measured. A night now samples at most `sweep.per_pr_sample` mutations per merged PR
+  (default 20), spread across mutation kinds. Each PR gets its first sample before any PR gets
+  its second. The total is capped at what the budget fits at the measured median time per
+  mutation, with at least one per PR. The unsampled rest is dropped and counted, not owed, and
+  an older owed backlog is trimmed to the same per-PR share. (CMX-455)
+- **No more empty starts.** A sweep started by the daemon no longer starts with less budget
+  left than one mutation needs: the measured median baseline plus one mutation, or 5 minutes
+  before anything has been measured. That run is recorded as `budget_spent`, ends the day,
+  and sends no notice. (CMX-455)
+- **The nightly notice is short.** It now says "N dropped (line gone)" as a count, with each
+  line written to the log, and stays under 400 characters. A CANNOT VERIFY notice keeps its
+  full reason. (CMX-455)
+
+- **A self-check experiment that never applied no longer blocks the push of a clean file.**
+  An experiment whose anchor did not match (or matched more than once) used to be written to
+  the mutation journal anyway, with the clean file's own bytes as the "mutation", so
+  `request-push` refused a committed file whose `git diff HEAD` was empty. Such an experiment
+  is now INVALID and leaves no marker and no journal entry. Journal entries now record the
+  pre-mutation bytes too, and an entry that never changed its file is dropped (and logged) at
+  hand-in instead of refusing it; a real leftover mutation still refuses. The refusal no
+  longer tells an agent to edit the journal by hand: it points at the new
+  `chela judge journal --prune-stale <run>`, which re-checks each entry against the file
+  before dropping it and never drops a real mutation. (CMX-456)
+
+- **Tests now pin what CMX-388's dispatch-off-by-choice code says and returns.** The exact
+  dispatcher and reconciliation detail text with `CHELA_DISPATCH=off`, the "IGNORED"
+  note for configured workflows, the `1 workflow` / `2 workflows` count, and the sidebar's
+  folder key for a missing row each have a test. The nightly sweep found that no test
+  failed when any of them was broken. Tests only, no behaviour change. (CMX-463)
+
+- **The dashboard's update banner on a phone:** "Update & restart" no longer breaks over three
+  lines. The button stays on one line and the message wraps; on a narrow phone the button
+  drops under the message, and the dismiss ✕ is a 44px touch target. Desktop is unchanged.
+  (CMX-465)
+
+- **Telegram: a relaunched session gets back the topic it was using, not an old duplicate.**
+  When a session had two topics, the restore picked by the time a session id was first
+  stamped on a topic, so it could pick a topic unused for weeks. It now picks the topic the
+  session used last. And when a window dies because its session is relaunching in a new
+  window, its topic moves to the new window directly, with its name and pinned title, instead
+  of closing and reopening. A dead window's topic waits up to 90 seconds for its session to
+  come back before it is closed. (CMX-466)
+
+### Security
+
+- **An override decision on the dashboard must now prove the operator's browser session.**
+  Before, a dispatched agent could approve its own override with a plain HTTP POST from
+  loopback: a request with no `Origin` header passed the same-origin check, and
+  `overrides.decide` trusted any `channel="dashboard"` caller by name. Now `/` and the
+  `/override/<id>` confirm page set an `HttpOnly`, `SameSite=Lax` session cookie and embed a
+  token, an HMAC-SHA256 of the session id under a key that exists only in the dashboard
+  process's memory and changes on every restart. Approve and Deny, from the approvals sheet
+  or the confirm page, need the cookie, the matching token and an `Origin` that names the
+  dashboard's own host and port (`http` or `https`). If any is missing or wrong, the
+  dashboard returns 403 and decides nothing. A `channel="dashboard"` call to
+  `overrides.decide` without `browser_proven=True` is refused. Telegram is unchanged.
+
+- **Share-request decisions and the card's Merge button now need the operator's browser
+  session too.** Approve, Deny and Revoke on an access request, and the card's Merge (which
+  runs `gh pr merge` itself), used to act on any POST that reached the dashboard over
+  loopback, so a dispatched agent could merge its own PR or grant a guest a mount with one
+  HTTP call. They now need the same proof as an override decision: the session cookie, the
+  page's token and an `Origin` naming the dashboard's own host and port. If any is missing or
+  wrong, the dashboard returns 403 and does nothing. The access-request sheet and the card's
+  buttons send the token, so they work as before.
+
+- **The trust posture now says what actually gates a dashboard decision.**
+  `docs/TRUST_AND_APPROVAL_POSTURE.md` §3 documents the browser-session proof (session
+  cookie, page token, exact Origin) that an override, a share-request decision and the
+  card's Merge must carry, and what it does not stop: a process running as the operator
+  can still impersonate the browser on purpose. The merge-gate hook is documented as a
+  speed bump that string-matches `curl`/`wget` argv, never the gate. The section ends with
+  an audit of every mutating dashboard route: which require the proof, which should get it
+  next, which add no power an agent lacks, and which agents post by design. Four new
+  defeat shapes (`docs/defeat_shapes/392*.md`) record the test gaps found on the way.
+  (CMX-442)
+
+- **Settings, updates, schedules, dispatcher writes and terminal shares now need the operator's
+  browser session.** Saving settings (including the agent permission mode), Update/Restart,
+  adding, toggling or deleting a schedule, promoting a backlog item, initialising a repo,
+  creating a Linear task, and starting or changing a terminal share used to act on any request
+  that reached the dashboard over loopback, so a dispatched agent could do any of them with one
+  HTTP call. They now need the same proof as an override decision: the session cookie, the
+  page's token and an `Origin` naming the dashboard's own host and port. If any is missing or
+  wrong, the dashboard returns 403 and does nothing. Reading settings still needs no proof, the
+  dashboard's own buttons send the token, and `chela schedule` / `chela update` work from a
+  terminal as before.
+
 ## [0.19.1] — 2026-10-30
 
 ### Fixed
