@@ -756,6 +756,8 @@ def api_agents():
 
     # Belt-and-braces share revocation on session end (see _reap_shares).
     _reap_shares({a["window_id"]: a["claude_running"] for a in agents})
+    # CMX-476: an active client whose input aged out hands the window's size back.
+    _reconcile_all_term_sizes()
 
     return jsonify(agents)
 
@@ -1631,10 +1633,11 @@ if _sock is not None:
         except Exception:
             return
 
+        tty = None
         if cid:
             tty = _claim_new_client_tty(session, before)
             if tty:
-                _TERM_CID_TTY[(wid, cid)] = tty
+                _term_client_claimed(wid, cid, tty)
 
         def _pump_upstream_to_browser():
             try:
@@ -1666,8 +1669,8 @@ if _sock is not None:
                 upstream.close()
             except Exception:
                 pass
-            if cid:
-                _TERM_CID_TTY.pop((wid, cid), None)
+            if cid and tty:
+                _term_client_gone(wid, cid, tty)
 
 
 @app.route("/api/term/ready")
@@ -1768,16 +1771,111 @@ def _session_client_ttys(session: str) -> set[str]:
     return {ln.strip() for ln in out.stdout.splitlines() if ln.strip()}
 
 
-def _set_client_ignore_size(tty: str, ignore: bool) -> None:
+def _set_client_ignore_size(tty: str, ignore: bool) -> bool:
     """Set/clear the ignore-size flag on one tmux client by tty. Best-effort:
     the client may have disconnected between the frontend's report and this
-    call, in which case tmux errors and there is nothing left to flag anyway."""
+    call, in which case tmux errors and there is nothing left to flag anyway.
+    True only when tmux confirmed it (CMX-476 retries anything else)."""
     flag = "ignore-size" if ignore else "!ignore-size"
     try:
-        subprocess.run(["tmux", "refresh-client", "-t", tty, "-f", flag],
-                       capture_output=True, timeout=5)
+        out = subprocess.run(["tmux", "refresh-client", "-t", tty, "-f", flag],
+                             capture_output=True, timeout=5)
     except Exception:
-        pass
+        return False
+    return out.returncode == 0
+
+
+# ---------------------------------------------------------------------------
+# "The device you're using wins" (CMX-476)
+# ---------------------------------------------------------------------------
+# CMX-175 alone leaves a gap: a desktop tab left VISIBLE while its owner is away
+# still counts as watched, so `largest` keeps sizing the window to it and the phone
+# they are actually holding needs horizontal scrolling. So each connection also
+# reports its user INPUT (keypress, tap/click, scroll, focusing the pane; never a
+# bare resize, which is what ruled out `window-size latest`). For each window, the
+# watched client with the most recent input inside the active window
+# (config.TERM_ACTIVE_INPUT_MINUTES) is ACTIVE and every other client of that
+# window gets `ignore-size`, visible or not, so `largest` has only the device in
+# use to choose from. With no recent input anywhere the window falls back to the
+# CMX-175 rule (ignore-size = not watching). A presented window (`window-size
+# manual`, api_term_grid) ignores every client's size, so the presenter keeps
+# priority over all of this without a special case.
+#
+# (wid, cid) -> {"watching": bool, "input_at": monotonic float | None,
+#                "applied": the ignore flag last sent to tmux, or None}
+# Kept for exactly the connections in _TERM_CID_TTY (term_ws drops both on close).
+_TERM_CID_STATE: dict[tuple[str, str], dict] = {}
+_TERM_SIZE_LOCK = threading.Lock()
+
+
+def _term_active_window_s() -> float:
+    return config.TERM_ACTIVE_INPUT_MINUTES * 60.0
+
+
+def _size_flags(states: dict[str, dict], now: float, window_s: float) -> dict[str, bool]:
+    """Pure rule: cid -> whether that client gets `ignore-size`.
+
+    The active client is the WATCHED one with the latest input no older than
+    `window_s`; it alone counts. With none, each client is ignored iff it is not
+    watched (CMX-175)."""
+    recent = [(st["input_at"], cid) for cid, st in states.items()
+              if st.get("watching") and st.get("input_at") is not None
+              and now - st["input_at"] <= window_s]
+    if recent:
+        active = max(recent)[1]
+        return {cid: cid != active for cid in states}
+    return {cid: not st.get("watching") for cid, st in states.items()}
+
+
+def _reconcile_term_size(wid: str, now: float | None = None) -> None:
+    """Apply _size_flags to every tracked client of `wid`, sending tmux only the
+    flags that changed since the last apply."""
+    now = time.monotonic() if now is None else now
+    # One lock across decide AND apply: two reconciles racing their tmux calls could
+    # otherwise leave tmux holding the older flag while `applied` holds the newer.
+    with _TERM_SIZE_LOCK:
+        ttys = {k[1]: t for k, t in list(_TERM_CID_TTY.items()) if k[0] == wid}
+        states = {cid: _term_client_state(wid, cid) or {} for cid in ttys}
+        flags = _size_flags(states, now, _term_active_window_s())
+        # Clear before set: never leave a moment where every client is ignored.
+        for cid, ignore in sorted(flags.items(), key=lambda kv: kv[1]):
+            st = states[cid]
+            if st.get("applied") is not ignore:
+                ok = _set_client_ignore_size(ttys[cid], ignore=ignore)
+                st["applied"] = ignore if ok else None  # a failed apply is retried next time
+
+
+def _reconcile_all_term_sizes() -> None:
+    """Re-run the rule for every window with a tracked client, so an active
+    client whose input aged out hands the size back without any new event."""
+    for wid in {k[0] for k in list(_TERM_CID_TTY)}:
+        _reconcile_term_size(wid)
+
+
+def _term_client_state(wid: str, cid: str) -> dict | None:
+    """The tracked state for a (wid, cid) term_ws claimed a tty for, else None."""
+    if (wid, cid) not in _TERM_CID_TTY:
+        return None
+    return _TERM_CID_STATE.setdefault((wid, cid), {"watching": True, "input_at": None, "applied": None})
+
+
+def _term_client_claimed(wid: str, cid: str, tty: str) -> None:
+    """term_ws matched this connection to its tmux client: track it, and size the
+    window at once (a newcomer never steals a window another device is using)."""
+    _TERM_CID_TTY[(wid, cid)] = tty
+    _term_client_state(wid, cid)
+    _reconcile_term_size(wid)
+
+
+def _term_client_gone(wid: str, cid: str, tty: str) -> None:
+    """term_ws's connection closed: forget it, unless the same cid has already
+    reconnected onto another tty (that entry is the new connection's), then let
+    the window's remaining clients fall back."""
+    if _TERM_CID_TTY.get((wid, cid)) != tty:
+        return
+    _TERM_CID_TTY.pop((wid, cid), None)
+    _TERM_CID_STATE.pop((wid, cid), None)
+    _reconcile_term_size(wid)
 
 
 @app.route("/api/term/<wid>/watch", methods=["POST"])
@@ -1785,21 +1883,38 @@ def _set_client_ignore_size(tty: str, ignore: bool) -> None:
 def api_term_watch(wid):
     """A wall tile reports whether IT is currently being watched (tab
     foregrounded, pane not minimized) vs. a passive mirror of the same shared
-    tmux window on another tab/device. Toggles ignore-size on the ONE tmux
-    client `term_ws` matched to this (wid, cid) — sibling clients on the same
-    window are untouched. Unlike the tab-hidden teardown (_teardownTermFrames
-    in terminals.js) this never closes the connection, so flipping it back is
-    instant with no reconnect flicker."""
+    tmux window on another tab/device. Records it for the ONE tmux client
+    `term_ws` matched to this (wid, cid) and re-applies the window's sizing rule
+    (CMX-476, above). Unlike the tab-hidden teardown this never closes the
+    connection, so flipping it back is instant with no reconnect flicker."""
     _require_terminals()
     if wid not in _terminals_port_map():
         abort(404)  # only real terminal windows; also blocks tmux target injection
     data = request.get_json(force=True) or {}
     cid = str(data.get("cid") or "")
-    watching = bool(data.get("watching"))
-    tty = _TERM_CID_TTY.get((wid, cid))
-    if tty:
-        _set_client_ignore_size(tty, ignore=not watching)
-    return jsonify({"ok": True, "tracked": bool(tty)})
+    st = _term_client_state(wid, cid)
+    if st is not None:
+        st["watching"] = bool(data.get("watching"))
+        _reconcile_term_size(wid)
+    return jsonify({"ok": True, "tracked": st is not None})
+
+
+@app.route("/api/term/<wid>/input", methods=["POST"])
+@require_auth
+def api_term_input(wid):
+    """A pane reports user input on its connection (CMX-476): this client becomes
+    the window's active one, so the window takes its size."""
+    _require_terminals()
+    if wid not in _terminals_port_map():
+        abort(404)  # only real terminal windows; also blocks tmux target injection
+    data = request.get_json(force=True) or {}
+    cid = str(data.get("cid") or "")
+    st = _term_client_state(wid, cid)
+    if st is not None:
+        st["input_at"] = time.monotonic()
+        st["watching"] = True  # input proves the pane is in front of someone
+        _reconcile_term_size(wid)
+    return jsonify({"ok": True, "tracked": st is not None})
 
 
 # Per-wid share state (in-memory; presence-only, no auth): wid -> {"cols","rows"},

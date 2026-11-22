@@ -74,11 +74,18 @@ def test_set_client_ignore_size_clears_flag(monkeypatch):
     assert calls == [["tmux", "refresh-client", "-t", "/dev/pts/3", "-f", "!ignore-size"]]
 
 
+def test_set_client_ignore_size_reports_success(monkeypatch):
+    monkeypatch.setattr(dash.subprocess, "run", lambda cmd, **k: _FakeCompleted())
+    assert dash._set_client_ignore_size("/dev/pts/3", ignore=True) is True
+    monkeypatch.setattr(dash.subprocess, "run", lambda cmd, **k: _FakeCompleted(returncode=1))
+    assert dash._set_client_ignore_size("/dev/pts/3", ignore=True) is False
+
+
 def test_set_client_ignore_size_swallows_exception(monkeypatch):
     def boom(*a, **k):
         raise OSError("client gone")
     monkeypatch.setattr(dash.subprocess, "run", boom)
-    dash._set_client_ignore_size("/dev/pts/3", ignore=True)   # must not raise
+    assert dash._set_client_ignore_size("/dev/pts/3", ignore=True) is False   # must not raise
 
 
 def test_claim_new_client_tty_picks_the_new_one(monkeypatch):
