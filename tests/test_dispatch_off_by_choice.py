@@ -260,6 +260,15 @@ def test_by_choice_detail_says_configured_workflows_are_ignored(chela_dir, monke
     d = _details(monkeypatch, workflows=[tmp_path / "A.md", tmp_path / "B.md"], off=True)
     assert d["dispatch"] == ("OFF (by choice, CHELA_DISPATCH=off) — 2 workflow(s) in "
                              "CHELA_DISPATCH_WORKFLOWS are IGNORED: the switch wins")
+    assert d["reconcile"] == ("off by choice with dispatch (CHELA_DISPATCH=off) — no "
+                              "dispatched run exists to reconcile")
+
+
+def test_empty_without_the_switch_detail_is_the_accident_text(chela_dir, monkeypatch):
+    d = _details(monkeypatch, workflows=[], off=False)
+    assert d["dispatch"] == ("CHELA_DISPATCH_WORKFLOWS is empty — NO task will ever be "
+                             "claimed from a tracker")
+    assert d["reconcile"].startswith("OFF FOR THE SAME REASON")
 
 
 @pytest.mark.parametrize("count,noun", [(1, "workflow"), (2, "workflows")])
