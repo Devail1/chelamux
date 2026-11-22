@@ -1928,6 +1928,8 @@ def _reconcile_loop(registry, topic_api, interval: int, stop, ledger=None) -> No
     # CMX-204: every topic made, so a folder's old one is reused. Passed in when the
     # inbound close/reopen handlers write it too: one instance, or each clobbers the other.
     ledger = ledger if ledger is not None else tg.TopicLedger()
+    # CMX-466: when each dead window was first seen gone, so its topic waits for a relaunch.
+    relaunch_grace: dict[str, float] = {}
     while not stop.is_set():
         try:
             if userconfig.get(topics.CLEANUP_KEY):
@@ -1978,6 +1980,7 @@ def _reconcile_loop(registry, topic_api, interval: int, stop, ledger=None) -> No
                 delete_on_close=userconfig.get(topics.DELETE_ON_CLOSE_KEY) is True,
                 session_for=tg.window_session_id,
                 force_rebinds=forced,
+                relaunch_grace=relaunch_grace,
             )
             if had_rebinds:
                 sidebar_archive.settle_rebinds(rebinds, now_epoch)
