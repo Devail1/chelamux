@@ -192,7 +192,7 @@ spawn() {
         --client-option disableLeaveAlert=true \
         --client-option disableResizeOverlay=true \
         --client-option "rendererType=${TERM_RENDERER}" \
-        tmux -u new-session -A -s "${grp}" -t "${TMUX_SESSION}" ';' \
+        tmux -u new-session -A -s "${grp}" -t "=${TMUX_SESSION}" ';' \
                  set-option destroy-unattached off ';' \
                  set-option status off ';' \
                  set-option -g window-size largest ';' \
@@ -352,11 +352,11 @@ ensure_session() {
         echo "agent-terminals: REFUSING to heal: TMUX_TMPDIR=${TMUX_TMPDIR} does not exist, and tmux would silently fall back to the DEFAULT socket (the live server)" >&2
         return 1
     fi
-    tmux has-session -t "${TMUX_SESSION}" 2>/dev/null && return 0
+    tmux has-session -t "=${TMUX_SESSION}" 2>/dev/null && return 0
     "${PYTHON}" -c 'import sys
 from chela import discovery
 sys.exit(0 if discovery.ensure_session(sys.argv[1]) else 1)' "${TMUX_SESSION}" </dev/null >/dev/null
-    if tmux has-session -t "${TMUX_SESSION}" 2>/dev/null; then
+    if tmux has-session -t "=${TMUX_SESSION}" 2>/dev/null; then
         echo "agent-terminals: tmux session '${TMUX_SESSION}' was missing — created it"
         return 0
     fi

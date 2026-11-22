@@ -318,7 +318,7 @@ def test_spawn_orchestrator_window_marks_its_remote_control_name(monkeypatch):
 
     monkeypatch.setattr(subprocess, "run", fake_run)
     autolaunch._spawn_orchestrator_window("/tmp/repo")
-    assert ["tmux", "set-window-option", "-t", f"{autolaunch.TMUX_SESSION}:@42",
+    assert ["tmux", "set-window-option", "-t", f"={autolaunch.TMUX_SESSION}:@42",
             "@chela_rc_name", autolaunch.WINDOW_NAME] in calls
 
 
@@ -515,7 +515,7 @@ def test_teardown_kills_the_recorded_window_and_clears_the_stamp(monkeypatch):
     monkeypatch.setattr(subprocess, "run", fake_run)
     result = autolaunch.teardown("@7", "the inbox queue is drained")
     assert result == {"ok": True, "wid": "@7", "reason": "the inbox queue is drained"}
-    assert killed and killed[0][-1] == f"{config.TMUX_SESSION}:@7"
+    assert killed and killed[0][-1] == f"={config.TMUX_SESSION}:@7"
     # the launch stamp is gone — a stale cooldown must not survive the window it described
     assert autolaunch._read_launch_stamp() is None
 

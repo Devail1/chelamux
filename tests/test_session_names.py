@@ -140,10 +140,10 @@ def test_a_stored_name_goes_back_on_the_restored_window(monkeypatch, tmux, rc):
     session_names.record_name(SID, "tapparty")
     actions = _tick(monkeypatch, {"@7": _pane("@7")}, {"@7": "swim-proto"}, {SID: "@7"})
     assert actions == ["@7 name swim-proto -> tapparty"]
-    assert tmux.calls[0] == ["tmux", "rename-window", "-t", "chela:@7", "tapparty"]
+    assert tmux.calls[0] == ["tmux", "rename-window", "-t", "=chela:@7", "tapparty"]
     assert tmux.kwargs[0] == {"capture_output": True, "text": True, "timeout": 5}
-    assert ["tmux", "set-window-option", "-t", "chela:@7", "@chela_manual_name", "1"] in tmux.calls
-    assert ["tmux", "set-window-option", "-t", "chela:@7", "allow-rename", "off"] in tmux.calls
+    assert ["tmux", "set-window-option", "-t", "=chela:@7", "@chela_manual_name", "1"] in tmux.calls
+    assert ["tmux", "set-window-option", "-t", "=chela:@7", "allow-rename", "off"] in tmux.calls
     assert rc == [("@7", "tapparty")]
 
 
@@ -165,7 +165,7 @@ def test_a_window_already_wearing_its_name_is_only_marked(monkeypatch, tmux, rc)
     session_names.record_name(SID, "tapparty")
     assert _tick(monkeypatch, {"@7": _pane("@7")}, {"@7": "tapparty"},
                  {SID: "@7"}) == ["@7 name tapparty -> tapparty"]
-    assert ["tmux", "set-window-option", "-t", "chela:@7", "@chela_manual_name", "1"] in tmux.calls
+    assert ["tmux", "set-window-option", "-t", "=chela:@7", "@chela_manual_name", "1"] in tmux.calls
 
 
 def test_an_unresolved_session_renames_nothing(monkeypatch, tmux, rc):
@@ -208,7 +208,7 @@ def test_a_stored_title_is_queued_again_on_the_restored_window(monkeypatch, tmux
     session_names.record_title(SID, "One Letter: ladder words")
     assert _tick(monkeypatch, {"@7": _pane("@7")}, {"@7": "oneletter"}, {SID: "@7"}) == [
         "@7 title 'One Letter: ladder words' queued again"]
-    assert tmux.calls == [["tmux", "set-window-option", "-t", "chela:@7",
+    assert tmux.calls == [["tmux", "set-window-option", "-t", "=chela:@7",
                            "@chela_title_pending", "One Letter: ladder words"]]
 
 
@@ -366,7 +366,7 @@ def test_acceptance_name_and_title_survive_a_tmux_restart(monkeypatch, rc):
 
     actions = session_names.restore_tick()
     assert actions == ["@0 name swim-proto -> tapparty", "@0 title 'Ladder words' queued again"]
-    assert ["tmux", "rename-window", "-t", "chela:@0", "tapparty"] in f.tmux.calls
+    assert ["tmux", "rename-window", "-t", "=chela:@0", "tapparty"] in f.tmux.calls
     assert f.tmux.options["@0"]["@chela_manual_name"] == "1"
     assert suggest_names.flush_pending() == {"@0": "busy"}  # still waits for idle
     f.status["@0"] = "idle"

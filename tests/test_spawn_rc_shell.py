@@ -117,7 +117,7 @@ def _new_shell(monkeypatch, tmp_path, *, rc: bool, command: str | None = None,
     workdir = tmp_path / "proj"
     workdir.mkdir()
     assert spawn.spawn_window(workdir, command=command).ok
-    assert sent and set(targets) == {f"{spawn.config.current_session()}:proj"}, targets
+    assert sent and set(targets) == {f"={spawn.config.current_session()}:proj"}, targets
     return sent
 
 
@@ -143,7 +143,7 @@ def test_one_setup_line_starting_with_a_space_then_the_scrollback_is_cleared(
     assert len(sent) == (2 if command else 1)
     assert sent[-1].startswith("claude") if command else True
     assert not any(_MARKER in t for t in sent)
-    assert ["tmux", "clear-history", "-t", f"{spawn.config.current_session()}:proj"] in calls
+    assert ["tmux", "clear-history", "-t", f"={spawn.config.current_session()}:proj"] in calls
 
 
 def test_no_window_id_and_rc_off_sends_nothing_and_clears_nothing(monkeypatch, tmp_path):

@@ -855,7 +855,7 @@ def _load_panes() -> dict[str, Pane]:
     """``{window_id: Pane}`` — ONE tmux call, then /proc for the process facts."""
     try:
         result = subprocess.run(
-            ["tmux", "list-windows", "-t", config.current_session(), "-F",
+            ["tmux", "list-windows", "-t", config.session_target(), "-F",
              "#{window_id}\t#{pane_current_command}\t#{pane_current_path}\t#{pane_pid}\t"
              "#{@chela_manual_name}\t#{@chela_title_pending}"],
             capture_output=True, text=True, timeout=5,

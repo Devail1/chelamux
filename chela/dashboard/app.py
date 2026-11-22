@@ -803,9 +803,9 @@ def _term_target(agent: str) -> str | None:
     is still accepted (resolved via discovery) for compatibility / external
     callers. Returns None if a name can't be resolved to a live window."""
     if agent.startswith("@"):
-        return f"{TMUX_SESSION}:{agent}"
+        return config.window_target(agent, TMUX_SESSION)
     wid = discovery.get_window_id(agent)
-    return f"{TMUX_SESSION}:{wid}" if wid else None
+    return config.window_target(wid, TMUX_SESSION) if wid else None
 
 
 def _term_keyargv(target: str, key: str) -> list[str] | None:
@@ -1758,7 +1758,7 @@ def _session_client_ttys(session: str) -> set[str]:
     """Every client tty currently attached to a grouped session."""
     try:
         out = subprocess.run(
-            ["tmux", "list-clients", "-t", session, "-F", "#{client_tty}"],
+            ["tmux", "list-clients", "-t", config.session_target(session), "-F", "#{client_tty}"],
             capture_output=True, text=True, timeout=5,
         )
     except Exception:
@@ -2525,7 +2525,7 @@ def api_term_upload():
     mention = f"@{uploads.UPLOADS_DIRNAME}/{name} "
     typed = True
     try:
-        subprocess.run(["tmux", "send-keys", "-t", f"{TMUX_SESSION}:{wid}", "-l", mention],
+        subprocess.run(["tmux", "send-keys", "-t", config.window_target(wid, TMUX_SESSION), "-l", mention],
                        check=True, capture_output=True, timeout=5)
     except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired) as e:
         typed = False
@@ -2762,7 +2762,7 @@ def api_agents_rename(wid):
     if any(n == name and w != wid for w, n in windows.items()):
         return jsonify({"ok": False, "error": f"another window is already named {name}"}), 409
 
-    target = f"{TMUX_SESSION}:{wid}"
+    target = config.window_target(wid, TMUX_SESSION)
     try:
         proc = subprocess.run(["tmux", "rename-window", "-t", target, name],
                               capture_output=True, text=True, timeout=10)
@@ -6781,6 +6781,8 @@ def _start_notifier():
 
 
 def main():
+    # CMX-470: a service — ignore a $TMUX_PANE inherited from whichever shell started it.
+    config.mark_service("dashboard")
     # threaded=True is required: the SSE generator at /api/events holds its
     # request thread open for the life of the connection, so a single-threaded
     # dev server would block every other request behind it.

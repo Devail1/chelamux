@@ -890,6 +890,10 @@ def _tmux_violation(argv: list, env: dict | None) -> str | None:
                 break
             except (ValueError, IndexError):
                 continue
+        # CMX-470: chela's targets are exact-match (`=session`, `=session:@N`); `=` is
+        # tmux syntax, not part of the name.
+        if target is not None:
+            target = target.removeprefix("=")
         if target is not None and (target == safe_session
                                     or target.startswith(f"{safe_session}:")):
             return None  # scoped to a session that can never exist

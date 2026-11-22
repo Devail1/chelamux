@@ -20,6 +20,8 @@ Run these PM2 apps from [`examples/ecosystem.config.js`](../examples/ecosystem.c
 | `chela-dashboard` (`chela dashboard`) | the web dashboard; binds `CHELA_DASHBOARD_PORT` (default 5001) on `127.0.0.1` |
 | `chela-agent-terminals` | the ttyd supervisor behind the terminal wall. The wall's tiles are empty without it. Leave it out (and set `CHELA_TERMINALS_ENABLED=false`) only if you do not want terminals in the browser at all |
 
+Run `pm2 start` from a shell outside tmux, or set `CHELA_TMUX_SESSION=chela` in `chela.env`, and never name another tmux session `chela-*` (`chela doctor` warns about both).
+
 **Do not start** `chela-telegram` or `chela-collab`: delete those two lines from your copy of
 the ecosystem file, so a cold `pm2 start` cannot bring them back. In `chela.env` and
 `secrets.env`, **leave unset**:
