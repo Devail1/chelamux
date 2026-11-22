@@ -18,7 +18,15 @@ Run these PM2 apps from [`examples/ecosystem.config.js`](../examples/ecosystem.c
 |---|---|
 | `chela-daemon` (`chela run`) | scheduler and notifier (the dispatcher stays off, see below) |
 | `chela-dashboard` (`chela dashboard`) | the web dashboard; binds `CHELA_DASHBOARD_PORT` (default 5001) on `127.0.0.1` |
-| `chela-agent-terminals` | the ttyd supervisor behind the terminal wall. The wall's tiles are empty without it. Leave it out (and set `CHELA_TERMINALS_ENABLED=false`) only if you do not want terminals in the browser at all |
+| `chela-agent-terminals` (`chela agent-terminals`) | the ttyd supervisor behind the terminal wall. The wall's tiles are empty without it. Leave it out (and set `CHELA_TERMINALS_ENABLED=false`) only if you do not want terminals in the browser at all |
+
+Installed from PyPI (`uv tool install "chelamux[dashboard]"`), with no checkout for the
+ecosystem file's `CHELA_REPO` to point at? The wall's supervisor ships in the package: run
+`chela agent-terminals` (under pm2: `pm2 start "$(command -v chela)" --name
+chela-agent-terminals --interpreter none -- agent-terminals`). It needs `ttyd` on PATH
+(`brew install ttyd` on macOS) and runs on macOS's stock `/bin/bash` 3.2. It never creates
+the tmux session, only waits for it: after a reboot the wall fills in once a session exists
+(starting one from the dashboard creates it).
 
 Run `pm2 start` from a shell outside tmux, or set `CHELA_TMUX_SESSION=chela` in `chela.env`, and never name another tmux session `chela-*` (`chela doctor` warns about both).
 
@@ -50,6 +58,55 @@ INFO, `chela doctor` reports it as information instead of a warning, and the das
 the Work board, **New task** and the sidebar's **Dispatched** section. Settings shows one line
 in place of the *Work dispatcher* row. Without the switch, an empty workflow list still
 warns, on purpose ([CONFIG.md](CONFIG.md#a-config-is-not-a-capability)).
+
+### On macOS: launchd instead of PM2
+
+PM2 is not required. On a Mac, a launchd **LaunchAgent** starts each service at login and
+restarts it if it exits. Use one agent per service, each running `scripts/run-chela.sh` (the
+same start script the ecosystem file uses, so `chela.env` is still the only config). For the
+dashboard, `~/Library/LaunchAgents/org.chela.dashboard.plist`:
+
+```xml
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>             <string>org.chela.dashboard</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/bash</string>
+    <string><checkout>/scripts/run-chela.sh</string>
+    <string>dashboard</string>
+  </array>
+  <!-- launchd starts with a bare PATH: name where chela, uv and tmux live. -->
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key>            <string><home>/.local/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+  </dict>
+  <key>RunAtLoad</key>         <true/>
+  <key>KeepAlive</key>         <true/>
+  <key>StandardOutPath</key>   <string><home>/Library/Logs/chela-dashboard.log</string>
+  <key>StandardErrorPath</key> <string><home>/Library/Logs/chela-dashboard.log</string>
+</dict>
+</plist>
+```
+
+launchd does not expand `~` or `$HOME`: replace `<checkout>` and `<home>` with absolute
+paths. Copy the file for the daemon (`run` instead of `dashboard`, label
+`org.chela.daemon`) and for the terminal wall (`agent-terminals`, label
+`org.chela.agent-terminals`). Installed from PyPI, with no checkout? Give `ProgramArguments`
+the absolute path of `chela` (`command -v chela`) and the subcommand, with no `/bin/bash` in
+front. Then:
+
+```bash
+launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/org.chela.dashboard.plist  # load and start
+launchctl kickstart -k gui/$(id -u)/org.chela.dashboard                            # restart
+launchctl print gui/$(id -u)/org.chela.dashboard | grep -E 'state|pid|last exit'   # status
+tail -f ~/Library/Logs/chela-dashboard.log                                         # logs
+launchctl bootout gui/$(id -u)/org.chela.dashboard                                 # stop and unload
+```
+
+Wherever this guide says `pm2 restart <app>`, use the `kickstart -k` line for that label.
 
 ### What you lose, and what replaces it
 
@@ -166,6 +223,44 @@ that to chela. Without them the dashboard never learns a name, and every approva
 Then set `CHELA_DASHBOARD_IDENTITY_HEADER=tailscale` (section 4). The name is attribution,
 not authority: it records who approved, and the tailnet policy still decides who gets in.
 
+#### Signing the node in without an auth key
+
+You do not have to create or store an auth key at all. Leave `auth_key` out, and give the
+node its tags in a node block named after the `bind` target:
+
+```caddyfile
+{
+	tailscale {
+		state_dir /var/lib/caddy/tailscale
+		<node-name> {
+			tags tag:org-chela
+		}
+	}
+}
+```
+
+`tag:org-chela` must already exist in the policy's `tagOwners` (section 3), and you must be
+one of its owners, or the login is refused. On the first start the embedded node has no
+state, so it prints a login URL to **Caddy's log**: open it, sign in, and the node joins
+tagged. After that the key lives in `state_dir`, and later starts sign in silently. Check the
+`tags` option against the plugin's README for the version you build.
+
+#### Pitfalls
+
+- **One Caddy per `state_dir`.** Two Caddy processes on the same `state_dir` run the same
+  node key twice. The admin console then shows **"Duplicate node key"**, and the node drops
+  in and out. Before you start Caddy, check that no other one is running
+  (`pgrep -l '[c]addy'`).
+- **A `| tee` can outlive its window.** If you run Caddy in a tmux window as
+  `caddy run … | tee caddy.log`, killing or respawning the window can leave the `caddy`
+  process alive, still holding the node, and the next start is the duplicate above. Stop it
+  properly (`caddy stop`, Ctrl-C in its window, or the service manager), or better, run it
+  as a service and log to a file instead of a pipe.
+- **The Tailscale app on the same host.** With (a) the host itself is not meant to be on the
+  tailnet. If the Tailscale app (or `tailscaled`) is also installed, it can sign the whole
+  host back in, and the policy in section 3 then has a second node to contain. For (a),
+  uninstall it from the host; the embedded node does not need it.
+
 ### (b) `tailscale serve`
 
 If the host runs `tailscaled` and has joined the tailnet itself:
@@ -200,6 +295,12 @@ dashboard itself can write), like the identity settings in section 4. An unknown
 refused: the dashboard answers 503 and names the bad value, rather than quietly drawing the
 default icon. `pm2 restart chela-dashboard` after a change, then remove and re-add the
 home-screen icon: a phone keeps the icon and label it saved.
+
+**If an iPhone says "Safari can't open the page because the server can't be found"** for the
+`*.ts.net` address, the phone is not resolving tailnet names. In the Tailscale app, turn on
+**Use Tailscale DNS**. If it still fails, turn off **iCloud Private Relay** for the network
+the phone is on (Settings → Wi-Fi → the network's ⓘ): Private Relay can send Safari's
+lookups around Tailscale's resolver.
 
 ## 3. The tailnet policy
 
@@ -250,6 +351,27 @@ attribution of approvals ([CMX-385](https://linear.app/chelamux/issue/CMX-385/da
 depends on. Note that `node:os` is what the client reports, not an attestation: it narrows
 which of your devices are let in, it does not prove a device is a phone.
 
+**Alternative for exactly one phone: an IP alias.** Instead of user plus posture, name the
+phone's tailnet IP in `hosts` and grant from that alias:
+
+```jsonc
+{
+  "hosts": {
+    "my-phone": "<phone-ip>/32"
+  },
+  "grants": [
+    { "src": ["my-phone"], "dst": ["tag:org-chela"], "ip": ["tcp:443"] }
+  ]
+}
+```
+
+This still keeps identity: the phone stays user-owned (it is not tagged), so its requests
+still carry your login. It is stricter than posture, which lets in every phone you own; the
+alias lets in one device. The caveat: tailnet IPs are not permanent. If the phone is removed
+from the tailnet and re-added (or replaced), it gets a new IP, and the old one can later be
+given to **another device**, which the alias then lets in. Update or delete the alias
+whenever the phone leaves the tailnet.
+
 ## 4. Hardening checklist
 
 - [ ] **Never Funnel.** `tailscale funnel` publishes a node to the public internet. With no
@@ -279,6 +401,18 @@ which of your devices are let in, it does not prove a device is a phone.
       session that started before it is badged "may still use" the old account: restart it.
 - [ ] **Keep the dashboard on loopback.** `CHELA_DASH_HOST` unset (it defaults to
       `127.0.0.1`), `CHELA_TERMINALS_EXPOSE` unset.
+- [ ] **Turn off Caddy's admin API.** Put `admin off` in the Caddyfile's global options
+      block. Otherwise Caddy listens on `localhost:2019`, and any local process can replace
+      its config, including the `header_up` lines that set the identity header. With it off,
+      reload by restarting Caddy.
+- [ ] **Turn off the plugin's web UI.** In option (a), set `webui false` in the `tailscale`
+      block (or the node block), so the embedded node serves no Tailscale web interface.
+- [ ] **Lock down the tsnet state dir.** `state_dir` holds the node's private keys. Make the
+      directory mode `700` and its files `600`, owned by the user Caddy runs as:
+      `chmod 700 <state_dir> && chmod 600 <state_dir>/*`.
+- [ ] **Keep the keys out of backups.** On macOS, `tmutil addexclusion <state_dir>` keeps the
+      state dir out of Time Machine, so a copy of the node's keys does not sit on a backup
+      disk. Exclude it from any other backup tool too.
 
 ## 5. What this does not solve
 
@@ -292,6 +426,14 @@ which of your devices are let in, it does not prove a device is a phone.
   who reaches the dashboard; it does not limit what an agent on the host can do. Treat the
   host as able to run anything the agents run, including reaching any network the host
   itself can reach outside Tailscale.
+- **An open LAN port from the embedded node.** With option (a), tsnet's peerapi (the
+  node-to-node API Tailscale uses for things like Taildrop) listens on `0.0.0.0:<port>` on
+  the host, a port chosen at start. This is how it behaves on macOS, where tsnet runs on
+  netstack. Callers that are not tailnet peers are dropped (the log shows "unknown peer"),
+  so it serves nothing to them, but it is still a port open to the local network, visible to
+  a port scan. On a managed Mac the application firewall may be controlled by IT and not
+  changeable from the command line, so you may not be able to close it. Treat it as a known
+  exposure, and tell IT about it if your setup needs their approval.
 
 ## 6. The Cloudflare alternative
 

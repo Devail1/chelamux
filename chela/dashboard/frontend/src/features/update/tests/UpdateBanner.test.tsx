@@ -143,6 +143,35 @@ test('stale: one banner naming the count, a Restart button, no Reload', () => {
   expect(shown()).toBe(false);
 });
 
+// CMX-471: a uv tool / uvx / pip install. The banner names the upgrade command; it never offers
+// "Update & restart" (chela cannot upgrade the package it runs from) and unknown offers nothing.
+const PKG: UpdateStatus = { ok: true, install: 'uv-tool', latest: '0.20.0', behind: true, command: 'uv tool upgrade chelamux', advice: 'run `uv tool upgrade chelamux`, then restart the services' };
+test('package install behind PyPI: the command as text, no Update & restart, no Restart', () => {
+  stale(PKG);
+  expect(shown()).toBe(true);
+  expect(msg()).toBe('chelamux 0.20.0 is out: run `uv tool upgrade chelamux`, then restart the services');
+  expect([$('update-banner-restart'), $('update-banner-reload'), $('update-banner-claude')]).toEqual([null, null, null]);
+  expect(document.body.textContent).not.toContain('Update & restart');
+  stale({ ...PKG, install: 'uvx', command: '', advice: 'uvx always runs the latest; restart the services' });
+  expect(msg()).toBe('chelamux 0.20.0 is out: uvx always runs the latest; restart the services');
+});
+
+test('package install: up to date, unknown, or a git checkout offer nothing', () => {
+  for (const st of [{ ...PKG, behind: false }, { ...PKG, behind: null }, { ...PKG, ok: false }, { ...PKG, latest: null }, { ...PKG, install: 'git' }, { ...PKG, install: undefined }]) {
+    stale(st as UpdateStatus);
+    expect(shown()).toBe(false);
+  }
+});
+
+test('package offer: dismiss hides THIS release only; a newer one shows again', () => {
+  stale(PKG);
+  click('update-banner-close');
+  stale(PKG);
+  expect(shown()).toBe(false);
+  stale({ ...PKG, latest: '0.21.0' });
+  expect(msg()).toBe('chelamux 0.21.0 is out: run `uv tool upgrade chelamux`, then restart the services');
+});
+
 test('a deploy AND stale services: ONE banner, both facts, each button', () => {
   stale(STALE);
   expect(ver('bbbbbbbbbbbb')).toBe(true);

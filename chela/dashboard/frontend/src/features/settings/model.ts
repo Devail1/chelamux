@@ -105,8 +105,15 @@ export type UpdateInfo = Partial<{
   ok: boolean;
   error: string;
   note: string;
-  behind: number;
+  /** git checkout: commits behind. A package install (CMX-471): newer on PyPI, or null = unknown. */
+  behind: number | boolean | null;
   branch: string;
+  /** CMX-471: 'git' | 'uv-tool' | 'uvx' | 'pip'. */
+  install: string;
+  version: string;
+  latest: string | null;
+  command: string;
+  advice: string;
   stale_services: string[];
   unknown_services: string[];
   stale_ok: boolean;
@@ -115,6 +122,7 @@ export type UpdateInfo = Partial<{
 /** What the Update card shows: the badge, which sentence, and the button (none = hidden). */
 export type UpdateView =
   | { kind: 'unknown'; badge: string; detail: string; button: null }
+  | { kind: 'package'; badge: string; detail: string; behind: boolean; command: string; button: null }
   | { kind: 'behind'; badge: string; branch: string; behind: number; unknown: string[]; button: { mode: 'update'; label: string } }
   | { kind: 'stale'; badge: string; branch: string; stale: string[]; unknown: string[]; button: { mode: 'restart'; label: string } }
   | { kind: 'unreadable'; badge: string; branch: string; button: null }
@@ -124,7 +132,9 @@ export function updateView(upd: UpdateInfo | null | undefined): UpdateView {
   if (!upd || !upd.ok) {
     return { kind: 'unknown', badge: 'Unknown', detail: upd && (upd.error || upd.note) ? String(upd.error || upd.note) : 'unavailable', button: null };
   }
-  const behind = upd.behind || 0;
+  // CMX-471: a uv tool / uvx / pip install. No pull and no button: it names its own upgrade path.
+  if (upd.install && upd.install !== 'git') return packageView(upd);
+  const behind = typeof upd.behind === 'number' ? upd.behind : 0;
   const stale = upd.stale_services || [];
   // CMX-56: a service whose start commit could not be read is neither stale nor fresh.
   const unknown = upd.unknown_services || [];
@@ -136,6 +146,17 @@ export function updateView(upd: UpdateInfo | null | undefined): UpdateView {
   // CMX-95: which services run old code could not be read: Unknown, never "Up to date".
   if (upd.stale_ok === false) return { kind: 'unreadable', badge: 'Unknown', branch, button: null };
   return { kind: 'ok', badge: 'Up to date', branch, unknown, button: null };
+}
+
+/** A package install's Update card: PyPI's latest against the installed version. Only an
+ * affirmative `behind: true` offers the upgrade; anything else from a readable payload is
+ * "Up to date" (an unreadable one never reaches here: `ok` is false). */
+function packageView(upd: UpdateInfo): UpdateView {
+  const what = `${upd.install} install, chelamux ${upd.version || '?'}`;
+  if (upd.behind === true) {
+    return { kind: 'package', badge: `${upd.latest} available`, detail: `${what}: ${upd.advice || ''}`, behind: true, command: upd.command || '', button: null };
+  }
+  return { kind: 'package', badge: 'Up to date', detail: `${what}: the latest on PyPI`, behind: false, command: '', button: null };
 }
 
 /** "runs" / "run", "it" / "they": the stale sentence agrees with its count. */

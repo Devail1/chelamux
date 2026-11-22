@@ -191,6 +191,15 @@ if ! in_box 'chela doctor'; then
     exit 1
 fi
 
+# CMX-469: the terminal wall's supervisor ships inside the wheel `uv tool install` built.
+echo "==> chela agent-terminals --help"
+if ! in_box 'chela agent-terminals --help \
+        && ls "$(uv tool dir)"/chelamux/lib/python*/site-packages/chela/scripts/agent-terminals.sh \
+              "$(uv tool dir)"/chelamux/lib/python*/site-packages/chela/scripts/chela-env.sh'; then
+    echo "FAIL: chela agent-terminals is missing from the installed chela" >&2
+    exit 1
+fi
+
 echo
 printf '%s' "$TIMINGS"
 echo "prerequisites: ${prereqs} ($IMAGE)"

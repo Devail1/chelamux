@@ -701,6 +701,19 @@ def _break_services_current(tmp_path, monkeypatch):
     return doctor.WARN
 
 
+def _break_package_current(tmp_path, monkeypatch):
+    """A uv tool install (no `.git`) one release behind PyPI (CMX-471)."""
+    from chela import install
+
+    monkeypatch.setattr(
+        update, "repo_root",
+        lambda: (_ for _ in ()).throw(update.NotAGitCheckout("not a git checkout")))
+    monkeypatch.setattr(
+        install, "package_status",
+        lambda *a, **k: install.PackageStatus("uv-tool", "0.19.1", "0.20.0", True))
+    return doctor.WARN
+
+
 def _break_telegram_sender_allowlist(tmp_path, monkeypatch):
     """The bridge has a token (in secrets.env, where it belongs) and NO sender allowlist —
     every member of the bound chat can drive every agent (CMX-185)."""
@@ -745,6 +758,7 @@ CORRUPTIONS = {
     "fonts.glyph_coverage": _break_fonts_glyph_coverage,
     "repo.upstream_synced": _break_upstream_synced,
     "repo.services_current": _break_services_current,
+    "install.package_current": _break_package_current,
     "agents.native_status_feed": _break_native_status_feed,
     "restore.dead_epoch_rows": _break_restore_dead_epoch,
     "dispatch.unresolved_depends": _break_unresolved_depends,

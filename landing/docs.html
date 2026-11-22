@@ -767,6 +767,7 @@ cd chela/collab-relay && npx wrangler deploy
       <h3>Setup</h3>
       <div class="cmd"><code>chela plugin <span class="opt">[--dir PATH] [--port N]</span></code><p>Render the Claude Code hooks plugin (event log + zero-keystroke Telegram answers). Recommended; see above.</p></div>
       <div class="cmd"><code>chela install-statusline <span class="opt">[--write] [--force] [--settings]</span></code><p>Print (or <code>--write</code>) the statusLine snippet for <code>~/.claude/settings.json</code> so panes report live context + rate limits.</p></div>
+      <div class="cmd"><code>chela agent-terminals</code><p>Run the terminal wall's ttyd supervisor: one localhost <code>ttyd</code> per agent window, so the wall's tiles are live terminals. Run it next to <code>chela dashboard</code>; needs <code>ttyd</code>.</p></div>
     </div>
   </section>
 

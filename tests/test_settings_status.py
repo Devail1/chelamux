@@ -212,7 +212,7 @@ def test_update_payload_reports_behind_count(client, monkeypatch):
                         lambda fetch=True: dash.update.UpdateStatus(
                             ok=True, behind=5, ahead=0, branch="dev"))
     data = client.get("/api/settings").get_json()
-    assert data["update"] == {"ok": True, "behind": 5, "ahead": 0, "branch": "dev",
+    assert data["update"] == {"ok": True, "install": "git", "behind": 5, "ahead": 0, "branch": "dev",
                                "stale_services": [], "unknown_services": [], "stale_ok": True}
 
 
@@ -225,12 +225,18 @@ def test_update_payload_is_clean_when_up_to_date(client, monkeypatch):
 
 
 def test_update_payload_degrades_gracefully_on_a_pip_install(client, monkeypatch):
+    """CMX-471: a pip install reports its kind; PyPI unreadable is ``ok: False``, never
+    "up to date"."""
     def _boom(fetch=True):
         raise dash.update.NotAGitCheckout("not a git checkout")
     monkeypatch.setattr(dash.update, "commits_behind", _boom)
+    monkeypatch.setattr(dash.install, "kind", lambda: "pip")
+    monkeypatch.setattr(dash.install, "latest_version", lambda **k: ("", "could not read PyPI: x"))
     data = client.get("/api/settings").get_json()
     assert data["update"]["ok"] is False
     assert data["update"]["git"] is False
+    assert data["update"]["install"] == "pip"
+    assert data["update"]["behind"] is None
 
 
 def test_update_payload_carries_the_no_upstream_note(client, monkeypatch):
@@ -247,7 +253,7 @@ def test_update_payload_carries_the_no_upstream_note(client, monkeypatch):
                             error="no upstream configured for this branch"))
     data = client.get("/api/settings").get_json()
     assert data["update"] == {
-        "ok": True, "behind": 0, "ahead": 0, "branch": "dev",
+        "ok": True, "install": "git", "behind": 0, "ahead": 0, "branch": "dev",
         "note": "no upstream configured for this branch", "stale_services": [],
         "unknown_services": [], "stale_ok": True,
     }
@@ -293,7 +299,7 @@ def test_update_payload_reports_stale_services_even_with_nothing_to_pull(client,
     data = client.get("/api/settings").get_json()
     # CMX-56: "unknown" travels separately — neither folded into stale nor dropped.
     assert data["update"] == {
-        "ok": True, "behind": 0, "ahead": 0, "branch": "dev",
+        "ok": True, "install": "git", "behind": 0, "ahead": 0, "branch": "dev",
         "stale_services": ["chela-daemon", "chela-dashboard"],
         "unknown_services": ["chela-agent-terminals"], "stale_ok": True,
     }

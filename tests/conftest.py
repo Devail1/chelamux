@@ -938,6 +938,32 @@ def _no_live_tmux_mutation(monkeypatch):
     monkeypatch.setattr(subprocess.Popen, "__init__", guarded_init)
 
 
+class LiveExecEscape(BaseException):
+    """A test reached ``os.exec*``: the pytest worker itself would become another program.
+
+    CMX-469: a judge sweep mutated `chela agent-terminals`' dispatch line to `if True`, so
+    every in-suite ``main()`` call exec'd the real terminal-wall supervisor. An exec'd
+    process is past every fence in this file (they patch ``subprocess.Popen``), and the
+    supervisor's self-heal created the suite's never-exists ``CHELA_TMUX_SESSION`` on the
+    operator's LIVE tmux server. ``BaseException`` for the same reason as the fences above.
+    A test that wants an exec patches the seam that calls it (as test_demo_resume does).
+    """
+
+
+@pytest.fixture(autouse=True)
+def _no_exec(monkeypatch):
+    """The fence: ``os.execv``/``execve``/``execvp``/``execvpe``/``execl*`` fail the test."""
+    def refuse(name):
+        def _refused(*args, **kwargs):
+            raise LiveExecEscape(f"test reached os.{name}{args[:2]!r}: a test must never "
+                                 "replace the pytest process; patch the seam that execs")
+        return _refused
+
+    for name in ("execv", "execve", "execvp", "execvpe", "execl", "execle", "execlp",
+                 "execlpe"):
+        monkeypatch.setattr(os, name, refuse(name))
+
+
 class LiveGhEscape(BaseException):
     """A test ran the real ``gh`` (or the fence's stub standing in for it). ``BaseException``
     like :class:`LiveTmuxMutationEscape`: the gh callers fail closed on ``Exception``."""

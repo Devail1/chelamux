@@ -60,11 +60,16 @@ exclude = ["chela/dashboard/frontend"]
 # `chela install-statusline` finds this copy when chela runs from an installed wheel.
 [tool.hatch.build.targets.wheel.force-include]
 "scripts/cache-statusline.sh" = "chela/scripts/cache-statusline.sh"
+# CMX-469: the terminal wall's supervisor and the env loader it sources, so `chela
+# agent-terminals` runs from a PyPI install (the script finds chela-env.sh next to itself).
+"scripts/agent-terminals.sh" = "chela/scripts/agent-terminals.sh"
+"scripts/chela-env.sh" = "chela/scripts/chela-env.sh"
 
 # What a wheel is built from, and nothing else: a dev checkout's node_modules (symlinked in
 # by pnpm) would otherwise land in the sdist. tests/test_packaging.py checks both artifacts.
 [tool.hatch.build.targets.sdist]
-only-include = ["chela", "scripts/cache-statusline.sh", "README.md", "LICENSE", "NOTICE", "CHANGELOG.md"]
+only-include = ["chela", "scripts/cache-statusline.sh", "scripts/agent-terminals.sh",
+                "scripts/chela-env.sh", "README.md", "LICENSE", "NOTICE", "CHANGELOG.md"]
 exclude = ["node_modules"]
 
 [tool.pytest.ini_options]

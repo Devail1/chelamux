@@ -29,7 +29,7 @@ from flask import abort, Flask, jsonify, render_template, request, Response, sen
 
 from chela import config
 from chela.config import DISPATCH_WORKFLOWS, CHELA_DIR, TMUX_SESSION, NOTIFY_INTERVAL
-from chela import agent_manager, capabilities, claude_account, collab, concurrency, collab_host, collab_stream, context, diffsurface, discovery, dismissed_sessions, dispatcher, epoch, event_log, fleet, gateanswer, hold, hooks, inbox, judge, launcher, messenger, notify, okf, parentage, park, personas, pr_status, probecache, rc_rename, restart, restore, rooms, sandbox_status, scheduler, session_names, sessionids, share_requests, share_sandbox, share_store, sidebar_archive, sidebar_layout, spawn, starter, suggest_names, tasklists, transcripts, update, usage, userconfig
+from chela import agent_manager, capabilities, claude_account, collab, concurrency, collab_host, collab_stream, context, diffsurface, discovery, dismissed_sessions, dispatcher, epoch, event_log, fleet, gateanswer, hold, hooks, inbox, install, judge, launcher, messenger, notify, okf, parentage, park, personas, pr_status, probecache, rc_rename, restart, restore, rooms, sandbox_status, scheduler, session_names, sessionids, share_requests, share_sandbox, share_store, sidebar_archive, sidebar_layout, spawn, starter, suggest_names, tasklists, transcripts, update, usage, userconfig
 from chela.dashboard import humanproof, identity, pwa, resources, term_fonts, term_themes
 from chela import topic_ledger as tg_topics
 from chela.personas import autolaunch, lease
@@ -4071,19 +4071,23 @@ def _update_status_payload() -> dict:
     never mutates. `/api/update/apply` is the only route that actually pulls."""
     try:
         status = update.commits_behind(fetch=False)
-    except update.NotAGitCheckout as e:
-        return {"ok": False, "git": False, "error": str(e)}
+    except update.NotAGitCheckout:
+        # CMX-471: a uv tool / uvx / pip install — the installed version against PyPI's
+        # latest as the daemon's hourly check last cached it (never a network call from
+        # a poll), plus the command that upgrades this kind of install. There is no pull
+        # and no "Update & restart".
+        return install.package_status().as_dict()
     if not status.ok:
-        return {"ok": False, "error": status.error}
+        return {"ok": False, "install": install.GIT, "error": status.error}
     stale, unknown, stale_ok = _service_freshness()
     if status.error:
         # ok=True but carrying a note (no upstream configured) — not a fault, just
         # nothing this control can act on.
-        return {"ok": True, "behind": 0, "ahead": 0, "branch": status.branch,
-                "note": status.error, "stale_services": stale, "unknown_services": unknown,
+        return {"ok": True, "install": install.GIT, "behind": 0, "ahead": 0,
+                "branch": status.branch, "note": status.error, "stale_services": stale, "unknown_services": unknown,
                 "stale_ok": stale_ok}
-    return {"ok": True, "behind": status.behind, "ahead": status.ahead, "branch": status.branch,
-            "stale_services": stale, "unknown_services": unknown, "stale_ok": stale_ok}
+    return {"ok": True, "install": install.GIT, "behind": status.behind, "ahead": status.ahead,
+            "branch": status.branch, "stale_services": stale, "unknown_services": unknown, "stale_ok": stale_ok}
 
 
 # CMX-95: THIS dashboard process. A click that restarts the dashboard can't read its own
@@ -4166,8 +4170,11 @@ def api_update_apply():
     global _update_apply_started_at, _update_apply_runs
     try:
         status = update.commits_behind(fetch=False)
-    except update.NotAGitCheckout as e:
-        return jsonify({"ok": False, "error": str(e)}), 400
+    except update.NotAGitCheckout:
+        # CMX-471: nothing here can upgrade a package install; say what does.
+        kind = install.kind()
+        return jsonify({"ok": False, "install": kind,
+                        "error": f"{kind} install: {install.advice(kind)}"}), 400
     if not status.ok:
         return jsonify({"ok": False, "error": status.error}), 400
     # CMX-56: nothing to pull used to mean "do nothing" — while the card above the button
