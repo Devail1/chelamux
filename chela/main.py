@@ -2468,15 +2468,18 @@ def cmd_restart(args) -> None:
     """
     from chela import inbox, restart
 
+    wids = [w for w in (_resolve_wid(t) for t in args.wid) if w]
+    if not args.all and not wids and args.self:
+        wids = [w for w in (orchestrator.self_wid(),) if w]
+    if not args.all and not wids:
+        print("no window id (pass @N, --self or --all)", file=sys.stderr)
+        sys.exit(2)
     if args.detach:
-        target = ["--all"] if args.all else [_resolve_wid(None if args.self else args.wid)]
-        if not target[0]:
-            print("no window id (pass @N, --self or --all)", file=sys.stderr)
-            sys.exit(2)
-        if args.wait and not args.all:
-            target.append("--wait")
+        # a detached single target always waits for idle: the caller may be that session,
+        # mid-turn running this very command
+        target = ["--all"] if args.all else wids + (["--wait"] if len(wids) == 1 else [])
         try:
-            pid, path = restart.spawn_helper([t for t in target if t])
+            pid, path = restart.spawn_helper(target)
         except OSError as e:
             print(f"restart: could not start the detached helper: {e}", file=sys.stderr)
             sys.exit(1)
@@ -2485,19 +2488,21 @@ def cmd_restart(args) -> None:
         return
     ops = restart.live_ops()
     self_wid = None if args.helper else orchestrator.self_wid()
-    if args.all:
-        results = restart.restart_all(ops, wids=restart.interactive_windows(),
-                                      self_wid=self_wid, arm=restart.arm_helper)
-    else:
-        wid = _resolve_wid(None if args.self else args.wid)
-        if not wid:
-            print("no window id (pass @N, --self or --all)", file=sys.stderr)
-            sys.exit(2)
-        if wid == self_wid:
-            results = [restart.arm_helper(wid)]
-        else:
-            wait = restart.WAIT_IDLE_S if args.wait else 0.0
-            results = [restart.restart_one(wid, ops, wait_idle=wait)]
+    try:
+        # a helper waits its turn; an interactive call refuses while another restart runs
+        with restart.one_at_a_time(restart.WAIT_IDLE_S if args.helper else 0.0):
+            if args.all or len(wids) > 1:
+                results = restart.restart_all(
+                    ops, wids=restart.interactive_windows() if args.all else wids,
+                    self_wid=self_wid, arm=restart.arm_helper)
+            elif wids[0] == self_wid:
+                results = [restart.arm_helper(wids[0])]
+            else:
+                wait = restart.WAIT_IDLE_S if args.wait else 0.0
+                results = [restart.restart_one(wids[0], ops, wait_idle=wait)]
+    except restart.Busy as e:
+        results = [restart.Result("--all" if args.all else ",".join(wids),
+                                  outcome=restart.BUSY, detail=str(e))]
     lines = [r.line() for r in results]
     print("\n".join(lines) or "restart: no interactive session to restart")
     if args.helper and lines:
@@ -5201,7 +5206,9 @@ def main() -> None:
              "/exit, then the same session relaunched with its flags, name, Remote Control "
              "and topic. Dispatched runs and judges are never touched.",
     )
-    p_restart.add_argument("wid", nargs="?", help="Window to restart (@N or N)")
+    p_restart.add_argument("wid", nargs="*",
+                           help="Window(s) to restart (@N or N); several go one at a time, "
+                                "the orchestrator last")
     p_restart.add_argument("--all", action="store_true",
                            help="Every interactive session, one at a time; busy ones are "
                                 "retried at the end, the orchestrator goes last")

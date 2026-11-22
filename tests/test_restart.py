@@ -25,7 +25,8 @@ class Fleet:
     """A fake tmux fleet + clock. ``exit_after`` is how long after ``/exit`` Claude exits."""
 
     def __init__(self, windows: dict, *, exit_after: float = 5.0, status=None, runs=None,
-                 orchestrator=None, topics=None, relaunch_alive=True, rebind_after=0.0):
+                 orchestrator=None, topics=None, relaunch_alive=True, rebind_after=0.0,
+                 drafts=None):
         self.t = 0.0
         self.windows = {w: dict(v) for w, v in windows.items()}
         self.exit_after = exit_after
@@ -35,6 +36,7 @@ class Fleet:
         self.topics = dict(topics or {})
         self.relaunch_alive = relaunch_alive
         self.rebind_after = rebind_after
+        self.drafts = dict(drafts or {})
         self.keys: list[tuple[str, list[str]]] = []
         self.exit_sent_at: dict[str, float] = {}
         self.killed: list[str] = []
@@ -105,6 +107,7 @@ class Fleet:
             runs=lambda: self.runs_rows, send_keys=self.send_keys, exited=self.exited,
             window_alive=self.window_alive, kill_window=self.kill_window,
             relaunch=self.relaunch, topic_for=self.topic_for,
+            draft=lambda w: self.drafts.get(w, ""),
             orchestrator=lambda: self.orch, register_orchestrator=self.register,
             sleep=self.sleep, clock=lambda: self.t)
 
@@ -281,6 +284,30 @@ def test_an_unknown_cwd_is_refused():
     assert (r.outcome, r.detail, f.keys) == ("refused", "the window's cwd is unknown", [])
 
 
+@pytest.mark.parametrize("draft, why", [
+    ("refactor the foo module and", "its prompt holds an unsent draft — not typing /exit over it"),
+    (None, "its prompt could not be read — not typing /exit blind"),
+])
+def test_an_unsent_draft_or_an_unreadable_prompt_is_never_typed_over(draft, why):
+    f = _one(drafts={"@3": draft})
+    r = restart.restart_one("@3", f.ops())
+    assert (r.outcome, r.detail, f.keys, f.relaunched) == ("refused", why, [], [])
+
+
+def test_the_draft_is_read_with_escapes_so_ghost_text_reads_empty(monkeypatch):
+    from chela import messenger
+    seen = []
+    monkeypatch.setattr(messenger, "capture_pane",
+                        lambda wid, ansi=False: seen.append((wid, ansi)) or "PANE")
+    monkeypatch.setattr(messenger, "input_draft", lambda pane: "" if pane == "PANE" else "x")
+    assert (restart._draft("@3"), seen) == ("", [("@3", True)])
+
+    def boom(wid, ansi=False):
+        raise OSError("tmux gone")
+    monkeypatch.setattr(messenger, "capture_pane", boom)
+    assert restart._draft("@3") is None
+
+
 def test_a_dead_window_is_refused():
     r = restart.restart_one("@9", _one().ops())
     assert (r.outcome, r.detail) == ("refused", "not a live window")
@@ -448,7 +475,9 @@ def test_helper_log_path_lives_in_the_chela_dir(tmp_path, monkeypatch):
     ("/home/u/.local/share/claude/versions/2.1.330", "2.1.330"),
     ("/home/u/.local/share/claude/versions/2.1.330 (deleted)", "2.1.330"),
     ("/usr/bin/node", None),
-    ("/opt/2.1.330/bin/claude", None),            # only the basename counts
+    ("/usr/bin/node-22.1.0", None),               # not a Claude Code versions dir
+    ("/x/claude/versions/2.1.330/claude", None),  # the version must be the file itself
+    ("/opt/2.1.330/bin/claude", None),
     ("", None),
     (None, None),
 ])
@@ -541,9 +570,15 @@ def test_exited_is_true_once_the_window_closed_or_the_pane_is_a_shell(monkeypatc
         cmds.append(args)
         return SimpleNamespace(stdout=tmux.out)
     monkeypatch.setattr(restart, "_tmux", tmux)
+    from chela import agent_manager
+    pid = {"v": None}
+    monkeypatch.setattr(agent_manager, "claude_pid", lambda w: pid["v"])
     for cmd, done in [("claude\n", False), ("node", False), ("bash\n", True), ("zsh", True)]:
         tmux.out = cmd
         assert restart._exited("@3") is done
+    pid["v"] = 77                                  # a wrapper shows bash; Claude still runs
+    tmux.out = "bash"
+    assert restart._exited("@3") is False
     assert cmds[0] == ("display-message", "-p", "-t", "@3", "#{pane_current_command}")
     live.clear()
     assert restart._exited("@3") is True
@@ -610,6 +645,7 @@ def test_live_ops_wires_restore_s_relaunch_core_and_inbox_register(monkeypatch):
     ops = restart.live_ops()
     assert ops.relaunch is restore.relaunch_session
     assert ops.kill_window is restore._default_kill_window
+    assert (ops.draft, ops.exited, ops.status) == (restart._draft, restart._exited, restart._native_status)
     assert ops.orchestrator() == "@2"
     ops.register_orchestrator("@90")
     assert calls == [("@90", "restart")]
@@ -699,10 +735,41 @@ def test_cli_helper_never_re_arms_itself_and_reports_to_the_inbox(monkeypatch):
 
 def test_cli_detach_spawns_the_helper_with_the_target(monkeypatch, capsys):
     _, seen = _cli(monkeypatch, ["--all", "--detach"])
-    _, seen2 = _cli(monkeypatch, ["5", "--wait", "--detach"])
+    _, seen2 = _cli(monkeypatch, ["5", "--detach"])
     assert (seen["spawned"], seen2["spawned"]) == ([["--all"]], [["@5", "--wait"]])
     assert seen["one"] == seen["all"] == []
     assert "detached helper pid 99" in capsys.readouterr().out
+
+
+def test_cli_several_windows_go_through_restart_all(monkeypatch):
+    code, seen = _cli(monkeypatch, ["3", "@5"], all_results=[
+        restart.Result("@3", outcome="restarted")])
+    [(_, wids, _, _)] = seen["all"]
+    assert (code, wids, seen["one"]) == (0, ["@3", "@5"], [])
+
+
+def test_cli_detach_self_always_waits(monkeypatch):
+    _, seen = _cli(monkeypatch, ["--self", "--detach"], self_wid="@2")
+    _, seen2 = _cli(monkeypatch, ["3", "5", "--detach"])
+    assert (seen["spawned"], seen2["spawned"]) == ([["@2", "--wait"]], [["@3", "@5"]])
+
+
+def test_cli_another_restart_running_is_refused_as_busy(monkeypatch, tmp_path):
+    import contextlib
+
+    @contextlib.contextmanager
+    def held(timeout=0.0):
+        held.timeouts.append(timeout)
+        raise restart.Busy("another chela restart is running")
+        yield
+    held.timeouts = []
+    monkeypatch.setattr(restart, "one_at_a_time", held)
+    code, seen = _cli(monkeypatch, ["@3"])
+    assert (code, seen["one"], held.timeouts) == (1, [], [0.0])
+    code, seen = _cli(monkeypatch, ["@3", "--helper"])
+    assert held.timeouts[-1] == restart.WAIT_IDLE_S        # a helper waits its turn
+    [(kind, summary)] = seen["enqueued"]
+    assert summary == "chela restart: ⏸ ? @3: busy — another chela restart is running"
 
 
 def test_cli_without_a_target_is_a_usage_error(monkeypatch):
@@ -739,8 +806,15 @@ def test_claude_version_route_with_unknown_installed_offers_nothing(dash, monkey
     assert body == {"ok": True, "installed": None, "stale": []}
 
 
-@pytest.mark.parametrize("payload, args", [({"wid": "@3"}, ["@3"]), ({"all": True}, ["--all"])])
+@pytest.mark.parametrize("payload, args", [
+    ({"wid": "@3"}, ["@3", "--wait"]),
+    ({"wids": ["@3"]}, ["@3", "--wait"]),
+    ({"wids": ["@3", "@5", "@3"]}, ["@3", "@5"]),
+    ({"all": True}, ["--all"]),
+])
 def test_restart_route_starts_the_detached_helper(dash, monkeypatch, payload, args):
+    monkeypatch.setattr(dash.discovery, "get_windows_by_id", lambda: {"@3": "a", "@5": "b"})
+    monkeypatch.setattr(restart, "running", lambda: False)
     spawned = []
     monkeypatch.setattr(restart, "spawn_helper", lambda a: spawned.append(a) or (321, "/l"))
     resp = dash.app.test_client().post("/api/sessions/restart", json=payload)
@@ -752,6 +826,8 @@ def test_restart_route_starts_the_detached_helper(dash, monkeypatch, payload, ar
 @pytest.mark.parametrize("payload, status", [
     ({}, 400), ({"wid": "3"}, 400), ({"wid": "@3; rm"}, 400), ({"wid": "@3\n"}, 400),
     ({"all": "yes"}, 400), ({"wid": 3}, 400), ({"wid": "@4"}, 404),
+    ({"wids": []}, 400), ({"wids": "@3"}, 400), ({"wids": ["@3", "x"]}, 400),
+    ({"wids": ["@3", "@4"]}, 404),
 ])
 def test_restart_route_refuses_a_bad_target(dash, monkeypatch, payload, status):
     monkeypatch.setattr(restart, "spawn_helper", lambda a: pytest.fail("never spawned"))
@@ -767,7 +843,16 @@ def test_restart_route_requires_the_browser_proof(dash, monkeypatch):
     assert resp.status_code == 403
 
 
+def test_restart_route_refuses_while_a_restart_runs(dash, monkeypatch):
+    monkeypatch.setattr(restart, "running", lambda: True)
+    monkeypatch.setattr(restart, "spawn_helper", lambda a: pytest.fail("never spawned"))
+    resp = dash.app.test_client().post("/api/sessions/restart", json={"all": True})
+    assert (resp.status_code, resp.get_json()["error"]) == (
+        409, "a restart is already running; its result lands in the inbox")
+
+
 def test_restart_route_that_cannot_start_says_so(dash, monkeypatch):
+    monkeypatch.setattr(restart, "running", lambda: False)
     def boom(a):
         raise OSError("no fork")
     monkeypatch.setattr(restart, "spawn_helper", boom)
@@ -834,3 +919,34 @@ def test_relaunch_whose_spawn_failed_closes_nothing():
         launch_settings_for=lambda s: None, name_for=lambda s: None,
         remote_control_on=lambda: False)
     assert (r.alive, r.result.error, killed) == (False, "no tmux", [])
+
+
+# --------------------------------------------------------------------------
+# one restart at a time
+# --------------------------------------------------------------------------
+
+def test_one_at_a_time_refuses_a_second_holder_and_frees_on_exit(tmp_path):
+    lock = tmp_path / "sub" / "restart.lock"
+    assert restart.running(lock) is False
+    with restart.one_at_a_time(path=lock):
+        assert restart.running(lock) is True
+        with pytest.raises(restart.Busy, match="another chela restart is running"):
+            with restart.one_at_a_time(path=lock):
+                pass
+    assert restart.running(lock) is False
+
+
+def test_one_at_a_time_waits_up_to_its_timeout(tmp_path):
+    lock = tmp_path / "restart.lock"
+    t = [0.0]
+    with restart.one_at_a_time(path=lock):
+        with pytest.raises(restart.Busy):
+            with restart.one_at_a_time(30, path=lock, clock=lambda: t[0],
+                                       sleep=lambda s: t.__setitem__(0, t[0] + s)):
+                pass
+    assert t[0] == 30
+
+
+def test_lock_path_lives_in_the_chela_dir(tmp_path, monkeypatch):
+    monkeypatch.setattr(restart.config, "CHELA_DIR", tmp_path)
+    assert restart.lock_path() == tmp_path / "restart.lock"

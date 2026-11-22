@@ -6,7 +6,9 @@ what this replaces. Per session, and only when it is safe:
 
 1. **Idle only.** The native ``session_status`` (``claude agents --json``, the same authority
    ``chela peek`` reads) must say ``idle`` — never a pane scrape. Busy, waiting or unknown:
-   the session is not touched (``--wait`` waits for idle instead of skipping).
+   the session is not touched (``--wait`` waits for idle instead of skipping). And its prompt
+   must be EMPTY (:func:`chela.messenger.input_draft`, which tells Claude Code's ghost
+   suggestion from a typed draft): ``/exit`` typed after a draft would be submitted with it.
 2. **Exit.** ``Escape`` then ``/exit``, then wait up to :data:`EXIT_TIMEOUT_S` (120 s) for
    Claude to exit — the window closes, or its pane is back at a shell. Exiting can take more
    than 30 s; the first hand-written restart gave up at 30 s and left a session down. A
@@ -33,6 +35,8 @@ last; its result reaches the restarted orchestrator through the inbox.
 """
 from __future__ import annotations
 
+import contextlib
+import fcntl
 import logging
 import os
 import re
@@ -65,6 +69,8 @@ ARMED = "armed"                # handed to the detached helper (the caller's own
 
 _SHELLS = frozenset({"bash", "zsh", "sh", "fish", "dash"})
 _VERSION_RE = re.compile(r"(\d+\.\d+\.\d+)")
+# The native installer keeps each Claude Code at ``…/claude/versions/<X.Y.Z>``.
+_EXE_VERSION_RE = re.compile(r"/claude/versions/(\d+\.\d+\.\d+)(?: \(deleted\))?\Z")
 
 
 @dataclass
@@ -105,6 +111,7 @@ class Ops:
     kill_window: Callable[[str], None]
     relaunch: Callable[..., restore.Relaunch]
     topic_for: Callable[[str], str | None]
+    draft: Callable[[str], str | None]           # wid -> unsent prompt text ("" empty)
     orchestrator: Callable[[], str | None]
     register_orchestrator: Callable[[str], dict]
     sleep: Callable[[float], None] = time.sleep
@@ -171,6 +178,13 @@ def restart_one(wid: str, ops: Ops, *, wait_idle: float = 0.0,
                       else f"not idle ({ops.status(wid) or 'status unknown'})")
         return res
 
+    # An idle session can still hold a half-typed prompt: `/exit` typed after it would be
+    # appended and SUBMITTED as one turn. Unreadable is not "empty" — refuse both.
+    draft = ops.draft(wid)
+    if draft is None or draft:
+        res.detail = ("its prompt holds an unsent draft — not typing /exit over it"
+                      if draft else "its prompt could not be read — not typing /exit blind")
+        return res
     was_orchestrator = ops.orchestrator() == wid
     old_topic = ops.topic_for(wid)
     ops.send_keys(wid, ["Escape"])
@@ -248,6 +262,50 @@ def restart_all(ops: Ops, *, wids: list[str], self_wid: str | None,
     return [results[w] for w in first + last]
 
 
+# --- one restart at a time -------------------------------------------------------------
+
+def lock_path() -> Path:
+    return config.CHELA_DIR / "restart.lock"
+
+
+class Busy(Exception):
+    """Another ``chela restart`` holds the lock."""
+
+
+@contextlib.contextmanager
+def one_at_a_time(timeout: float = 0.0, *, path: Path | None = None,
+                  sleep=time.sleep, clock=time.monotonic):
+    """Hold the restart lock (``flock`` on :func:`lock_path`) for the duration. Two restarts
+    at once could both see a session idle, both ``/exit`` it and both relaunch it — two
+    windows resuming one session. ``timeout`` 0 refuses at once (:class:`Busy`); a helper
+    waits its turn. The kernel drops the lock when the holder dies, so it never wedges."""
+    target = path or lock_path()
+    target.parent.mkdir(parents=True, exist_ok=True)
+    with open(target, "a") as fh:
+        deadline = clock() + timeout
+        while True:
+            try:
+                fcntl.flock(fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except BlockingIOError:
+                if clock() >= deadline:
+                    raise Busy("another chela restart is running") from None
+                sleep(POLL_S)
+        try:
+            yield
+        finally:
+            fcntl.flock(fh, fcntl.LOCK_UN)
+
+
+def running(path: Path | None = None) -> bool:
+    """Whether a ``chela restart`` holds the lock right now (a probe: taken and released)."""
+    try:
+        with one_at_a_time(0.0, path=path):
+            return False
+    except Busy:
+        return True
+
+
 # --- the detached helper ---------------------------------------------------------------
 
 def helper_log_path() -> Path:
@@ -318,11 +376,23 @@ def _window_alive(wid: str) -> bool:
 
 
 def _exited(wid: str) -> bool:
-    """Claude is gone from ``wid``: the window closed, or its pane is back at a shell."""
+    """Claude is gone from ``wid``: the window closed, or its pane is back at a shell AND no
+    Claude process is left in it (a wrapper can show ``bash`` while Claude still runs)."""
+    from chela import agent_manager
+
     if not _window_alive(wid):
         return True
     cmd = _tmux("display-message", "-p", "-t", wid, "#{pane_current_command}").stdout.strip()
-    return cmd in _SHELLS
+    return cmd in _SHELLS and agent_manager.claude_pid(wid) is None
+
+
+def _draft(wid: str) -> str | None:
+    from chela import messenger
+
+    try:
+        return messenger.input_draft(messenger.capture_pane(wid, ansi=True))
+    except OSError:
+        return None
 
 
 def _send_keys(wid: str, keys: list[str]) -> None:
@@ -358,6 +428,7 @@ def live_ops() -> Ops:
         kill_window=restore._default_kill_window,
         relaunch=restore.relaunch_session,
         topic_for=_topic_for,
+        draft=_draft,
         orchestrator=lambda: inbox.load().get("orchestrator"),
         register_orchestrator=lambda w: inbox.register(w, source="restart"),
     )
@@ -370,7 +441,7 @@ def version_of_exe(path: str | None) -> str | None:
     ``…/claude/versions/<X.Y.Z>`` — or ``None`` when the path names none."""
     if not path:
         return None
-    m = _VERSION_RE.search(os.path.basename(path.removesuffix(" (deleted)")))
+    m = _EXE_VERSION_RE.search(path)
     return m.group(1) if m else None
 
 

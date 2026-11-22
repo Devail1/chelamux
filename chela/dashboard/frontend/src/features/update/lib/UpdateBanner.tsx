@@ -90,17 +90,19 @@ export async function checkClaude(): Promise<boolean> {
   return applyClaude(cv);
 }
 
-/** CMX-467: "Restart onto the new Claude Code": every interactive session, after a confirm. The
- * restart runs detached on the server (minutes, the orchestrator last); its result lands in the
- * inbox, so the banner says it started, or why not. */
+/** CMX-467: "Restart onto the new Claude Code": the sessions the offer names, after a confirm.
+ * The restart runs detached on the server (minutes, the orchestrator last); its result lands in
+ * the inbox, so the banner says it started, or why not. */
 export async function restartClaude(confirm: (msg: string) => boolean = (m) => window.confirm(m)): Promise<Progress | null> {
   const { claude: offer, progress } = banner.get();
   if (!offer || (progress && !progress.done)) return null;
-  if (!confirm(`${offer.label}? Each idle session exits and comes back with the same session, name, flags, Remote Control and topic. Busy sessions are retried, the orchestrator goes last, dispatched runs and judges are not touched.`)) return null;
+  if (!confirm(`${offer.label}? ${offer.text}: each exits when idle and comes back with the same session, name, flags, Remote Control and topic. Busy ones are retried, the orchestrator goes last.`)) return null;
   patch({ progress: { text: 'Starting…', cls: '' } });
-  const note = restartNote(await postRestart({ all: true }));
+  // only the sessions on an older Claude Code: one already current is not restarted for nothing
+  const note = restartNote(await postRestart({ wids: offer.wids }));
   const p: Progress = { text: note.text, cls: note.ok ? 'ok' : 'err', done: true };
-  patch(note.ok ? { progress: p, claude: null } : { progress: p });
+  // started: this offer is not made again while the restart runs (the next poll re-decides)
+  patch(note.ok ? { progress: p, claude: null, dismissedClaude: offer.key } : { progress: p });
   return p;
 }
 

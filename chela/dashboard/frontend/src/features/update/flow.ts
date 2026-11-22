@@ -137,9 +137,9 @@ export function claudeOffer(cv: ClaudeVersion | null | undefined): ClaudeOffer |
 
 export type RestartReply = { ok?: boolean; started?: boolean; error?: string; detail?: string };
 
-/** POST /api/sessions/restart: one session (`{wid}`) or every interactive one (`{all: true}`).
+/** POST /api/sessions/restart: one session (`{wid}`), these (`{wids}`) or every interactive one (`{all: true}`).
  * A failed request is a refusal, never a start. */
-export async function postRestart(body: { wid: string } | { all: true }): Promise<RestartReply> {
+export async function postRestart(body: { wid: string } | { wids: string[] } | { all: true }): Promise<RestartReply> {
   try {
     const res = await fetch(`${BASE_PATH}/api/sessions/restart`, { method: 'POST', headers: decideHeaders(), body: JSON.stringify(body) });
     return (await res.json()) as RestartReply;

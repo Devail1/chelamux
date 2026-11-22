@@ -313,14 +313,16 @@ test('checkClaude reads /api/sessions/claude-version; a failed read offers nothi
   expect(shown()).toBe(false);
 });
 
-test('Restart onto the new Claude Code: confirm, POST {all: true} with the token, says it started', async () => {
+test('Restart onto the new Claude Code: confirm, POST only the stale wids with the token, says it started; that offer is not made again', async () => {
   claude(CV);
   restartPayload = { ok: true, started: true, detail: 'Restarting; the result lands in the inbox' };
   const res = await act(() => restartClaude((q) => ((asked = q), true)));
-  expect(asked).toMatch(/^Restart onto the new Claude Code\? .*dispatched runs and judges are not touched\.$/);
-  expect(restarts().map((c) => [c.method, c.token, c.body])).toEqual([['POST', 'tok-update', '{"all":true}']]);
+  expect(asked).toMatch(/^Restart onto the new Claude Code\? 2 sessions run an older Claude Code than 2\.1\.330: each exits when idle/);
+  expect(restarts().map((c) => [c.method, c.token, c.body])).toEqual([['POST', 'tok-update', '{"wids":["@3","@7"]}']]);
   expect([res?.text, msg(), $('update-banner-msg')?.className]).toEqual(['Restarting; the result lands in the inbox', 'Restarting; the result lands in the inbox', 's-savemsg ok']);
   expect($('update-banner-claude')).toBeNull();
+  expect(claude(CV)).toBe(false);                 // the next poll, same set: not offered again
+  expect(claude({ ...CV, installed: '2.1.331' })).toBe(true);
 });
 
 test('a declined confirm POSTs nothing; a refusal keeps the offer and says why', async () => {

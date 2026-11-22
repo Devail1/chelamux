@@ -2848,22 +2848,31 @@ def api_sessions_claude_version():
 def api_sessions_restart():
     """CMX-467: restart sessions in place onto the installed Claude Code — ``chela restart``
     run DETACHED (it outlives this request, and this process: an orchestrator's restart can
-    take minutes). Body ``{"wid": "@N"}`` for one session, or ``{"all": true}`` for every
+    take minutes). Body ``{"wid": "@N"}`` for one session (it waits for idle),
+    ``{"wids": [...]}`` for those (the banner's stale set), or ``{"all": true}`` for every
     interactive one (busy ones retried, the orchestrator last, dispatched runs and judges
-    never touched). The per-session result lands in the orchestrator's inbox. Acts as the
+    never touched). Only one restart runs at a time (``restart.one_at_a_time``). The per-session result lands in the orchestrator's inbox. Acts as the
     operator, so the browser proof is required (CMX-392)."""
     if refused := _browser_refusal():
         return refused
     body = request.get_json(silent=True) or {}
+    live = discovery.get_windows_by_id()
     if body.get("all") is True:
         args = ["--all"]
     else:
-        wid = body.get("wid")
-        if not isinstance(wid, str) or not _RESTART_WID_RE.match(wid):
-            return jsonify({"ok": False, "error": "pass {\"wid\": \"@N\"} or {\"all\": true}"}), 400
-        if wid not in discovery.get_windows_by_id():
-            return jsonify({"ok": False, "error": f"no such window: {wid}"}), 404
-        args = [wid]
+        wids = body.get("wids") if "wids" in body else [body.get("wid")]
+        if (not isinstance(wids, list) or not wids
+                or not all(isinstance(w, str) and _RESTART_WID_RE.match(w) for w in wids)):
+            return jsonify({"ok": False, "error": "pass {\"wid\": \"@N\"}, {\"wids\": [\"@N\", …]} "
+                                                  "or {\"all\": true}"}), 400
+        gone = [w for w in wids if w not in live]
+        if gone:
+            return jsonify({"ok": False, "error": f"no such window: {', '.join(gone)}"}), 404
+        # one session waits for idle (the row menu says "when idle"); a list goes one at a time
+        args = list(dict.fromkeys(wids)) + (["--wait"] if len(set(wids)) == 1 else [])
+    if restart.running():
+        return jsonify({"ok": False, "error": "a restart is already running; its result "
+                                              "lands in the inbox"}), 409
     try:
         pid, _path = restart.spawn_helper(args)
     except OSError as e:
