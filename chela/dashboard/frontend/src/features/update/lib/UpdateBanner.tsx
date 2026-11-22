@@ -119,12 +119,17 @@ export function UpdateBanner() {
   const s = useStore(banner);
   const v = view(s);
   if (!v.show) return null;
+  // CMX-465: the dock is the fixed, full-width box the banner centres in. It is the query
+  // container (a shrink-to-fit fixed banner cannot be one: inline-size containment would size
+  // it to nothing), so the banner's narrow layout follows the room it has, not the window.
   return (
-    <div id="update-banner" className="update-banner" role="status">
-      <span id="update-banner-msg" className={s.progress?.cls ? `s-savemsg ${s.progress.cls}` : ''}>{v.text}</span>
-      {v.showStale && <Button variant="primary" id="update-banner-restart" onClick={() => void restartStale()}>{s.stale?.label}</Button>}
-      {v.showReload && <Button variant="primary" id="update-banner-reload" onClick={() => window.location.reload()}>Reload</Button>}
-      <IconButton className="icon-btn" id="update-banner-close" label="Dismiss" onClick={dismiss}><icons.close size={14} aria-hidden /></IconButton>
+    <div className="update-banner-dock">
+      <div id="update-banner" className="update-banner" role="status">
+        <span id="update-banner-msg" className={s.progress?.cls ? `s-savemsg ${s.progress.cls}` : ''}>{v.text}</span>
+        {v.showStale && <Button variant="primary" id="update-banner-restart" onClick={() => void restartStale()}>{s.stale?.label}</Button>}
+        {v.showReload && <Button variant="primary" id="update-banner-reload" onClick={() => window.location.reload()}>Reload</Button>}
+        <IconButton className="icon-btn" id="update-banner-close" label="Dismiss" onClick={dismiss}><icons.close size={14} aria-hidden /></IconButton>
+      </div>
     </div>
   );
 }

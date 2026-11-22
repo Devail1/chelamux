@@ -4188,23 +4188,58 @@ body.sidebar-dragging iframe { pointer-events: none; }
 }
 
 /* CMX-426: "chela was updated — Reload". Unobtrusive: bottom-centre, never modal, never
-   auto-reloads (version.js). Above the wall, below modals. */
-.update-banner {
-    position: fixed; z-index: 46; left: 50%; transform: translateX(-50%);
+   auto-reloads (version.js). Above the wall, below modals.
+   CMX-465: the fixed box is the DOCK (16px in from each side, i.e. the old
+   `max-width: calc(100vw - 32px)`), and the banner is centred inside it. The dock is the
+   query container for the banner's narrow layout below: a container query, never @media,
+   because what matters is the room the banner has. It lets clicks through around the banner. */
+.update-banner-dock {
+    position: fixed; z-index: 46; left: 16px; right: 16px;
     bottom: max(14px, env(safe-area-inset-bottom));
+    display: flex; justify-content: center; pointer-events: none;
+    container: update-banner / inline-size;
+}
+.update-banner {
     display: flex; align-items: center; gap: 10px; padding: 6px 8px 6px 14px;
     background: var(--surface); color: var(--text); border: 1px solid var(--border);
     border-radius: 8px; box-shadow: 0 4px 16px rgba(0, 0, 0, .35); font-size: 13px;
-    max-width: calc(100vw - 32px);
+    max-width: 100%; box-sizing: border-box; pointer-events: auto;
 }
 .update-banner[hidden] { display: none; }
+/* CMX-465: the message takes what is left and wraps; a button never does ("Update / & /
+   restart" on a 390px phone). */
+#update-banner-msg { flex: 1 1 auto; min-width: 0; overflow-wrap: anywhere; }
+.update-banner .btn { flex: 0 0 auto; white-space: nowrap; }
 /* CMX-95: the dismiss ✕ matches the Reload button beside it instead of the toolbar-sized
    .icon-btn (38px, 17px glyph) — scoped here, .icon-btn itself is untouched. Two classes
    outrank the ≤768px `.icon-btn` bump. min-width/min-height keep the WCAG 2.5.8 24×24
    CSS-px target on phones while the box shrinks visually. */
 .update-banner .icon-btn {
     width: auto; height: 24px; min-width: 24px; min-height: 24px;
-    padding: 0 6px; font-size: 14px; border-radius: 5px;
+    padding: 0 6px; font-size: 14px; border-radius: 5px; flex: 0 0 auto;
+}
+/* CMX-465: on a touch screen the ✕ is a 44px target (WCAG 2.5.5); a mouse keeps the 24px one.
+   An input-type question, so @media. */
+@media (pointer: coarse) {
+    .update-banner .icon-btn { min-width: 44px; min-height: 44px; }
+}
+/* CMX-465: too narrow for the button(s) beside a readable message: the message and the ✕ keep
+   the first row, the buttons drop under it, right-aligned. Nothing is shortened or hidden.
+   One row costs ~210px of padding, gaps, "Update & restart" and a 44px ✕ (~290px with Reload
+   beside it too), so below these widths the message would get under ~150px and break
+   mid-sentence beside the buttons. The two rule sets are the same; only the width differs. */
+@container update-banner (max-width: 360px) {
+    .update-banner { flex-wrap: wrap; justify-content: flex-end; row-gap: 6px; }
+    /* leaves exactly the ✕'s room (≤44px + the 10px gap) on row 1, so the buttons wrap */
+    #update-banner-msg { flex: 1 1 calc(100% - 54px); }
+    .update-banner .icon-btn { order: 1; }
+    .update-banner .btn { order: 2; }
+}
+@container update-banner (max-width: 460px) {
+    .update-banner:has(.btn + .btn) { flex-wrap: wrap; justify-content: flex-end; row-gap: 6px; }
+    .update-banner:has(.btn + .btn) #update-banner-msg { flex: 1 1 calc(100% - 54px); }
+    .update-banner:has(.btn + .btn) .icon-btn { order: 1; }
+    .update-banner:has(.btn + .btn) .btn { order: 2; }
 }
 
 /* Cost tab → Usage view (CMX-38; see usage.js). */
