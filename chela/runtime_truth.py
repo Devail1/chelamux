@@ -3484,6 +3484,72 @@ def _nightly_sweep_report(declared: dict[str, str], obs: Observation) -> list[Fi
     return out
 
 
+# --- fact: where each live session's context % comes from (CMX-475) -------------------
+#
+# The context bar used to depend on the statusLine command `chela install-statusline`
+# writes into Claude Code's settings, which fails for sessions started before the install,
+# org-managed settings that override it, and users with their own status line. The
+# transcript is now the default source and the statusLine is optional; this fact says which
+# one each live session's reading comes from, and which source decided its window size.
+# A session with neither is UNKNOWN — never reported as 0%.
+
+def _context_snapshots() -> list[tuple[str, str, dict | None]]:
+    """``(name, wid, snapshot)`` for every window running Claude — the same
+    :func:`chela.context.live_snapshot` read the dashboard's bar makes. A seam: the suite
+    hands the fact a fixed fleet instead of the developer's real one."""
+    from chela import context                       # lazy: doctor must import cheaply
+    rows = []
+    for wid, name in sorted(discovery.get_windows_by_id().items()):
+        if agent_manager.claude_pid(wid) is None:
+            continue                                 # a plain shell has no context to read
+        rows.append((name, wid, context.live_snapshot(name, wid)))
+    return rows
+
+
+def _context_source_read() -> Observation:
+    if _tmux_or_unverifiable() is None:
+        return cannot_verify("tmux is not on PATH, so chela cannot list the sessions whose "
+                             "context % it would report.")
+    return observed(_context_snapshots())
+
+
+def _context_source_report(_declared: Any, obs: Observation) -> list[Finding]:
+    rows: list[tuple[str, str, dict | None]] = obs.value
+    if not rows:
+        return [Finding(OK, "context %: no live Claude session to read")]
+    out = []
+    for name, wid, snap in rows:
+        label = f"context % for {name} ({wid})"
+        if snap is None:
+            out.append(Finding(
+                WARN, f"{label}: UNKNOWN — no transcript and no status line to read",
+                "Neither source resolved for this window, so the dashboard shows no reading "
+                "(not 0%). The transcript is found through the window's own session id; "
+                "`chela peek` shows whether chela can identify that session.",
+            ))
+            continue
+        source = snap.get("source") or "transcript"
+        state = snap.get("state") or "ok"
+        if state == "no_turns":
+            out.append(Finding(INFO, f"{label}: — (no assistant turn yet; source: {source})"))
+        elif state == "compacted":
+            out.append(Finding(INFO, f"{label}: compacted — the real % shows after the next "
+                                     f"turn (source: {source})"))
+        elif snap.get("used_pct") is None:
+            out.append(Finding(
+                WARN, f"{label}: {snap.get('used_k')}K tokens, window size UNKNOWN — shown "
+                      f"as tokens, no % (source: {source})",
+                "The transcript's model id does not say whether the session runs a 1M or a "
+                "200k window. Any of these settles it: a `[1m]` model (`--model opus[1m]` or "
+                "`model` in Claude's settings), the status line (`chela install-statusline`), "
+                "or CHELA_DEFAULT_CONTEXT_WINDOW.",
+            ))
+        else:
+            out.append(Finding(OK, f"{label}: {snap.get('used_pct')}% — source: {source}, "
+                                   f"window from: {snap.get('window_source') or source}"))
+    return out
+
+
 # --- the registry ---------------------------------------------------------------------
 
 def facts() -> list[Fact]:
@@ -3600,6 +3666,17 @@ def facts() -> list[Fact]:
             declare=lambda: None,
             read_back=_native_status_read,
             report=_native_status_report,
+        ),
+        Fact(
+            name="context.source",
+            declared_by="nothing — the context bar reads the transcript by default and the "
+                        "statusLine cache when it is installed and newer (CMX-475)",
+            owned_by="each live session's own transcript and statusLine cache",
+            declare=lambda: None,
+            read_back=_context_source_read,
+            report=_context_source_report,
+            # WARN, not ERROR: like tmux.session, doctor runs where the fleet is down.
+            unverifiable_level=WARN,
         ),
         Fact(
             name="plugin.rendered",

@@ -154,7 +154,8 @@ CMX-179; the dashboard write path rejects anything below `45.0`, the measured
 cold-start floor), `CHELA_STATUS_TTL_S` (status-cache TTL,
 s, default `30.0`), `CHELA_DOCTOR_CHECK_INTERVAL` (self-audit cadence, s, default
 `3600`), `CHELA_DEFAULT_CONTEXT_WINDOW` (fallback context-window size, tokens, default
-`200000`).
+`200000`; CMX-475: used only when set explicitly — at its default, a session whose window
+no other source knows shows tokens, not a %).
 
 Two of the nine (`CHELA_STATUS_CMD_TIMEOUT_S` / `CHELA_STATUS_TTL_S`) are resolved once
 at `chela/agent_manager.py` import, same as they always were — a dashboard write to

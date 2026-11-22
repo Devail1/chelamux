@@ -106,10 +106,12 @@ def peek(wid: str) -> dict | None:
     summary = transcripts.summary_for_path(path)
     ctx = transcripts.latest_context_usage(path) if path is not None else None
     if ctx and ctx.get("used_tokens"):
-        # CMX-292: the same window the dashboard's bar sizes against — the session's
-        # own statusLine-reported size, else the estimated default.
-        w = context.window_for(ctx["used_tokens"], ctx.get("session_id"), win["name"])
-        ctx.update(total_k=w["total_k"], used_pct=w["used_pct"], estimated=w["estimated"])
+        # CMX-292/CMX-475: the same window the dashboard's bar sizes against, from the
+        # same ordered sources — and no % at all when none of them knows it.
+        w = context.window_for(ctx["used_tokens"], ctx.get("session_id"), win["name"],
+                               model=ctx.get("model"), cwd=ctx.get("cwd"), window_id=wid)
+        ctx.update(total_k=w["total_k"], used_pct=w["used_pct"], estimated=w["estimated"],
+                   window_source=w["window_source"])
 
     return {
         "wid": wid,
@@ -174,7 +176,9 @@ def format_peek(p: dict) -> str:
                  "address it by this name" if p.get("session_moved") else "")
         lines.append(f"  session: {p['session_name']}{moved}")
     ctx = p.get("context")
-    if ctx and ctx.get("used_tokens"):
+    if ctx and ctx.get("compacted"):
+        lines.append("  context: compacted — the real % shows after the next turn")
+    elif ctx and ctx.get("used_tokens"):
         model = f" ({ctx['model']})" if ctx.get("model") else ""
         line = f"  context: ~{ctx['used_tokens'] // 1000}K"
         if ctx.get("total_k"):

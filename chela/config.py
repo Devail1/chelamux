@@ -337,6 +337,17 @@ def default_context_window() -> int:
     return timing_value("default_context_window")
 
 
+def default_context_window_explicit() -> int | None:
+    """``default_context_window`` only when the operator SET it (env or dashboard), else
+    None. CMX-475: the built-in default is not knowledge of any session's window, so the
+    context bar never sizes a session against it."""
+    knob = _TIMING_BY_KEY["default_context_window"]
+    value, source = _resolve_dashboard_setting(knob.key, knob.env, knob.default, knob.cast)
+    if source == "default" or not isinstance(value, int) or value <= 0:
+        return None
+    return value
+
+
 # --- Dispatch tab (CMX-220) ---------------------------------------------------
 #
 # docs/SETTINGS_UI_INVENTORY.md's second group ("Dispatch / judge / critic

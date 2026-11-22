@@ -4749,6 +4749,13 @@ def api_agents_context():
             "branch": s.get("branch"),
             "source": s.get("source"),
             "estimated": s.get("estimated", False),
+            # CMX-475: `ok` | `compacted` (a /compact is newer than the last usage — no %
+            # until the next turn) | `no_turns` (nothing to read yet: "—", never 0%).
+            "state": s.get("state", "ok"),
+            # Which source decided the window size; `unknown` ⇒ used_pct is None and
+            # `used` is the absolute reading.
+            "window_source": s.get("window_source"),
+            "pre": _fmt_k(s.get("pre_k")),
             "ts": s.get("ts"),
         })
     return jsonify(results)
