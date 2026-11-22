@@ -54,6 +54,7 @@ async function measure({ width, touch, reload = false }) {
             const reloadBtn = document.getElementById('update-banner-reload');
             const css = getComputedStyle(btn);
             return {
+                coarse: matchMedia('(pointer: coarse)').matches,
                 label: btn.textContent, oneLine, lines: lineTops.size,
                 whiteSpace: css.whiteSpace, flexShrink: css.flexShrink,
                 reload: reloadBtn && rect(reloadBtn),
@@ -93,6 +94,7 @@ for (const width of [360, 390, 430]) {
 
         test('the dismiss ✕ is a 44px touch target', () => {
             ready();
+            assert.equal(m.coarse, true, 'the fixture must emulate a touch screen, else this measures a mouse layout');
             assert.ok(m.close.width >= 44 && m.close.height >= 44, `✕ is ${m.close.width}×${m.close.height}`);
         });
 
@@ -146,6 +148,7 @@ describe('CMX-465 1440px desktop: the banner is unchanged', { skip: why }, () =>
         assert.equal(m.lines, 1);
         assert.ok(Math.abs(m.btn.height - m.oneLine) < 1);
         assert.ok(m.btn.top < m.msg.bottom && m.btn.bottom > m.msg.top, 'button beside the message');
+        assert.equal(m.coarse, false);
         assert.equal(m.close.height, 24);
         assert.ok(m.banner.height < 50, `banner is ${m.banner.height}px tall`);
         assert.ok(Math.abs((m.banner.left + m.banner.right) / 2 - m.vw / 2) <= 1, 'banner centred');
