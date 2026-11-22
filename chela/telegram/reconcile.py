@@ -520,8 +520,9 @@ def reconcile_bindings(
     if orphans:
         changed |= _settle_orphans(
             orphans, registry, topic_api, ledger, session_for, live_windows, now_epoch,
+            # A window the sidebar asked a topic for takes that one (below), not this.
             [w for w in agent_ids if registry.thread_for_window(w) is None
-             and _wants_topic(w)],
+             and w not in (rebinds or {}) and _wants_topic(w)],
             cwd_for, sid_cache, delete_on_close, relaunch_grace, relaunch_grace_seconds,
             clock)
     if relaunch_grace is not None:
@@ -679,8 +680,12 @@ def _settle_orphans(orphans, registry, topic_api, ledger, session_for, live_wind
     """Place the topic of each gone window whose session is recorded (CMX-466).
 
     Its session running in an unbound agent window (``candidates``) is a relaunch: the
-    topic moves there as it is — no close, no reopen — with its name and pin carried over,
-    so the next sync edits that pin instead of posting another. Otherwise a gone window
+    topic moves there — never closed — with its name and pin carried over, so the next
+    sync edits that pin instead of posting another. The move still asks Telegram to reopen
+    it: on an open topic that is a no-op (``TOPIC_NOT_MODIFIED``, accepted), and it catches
+    one a human closed or deleted meanwhile, which then takes the close path below. When
+    several gone windows recorded the same session, the topic it used last
+    (:meth:`~chela.topic_ledger.TopicLedger.for_session`) goes first. Otherwise a gone window
     no stranger wears keeps its topic while ``grace`` allows, and then, or at once, the
     topic is closed (deleted when asked and not a restart) and unbound, as before."""
     changed = False
@@ -694,10 +699,17 @@ def _settle_orphans(orphans, registry, topic_api, ledger, session_for, live_wind
         if sid_cache[wid]:
             by_sid.setdefault(sid_cache[wid], wid)
     now = clock()
-    for wid, (thread, dangling, name, title, pin_id) in orphans.items():
+
+    def last_used_first(item):
+        thread = item[1][0]
+        ranked = ledger.for_session(_recorded_session(ledger, session_for, thread))
+        return ranked.index(thread)
+    for wid, (thread, dangling, name, title, pin_id) in sorted(orphans.items(),
+                                                                key=last_used_first):
         sid = _recorded_session(ledger, session_for, thread)
-        new = by_sid.pop(sid, None)
-        if new is not None:
+        new = by_sid.get(sid)
+        if new is not None and topic_api.reopen_topic(thread):
+            by_sid.pop(sid)
             registry.unbind(wid)
             registry.bind(new, thread, now_epoch)
             if name:
@@ -752,13 +764,13 @@ def _retire_topic(topic_api, ledger, thread: str, delete: bool,
 
 def _note_session(ledger, session_for, thread, wid: str) -> None:
     """Record the session ``wid`` runs on its bound ``thread`` when the ledger has none
-    for it yet (CMX-450): a binding made before session ids were recorded, or by a path
-    that did not know it. Once recorded, no further lookup; a window whose session never
+    for it yet, or no ``bound`` stamp (CMX-450, CMX-466): a binding made before session ids
+    were recorded, or by a path that did not know it. Once recorded, no further lookup; a window whose session never
     resolves is asked again each tick (one cached-pane read)."""
     if ledger is None or session_for is None or thread is None:
         return
     entry = ledger.get(thread)
-    if entry is None or entry.get("session_id"):
+    if entry is None or (entry.get("session_id") and entry.get("bound")):
         return
     try:
         sid = session_for(wid)

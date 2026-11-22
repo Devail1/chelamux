@@ -86,7 +86,10 @@ def test_a_restored_session_gets_its_old_topic_back_and_no_new_one(ledger):
     assert _tick(reg, ledger, wire, live, {"@0": "/p/elsewhere", "@4": "/p/x"},
                  {"@0": SID, "@4": OTHER}, now_epoch=NEW, delete_on_close=True) is True
     assert reg.thread_for_window("@0") == "140624" and reg.epoch_for("@0") == NEW
-    assert not {"closeForumTopic", "reopenForumTopic", "deleteForumTopic"} & set(wire.methods())
+    assert not {"closeForumTopic", "deleteForumTopic"} & set(wire.methods())
+    # the one reopen is the move's open-check (a no-op on an open topic)
+    assert [c for c in wire.calls if c[0] == "reopenForumTopic"] == [
+        ("reopenForumTopic", _thread("140624"))]
     # Had the reap asked the stranger at @4, the topic would be filed under OTHER and
     # tapparty would have got a fresh one.
     assert ledger.get("140624")["session_id"] == SID

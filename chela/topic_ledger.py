@@ -91,9 +91,12 @@ class TopicLedger:
 
     def set_session(self, thread, session_id: str) -> bool:
         """Record ``session_id`` on a known ``thread`` that has none yet (CMX-450: a topic
-        bound before session ids were recorded). True when it wrote."""
+        bound before session ids were recorded), or that has one but no ``bound`` stamp
+        (CMX-466: learnt from a close, or bound by folder with the session unknown — such
+        a topic in use would rank below any stamped duplicate). Stamps ``bound``. A
+        complete record is never moved. True when it wrote."""
         entry = self._topics.get(str(thread))
-        if entry is None or entry.get("session_id") or not session_id:
+        if entry is None or not session_id or (entry.get("session_id") and entry.get("bound")):
             return False
         entry["session_id"] = session_id
         entry["bound"] = self._clock()

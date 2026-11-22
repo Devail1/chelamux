@@ -81,6 +81,13 @@ def _bound_to_b(name="glide", pin="777", title="Passkey authentication support")
 MUTATING = {"closeForumTopic", "reopenForumTopic", "deleteForumTopic", "createForumTopic"}
 
 
+def _mutations(wire):
+    return [c for c in wire.calls if c[0] in MUTATING]
+
+
+MOVED_B = [("reopenForumTopic", _thread(B))]   # the move's open-check; nothing else
+
+
 # -- the ledger's ranking ------------------------------------------------------------
 
 def test_the_topic_used_last_ranks_first(tmp_path):
@@ -146,7 +153,7 @@ def test_a_relaunch_seen_on_one_tick_moves_the_topic_without_closing_it(tmp_path
     assert reg.topic_name("@76") == "glide"
     assert reg.pinned_message_id("@76") == "777"
     assert reg.pinned_title("@76") == "Passkey authentication support"
-    assert wire.calls == []
+    assert wire.calls == MOVED_B
     entry = led.get(B)
     assert entry["window"] == "@76" and entry["closed"] is None and entry["session_id"] == SID
     assert grace == {}
@@ -160,7 +167,7 @@ def test_a_moved_topic_without_a_cached_name_or_pin_carries_none(tmp_path):
     assert reg.thread_for_window("@76") == B
     assert reg.pinned_message_id("@76") is None and reg.pinned_title("@76") is None
     # no cached name: the rename loop resyncs it once, as for any unknown name
-    assert [m for m, _ in wire.calls] == ["editForumTopic"]
+    assert [m for m, _ in wire.calls] == ["reopenForumTopic", "editForumTopic"]
 
 
 def test_without_a_ledger_cwd_resolver_the_move_records_no_cwd(tmp_path):
@@ -180,7 +187,7 @@ def test_a_gone_window_is_held_through_the_grace_and_then_moved(tmp_path):
     clock.t = 38.0
     _tick(reg, led, wire, {"@76": "claude"}, {"@76": SID}, relaunch_grace=grace, clock=clock)
     assert reg.thread_for_window("@76") == B
-    assert not MUTATING & set(wire.methods())
+    assert _mutations(wire) == MOVED_B
     assert grace == {}
 
 
@@ -258,7 +265,7 @@ def test_a_restart_relaunch_moves_the_topic_off_the_stranger(tmp_path):
     _tick(reg, led, wire, {"@17": "x", "@0": "claude"}, {"@17": OTHER, "@0": SID},
           agents={"@0"}, relaunch_grace={})
     assert reg.thread_for_window("@0") == B and reg.thread_for_window("@17") is None
-    assert not MUTATING & set(wire.methods())
+    assert _mutations(wire) == MOVED_B
 
 
 def test_a_dangling_window_not_live_is_held_by_the_grace(tmp_path):
@@ -360,3 +367,60 @@ def test_the_bridge_loop_keeps_one_grace_dict(monkeypatch):
     from tests.test_telegram_reconcile import _run_one_tick
     kwargs = _run_one_tick(monkeypatch)["kwargs"]
     assert kwargs["relaunch_grace"] == {} and isinstance(kwargs["relaunch_grace"], dict)
+
+
+def test_a_topic_closed_or_deleted_meanwhile_is_not_moved(tmp_path):
+    """The move asks Telegram first: a topic it cannot reopen is closed as before, and the
+    relaunched window is provisioned like any other."""
+    led, reg = _ledger(tmp_path, b_closed=None), _bound_to_b()
+    wire = _Wire({"reopenForumTopic"})
+    grace = {}
+    _tick(reg, led, wire, {"@76": "claude"}, {"@76": SID}, relaunch_grace=grace,
+          clock=_Clock())
+    assert reg.thread_for_window("@76") not in (None, B)
+    assert reg.window_for_thread(B) == "@17" and grace == {"@17": 0.0}
+
+
+def test_two_gone_windows_of_one_session_hand_over_the_topic_used_last(tmp_path):
+    """Orphans of A (old duplicate) and B (in use) both record SID: the relaunched window
+    takes B whatever the binding order; A is held, then closed."""
+    led, wire = _ledger(tmp_path, b_closed=None), _Wire()
+    reg = BindingRegistry(CHAT)
+    reg.bind("@9", A, EP)                    # bound FIRST: iterated first
+    reg.bind("@17", B, EP)
+    grace = {}
+    # one tick live: B, in use with no stamp, learns its bound time
+    _tick(reg, led, wire, {"@9": "glide", "@17": "glide"}, {"@9": SID, "@17": SID},
+          relaunch_grace=grace, clock=_Clock())
+    assert led.get(B)["bound"] == NOV22 + 60 and led.get(A)["bound"] == OCT29_LATE + 1
+    _tick(reg, led, wire, {"@76": "claude"}, {"@76": SID}, relaunch_grace=grace,
+          clock=_Clock())
+    assert reg.thread_for_window("@76") == B and reg.thread_for_window("@9") == A
+
+
+def test_a_pending_sidebar_rebind_wins_over_a_relaunch_match(tmp_path):
+    led, reg, wire = _ledger(tmp_path, b_closed=None), _bound_to_b(), _Wire()
+    rebinds = {"@76": A}
+    _tick(reg, led, wire, {"@76": "claude"}, {"@76": SID}, relaunch_grace={},
+          clock=_Clock(), rebinds=rebinds)
+    assert reg.thread_for_window("@76") == A and rebinds == {}
+
+
+def test_a_topic_in_use_with_a_session_but_no_stamp_learns_its_bound_time(tmp_path):
+    """B's session came from a close, so it carries no ``bound``: the first tick it is seen
+    bound and live stamps it, once, and never moves a complete record."""
+    led, wire = _ledger(tmp_path, b_closed=None), _Wire()
+    reg = BindingRegistry(CHAT)
+    reg.bind("@17", B, EP)
+    asked = []
+
+    def session_for(wid):
+        asked.append(wid)
+        return SID
+    api = TopicManager("tok", CHAT, transport=wire)
+    for _ in range(3):
+        reconcile_bindings(reg, {"@17": "glide"}, {"@17"}, api, ledger=led,
+                           session_for=session_for, now_epoch=EP)
+    assert led.get(B)["bound"] == NOV22 + 60 and asked == ["@17"]
+    assert led.set_session(B, OTHER) is False and led.get(B)["session_id"] == SID
+    assert led.set_session(A, OTHER) is False          # A: complete record
