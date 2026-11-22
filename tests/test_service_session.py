@@ -305,15 +305,28 @@ def test_list_sessions_unknown_is_none(monkeypatch, raises, returncode):
 
 # --- chela status refuses a missing session ---------------------------------------------
 
-def test_status_refuses_a_missing_session(monkeypatch, capsys):
-    monkeypatch.setenv("CHELA_TMUX_SESSION", "chela")
-    monkeypatch.setattr(discovery, "session_exists", lambda s: False)
+@pytest.mark.parametrize("session", ["chela", "fleet"])
+def test_status_refuses_a_missing_session(monkeypatch, capsys, session):
+    monkeypatch.setenv("CHELA_TMUX_SESSION", session)
+    asked: list = []
+    monkeypatch.setattr(discovery, "session_exists", lambda s=None: asked.append(s) or False)
     monkeypatch.setattr(discovery, "get_all_windows",
                         lambda: pytest.fail("listed windows of a missing session"))
     with pytest.raises(SystemExit) as exc:
         main.cmd_status(types.SimpleNamespace(sessions=False))
     assert exc.value.code == 1
-    assert "no session chela" in capsys.readouterr().err
+    assert asked in ([session], [None])          # it asked about THE session, not another
+    assert f"no session {session}:" in capsys.readouterr().err
+
+
+def test_status_lists_an_existing_session(monkeypatch, capsys):
+    monkeypatch.setenv("CHELA_TMUX_SESSION", "fleet")
+    asked: list = []
+    monkeypatch.setattr(discovery, "session_exists", lambda s=None: asked.append(s) or True)
+    monkeypatch.setattr(discovery, "get_all_windows", lambda: {})
+    main.cmd_status(types.SimpleNamespace(sessions=False))
+    assert asked in (["fleet"], [None])
+    assert "No windows found in tmux session 'fleet'." in capsys.readouterr().out
 
 
 # --- against a REAL tmux server (scratch socket) -----------------------------------------
@@ -376,3 +389,67 @@ def test_real_tmux_a_service_inside_another_session_drives_chela(scratch_tmux, m
     config.mark_service("daemon")
     assert config.current_session() == "chela"
     assert sorted(discovery.get_all_windows()) == ["agent-1"]
+
+
+# --- scripts/agent-terminals.sh: its OWN functions, run against a real tmux --------------
+
+_AGENT_TERMINALS = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                                "scripts", "agent-terminals.sh")
+
+
+def _sh_functions(*names: str) -> str:
+    """The named one-line / multi-line function definitions, cut verbatim out of the real
+    script (it runs its supervisor loop when sourced, so it can't just be sourced)."""
+    import re
+    text = open(_AGENT_TERMINALS).read()
+    out = []
+    for name in names:
+        m = (re.search(rf"^{name}\(\) \{{.*\}}[^\n]*$", text, re.M)
+             or re.search(rf"^{name}\(\) \{{\n.*?^\}}$", text, re.M | re.S))
+        assert m, f"{name}() not found in agent-terminals.sh"
+        out.append(m.group(0))
+    return "\n".join(out)
+
+
+def _run_sh(body: str, **env) -> subprocess.CompletedProcess:
+    full = {k: v for k, v in os.environ.items() if k not in ("TMUX", "TMUX_PANE")}
+    full.update(env)
+    return subprocess.run(["bash", "-c", body], env=full, capture_output=True, text=True,
+                          timeout=30, stdin=subprocess.DEVNULL)
+
+
+def _sessions(tmux) -> set[str]:
+    out = tmux("list-sessions", "-F", "#{session_name}").stdout
+    return {s for s in out.split() if s}
+
+
+@needs_tmux
+def test_real_tmux_despawn_never_kills_a_prefix_sibling_viewer(scratch_tmux):
+    """@1's viewer is already gone; @10's is live. despawn @1 must leave @10's alone —
+    a bare `kill-session -t webterm_chela__1` prefix-matches `webterm_chela__10`."""
+    scratch_tmux("new-session", "-d", "-s", "webterm_chela__10")
+    scratch_tmux("new-session", "-d", "-s", "webterm_chela__2")
+    body = (_sh_functions("at_get", "at_del", "sanitize", "despawn")
+            + '\nWEBTERM_PREFIX=webterm_chela_\nTRACKED="@1 @10 @2"\n'
+            + 'despawn @1\ndespawn @2\n')
+    r = _run_sh(body)
+    assert r.returncode == 0, r.stderr
+    assert _sessions(scratch_tmux) == {"webterm_chela__10"}
+
+
+@pytest.mark.parametrize("present, ok", [
+    (["chela-services"], False),
+    (["chela-services", "chela"], True),
+    (["chela"], True),
+])
+@needs_tmux
+def test_real_tmux_ensure_session_has_session_is_exact(scratch_tmux, present, ok):
+    """With heal off, ensure_session only ASKS — and must not take `chela-services` for
+    `chela`."""
+    for name in present:
+        scratch_tmux("new-session", "-d", "-s", name)
+    body = (_sh_functions("tmux_tmpdir_missing", "heal_enabled", "ensure_session")
+            + "\nensure_session\n")
+    r = _run_sh(body, TMUX_SESSION="chela", CHELA_TERM_HEAL="false")
+    assert (r.returncode == 0) is ok, r.stderr
+    assert _sessions(scratch_tmux) == set(present)   # heal off: never created anything
