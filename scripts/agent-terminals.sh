@@ -206,7 +206,7 @@ spawn() {
 despawn() {
     local wid="$1"
     [[ -n "${PID_OF[$wid]:-}" ]] && kill "${PID_OF[$wid]}" 2>/dev/null
-    tmux kill-session -t "${WEBTERM_PREFIX}$(sanitize "$wid")" 2>/dev/null
+    tmux kill-session -t "=${WEBTERM_PREFIX}$(sanitize "$wid")" 2>/dev/null
     unset 'PID_OF[$wid]' 'PORT_OF[$wid]'
 }
 

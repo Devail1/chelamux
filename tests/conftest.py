@@ -907,6 +907,16 @@ def _tmux_violation(argv: list, env: dict | None) -> str | None:
 
 
 @pytest.fixture(autouse=True)
+def _not_a_chela_service(monkeypatch):
+    """CMX-470: `config.mark_service` (called by `cmd_run`, `cmd_dashboard`, …) flips a
+    process-global flag that makes `current_session()` ignore `$TMUX_PANE`. Reset it per
+    test, so a test that runs a service entrypoint can't change session resolution for
+    every later test on the same worker."""
+    from chela import config
+    monkeypatch.setattr(config, "_SERVICE", None)
+
+
+@pytest.fixture(autouse=True)
 def _no_live_tmux_mutation(monkeypatch):
     """The fence: any MUTATING tmux subcommand reaching the default socket fails the test.
 

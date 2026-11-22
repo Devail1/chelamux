@@ -148,7 +148,7 @@ def test_send_tmux_refuses_an_unsafe_input_mode_and_types_nothing(pane):
 def test_send_tmux_still_delivers_into_a_prose_prompt():
     ok, cmds = _send_into(_PANE_PROMPT)
     assert ok is True
-    assert ["tmux", "send-keys", "-t", "chela:@1", "-l", "📥 cmx-77 awaiting review"] in cmds
+    assert ["tmux", "send-keys", "-t", "=chela:@1", "-l", "📥 cmx-77 awaiting review"] in cmds
 
 
 def test_an_unreadable_pane_is_not_refused():
