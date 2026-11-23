@@ -17,7 +17,7 @@ The contract, in one place:
 from __future__ import annotations
 
 from argparse import Namespace
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -30,13 +30,23 @@ STATUSES = {"@1": "idle", "@2": "idle", "@3": "waiting", "@9": "busy"}
 
 @pytest.fixture
 def fleet():
-    """A live tmux fleet with tmux itself stubbed. Yields the send_tmux mock."""
+    """A live fleet with every peer socket reachable. Yields a mock called ``(wid, prompt)``
+    once per peer delivery. ⛔ CMX-482: no room delivery may type into a pane, so every
+    test using this fixture also asserts ``send_tmux`` was never called."""
+    delivered = MagicMock()
+
+    def peer(wid, frm, prompt):
+        delivered(wid, prompt)
+        return messenger.PeerSendResult(True, "sent")
+
     with patch.object(messenger, "get_windows_by_id", return_value=dict(LIVE)), \
             patch.object(rooms.discovery, "get_windows_by_id", return_value=dict(LIVE)), \
             patch.object(main.discovery, "get_windows_by_id", return_value=dict(LIVE)), \
             patch.object(rooms.agent_manager, "status_by_wid", return_value=dict(STATUSES)), \
-            patch.object(messenger, "send_tmux", return_value=True) as send:
-        yield send
+            patch.object(messenger, "send_peer", side_effect=peer), \
+            patch.object(messenger, "send_tmux", return_value=True) as paste:
+        yield delivered
+    paste.assert_not_called()
 
 
 @pytest.fixture
@@ -403,11 +413,11 @@ def test_cli_recap_prints_nothing_for_a_roomless_window(wired, capsys):
     assert capsys.readouterr().out == ""
 
 
-# --- CMX-223: peer socket first, tmux paste as fallback, receipts recorded -------
+# --- CMX-223/482: the peer socket only, receipts recorded, never a tmux paste -----
 
 def test_a_targeted_dispatch_prefers_the_peer_socket(wired):
     """A reachable peer socket delivers without ever touching send_tmux — mirrors
-    messenger.send_message's own peer-first contract."""
+    messenger.send_message's own contract."""
     sent = messenger.PeerSendResult(True, "sent")
     with patch.object(messenger, "send_peer", return_value=sent) as peer:
         result = _post("question")
@@ -436,15 +446,60 @@ def test_a_held_receipt_is_recorded_and_NOT_treated_as_delivered(wired):
     assert receipt["payload"]["post_seq"] == result["seq"]
 
 
-def test_peer_socket_unreachable_falls_back_to_tmux(wired):
-    """The existing contract, unchanged: no live socket -> tmux paste, same as
-    before CMX-223 ever routed rooms through the peer socket."""
+def test_peer_socket_unreachable_parks_and_never_pastes(wired):
+    """CMX-482 negative control: no live socket → the delivery is PARKED and announced,
+    never typed into the pane. The old path pasted it with send_tmux and called it
+    delivered."""
+    unreachable = messenger.PeerSendResult(False, None)
+    with patch.object(messenger, "send_peer", return_value=unreachable), \
+            patch.object(messenger, "send_tmux", return_value=True) as paste:
+        result = _post("question")
+    paste.assert_not_called()
+    assert result["ok"] and result["delivered"] == [] and result["failed"] == []
+    assert result["unreachable"] == ["@2"]
+    assert [(e["post_seq"], e["from_wid"]) for e in rooms.pending()["@2"]] == [
+        (result["seq"], "@1")]
+    assert _types() == ["room_question", "peer_unreachable"]
+    held = next(e for e in event_log.read()["events"] if e["type"] == "peer_unreachable")
+    assert held["payload"] == {"target": "@2", "via": "room wire"}
+
+
+def test_a_parked_delivery_stays_queued_while_the_socket_is_unreachable(wired):
+    """The retry is over the socket too: unreachable at flush → still queued, no paste;
+    reachable on a later tick → delivered and recorded as a parked delivery."""
+    unreachable = messenger.PeerSendResult(False, None)
+    with patch.object(messenger, "send_peer", return_value=unreachable), \
+            patch.object(messenger, "send_tmux", return_value=True) as paste:
+        posted = _post("question")
+        assert rooms.flush_pending(dict(STATUSES)) == []
+    paste.assert_not_called()
+    assert [e["post_seq"] for e in rooms.pending()["@2"]] == [posted["seq"]]
+    sent = rooms.flush_pending(dict(STATUSES))        # the fixture's socket is reachable
+    assert [(e["to_wid"], e["post_seq"]) for e in sent] == [("@2", posted["seq"])]
+    assert not rooms.has_pending()
+    wired.assert_called_once()
+    assert _types()[-1] == rooms.DELIVERY_TYPE
+
+
+def test_cli_post_to_an_unreachable_window_exits_nonzero_and_says_so(wired, capsys):
     unreachable = messenger.PeerSendResult(False, None)
     with patch.object(messenger, "send_peer", return_value=unreachable):
-        result = _post("question")
-    assert result["ok"] and result["delivered"] == ["@2"]
-    wired.assert_called_once()
-    assert _types() == ["room_question", rooms.DELIVERY_TYPE]
+        assert _run_post(_cli()) == 1
+    err = capsys.readouterr().err
+    assert "@2: unreachable" in err and "PARKED" in err
+
+
+def test_cli_post_exits_nonzero_when_one_recipient_is_unreachable_and_another_delivered(
+        wired, capsys):
+    """Something WAS delivered, so only the unreachable check can make $? say a recipient
+    was not reached."""
+    def peer(wid, frm, prompt):
+        return messenger.PeerSendResult(wid != "@2", None if wid == "@2" else "sent")
+    with patch.object(messenger, "send_peer", side_effect=peer):
+        assert _run_post(_cli(to=["@2", "@9"])) == 1
+    captured = capsys.readouterr()
+    assert "-> @9" in captured.out
+    assert "@2: unreachable" in captured.err
 
 
 def test_a_parked_delivery_with_an_adverse_receipt_is_recorded_and_dropped(wired):

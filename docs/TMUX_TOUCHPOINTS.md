@@ -6,8 +6,9 @@ tmux, **replace** it with a Claude Code native mechanism, or **remove** it. The 
 native peer messaging is the default way chela talks to an agent, and that tmux is used only
 where nothing else can do the job.
 
-This is an audit. It changes no behaviour. The follow-up work is written out as
-[slices](#slices) at the end.
+This started as an audit (CMX-474) that changed no behaviour. The follow-up work is
+written out as [slices](#slices) at the end; slice 1 is done (CMX-482), and the rows it
+changed say so.
 
 **The doc is kept complete by a test.** `tests/test_tmux_touchpoints.py` parses `chela/`
 with `ast` and fails when a pane-touching function has no row here, when a row names a
@@ -30,9 +31,12 @@ Claude Code session shows no cross-session banner, and text from another agent r
 the user wrote it. A native peer message arrives as `<cross-session-message from="…">`, and
 the receiver's own `crossSessionInbound` setting decides whether to take it. The orchestrator
 CLAUDE.md records the 08-25 incident this caused. `messenger.send_message` and its callers
-try the peer socket first but fall back to `send_tmux` without telling anyone when the socket
-can't be reached. `chela doctor` warns about windows in that state
-(`runtime_truth.py`, `messenger.peer_transport_kind`), but the fallback still happens.
+used to try the peer socket first and fall back to `send_tmux` without telling anyone when
+the socket couldn't be reached. Since slice 1 (CMX-482) they don't: an unreachable socket
+returns `unreachable`, the message is held where a queue exists, a `peer_unreachable` event
+is logged, and `chela msg` / `chela drive` exit non-zero. `chela doctor` names the windows in
+that state as "unreachable: messages are held" (`runtime_truth.py`,
+`messenger.peer_transport_kind`).
 
 ## Buckets
 
@@ -58,16 +62,20 @@ Columns: **site** (`file:function`), **what it sends or reads, and why**, **arri
 
 ### Messages to agents (bucket 1)
 
+Since slice 1 (CMX-482) none of these reaches a pane: each goes through
+`messenger.deliver_peer` (or `send_peer` / `send_peer_to_pid` in the inbox) and nothing
+else. `tests/test_tmux_touchpoints.py` fails if any bucket-1 row becomes a pane site again.
+The fleet pause moved to bucket 4: its message is native, and only its Escape touches the
+pane.
+
 | Site | What and why | Arrives as | Bucket | Rec |
 |------|--------------|------------|--------|-----|
-| `chela/messenger.py:send_message` | `chela msg` / `broadcast` / `fleet` / dashboard: `[from] text` to an agent. Tries `send_peer` first; an adverse receipt is a failure, but when the socket **can't be reached** it calls `send_tmux` without saying so. | Native with `from` when the socket is reached; **a user turn** on the fallback | 1 | replace |
-| `chela/rooms.py:post` | A room post to each member. Peer first, then `send_tmux` when the socket can't be reached. | Native, or a user turn on the fallback | 1 | replace |
-| `chela/rooms.py:flush_pending` | Retries a parked room delivery. Same peer-then-tmux fallback. | Native, or a user turn on the fallback | 1 | replace |
-| `chela/inbox.py:deliver` | Decision-inbox events to the orchestrator. Peer first; when the orchestrator is `idle`, a failed peer send retries as a `send_tmux` paste (`tmux_fallback`). The queue is already durable, so holding loses nothing. | Native, or a user turn on the fallback | 1 | replace |
-| `chela/inbox.py:send_resumes` | The resume prompt sent to each agent after a usage outage ends. Peer first, `send_tmux` when no socket. Already re-queues the outage on failure. | Native, or a user turn on the fallback | 1 | replace |
-| `chela/main.py:cmd_drive` | `chela drive @N msg`: the orchestrator drives a sibling with `[sender] msg`. **tmux only**: it never tries the peer socket. | **A user turn** | 1 | replace |
-| `chela/fleet.py:_pause` | Fleet pause: Escape (bucket 4), then the pause message through `send_message`. The message inherits `send_message`'s fallback. The Escape stays, because no native message can interrupt a turn in progress. | Native, or a user turn on the fallback | 1 | replace |
-| `chela/fleet.py:pause_all` | Caller of `_pause` for every dispatched run (`chela dispatch --pause --all`). | Native, or a user turn on the fallback | 1 | replace |
+| `chela/messenger.py:send_message` | `chela msg` / `broadcast` / `fleet` / dashboard trigger: `[from] text` to an agent, over `deliver_peer`. Returns `delivered`, `unreachable`, `offline` or the adverse receipt; `chela msg` / `broadcast` exit non-zero on anything but `delivered`. **Done (CMX-482):** no `send_tmux` fallback. | Native with `from`; held (not sent) when unreachable | 1 | remove |
+| `chela/rooms.py:post` | A room post to each member. An unreachable socket **parks** the delivery (`unreachable` in the result, `chela room post` exits non-zero). **Done (CMX-482).** | Native, or parked | 1 | remove |
+| `chela/rooms.py:flush_pending` | Retries a parked room delivery over the socket; still unreachable leaves it queued until `PENDING_TTL_SECONDS`. **Done (CMX-482).** | Native, or still parked | 1 | remove |
+| `chela/inbox.py:deliver` | Decision-inbox events to the orchestrator, over the socket only. A failed send HOLDS the event in the durable queue and records `last_delivery_failure`. **Done (CMX-482):** the `tmux_fallback` is gone. | Native, or held | 1 | remove |
+| `chela/inbox.py:send_resumes` | The resume prompt sent to each agent after a usage outage ends, over `deliver_peer`. A failed send re-queues the outage. **Done (CMX-482).** | Native, or re-queued | 1 | remove |
+| `chela/main.py:cmd_drive` | `chela drive @N msg`: the orchestrator drives a sibling with `[sender] msg`, now a native peer message (`deliver_peer`, sender = the driving window). Exits non-zero naming the window and reason when not delivered. **Done (CMX-482):** it used to be tmux-only. | Native with `from` | 1 | remove |
 
 ### Starting and seeding agents (bucket 2)
 
@@ -113,6 +121,8 @@ Columns: **site** (`file:function`), **what it sends or reads, and why**, **arri
 | `chela/agent_manager.py:stop_agent` | Types `/exit` through `send_tmux` with `interrupt=True`, so Escape **cancels a turn in progress**. Checks nothing first: no status, no draft (a draft gets `/exit` appended and submitted). | A slash command | 4 | replace |
 | `chela/dispatcher.py:_dismiss_input_block` | Sends Escape to a dispatched agent stuck on an AskUserQuestion with no human there, so the model falls back to its own default. Since CMX-478 a permission prompt is never Escaped (Escape denies the call); it alerts the inbox. A `PreToolUse` hook that refuses AskUserQuestion when `CHELA_RUN` is set would mean the dialog never opens. chela already ships gate hooks. | A control key | 4 | replace |
 | `chela/messenger.py:send_escape` | One Escape keypress (`/esc` on Telegram, fleet pause). | A control key | 4 | keep |
+| `chela/fleet.py:_pause` | Fleet pause: Escape, then the pause message through `send_message` (native since CMX-482, bucket 1). The Escape stays, because no native message can interrupt a turn in progress. | A control key (+ a native message) | 4 | keep |
+| `chela/fleet.py:pause_all` | Caller of `_pause` for every dispatched run (`chela dispatch --pause --all`). | A control key (+ a native message) | 4 | keep |
 | `chela/messenger.py:send_key` | One tmux key name (`Up`, `C-c`, `Enter`…). Primitive behind the Telegram keyboard and the AskUserQuestion answer keys. | A control key | 4 | keep |
 | `chela/messenger.py:resend_enter` | A bare Enter for a typed prompt the TUI didn't submit (seed retries, image chip). Not needed for the seed after slice 2; `deliver_image` still uses it. | A control key | 4 | keep |
 
@@ -120,10 +130,10 @@ Columns: **site** (`file:function`), **what it sends or reads, and why**, **arri
 
 | Site | What and why | Arrives as | Bucket | Rec |
 |------|--------------|------------|--------|-----|
-| `chela/messenger.py:send_tmux` | The primitive that types text into a pane: refuses unsafe input modes, Escape before a slash command, bracketed paste for multi-line text, a second Enter for a paste chip. Stays for human input and gated slash commands. After slice 1 it should no longer be reachable from any bucket-1 path. | A user turn | 5 | keep |
+| `chela/messenger.py:send_tmux` | The primitive that types text into a pane: refuses unsafe input modes, Escape before a slash command, bracketed paste for multi-line text, a second Enter for a paste chip. Stays for human input and gated slash commands. Since slice 1 (CMX-482) it is reachable from no bucket-1 path. | A user turn | 5 | keep |
 | `chela/messenger.py:deliver_prompt` | `send_tmux` that refuses to append to an existing draft (CMX-117). Telegram text and documents. | A user turn | 5 | keep |
 | `chela/messenger.py:deliver_image` | Telegram photo: path pasted, submit checked via the UserPromptSubmit hook, then a draft read. | A user turn | 5 | keep |
-| `chela/dashboard/app.py:api_agents_msg` | Dashboard "message agent": a `/command` goes through `send_tmux`, anything else through `send_message("dashboard", …)`. The person typing is the **user**, so a user turn is correct here. It should say so explicitly (`deliver_prompt`) and not reach the pane through `send_message`'s fallback. | Native `from=dashboard`, or a user turn | 5 | keep |
+| `chela/dashboard/app.py:api_agents_msg` | Dashboard "message agent": a `/command` goes through `send_tmux`, anything else through `deliver_prompt` (409 when the prompt holds an unsent draft). The person typing is the **user**, so a user turn is correct here; since CMX-482 it says so explicitly and no longer goes through `send_message`. | A user turn | 5 | keep |
 | `chela/telegram/inbound.py:RegistryRouter.__init__` | Default sender `messenger.deliver_prompt` for a bound topic's text. | A user turn | 5 | keep |
 | `chela/telegram/inbound.py:TopicRouter.__init__` | Same for the legacy topic router. | A user turn | 5 | keep |
 | `chela/telegram/inbound.py:build_application` | Wires the defaults `capture_pane` (`/screenshot`), `send_escape` (`/esc`) and `send_key` (control keyboard). | User keys | 5 | keep |
@@ -201,6 +211,8 @@ Dispatched agents have no Linear access, so the orchestrator files these on merg
 the issue IDs here.
 
 ### Slice 1: no silent tmux fallback for agent messages
+
+**Done: CMX-482.** One PR (1a and 1b together). The rows above are updated.
 
 * **Scope:** `messenger.send_message`, `rooms.post`, `rooms.flush_pending`, `inbox.deliver`,
   `inbox.send_resumes`, plus `main.cmd_drive`, which is different: it is tmux-only today and

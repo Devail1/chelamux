@@ -354,66 +354,102 @@ _SENT = messenger.PeerSendResult(True, "sent")
 _HELD = messenger.PeerSendResult(True, "held")
 
 
-def test_send_message_to_busy_agent_by_wid_is_delivered():
+@pytest.fixture
+def events(monkeypatch):
+    """The event-log entries messenger writes, and a clean announce de-dupe."""
+    written = []
+    monkeypatch.setattr(messenger.event_log, "append",
+                        lambda type, summary="", payload=None, **kw:
+                        written.append((type, summary, payload, kw)) or {"seq": 1})
+    monkeypatch.setattr(messenger, "_unreachable_announced", {})
+    return written
+
+
+def test_send_message_to_busy_agent_by_wid_is_delivered(events):
     # The exact live failure: a working agent addressed by its window id. Busy is
     # not a failure mode — nothing here may consult claude_pid/session status.
-    with _with_windows(), patch.object(messenger, "send_peer", return_value=_UNREACHABLE), \
-            patch.object(messenger, "send_tmux", return_value=True) as send:
-        assert messenger.send_message("orchestrator", "@32", "ping") is True
-    send.assert_called_once_with("@32", "[orchestrator] ping")
+    with _with_windows(), patch.object(messenger, "send_peer", return_value=_SENT) as peer:
+        assert messenger.send_message("orchestrator", "@32", "ping") == "delivered"
+    peer.assert_called_once_with("@32", "orchestrator", "[orchestrator] ping")
 
 
-def test_send_message_to_dead_window_is_not_delivered_and_never_sends():
+def test_send_message_to_dead_window_is_not_delivered_and_never_sends(events):
     with _with_windows(), patch.object(messenger, "send_peer") as peer, \
             patch.object(messenger, "send_tmux") as send:
-        assert messenger.send_message("orchestrator", "@99", "ping") is False
+        assert messenger.send_message("orchestrator", "@99", "ping") == "offline"
     peer.assert_not_called()
     send.assert_not_called()
 
 
-def test_send_message_false_when_both_transports_fail():
+def test_send_message_unreachable_socket_never_types_into_the_pane(events):
+    # CMX-482's negative control: the socket can't be reached. The old path pasted the
+    # message with send_tmux (a bare user turn, no `from`); now it is "unreachable",
+    # send_tmux is never called, and the event log says so.
     with _with_windows(), patch.object(messenger, "send_peer", return_value=_UNREACHABLE), \
-            patch.object(messenger, "send_tmux", return_value=False):
-        assert messenger.send_message("orchestrator", "@32", "ping") is False
+            patch.object(messenger, "send_tmux", return_value=True) as send:
+        assert messenger.send_message("orchestrator", "@32", "ping") == "unreachable"
+    send.assert_not_called()
+    assert [(t, p) for t, _, p, _ in events] == [
+        ("peer_unreachable", {"target": "@32", "via": "message from orchestrator"})]
+    assert events[0][3] == {"wid": "@32"}
+    assert "@32" in events[0][1] and "held" in events[0][1]
 
 
-def test_send_message_prefers_peer_socket_and_skips_tmux():
-    # The core of CMX-222: agent-to-agent delivery goes over the peer socket when
-    # it's reachable, and send_tmux (the paste-into-a-pane transport) is never
-    # touched — as long as no adverse receipt comes back.
+def test_send_message_prefers_peer_socket_and_skips_tmux(events):
+    # The core of CMX-222: agent-to-agent delivery goes over the peer socket, and
+    # send_tmux (the paste-into-a-pane transport) is never touched.
     with _with_windows(), patch.object(messenger, "send_peer", return_value=_SENT) as peer, \
             patch.object(messenger, "send_tmux") as send:
-        assert messenger.send_message("orchestrator", "@32", "ping") is True
+        assert messenger.send_message("orchestrator", "@32", "ping") == "delivered"
     peer.assert_called_once_with("@32", "orchestrator", "[orchestrator] ping")
     send.assert_not_called()
+    assert events == []
 
 
-def test_send_message_false_when_peer_socket_handoff_gets_an_adverse_receipt():
-    # THE fail-open bug this ticket exists to close (CMX-223): a socket accepting
-    # the bytes is a HANDOFF, not a delivery. A `held` receipt means the receiver's
-    # own gate dropped the message — send_message must NOT report success, and
-    # must NOT paper over the drop by falling back to tmux (that would route
-    # around a safety setting the receiver chose, not recover a lost transport).
-    with _with_windows(), patch.object(messenger, "send_peer", return_value=_HELD), \
+@pytest.mark.parametrize("status", ["held", "denied", "expired"])
+def test_send_message_reports_an_adverse_receipt_and_never_falls_back(events, status):
+    # THE fail-open bug CMX-223 closed: a socket accepting the bytes is a HANDOFF, not a
+    # delivery. A `held` receipt means the receiver's own gate dropped the message —
+    # send_message must NOT report success, and must NOT paper over the drop with tmux.
+    with _with_windows(), \
+            patch.object(messenger, "send_peer",
+                         return_value=messenger.PeerSendResult(True, status)), \
             patch.object(messenger, "send_tmux") as send:
-        assert messenger.send_message("orchestrator", "@32", "ping") is False
+        assert messenger.send_message("orchestrator", "@32", "ping") == status
+    send.assert_not_called()
+    assert events == []                       # a gate's refusal is not "unreachable"
+
+
+def test_send_message_counts_an_explicit_delivered_receipt_as_delivered(events):
+    with _with_windows(), patch.object(messenger, "send_peer",
+                                       return_value=messenger.PeerSendResult(True, "delivered")):
+        assert messenger.send_message("orchestrator", "@32", "ping") == "delivered"
+
+
+def test_announce_unreachable_writes_one_event_per_target_per_window(events):
+    assert messenger.announce_unreachable("@1", via="x", wid="@1", now=1000.0) is True
+    assert messenger.announce_unreachable("@1", via="x", wid="@1", now=1599.0) is False
+    assert messenger.announce_unreachable("@2", via="x", wid="@2", now=1599.0) is True
+    assert messenger.announce_unreachable("@1", via="x", wid="@1", now=1600.0) is True
+    assert messenger.announce_unreachable("@1", via="y", wid="@1", now=1601.0) is True
+    assert [(p["target"], p["via"]) for _, _, p, _ in events] == [
+        ("@1", "x"), ("@2", "x"), ("@1", "x"), ("@1", "y")]
+
+
+def test_broadcast_skips_own_window_and_reaches_colliding_names(events):
+    with _with_windows(), patch.object(messenger, "send_peer", return_value=_SENT) as peer, \
+            patch.object(messenger, "send_tmux") as send:
+        results = messenger.broadcast("@7", "standup")
+    targets = sorted(c.args[0] for c in peer.call_args_list)
+    assert targets == ["@32", "@9"]           # @7 (the sender) is skipped — no self-loop
+    assert results == {"cmx-43": "delivered", "cmx-43 (@9)": "delivered"}  # both, despite one name
     send.assert_not_called()
 
 
-def test_broadcast_skips_own_window_and_reaches_colliding_names():
-    with _with_windows(), patch.object(messenger, "send_peer", return_value=_UNREACHABLE), \
-            patch.object(messenger, "send_tmux", return_value=True) as send:
-        results = messenger.broadcast("@7", "standup")
-    targets = sorted(c.args[0] for c in send.call_args_list)
-    assert targets == ["@32", "@9"]           # @7 (the sender) is skipped — no self-loop
-    assert results == {"cmx-43": True, "cmx-43 (@9)": True}  # both, despite one name
-
-
-def test_broadcast_skips_own_window_when_sender_is_a_name():
-    with _with_windows(), patch.object(messenger, "send_peer", return_value=_UNREACHABLE), \
-            patch.object(messenger, "send_tmux", return_value=True) as send:
+def test_broadcast_skips_own_window_when_sender_is_a_name(events):
+    with _with_windows(), patch.object(messenger, "send_peer", return_value=_SENT) as peer:
         messenger.broadcast("orchestrator", "standup")
-    assert sorted(c.args[0] for c in send.call_args_list) == ["@32", "@9"]
+    assert sorted(c.args[0] for c in peer.call_args_list) == ["@32", "@9"]
 
 
 # --- send_peer / _peer_socket_path — the Claude Code peer-messaging socket ----
@@ -804,13 +840,13 @@ def test_peer_transport_kind_default_when_only_the_legacy_path_is_reachable(tmp_
         server.close()
 
 
-def test_peer_transport_kind_tmux_fallback_when_nothing_exists(tmp_path, monkeypatch):
+def test_peer_transport_kind_unreachable_when_nothing_exists(tmp_path, monkeypatch):
     monkeypatch.setattr(config, "CHELA_DIR", tmp_path / "chela-home")
     monkeypatch.setenv("XDG_RUNTIME_DIR", str(tmp_path))
-    assert messenger.peer_transport_kind("@1", 555, timeout=0.25) == "tmux fallback"
+    assert messenger.peer_transport_kind("@1", 555, timeout=0.25) == "unreachable"
 
 
-def test_peer_transport_kind_tmux_fallback_for_a_stale_deterministic_file(tmp_path, monkeypatch):
+def test_peer_transport_kind_unreachable_for_a_stale_deterministic_file(tmp_path, monkeypatch):
     # A stale FILE at the chela-owned path must not be reported "deterministic" —
     # the whole point of the reachability probe is that existence isn't enough.
     monkeypatch.setattr(config, "CHELA_DIR", tmp_path)
@@ -820,7 +856,7 @@ def test_peer_transport_kind_tmux_fallback_for_a_stale_deterministic_file(tmp_pa
     server.bind(str(det))
     server.listen(1)
     server.close()
-    assert messenger.peer_transport_kind("@1", 555, timeout=0.25) == "tmux fallback"
+    assert messenger.peer_transport_kind("@1", 555, timeout=0.25) == "unreachable"
 
 
 # --- CMX-380: every chela-originated peer message arrives NAMED ------------------

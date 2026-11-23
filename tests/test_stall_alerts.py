@@ -409,7 +409,7 @@ def test_tick_alerts_when_a_busy_orchestrators_socket_is_unreachable(sent, wired
     assert calls["tmux"] == []                           # never a paste into a busy session
     assert len(_held(sent)) == 1
     assert ("has been busy the whole time. Last delivery attempt: peer socket unreachable "
-            f"(no tmux paste while busy) at {ORCH}") in _held(sent)[0]
+            f"(held; never pasted into the pane) at {ORCH}") in _held(sent)[0]
 
 
 def test_tick_alerts_when_a_busy_orchestrators_socket_returns_an_adverse_receipt(sent, wired):
@@ -433,9 +433,10 @@ def test_a_tick_that_drains_a_long_held_queue_does_not_alert(sent, wired):
 def test_tick_records_why_an_idle_orchestrator_was_not_reached(sent, wired):
     calls = wired("idle", messenger.PeerSendResult(False, None))
     inbox.tick({})
-    assert len(calls["tmux"]) == 1                       # idle: the paste WAS tried
+    assert len(calls["peer"]) == 1
+    assert calls["tmux"] == []                           # CMX-482: idle is never pasted either
     assert inbox.load()["last_delivery_failure"]["reason"] == (
-        "peer socket unreachable, tmux paste refused")
+        "peer socket unreachable (held; never pasted into the pane)")
     assert len(_held(sent)) == 1
 
 
@@ -531,10 +532,9 @@ def test_thresholds_default_to_thirty_minutes(monkeypatch):
 def test_a_windowless_peer_failure_records_why_there_was_no_paste():
     store = _store(T0, kind="finished")
     inbox._deliver_loop(store, [], None, target_desc="pid 4242", event_wid=None,
-                        send=lambda text: messenger.PeerSendResult(False, None),
-                        tmux_fallback=None)
+                        send=lambda text: messenger.PeerSendResult(False, None))
     failure = store["last_delivery_failure"]
-    assert failure["reason"] == "peer socket unreachable (no pane to paste into)"
+    assert failure["reason"] == "peer socket unreachable (held; never pasted into the pane)"
     assert failure["target"] == "pid 4242" and failure["kind"] == "finished"
 
 

@@ -76,8 +76,11 @@ def main(scenario: str, root: Path) -> dict:
     epoch.current = lambda: NEW
     inbox.status_snapshot = lambda: dict(statuses)
     sent: list[list[str]] = []
-    messenger.send_peer = lambda wid, frm, text: messenger.PeerSendResult(False, None)
-    messenger.send_tmux = lambda wid, text: (sent.append([wid, text]), True)[1]
+    # Every window's peer socket is reachable; CMX-482 removed the pane paste, so the
+    # socket is the only way anything reaches a window. A paste is recorded as a failure.
+    messenger.send_peer = lambda wid, frm, text: (sent.append([wid, text]),
+                                                  messenger.PeerSendResult(True, "sent"))[1]
+    messenger.send_tmux = lambda wid, text, **kw: (sent.append(["PASTE", wid]), False)[1]
 
     # The pin as the orchestrator left it: `@8`, issued by a server that has since died,
     # with one verdict queued for it.

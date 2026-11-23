@@ -1796,14 +1796,11 @@ def _hooks_rejected_wid_report(_declared: None, obs: Observation) -> list[Findin
 # --- fact: does every LIVE window have a reachable PEER-MESSAGING SOCKET? -------------
 #
 # CMX-222/223 made the peer UDS socket the transport for `chela msg`/`broadcast`, room
-# `handoff`/`question`/`blocker` dispatch, and the decisions inbox's verdict delivery —
-# and every one of those tries the socket FIRST, then falls back to `send_tmux` SILENTLY
-# the moment it cannot be reached (chela.messenger's own module docstring names this: the
-# fallback is correct — a mixed fleet must not lose messages — and it is exactly what
-# makes it dangerous. The fleet can silently degrade to the pre-CMX-222 paste transport,
-# with CMX-79's bash-mode-injection risk back in play, and nothing anywhere reports it.
-# `chela doctor` emitted ZERO facts about peer messaging before this one. This closes
-# that gap the same way `plugin.hooks_flowing` closed "the manifest matches but the hook
+# `handoff`/`question`/`blocker` dispatch, and the decisions inbox's verdict delivery.
+# Since CMX-482 none of them falls back to `send_tmux` when the socket cannot be reached:
+# the message is HELD (parked, queued, or the CLI exits non-zero). So a window with no
+# reachable socket is one every agent message to is stuck on. `chela doctor` names those
+# windows the same way `plugin.hooks_flowing` closed "the manifest matches but the hook
 # never arrives": ask the OWNER — the socket file on disk — not chela's own belief that
 # `--messaging-socket-path` was used at launch.
 
@@ -1829,24 +1826,23 @@ def _peer_transport_report(declared: dict[str, sessions.Pane],
     if not declared:
         return []
     kinds: dict[str, str] = obs.value
-    unreachable = sorted(wid for wid, kind in kinds.items() if kind == "tmux fallback")
+    unreachable = sorted(wid for wid, kind in kinds.items()
+                         if kind == messenger.UNREACHABLE)
     default = sorted(wid for wid, kind in kinds.items() if kind == "default")
     out: list[Finding] = []
     if unreachable:
         out.append(Finding(
             WARN,
-            f"{len(unreachable)} live window(s) have NO reachable peer-messaging "
-            f"socket: {', '.join(unreachable)}",
-            "chela msg/broadcast, room handoff/question/blocker dispatch, and the "
-            "decisions inbox's verdict delivery all try the peer socket FIRST and fall "
-            "back to send_tmux SILENTLY the instant it cannot be reached — an older "
-            "Claude Code build, a window launched before --messaging-socket-path "
-            "existed, a socket that has not bound yet, or a socket FILE that outlived "
-            "the process behind it (a SIGKILLed agent never runs its own unlink). The "
-            "fallback is correct (a mixed fleet must not lose messages), and it is "
-            "exactly what makes this dangerous: every message to these windows quietly "
-            "degrades to typing into the pane, re-opening CMX-79's bash-mode-injection "
-            "risk, with nothing but this check saying so. Relaunch the window so it "
+            f"unreachable: messages are held — {len(unreachable)} live window(s) have "
+            f"NO reachable peer-messaging socket: {', '.join(unreachable)}",
+            "chela msg/broadcast/drive, room handoff/question/blocker dispatch, the fleet "
+            "pause and the decisions inbox send agent messages over the peer socket ONLY: "
+            "they never type into the pane instead (a paste arrives as a user turn, with no "
+            "from). Every message to these windows is HELD — parked, queued, or refused "
+            "with a non-zero exit — until a socket answers. Causes: an older Claude Code "
+            "build, a window launched before --messaging-socket-path existed, a socket "
+            "that has not bound yet, or a socket FILE that outlived the process behind it "
+            "(a SIGKILLed agent never runs its own unlink). Relaunch the window so it "
             "picks up --messaging-socket-path (dispatcher.py / personas/autolaunch.py "
             "already wire it in), or confirm its Claude Code build supports the peer "
             "socket.",
@@ -1873,7 +1869,7 @@ def _peer_transport_report(declared: dict[str, sessions.Pane],
     return [Finding(
         OK, f"{len(declared)} live window(s): every one reaches its peer-messaging "
             "socket through the chela-owned deterministic path — chela "
-            "msg/broadcast/rooms/inbox use it, not the tmux fallback")]
+            "msg/broadcast/drive/rooms/inbox reach every one of them")]
 
 
 # --- fact: what the RUNNING daemon came up with --------------------------------------

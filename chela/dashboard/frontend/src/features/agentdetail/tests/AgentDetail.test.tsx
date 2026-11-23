@@ -11,11 +11,13 @@ let calls: { url: string; body: unknown }[] = [];
 let role = 'Plain session';
 const host = { selectView: vi.fn(), roleLabel: vi.fn(() => role), dotColor: vi.fn(() => 'yellow') };
 let answer = true;
+let msgReply: unknown = { sent: true };
 
 beforeEach(() => {
   calls = [];
   role = 'Plain session';
   answer = true;
+  msgReply = { sent: true };
   host.selectView.mockClear();
   setAgentDetailHost(host);
   agents.set([]);
@@ -23,7 +25,8 @@ beforeEach(() => {
   detailAgent.set(null);
   vi.stubGlobal('fetch', (url: string, opts?: RequestInit) => {
     calls.push({ url, body: opts?.body ? JSON.parse(String(opts.body)) : undefined });
-    return Promise.resolve({ json: () => Promise.resolve([]) });
+    const body = url.endsWith('/api/agents/msg') ? msgReply : [];
+    return Promise.resolve({ json: () => Promise.resolve(body) });
   });
   vi.stubGlobal('confirm', () => answer);
   render(<div id="agent-detail"><AgentDetail /><SendMessage /></div>);
@@ -155,6 +158,24 @@ test('drilling in reads the context; its bar shows %, model, cost and the estima
   expect(label.title).toBe('the real % shows after the next turn');
   act(() => context.set([{ name: 'a1', used: '430K', used_pct: null, window_source: 'unknown' }]));
   expect([label.textContent, label.title]).toEqual(['Context: 430K tokens', 'window size unknown']);
+});
+
+test('a message that did not go in keeps the dialog open with its text and says why', async () => {
+  msgReply = { sent: false, error: 'the prompt holds an unsent draft; sending would merge into it' };
+  act(() => openSendMsg('w9'));
+  fireEvent.change(screen.getByRole('textbox', { name: 'Message' }), { target: { value: 'hi' } });
+  fireEvent.click(screen.getByRole('button', { name: 'Send' }));
+  await settle();
+  expect(calls).toEqual([{ url: '/api/agents/msg', body: { agent: 'w9', message: 'hi' } }]);
+  expect(screen.getByRole('dialog', { name: 'Send Message to w9' })).toBeTruthy();
+  expect(screen.getByRole('alert').textContent).toBe('the prompt holds an unsent draft; sending would merge into it');
+  expect((screen.getByRole('textbox', { name: 'Message' }) as HTMLTextAreaElement).value).toBe('hi');
+  msgReply = { sent: true };
+  fireEvent.click(screen.getByRole('button', { name: 'Send' }));
+  await settle();
+  expect(screen.queryByRole('dialog')).toBeNull();
+  act(() => openSendMsg('w9'));
+  expect(screen.queryByRole('alert')).toBeNull();
 });
 
 test('send a message: the dialog names the agent, a blank message sends nothing, Send posts and closes', async () => {

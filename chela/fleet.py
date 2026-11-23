@@ -77,7 +77,7 @@ def _pause(wid: str, finishing: str | None) -> str:
     """Escape + the pause message, or the message alone for an agent ``finishing`` a
     worktree-mutating command. ``failed`` when any of it did not land."""
     ok = ((finishing or messenger.send_escape(wid))
-          and messenger.send_message(SENDER, wid, PAUSE_MESSAGE))
+          and messenger.send_message(SENDER, wid, PAUSE_MESSAGE) == messenger.DELIVERED)
     if not ok:
         log.warning("fleet pause: could not pause %s", wid)
     return (FINISHING if finishing else INTERRUPTED) if ok else FAILED
@@ -228,7 +228,8 @@ def resume_all() -> dict | None:
         if task not in runs:
             continue
         wid = inbox.run_wid(runs[task])
-        resumed[task] = bool(wid) and messenger.send_message(SENDER, wid, RESUME_MESSAGE)
+        resumed[task] = (bool(wid) and messenger.send_message(SENDER, wid, RESUME_MESSAGE)
+                         == messenger.DELIVERED)
     return {"since": state.get("since"), "resumed": resumed, "thawed": thawed}
 
 

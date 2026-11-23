@@ -242,6 +242,20 @@ def live_inbox(tmp_path, monkeypatch):
     return statuses
 
 
+@pytest.fixture
+def peer_sends(monkeypatch):
+    """The orchestrator's peer socket, as a recorder. There is no claude here to bind one,
+    and since CMX-482 the inbox never pastes into a pane, so this is the delivery channel.
+    The WINDOW IDS it is called with are still the real ones the live server issued."""
+    from chela import messenger
+
+    sent: list[tuple[str, str]] = []
+    monkeypatch.setattr(messenger, "send_peer",
+                        lambda wid, frm, text: (sent.append((wid, text)),
+                                                messenger.PeerSendResult(True, "sent"))[1])
+    return sent
+
+
 def _runs(n: int) -> list[dict]:
     """The finished PRs the orchestrator has to be told about — real enough rows that the
     delivery-time re-validation (`inbox.stale_reason`) still sees them as TRUE."""
@@ -270,7 +284,7 @@ def _assert_nothing_was_pasted_into(pane: str) -> None:
 
 
 def test_a_tmux_restart_renumbers_the_fleet_and_the_queue_is_NOT_pasted_into_the_stranger(
-        tmux, live_inbox, caplog, monkeypatch):
+        tmux, live_inbox, peer_sends, caplog, monkeypatch):
     """2026-07-14, driven for real: the server dies, the fleet comes back renumbered.
 
     Server A issues `@0` to the orchestrator and the inbox is addressed to it. Server A is
@@ -293,8 +307,10 @@ def test_a_tmux_restart_renumbers_the_fleet_and_the_queue_is_NOT_pasted_into_the
     # nothing — a test harness that never delivers anything would "pass" just as well.
     live_inbox[orch] = IDLE
     inbox.tick({}, runs=_runs(1))
-    assert "cmx-70" in tmux.pane(orch), "the review never reached the orchestrator's pane"
+    assert [(w, "cmx-70" in t) for w, t in peer_sends] == [(orch, True)], \
+        "the review never reached the orchestrator"
     assert inbox.load()["queue"] == []
+    peer_sends.clear()
 
     # --- the OOM ------------------------------------------------------------------------
     tmux.kill()
@@ -322,6 +338,7 @@ def test_a_tmux_restart_renumbers_the_fleet_and_the_queue_is_NOT_pasted_into_the
         inbox.tick({}, runs=_runs(5))
 
     _assert_nothing_was_pasted_into(tmux.pane(stranger))
+    assert peer_sends == [], "a review notification was sent to the window that INHERITED the id"
     assert len(inbox.load()["queue"]) == 4, "the events must survive to be delivered later"
     assert "UNDELIVERABLE" in caplog.text and "dangling" in caplog.text, "it failed SILENTLY"
     assert "inbox_undeliverable" in _kinds(), "nothing durable said the inbox had stopped"
@@ -344,14 +361,15 @@ def test_a_tmux_restart_renumbers_the_fleet_and_the_queue_is_NOT_pasted_into_the
     for _ in range(4):
         inbox.tick({}, runs=_runs(5))
 
-    pane = tmux.pane(reborn)
-    assert all(f"cmx-7{i}" in pane for i in range(1, 5)), "the queue never drained to the orch"
+    assert {w for w, _ in peer_sends} == {reborn}
+    delivered = "\n".join(t for _, t in peer_sends)
+    assert all(f"cmx-7{i}" in delivered for i in range(1, 5)), "the queue never drained to the orch"
     assert inbox.load()["queue"] == []
     _assert_nothing_was_pasted_into(tmux.pane(stranger))   # ...and never was, throughout
     assert not [f for f in _doctor_inbox() if f.level == runtime_truth.ERROR]
 
 
-def test_a_watch_survives_its_own_server_but_never_the_next_one(tmux, live_inbox):
+def test_a_watch_survives_its_own_server_but_never_the_next_one(tmux, live_inbox, peer_sends):
     """The same rot, one store over: a watch is an `@N` too.
 
     The orchestrator watched `@1`. tmux restarted and gave `@1` to a different agent. A
@@ -375,11 +393,8 @@ def test_a_watch_survives_its_own_server_but_never_the_next_one(tmux, live_inbox
     inbox.tick({stranger: inbox.BUSY})               # a busy->idle edge on the STRANGER
 
     assert inbox.watches() == {}, "the dead watch survived to lie about somebody else's work"
-    pane = tmux.pane(reborn)
-    # Judge only what the inbox delivered, from its 📥 on: the pane also renders the user's
-    # shell prompt, which can carry the git branch name — and a branch named
-    # `…-finished-…` (CMX-8's) made `"finished" not in pane` fail with nothing delivered.
-    delivered = "\n".join(ln[ln.index("📥"):] for ln in pane.splitlines() if "📥" in ln)
+    assert {w for w, _ in peer_sends} == {reborn}
+    delivered = "\n".join(t for _, t in peer_sends)
     assert "tmux SERVER restarted" in delivered and "UNKNOWN" in delivered
     assert "finished" not in delivered, (
         "it reported a stranger's idleness as our agent's success")

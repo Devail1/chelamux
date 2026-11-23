@@ -546,8 +546,8 @@ def _break_hooks_flowing(tmp_path, monkeypatch):
 def _break_peer_transport(tmp_path, monkeypatch):
     """@1's peer-messaging socket is gone — an older Claude Code build, a window
     launched before --messaging-socket-path existed, or a socket that never bound.
-    Every send_message/send_peer call to @1 now falls back to send_tmux SILENTLY,
-    which is exactly the CMX-224 gap: chela doctor said nothing about it."""
+    Every agent message to @1 is now HELD (CMX-482: never typed into the pane), and
+    chela doctor must say so (the CMX-224 gap: it once said nothing)."""
     messenger.deterministic_peer_socket_path("@1").unlink()
     return doctor.WARN
 
@@ -1277,6 +1277,9 @@ def test_peer_transport_warns_on_a_stale_socket_file_nothing_is_listening_on(
     assert findings, "a stale socket file produced no finding at all"
     assert all(f.level == doctor.WARN for f in findings)
     assert "@1" in findings[0].title
+    # CMX-482: the finding says what happens to the messages now — held, not pasted.
+    assert findings[0].title.startswith("unreachable: messages are held — 1 live window(s)")
+    assert "never type into the pane" in findings[0].detail
 
 
 def test_peer_transport_flags_windows_reachable_only_via_the_legacy_default_path(

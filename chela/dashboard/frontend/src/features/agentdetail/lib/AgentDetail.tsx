@@ -177,20 +177,40 @@ export function AgentDetail() {
 export function SendMessage() {
   const target = useStore(msgTarget);
   const [text, setText] = useState('');
+  const [error, setError] = useState('');
+  const close = () => {
+    msgTarget.set(null);
+    setText('');
+    setError('');
+  };
+  // A message that did not go in (an unsent draft in the agent's prompt: 409) keeps the
+  // dialog open with its text and says why — closing would drop it silently (CMX-482).
   const send = async () => {
     const message = text.trim();
     if (!message || !target) return;
-    await post('/api/agents/msg', { agent: target, message });
-    msgTarget.set(null);
-    setText('');
+    let res: { sent?: boolean; error?: string } | null = null;
+    try {
+      const r = await fetch(BASE_PATH + '/api/agents/msg', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ agent: target, message }),
+      });
+      res = (await r.json()) as { sent?: boolean; error?: string };
+    } catch {
+      res = null;
+    }
+    if (!res?.sent) {
+      setError(res?.error || 'Not sent.');
+      return;
+    }
+    close();
   };
   return (
     <Dialog open={!!target} onOpenChange={(o) => {
         if (o) return;
-        msgTarget.set(null);
-        setText('');
+        close();
       }} title={`Send Message to ${target ?? ''}`}>
       <TextArea label="Message" value={text} onChange={setText} rows={4} />
+      {error && <p className="task-modal-error" role="alert">{error}</p>}
       <div className="modal-actions">
         <DialogClose asChild><Button>Cancel</Button></DialogClose>
         <Button variant="primary" onClick={() => void send()}>Send</Button>

@@ -487,6 +487,14 @@ def _no_default_sweep_blocked_hours(request, monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _fresh_unreachable_announcements(monkeypatch):
+    """``messenger.announce_unreachable`` de-dupes per process; a test must not inherit
+    another test's "already announced" and miss its own ``peer_unreachable`` event."""
+    from chela import messenger
+    monkeypatch.setattr(messenger, "_unreachable_announced", {})
+
+
+@pytest.fixture(autouse=True)
 def _isolate_claude_config(tmp_path, monkeypatch):
     monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "claude-config"))
 

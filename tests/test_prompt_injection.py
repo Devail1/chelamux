@@ -183,16 +183,19 @@ def test_a_legacy_queued_summary_is_neutralised_at_delivery(store_file_env):
              "queue": [{"kind": "run_review", "summary": "📥 cmx-77 $(id) `whoami`",
                         "payload": {}, "wid": None, "ts": 0}],
              "runs_seen": {}}
-    with patch.object(inbox.messenger, "send_tmux", return_value=True) as send:
+    with patch.object(inbox.messenger, "send_peer",
+                      return_value=messenger.PeerSendResult(True, "sent")) as send:
         inbox.deliver(store, {"@0": inbox.IDLE}, [])
-    sent = send.call_args.args[1]
+    sent = send.call_args.args[2]
     assert "$" not in sent and "`" not in sent and "(" not in sent
     assert store["queue"] == []
 
 
-def test_deliver_into_a_bash_mode_pane_types_nothing_and_HOLDS_the_event(store_file_env):
-    # The refusal is not a drop. The queue is durable and the notification still matters:
-    # it goes out on a later tick, once the pane is back at its prose prompt.
+def test_deliver_with_no_socket_types_nothing_even_into_a_bash_mode_pane_and_HOLDS(
+        store_file_env):
+    # CMX-482: the inbox never pastes, so a pane in `!` bash mode is never typed into —
+    # not because the mode check refused it, but because no paste is attempted at all.
+    # The event is HELD (the queue is durable), never dropped.
     event = {"kind": "run_review", "summary": "📥 cmx-77 awaiting review", "payload": {},
              "wid": None, "ts": 0}
     store = {"orchestrator": "@0", "watches": {}, "queue": [event], "runs_seen": {}}
@@ -211,13 +214,10 @@ def test_deliver_into_a_bash_mode_pane_types_nothing_and_HOLDS_the_event(store_f
 
     assert sent == []                      # nothing delivered…
     assert store["queue"] == [event]       # …and nothing LOST
-    # Nothing TYPED — not "the exact call sequence never changes": CMX-223 makes
-    # deliver() try the peer socket first (an extra `display-message` lookup via
-    # send_peer -> claude_pid, itself a no-op here since the pid can't be
-    # resolved), and it's the tmux fallback's mode check that refuses the paste.
-    calls = [c.args[0][1] for c in m.call_args_list]
-    assert "send-keys" not in calls
-    assert "capture-pane" in calls
+    # Only send_peer's pid lookup (`display-message`, a no-op here since the pid can't
+    # be resolved) touches tmux: nothing is typed, and no pane is even read.
+    calls = {c.args[0][1] for c in m.call_args_list}
+    assert calls == {"display-message"}
 
 
 @pytest.fixture

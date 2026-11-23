@@ -147,8 +147,11 @@ def _store(*kinds, unlogged=False):
 @pytest.fixture
 def sends(monkeypatch):
     calls = []
-    monkeypatch.setattr(inbox.messenger, "send_tmux",
-                        lambda wid, text: (calls.append((wid, text)), True)[1])
+    def peer(wid, frm, text):
+        calls.append((wid, text))
+        return inbox.messenger.PeerSendResult(True, "sent")
+
+    monkeypatch.setattr(inbox.messenger, "send_peer", peer)
     return calls
 
 

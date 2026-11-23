@@ -539,7 +539,7 @@ def post(room: str, kind: str, text: str, *, from_wid: str, targets: list[str] |
 
     result = {"ok": True, "seq": record["seq"], "room": room, "kind": kind,
               "chain_id": chain_id, "hop": hop, "delivered": [], "deferred": [],
-              "blocked": [], "failed": []}
+              "unreachable": [], "blocked": [], "failed": []}
     if not dispatchable:
         return result
 
@@ -561,23 +561,24 @@ def post(room: str, kind: str, text: str, *, from_wid: str, targets: list[str] |
             _park(wid, record, prompt)
             result["deferred"].append(wid)
             continue
-        # CMX-223: peer socket first (bypasses the terminal entirely — CMX-79's
-        # bash-mode risk doesn't apply), tmux paste as fallback. A handoff whose
-        # receipt comes back held/denied/expired is NOT a delivery — the socket
-        # accepting the bytes just means the recipient's own gate saw it and
-        # dropped it; that gets its own RECEIPT_TYPE record, never DELIVERY_TYPE.
-        peer = messenger.send_peer(wid, from_wid, prompt)
-        if peer.handed_off and peer.status in messenger.ADVERSE_RECEIPT_STATUSES:
-            log.warning("rooms: %s #%s to %s was %s — NOT delivered", kind,
-                        record["seq"], wid, peer.status)
-            _record_receipt(record, wid, peer.status)
-            result["failed"].append(wid)
-        elif peer.handed_off or messenger.send_tmux(wid, prompt):
+        # CMX-223: the peer socket (bypasses the terminal entirely — CMX-79's bash-mode
+        # risk doesn't apply). A handoff whose receipt comes back held/denied/expired is
+        # NOT a delivery — the socket accepting the bytes just means the recipient's own
+        # gate saw it and dropped it; that gets its own RECEIPT_TYPE record, never
+        # DELIVERY_TYPE. CMX-482: an unreachable socket is never retried as a pane paste
+        # (it would arrive as a user turn); the delivery is PARKED, and flush_pending
+        # retries it over the socket.
+        outcome = messenger.deliver_peer(wid, from_wid, prompt, via=f"room {room}")
+        if outcome == messenger.DELIVERED:
             _record_delivery(record, wid)
             result["delivered"].append(wid)
+        elif outcome == messenger.UNREACHABLE:
+            _park(wid, record, prompt)
+            result["unreachable"].append(wid)
         else:
-            log.warning("rooms: send to %s failed — %s #%s not delivered",
-                        wid, kind, record["seq"])
+            log.warning("rooms: %s #%s to %s was %s — NOT delivered", kind,
+                        record["seq"], wid, outcome)
+            _record_receipt(record, wid, outcome)
             result["failed"].append(wid)
     return result
 
@@ -595,7 +596,7 @@ def _park(wid: str, post_event: dict, prompt: str) -> None:
             dropped = queue.pop(0)
             log.warning("rooms: pending queue for %s is full — dropping %s #%s",
                         wid, dropped["kind"], dropped["post_seq"])
-    log.info("rooms: %s #%s parked for %s (it is at a gate — never paste into `waiting`)",
+    log.info("rooms: %s #%s parked for %s (at a gate, or its peer socket is unreachable)",
              p["kind"], post_event["seq"], wid)
 
 
@@ -647,19 +648,21 @@ def flush_pending(statuses: dict[str, str] | None = None) -> list[dict]:
                 continue
             if statuses.get(wid) == WAITING:
                 continue                   # still at the gate — it waits, it is not lost
-            # CMX-223: peer socket first, tmux paste as fallback (see post()). An
-            # adverse receipt is a drop, not a delivery — recorded and NOT re-queued:
-            # a receiver's own gate refused it, and retrying does not change that.
-            peer = messenger.send_peer(wid, entry["from_wid"], entry["prompt"])
-            if peer.handed_off and peer.status in messenger.ADVERSE_RECEIPT_STATUSES:
-                log.warning("rooms: parked %s #%s to %s was %s — NOT delivered",
-                            entry["kind"], entry["post_seq"], wid, peer.status)
-                resolved.add(key)
-                receipted.append({**entry, "to_wid": wid, "status": peer.status})
-                continue
-            if not (peer.handed_off or messenger.send_tmux(wid, entry["prompt"])):
-                log.warning("rooms: parked delivery to %s failed; leaving it queued", wid)
+            # CMX-223: the peer socket (see post()). An adverse receipt is a drop, not a
+            # delivery — recorded and NOT re-queued: a receiver's own gate refused it, and
+            # retrying does not change that. CMX-482: an unreachable socket leaves it
+            # queued (never a pane paste); the TTL above still bounds how long it waits.
+            outcome = messenger.deliver_peer(wid, entry["from_wid"], entry["prompt"],
+                                             via=f"room {entry['room']}")
+            if outcome == messenger.UNREACHABLE:
+                log.warning("rooms: parked delivery to %s unreachable; leaving it queued", wid)
                 break                      # unhappy — try this window again next tick
+            if outcome != messenger.DELIVERED:
+                log.warning("rooms: parked %s #%s to %s was %s — NOT delivered",
+                            entry["kind"], entry["post_seq"], wid, outcome)
+                resolved.add(key)
+                receipted.append({**entry, "to_wid": wid, "status": outcome})
+                continue
             resolved.add(key)
             sent.append({**entry, "to_wid": wid})
 

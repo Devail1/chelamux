@@ -200,6 +200,27 @@ def test_every_row_names_code_that_exists():
     assert not stale, f"rows naming a file or function that no longer exists: {stale}"
 
 
+def bucket_one_pane_sites(rows: dict[str, list[str]], sites: set[str]) -> list[str]:
+    """Bucket-1 rows (a message to an agent) whose function still touches a pane."""
+    return sorted(site for site, cells in rows.items()
+                  if len(cells) >= 2 and cells[-2].strip("* ") == "1" and site in sites)
+
+
+def test_no_message_to_an_agent_touches_a_pane():
+    """CMX-482 (slice 1's acceptance): ``send_tmux`` — or any pane primitive — is reachable
+    from no bucket-1 row. A message to an agent goes over the peer socket or not at all."""
+    rows = doc_rows(DOC.read_text())
+    assert sum(1 for c in rows.values() if c[-2].strip("* ") == "1") >= 6
+    bad = bucket_one_pane_sites(rows, code_sites())
+    assert not bad, f"bucket-1 (agent message) rows that still type into or read a pane: {bad}"
+
+
+def test_bucket_one_pane_sites_fixture():
+    rows = {"chela/a.py:f": ["x", "y", "1", "remove"], "chela/a.py:g": ["x", "y", "4", "keep"],
+            "chela/a.py:h": ["x", "y", "1", "remove"]}
+    assert bucket_one_pane_sites(rows, {"chela/a.py:f", "chela/a.py:g"}) == ["chela/a.py:f"]
+
+
 def row_problems(rows: dict[str, list[str]]) -> dict[str, tuple[str, str]]:
     """Rows whose last two cells are not a bucket 1-6 and a keep/replace/remove."""
     bad = {}

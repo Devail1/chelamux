@@ -775,9 +775,18 @@ def api_agents_msg():
     wid = messenger.resolve_window(agent)
     if not wid:
         return jsonify({"error": f"agent {agent} not found"}), 404
-    # A slash command goes in raw (a "[sender] /foo" prefix would not be a command).
-    ok = (messenger.send_tmux(wid, message) if message.startswith("/")
-          else messenger.send_message("dashboard", wid, message))
+    # The person typing here is the USER, so their text arrives as a user turn (bucket 5,
+    # docs/TMUX_TOUCHPOINTS.md). A slash command goes in raw (a "[sender] /foo" prefix
+    # would not be a command); prose goes through deliver_prompt, which never appends to a
+    # draft already in the prompt (CMX-117). Neither is an agent message, so neither goes
+    # through send_message (CMX-482).
+    try:
+        ok = (messenger.send_tmux(wid, message) if message.startswith("/")
+              else messenger.deliver_prompt(wid, message))
+    except messenger.PendingDraft:
+        return jsonify({"sent": False, "agent": agent,
+                        "error": "the prompt holds an unsent draft; sending would merge "
+                                 "into it"}), 409
     return jsonify({"sent": ok, "agent": agent})
 
 
@@ -2662,7 +2671,7 @@ def api_agents_trigger():
     tasks = scheduler.list_tasks()
     task = next((t for t in tasks if t.agent_name == agent and t.enabled), None)
     prompt = task.prompt if task else "Please run your work cycle now."
-    ok = messenger.send_message("dashboard", agent, prompt)
+    ok = messenger.send_message("dashboard", agent, prompt) == messenger.DELIVERED
     return jsonify({"sent": ok, "agent": agent, "prompt_source": "schedule" if task else "default"})
 
 
@@ -2674,8 +2683,10 @@ def api_agents_broadcast():
     priority = data.get("priority", "normal")
     if not message:
         return jsonify({"error": "message required"}), 400
+    # {agent: delivered?} — a bool, as before CMX-482: an outcome string like "unreachable"
+    # is truthy, and a client testing the value would read it as sent.
     results = messenger.broadcast("dashboard", message, priority)
-    return jsonify(results)
+    return jsonify({name: outcome == messenger.DELIVERED for name, outcome in results.items()})
 
 
 # ---------------------------------------------------------------------------

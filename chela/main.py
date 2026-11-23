@@ -641,14 +641,15 @@ def cmd_schedule_remove(args) -> None:
 
 
 def cmd_msg(args) -> None:
-    """Send a message to one live agent over tmux — by window id (``@32``) or name.
+    """Send a message to one live agent over its peer socket — by window id (``@32``) or name.
 
-    A message must never be lost quietly, so the two failure modes are reported
-    apart and both exit NON-ZERO: "the window is gone" and "tmux refused the
-    send". The old code collapsed both into a chatty `offline` on stdout with a
+    A message must never be lost quietly, so the failure modes are reported
+    apart and all exit NON-ZERO: "the window is gone", "no peer socket is
+    reachable" (CMX-482: never typed into the pane instead) and "the receiver's
+    gate dropped it". The old code collapsed both into a chatty `offline` on stdout with a
     zero exit — and, because it resolved the recipient by *name* only, said it
     about live windows addressed by id. A "busy" agent is NOT a failure mode: it
-    is a valid recipient, and Claude Code queues the paste.
+    is a valid recipient, and Claude Code queues the peer message.
     """
     target = messenger.resolve_window(args.agent)
     if target is None:
@@ -664,12 +665,25 @@ def cmd_msg(args) -> None:
         print(f"{args.agent} resolves to this very window ({target}) — refusing to "
               "message myself (that is a loop). Pass a sibling's @wid.", file=sys.stderr)
         sys.exit(1)
-    if messenger.send_message(args.from_agent, target, args.message, args.priority):
+    outcome = messenger.send_message(args.from_agent, target, args.message, args.priority)
+    if outcome == messenger.DELIVERED:
         print(f"Sent to {args.agent} ({target})")
         return
-    print(f"{args.agent} ({target}) is live but the tmux send FAILED — message not "
-          "delivered (see the log for tmux's error).", file=sys.stderr)
+    print(f"{args.agent} ({target}): message NOT delivered — {_undelivered_reason(outcome)}",
+          file=sys.stderr)
     sys.exit(1)
+
+
+def _undelivered_reason(outcome: str) -> str:
+    """Why an agent message was not delivered, for a CLI's stderr (CMX-482)."""
+    if outcome == messenger.UNREACHABLE:
+        return ("unreachable: no peer-messaging socket answered, and chela never types an "
+                "agent message into the pane instead (`chela doctor` lists such windows; "
+                "relaunching the window binds a socket)")
+    if outcome in messenger.ADVERSE_RECEIPT_STATUSES:
+        return (f"the receiver's own crossSessionInbound gate {outcome} it (its setting, "
+                "not a transport failure)")
+    return outcome
 
 
 def cmd_broadcast(args) -> None:
@@ -678,9 +692,10 @@ def cmd_broadcast(args) -> None:
     if not results:
         print("No other agents online")
         return
-    for agent, delivered in sorted(results.items()):
-        print(f"  {agent:<24} {'sent' if delivered else 'FAILED — not delivered'}")
-    if not all(results.values()):
+    for agent, outcome in sorted(results.items()):
+        print(f"  {agent:<24} "
+              f"{'sent' if outcome == messenger.DELIVERED else f'FAILED ({outcome}) — not delivered'}")
+    if any(outcome != messenger.DELIVERED for outcome in results.values()):
         sys.exit(1)
 
 
@@ -980,10 +995,15 @@ def cmd_room_post(args) -> None:
               f"(never pasted into a prompt)")
     for blocked in result["blocked"]:
         print(f"  {blocked['wid']}: NOT delivered — {blocked['reason']}", file=sys.stderr)
+    for wid in result["unreachable"]:
+        print(f"  {wid}: unreachable — no peer-messaging socket answered; delivery PARKED "
+              f"for a retry over the socket (never typed into the pane)", file=sys.stderr)
     if result["failed"]:
-        print(f"  tmux send FAILED for: {', '.join(result['failed'])} — not delivered",
-              file=sys.stderr)
+        print(f"  the receiver's gate dropped it for: {', '.join(result['failed'])} — "
+              f"not delivered", file=sys.stderr)
         sys.exit(1)
+    if result["unreachable"]:
+        sys.exit(1)          # held, not delivered — say so in $?
     if not result["delivered"] and not result["deferred"] and args.to:
         sys.exit(1)          # it was aimed at someone and reached nobody — say so in $?
 
@@ -1337,7 +1357,7 @@ def cmd_read(args) -> None:
 
 
 def cmd_drive(args) -> None:
-    """Message a sibling window (wid-keyed). Thin alias over the tmux send path.
+    """Message a sibling window (wid-keyed) over its peer socket, ``from`` the driving window.
 
     ⛔ **Issue #456's counterweight to herdr's atomic ``agent.prompt``.** A window sitting
     ``WAITING`` is mid permission/question prompt — typing prose into it is not an
@@ -1367,8 +1387,14 @@ def cmd_drive(args) -> None:
               file=sys.stderr)
         sys.exit(1)
     sender = orchestrator.self_wid() or "orchestrator"
-    if not messenger.send_tmux(wid, f"[{sender}] {args.message}"):
-        print(f"{wid} — send failed", file=sys.stderr)
+    # CMX-482: a native peer message from the driving window, never a pane paste — a paste
+    # arrives as a bare user turn, so the sibling would read the orchestrator's text as
+    # the user's.
+    outcome = messenger.deliver_peer(wid, sender, f"[{sender}] {args.message}",
+                                     via=f"chela drive from {sender}")
+    if outcome != messenger.DELIVERED:
+        print(f"{wid}: message NOT delivered — {_undelivered_reason(outcome)}",
+              file=sys.stderr)
         sys.exit(1)
     print(f"Sent to {wid}")
     if args.wait:

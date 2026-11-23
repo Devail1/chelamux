@@ -319,13 +319,16 @@ def test_a_failed_resume_is_tried_again_next_tick(statuses, sends, monkeypatch):
     """🔴 GUARD: a send that failed puts the outage back; the next idle tick re-sends."""
     monkeypatch.setattr(inbox.messenger, "send_peer",
                         lambda wid, frm, text: messenger.PeerSendResult(False, None))
-    monkeypatch.setattr(inbox.messenger, "send_tmux", lambda wid, text: False)
     runs = _outage_then(statuses, lambda: _ran(OTHER))
     assert inbox.load()["classifier_out"]["CMX-9"]["recovered"] is True
-    monkeypatch.setattr(inbox.messenger, "send_tmux",
-                        lambda wid, text: sends.append(("tmux", wid, text)) or True)
+    assert sends == []                                  # never a pane paste (CMX-482)
+
+    def peer(wid, frm, text):
+        sends.append(("peer", wid, frm, text))
+        return messenger.PeerSendResult(True, "sent")
+    monkeypatch.setattr(inbox.messenger, "send_peer", peer)
     inbox.tick({}, runs=runs)
-    assert sends == [("tmux", AGENT, inbox.RESUME_PROMPT)]
+    assert sends == [("peer", AGENT, "chela-inbox", inbox.RESUME_PROMPT)]
     assert inbox.load()["classifier_out"] == {}
 
 
@@ -398,14 +401,19 @@ def _resumed():
                         {"task_id": "CMX-9"}, wid=AGENT, silent=True)
 
 
-def test_no_socket_falls_back_to_the_pane(monkeypatch, sends):
-    """🔴 GUARD: socket unreachable → the pane paste, same text, same window."""
+def test_no_socket_never_falls_back_to_the_pane(monkeypatch, sends):
+    """🔴 GUARD (CMX-482 negative control): socket unreachable → NOT delivered, and never
+    typed into the pane (the old path pasted the same text with send_tmux)."""
     monkeypatch.setattr(inbox.messenger, "send_peer",
                         lambda wid, frm, text: messenger.PeerSendResult(False, None))
     event = _resumed()
     inbox.send_resumes([event])
-    assert sends == [("tmux", AGENT, inbox.RESUME_PROMPT)]
-    assert event["payload"]["delivered"] is True
+    assert sends == []
+    assert event["payload"]["delivered"] is False
+    assert event["payload"]["outcome"] == "unreachable"
+    assert event["summary"] == "▶ x · @41 could not be re-prompted (unreachable)"
+    [held] = _logged("peer_unreachable")
+    assert held["payload"] == {"target": AGENT, "via": "usage-outage resume"}
 
 
 @pytest.mark.parametrize("status", ["held", "denied", "expired"])
@@ -417,15 +425,7 @@ def test_an_adverse_receipt_never_routes_around_through_the_pane(monkeypatch, se
     inbox.send_resumes([event])
     assert sends == []
     assert event["payload"]["delivered"] is False
-    assert event["summary"] == "▶ x · @41 could not be re-prompted (the send failed)"
+    assert event["summary"] == f"▶ x · @41 could not be re-prompted ({status})"
     [logged] = _logged("classifier_resumed")
     assert logged["payload"]["delivered"] is False
-
-
-def test_a_refused_paste_is_recorded_as_not_sent(monkeypatch):
-    monkeypatch.setattr(inbox.messenger, "send_peer",
-                        lambda wid, frm, text: messenger.PeerSendResult(False, None))
-    monkeypatch.setattr(inbox.messenger, "send_tmux", lambda wid, text: False)
-    event = _resumed()
-    inbox.send_resumes([event])
-    assert event["payload"]["delivered"] is False
+    assert _logged("peer_unreachable") == []

@@ -2,24 +2,23 @@
 Claude Code's own peer-messaging Unix socket.
 
 ``send_tmux`` is the low-level primitive: given a tmux window id and text, type
-it into that window's Claude Code prompt and press Enter. It stays the transport
-for anything that isn't one agent messaging another — the Telegram bridge, the
-dashboard, rooms, the decisions inbox all keep using it unchanged.
+it into that window's Claude Code prompt and press Enter. It is the transport for
+the USER's input (the Telegram bridge, dashboard typing, the user's schedules) and
+for gated slash commands — never for a message from one agent (or chela) to another.
 
-``send_message``/``broadcast``, ``rooms.py``'s targeted dispatch, and the decisions
-inbox's verdict delivery are the peer-socket-eligible paths: each resolves a live
-window, then tries :func:`send_peer` — a direct write to the target session's own
-Unix socket (Claude Code 2.1.224+ binds one per session and ingests newline-
-delimited JSON on it) — before falling back to :func:`send_tmux`. ``send_tmux``
-typing into a pane is a poor fit for agent-to-agent traffic: it depends on the
-pane's terminal input MODE (CMX-79 — text typed while a pane is mid `!`-bash-
-command would execute), where the peer socket hands the message straight to the
-target's own message queue, bypassing the terminal entirely. The fallback exists
-because the socket is a newer mechanism than tmux delivery: an older Claude Code
-build, a session that hasn't bound the socket yet, or a stale socket file all fall
-straight through to the tried-and-true paste. Delivery is live-only either way: if
-the agent has no live window the message is not delivered (there is no persistent
-queue).
+``send_message``/``broadcast``, ``rooms.py``'s targeted dispatch, the decisions
+inbox, ``chela drive`` and the fleet pause are agent messages: each resolves a live
+window, then sends over :func:`send_peer` — a direct write to the target session's
+own Unix socket (Claude Code 2.1.224+ binds one per session and ingests newline-
+delimited JSON on it) — through :func:`deliver_peer`. ⛔ **There is no tmux
+fallback (CMX-482).** A paste arrives as a bare user turn with no ``from``, so the
+receiver shows no cross-session banner and another agent's text reads as the
+user's; it also depends on the pane's terminal input MODE (CMX-79 — text typed
+while a pane is mid `!`-bash-command would execute). When the socket cannot be
+reached (an older Claude Code build, a session that hasn't bound it yet, a stale
+socket file) the result is :data:`UNREACHABLE`: the caller holds the message where
+a queue exists, logs it, and a CLI exits non-zero. ``chela doctor`` names the
+windows in that state (``runtime_truth``, :func:`peer_transport_kind`).
 
 ⛔ **A socket accepting the bytes is a HANDOFF, not a delivery.** :func:`send_peer`
 briefly listens on its own reply socket for a receipt; a receiver whose
@@ -53,8 +52,8 @@ from chela.discovery import get_windows_by_id
 
 log = logging.getLogger(__name__)
 
-# How long send_peer waits to connect/write before giving up and falling back
-# to send_tmux. A dead or backed-up peer must not stall message delivery.
+# How long send_peer waits to connect/write before giving up (the message is then
+# UNREACHABLE and held). A dead or backed-up peer must not stall message delivery.
 _PEER_CONNECT_TIMEOUT = 2.0
 
 # How long send_peer listens on its own reply socket for a receipt before concluding
@@ -715,16 +714,16 @@ def peer_transport_kind(window_id: str, pid: int, timeout: float = _PROBE_TIMEOU
     now: ``"deterministic"`` (chela-owned path, confirmed reachable), ``"default"``
     (the legacy pid-derived guess, confirmed reachable — works today, but only because
     it happens to read OUR OWN environment as a stand-in for the target's, and needs a
-    relaunch to pick up a chela-owned path), or ``"tmux fallback"`` (no socket file, or
-    a stale one nothing is listening on — :func:`send_peer` will fail and the caller
-    silently falls back to :func:`send_tmux`).
+    relaunch to pick up a chela-owned path), or :data:`UNREACHABLE` (no socket file, or
+    a stale one nothing is listening on — :func:`send_peer` will fail and every agent
+    message to the window is held, never typed into the pane).
     """
     candidate = _peer_socket_candidate(window_id, pid)
     if candidate is None:
-        return "tmux fallback"
+        return UNREACHABLE
     path, kind = candidate
     if not peer_socket_reachable(path, timeout=timeout):
-        return "tmux fallback"
+        return UNREACHABLE
     return kind
 
 
@@ -793,7 +792,8 @@ def send_peer(window_id: str, from_agent: str, content: str) -> PeerSendResult:
     """Deliver ``content`` straight into ``window_id``'s Claude Code message queue over
     its peer-messaging Unix socket, then listen briefly for a receipt. Returns a
     :class:`PeerSendResult`; ``handed_off`` is False if no such socket could be
-    reached at all — callers fall back to :func:`send_tmux`. ``content`` is sent
+    reached at all — the message is then unreachable, never typed into the pane
+    (:func:`deliver_peer`). ``content`` is sent
     EXACTLY as given — no ``[from] `` wrapping is added here (unlike the old
     contract): callers that want attribution add it themselves before calling, the
     same contract :func:`send_tmux` already has. That is what lets a caller with its
@@ -828,9 +828,8 @@ def send_peer_to_pid(pid: int, from_agent: str, content: str) -> PeerSendResult:
     windowless session was never launched with ``--messaging-socket-path`` (chela's own
     dispatcher is the only thing that ever sets it, keyed on a window id it assigned), so
     the chela-owned deterministic path :func:`send_peer` checks first never applies here.
-    There is no tmux fallback for this call: with no window, there is no pane to paste
-    into, so ``handed_off=False`` here means genuinely undeliverable, not "try send_tmux
-    next" — the caller (:func:`chela.inbox.deliver`) treats it that way.
+    ``handed_off=False`` here means genuinely undeliverable — the same as for
+    :func:`send_peer`, since no agent message ever falls back to a pane paste.
     """
     sock_path = peer_socket_path_for_pid(pid)
     if sock_path is None:
@@ -868,8 +867,7 @@ def _send_over_socket(sock_path: Path, content: str, *, target_desc: str) -> Pee
     reply_path = sock_path.parent / f"r-{msg_id.replace('-', '')[:10]}.sock"
     if len(str(reply_path).encode()) >= _SUN_PATH_MAX:
         log.warning("reply socket path for %s is %d bytes (>= %d-byte sun_path ceiling) "
-                    "— can't listen for a receipt; treating as unreachable so the caller "
-                    "falls back to send_tmux: %s", target_desc,
+                    "— can't listen for a receipt; treating as unreachable: %s", target_desc,
                     len(str(reply_path).encode()), _SUN_PATH_MAX, reply_path)
         return PeerSendResult(False, None)
     reply_server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
@@ -937,47 +935,93 @@ def resolve_window(agent: str | None) -> str | None:
     return None
 
 
-def send_message(from_agent: str, to_agent: str, message: str, priority: str = "normal") -> bool:
-    """Send a message to an agent — peer socket first, tmux paste as fallback.
-    Live-only — no fallback queue.
+# The outcomes of :func:`deliver_peer`/:func:`send_message`. Anything else a caller sees is
+# one of :data:`ADVERSE_RECEIPT_STATUSES` (the receiver's own gate dropped it).
+DELIVERED = "delivered"
+# CMX-482: no peer socket could be reached. ⛔ An agent message is NEVER retried as a pane
+# paste (:func:`send_tmux`): a paste arrives as a bare user turn with no ``from``, so the
+# receiver shows no cross-session banner and another agent's text reads as the user's.
+# The caller holds the message where a queue exists and says so loudly.
+UNREACHABLE = "unreachable"
+# The target is not a live tmux window at all.
+OFFLINE = "offline"
 
-    ``to_agent`` is anything :func:`resolve_window` accepts (window id or name).
-    Returns True only when the message actually reached the recipient. ⛔ **A
-    peer-socket handoff whose receipt comes back ``held``/``denied``/``expired`` is
-    NOT a success**, even though the socket accepted the bytes — that used to be
-    exactly this function's fail-open bug (CMX-223): a receiver gating on its own
-    ``crossSessionInbound`` setting drops the message, and an absent receipt is the
-    ONLY channel that ever reports that (an accepted message produces no receipt at
-    all). Returns False for that case rather than falling back to :func:`send_tmux`
-    on purpose — the receiver's gate is a deliberate policy decision, not a
-    transport failure, and typing the same text into its pane would route around a
-    safety setting the receiver chose. The tmux fallback is reserved for when the
-    socket genuinely could not be reached (no live pid, no socket file, refused
-    connection). Callers that must not lose a message should resolve first and
-    report the two cases apart (``chela msg`` does).
+
+def deliver_peer(window_id: str, from_agent: str, text: str, *, via: str) -> str:
+    """Send ``text`` to ``window_id`` over its peer socket, and nothing else — the ONE
+    transport for a message to an agent (bucket 1 in ``docs/TMUX_TOUCHPOINTS.md``).
+
+    Returns :data:`DELIVERED`, :data:`UNREACHABLE` (no socket could be reached), or the
+    adverse receipt status (``held``/``denied``/``expired``: the receiver's own
+    ``crossSessionInbound`` gate dropped it). An unreachable socket is announced
+    (:func:`announce_unreachable`) naming the window and ``via`` (the caller: ``chela
+    msg``, a room, …), so a held message is never silent.
+    """
+    peer = send_peer(window_id, from_agent, text)
+    if peer.handed_off:
+        if peer.status in ADVERSE_RECEIPT_STATUSES:
+            log.warning("%s: %s %s the peer message — NOT delivered", via, window_id,
+                        peer.status)
+            return peer.status
+        return DELIVERED
+    announce_unreachable(window_id, via=via, wid=window_id)
+    return UNREACHABLE
+
+
+# A daemon retries a held message every tick; one event-log entry per target per window of
+# this many seconds says it loudly without flooding the log. Every attempt is still logged.
+UNREACHABLE_ANNOUNCE_SECONDS = 600.0
+_unreachable_announced: dict[tuple[str, str], float] = {}
+
+
+def announce_unreachable(target: str, *, via: str, wid: str | None,
+                         now: float | None = None) -> bool:
+    """Say loudly that an agent message to ``target`` was not delivered because no peer
+    socket could be reached: a log warning every time, and a ``peer_unreachable`` event-log
+    entry at most once per :data:`UNREACHABLE_ANNOUNCE_SECONDS` per target and sender
+    (``via``), so one caller's retries never hide another caller's failure. Returns whether
+    the event was written."""
+    log.warning("%s: %s has no reachable peer-messaging socket — message NOT delivered "
+                "(never typed into the pane instead)", via, target)
+    now = time.time() if now is None else now
+    key = (target, via)
+    last = _unreachable_announced.get(key)
+    if last is not None and now - last < UNREACHABLE_ANNOUNCE_SECONDS:
+        return False
+    _unreachable_announced[key] = now
+    event_log.append(
+        "peer_unreachable",
+        f"📵 {via}: {target} has no reachable peer socket; message held, not typed "
+        f"into the pane",
+        {"target": target, "via": via}, wid=wid)
+    return True
+
+
+def send_message(from_agent: str, to_agent: str, message: str, priority: str = "normal") -> str:
+    """Send a message to an agent over its peer socket. Live-only — no queue.
+
+    ``to_agent`` is anything :func:`resolve_window` accepts (window id or name). Returns
+    :data:`DELIVERED` only when the message actually reached the recipient; otherwise
+    :data:`OFFLINE` (no live window), :data:`UNREACHABLE` (no peer socket could be
+    reached), or the adverse receipt status. ⛔ **A peer-socket handoff whose receipt comes
+    back ``held``/``denied``/``expired`` is NOT a success** (CMX-223): the receiver's gate
+    is a deliberate policy decision, and typing the same text into its pane would route
+    around it. ⛔ **Neither is an unreachable socket a reason to type into the pane**
+    (CMX-482): that paste would arrive as a user turn, unattributed. Callers report the
+    outcome and exit non-zero (``chela msg`` does).
     """
     window_id = resolve_window(to_agent)
     if window_id is None:
         log.warning("%s is not a live tmux window — message NOT delivered", to_agent)
-        return False
-    # Prefix with the sender so the recipient has context on who pinged them —
-    # applied once, here, so both transports send identical attributed text.
-    text = f"[{from_agent}] {message}"
-    peer = send_peer(window_id, from_agent, text)
-    if peer.handed_off:
-        if peer.status in ADVERSE_RECEIPT_STATUSES:
-            log.warning("%s (%s) %s the peer message — NOT delivered", to_agent,
-                        window_id, peer.status)
-            return False
-        return True
-    if send_tmux(window_id, text):
-        return True
-    log.warning("tmux send to %s (%s) failed — message NOT delivered", to_agent, window_id)
-    return False
+        return OFFLINE
+    # Prefix with the sender so the recipient has context on who pinged them.
+    return deliver_peer(window_id, from_agent, f"[{from_agent}] {message}",
+                        via=f"message from {from_agent}")
 
 
-def broadcast(from_agent: str, message: str, priority: str = "normal") -> dict[str, bool]:
-    """Send a message to every other live agent. Returns {agent: delivered?}.
+def broadcast(from_agent: str, message: str, priority: str = "normal") -> dict[str, str]:
+    """Send a message to every other live agent. Returns {agent: outcome} (see
+    :func:`send_message`).
 
     Iterates the window-id-keyed table so two windows sharing a display name both
     get the message, and skips the sender's OWN window — an orchestrator that

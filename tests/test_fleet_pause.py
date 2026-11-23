@@ -38,7 +38,7 @@ def fake(tmp_path, monkeypatch):
     def send_message(frm, wid, text):
         world["calls"].append(("msg", frm, wid, text))
         world["held"].append(hold.active() is not None)
-        return world["msg_ok"]
+        return messenger.DELIVERED if world["msg_ok"] else messenger.UNREACHABLE
 
     monkeypatch.setattr(dispatcher, "list_runs", lambda: list(world["runs"]))
     monkeypatch.setattr(inbox, "_selfcheck_scan", lambda: list(world["procs"]))
@@ -276,7 +276,8 @@ def test_resume_messages_while_the_hold_stands_and_counts_only_deliveries(fake, 
 
     def send(frm, wid, text):
         held_at_send.append(hold.active() is not None)
-        return wid == "@1"                                  # T2's 'resume' does not land
+        # T2's 'resume' does not land
+        return messenger.DELIVERED if wid == "@1" else messenger.UNREACHABLE
     monkeypatch.setattr(messenger, "send_message", send)
     _cli(resume=True)
     assert held_at_send == [True, True]     # no tick could claim while agents were resumed

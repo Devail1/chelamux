@@ -54,8 +54,17 @@ def store(tmp_path, monkeypatch):
 @pytest.fixture
 def sends(monkeypatch):
     calls: list[tuple[str, str]] = []
-    monkeypatch.setattr(inbox.messenger, "send_tmux",
-                        lambda wid, text: (calls.append((wid, text)), True)[1])
+    def peer(wid, frm, text):
+        # These tests were written when an idle orchestrator was reached by a pane paste
+        # and a busy one not at all (the autouse socket stub is unreachable). CMX-482
+        # removed the paste, so the socket stands in for it with the same reach: it
+        # delivers to an IDLE window only, and a busy one still holds the queue.
+        if inbox.agent_manager.status_by_wid().get(wid) != inbox.IDLE:
+            return inbox.messenger.PeerSendResult(False, None)
+        calls.append((wid, text))
+        return inbox.messenger.PeerSendResult(True, "sent")
+
+    monkeypatch.setattr(inbox.messenger, "send_peer", peer)
     return calls
 
 

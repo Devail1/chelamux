@@ -7,33 +7,24 @@ nothing told the orchestrator; it polled the pane, and the human became the mess
 bus ("he's done"). This closes that loop: agent/run events are pushed straight into
 the orchestrator's session, so it wakes up and acts.
 
-**Push, gated per path.** An event is delivered — peer socket first
-(:func:`chela.messenger.send_peer`), :func:`chela.messenger.send_tmux` as fallback.
-The two paths carry different gates (CMX-27):
+**Push, over the peer socket only.** An event is delivered with
+:func:`chela.messenger.send_peer`. ⛔ There is no :func:`chela.messenger.send_tmux`
+fallback (CMX-482): a pane paste arrives as a bare user turn with no ``from``, so a
+notification from chela would read as the user's own words. An unreachable socket HOLDS
+the event in the durable queue, logs it, and writes a ``peer_unreachable`` event
+(:func:`chela.messenger.announce_unreachable`). The gate (CMX-27):
 
-* **Peer socket: ``idle`` or ``busy``.** Claude Code QUEUES a peer message and drains it
-  at the receiver's next tool round, mid-turn included — that is how agents' SendMessage
-  reports reach a busy orchestrator. Gating the socket on idle too cost a 4h outage on
-  2026-10-07: a stuck background job pinned the orchestrator to ``busy`` and every
-  verdict was held silently. ``waiting`` is still REFUSED on the socket: a permission /
-  question prompt is open, and how a queued peer message interacts with it is unmeasured.
-* **tmux paste: ``idle`` ONLY, checked STRICTLY** — ``not busy`` is not good enough. A
-  paste into a ``busy`` session interleaves with its work, and a ``waiting`` session is
-  sitting on a permission/question prompt that our paste would ANSWER. So the tmux
-  fallback is never attempted unless the window is genuinely idle at its prompt; a busy
-  orchestrator whose socket refuses simply HOLDS the event for the next tick.
-* ⛔ **And ``idle`` is not "the prompt will treat this as prose".** The status
-  authority models whether a session is THINKING; it says nothing about the INPUT
-  MODE its prompt is in. On 2026-07-15 the orchestrator's idle pane was in ``!``
-  bash-input mode, this inbox typed a notification into it, and ``/bin/bash`` RAN
-  IT — surviving only because the summary contained ``(rework 1)`` and died on the
-  parens. The mode is now read off the TUI and an unsafe one is REFUSED
-  (:func:`chela.messenger.refuses_paste`, which holds the event in the queue), and —
-  because a refusal is a guess about somebody else's pane, while the text is the
-  thing we control — every summary is neutralised (:func:`_event`) so it cannot
-  execute in ANY mode. Two independent layers, because the chain is fully
-  agent-controlled: an agent writes a PR title, this builds a summary from it, this
-  types it at the prompt of the one session with merge authority and a real shell.
+* **``idle`` or ``busy``.** Claude Code QUEUES a peer message and drains it at the
+  receiver's next tool round, mid-turn included — that is how agents' SendMessage reports
+  reach a busy orchestrator. Gating the socket on idle too cost a 4h outage on 2026-10-07:
+  a stuck background job pinned the orchestrator to ``busy`` and every verdict was held
+  silently. ``waiting`` is still REFUSED: a permission / question prompt is open, and how a
+  queued peer message interacts with it is unmeasured.
+* The text is still neutralised (:func:`_event`). It used to be typed at the orchestrator's
+  prompt, and on 2026-07-15 that prompt was in ``!`` bash-input mode and ``/bin/bash`` RAN a
+  notification. The socket bypasses the input mode entirely, but the summary is built from
+  agent-controlled text (a PR title) and goes to the one session with merge authority, so it
+  stays neutral in ANY rendering.
 * The orchestrator is identified EXPLICITLY (:func:`orchestrator_wid`) — registered
   by the orchestrator itself via ``chela watch``, or pinned with
   ``$CHELA_ORCHESTRATOR_WID``. It is never guessed, so a notification can never land
@@ -139,11 +130,11 @@ BUSY, IDLE, WAITING = "busy", "idle", "waiting"
 
 # CMX-27: the statuses the PEER SOCKET may deliver in. Claude Code queues a peer message and
 # drains it at the next tool round, so `busy` is safe there; `waiting` (an open permission /
-# question prompt) is not, until measured. The tmux paste fallback stays strictly IDLE-only.
+# question prompt) is not, until measured. There is no tmux paste fallback (CMX-482).
 SOCKET_DELIVERABLE = (IDLE, BUSY)
 
 # How many events go out per tick. ONE: a delivery makes the orchestrator busy, and
-# a second paste would land mid-thought (or, worse, race its status back to idle).
+# a second message would land mid-thought (or, worse, race its status back to idle).
 # The rest of the queue drains on subsequent idle ticks, oldest first.
 MAX_DELIVERIES_PER_TICK = 1
 
@@ -2982,18 +2973,13 @@ def deliver(store: dict, statuses: dict[str, str],
             now_epoch: str | None = None,
             alarms: list[dict] | None = None,
             live_heads: dict[str, str] | None = None) -> list[dict]:
-    """Push queued events into the orchestrator — socket while ``idle``/``busy``, tmux only while ``idle``.
+    """Push queued events into the orchestrator over its peer socket while ``idle``/``busy``.
 
-    **The tmux paste gate is a strict equality against ``idle``.** ``waiting`` must never be
-    pasted into: that session is sitting on a permission/question prompt, and our paste would
-    be consumed as the ANSWER to that prompt. ``busy`` is never pasted into either — a paste
-    lands mid-thought and interleaves with the session's own work.
-
-    **The peer socket is not a paste, so it is not held to that gate (CMX-27).** Claude Code
-    queues a peer message and drains it at the receiver's next tool round, so a ``busy``
-    orchestrator is delivered to over the socket ONLY — no tmux fallback; a socket that is
-    unavailable or refuses while busy HOLDS the event for the next tick. ``waiting`` is still
-    refused on BOTH paths (nothing sent at all): a prompt is open, and how a queued peer
+    **The peer socket, and nothing else (CMX-27, CMX-482).** Claude Code queues a peer
+    message and drains it at the receiver's next tool round, so a ``busy`` orchestrator is
+    delivered to too. A socket that is unreachable or whose receipt is adverse HOLDS the
+    event for a later tick — never a pane paste, which would arrive as a user turn.
+    ``waiting`` is refused (nothing sent at all): a prompt is open, and how a queued peer
     message interacts with it has not been measured. Any other status (unknown, absent) is
     held too.
 
@@ -3005,13 +2991,6 @@ def deliver(store: dict, statuses: dict[str, str],
     LOUDLY (:func:`_undeliverable`), and an address from a dead tmux epoch is refused even if
     something IS running under that number now — especially then, because that something is
     another agent, and a review instruction pasted into its prompt is one it will act on.
-
-    A live, idle pane in an unsafe INPUT MODE (``!`` bash, ``#`` memory) is the last unsafe
-    state, and it is refused by :func:`chela.messenger.send_tmux` itself — one authority,
-    every sender. The refusal reaches us as a failed send, which is exactly the behaviour we
-    want: the event stays at the head of the durable queue and goes out on a later tick. It
-    is HELD, never dropped — the notification still matters once the pane is prose again.
-    CMX-77 says WHICH window may be written to; this says WHAT may be typed into it.
 
     Every event is re-validated against the CURRENT runs (:func:`stale_reason`) on its
     way out; one that has rotted in the queue is dropped and LOGGED — never silently,
@@ -3055,11 +3034,7 @@ def deliver(store: dict, statuses: dict[str, str],
             _clear_address_alarm(store)
             return _deliver_loop(
                 store, runs, live_heads, target_desc=orch, event_wid=orch,
-                send=lambda text: messenger.send_peer(orch, "chela-inbox", text),
-                # CMX-27: a busy session takes the socket (it queues), never a paste.
-                tmux_fallback=((lambda text: messenger.send_tmux(orch, text))
-                               if status == IDLE else None),
-                no_fallback=f"no tmux paste while {status}")
+                send=lambda text: messenger.send_peer(orch, "chela-inbox", text))
 
     peer = orchestrator_peer(store)
     if not peer:
@@ -3077,24 +3052,20 @@ def deliver(store: dict, statuses: dict[str, str],
         return []
     return _deliver_loop(
         store, runs, live_heads, target_desc=f"pid {pid}", event_wid=None,
-        send=lambda text: messenger.send_peer_to_pid(pid, "chela-inbox", text),
-        tmux_fallback=None)
+        send=lambda text: messenger.send_peer_to_pid(pid, "chela-inbox", text))
 
 
 def _deliver_loop(store: dict, runs: list[dict], live_heads: dict[str, str] | None, *,
-                  target_desc: str, event_wid: str | None, send, tmux_fallback,
-                  no_fallback: str = "no pane to paste into") -> list[dict]:
+                  target_desc: str, event_wid: str | None, send) -> list[dict]:
     """The actual send loop :func:`deliver` runs once it has picked a live address — shared
     between the wid-based orchestrator and CMX-255's windowless peer fallback, which differ
-    only in HOW a message reaches the target: ``send`` is the peer-socket attempt (already
-    bound to its target — a wid or a raw pid), ``tmux_fallback`` is the pane-paste retry
-    (``None`` for the peer fallback: with no window there is no pane to paste into, so
-    ``send`` failing there means genuinely undeliverable, not "try tmux next").
+    only in HOW the peer socket is addressed: ``send`` is already bound to its target (a
+    wid or a raw pid). ⛔ There is no pane-paste retry for either (CMX-482): a paste would
+    arrive as a user turn, so an unreachable socket HOLDS the event in the durable queue.
 
     A failed attempt is recorded in ``store["last_delivery_failure"]`` (CMX-26) — the held
     alert names it, since after CMX-27 a ``busy`` status alone no longer explains a held
-    queue — and a successful delivery clears it. ``no_fallback`` says why there was no tmux
-    retry, for that record.
+    queue — and a successful delivery clears it.
     """
     sent: list[dict] = []
     while store["queue"] and len(sent) < MAX_DELIVERIES_PER_TICK:
@@ -3110,13 +3081,12 @@ def _deliver_loop(store: dict, runs: list[dict], live_heads: dict[str, str] | No
             store["queue"].pop(0)          # nothing to say — don't wedge the queue on it
             log.warning("inbox: dropping unrenderable %s event", event.get("kind"))
             continue
-        # CMX-223: peer socket first (bypasses the pane's terminal-input-mode risk
-        # entirely — CMX-79 doesn't apply), tmux paste as fallback. A handoff whose
-        # receipt comes back held/denied/expired is a DROP, not a delivery, even
-        # though the socket accepted it — recorded, and HOLD (never drop, same as
-        # a tmux refusal): unlike an agent-to-agent room dispatch, this queue's
-        # events are merge verdicts the orchestrator must eventually see, so a
-        # gate that is transient today is worth retrying on a later tick.
+        # CMX-223: the peer socket (bypasses the pane's terminal-input-mode risk
+        # entirely — CMX-79 doesn't apply). A handoff whose receipt comes back
+        # held/denied/expired is a DROP, not a delivery, even though the socket
+        # accepted it — recorded, and HOLD (never drop): unlike an agent-to-agent room
+        # dispatch, this queue's events are merge verdicts the orchestrator must
+        # eventually see, so a gate that is transient today is worth retrying later.
         peer = send(text)
         if peer.handed_off and peer.status in messenger.ADVERSE_RECEIPT_STATUSES:
             log.warning("inbox: delivery of %s to %s was %s; holding it queued",
@@ -3129,14 +3099,13 @@ def _deliver_loop(store: dict, runs: list[dict], live_heads: dict[str, str] | No
             )
             _record_failure(store, target_desc, event, f"peer receipt {peer.status}")
             break
-        if not (peer.handed_off or (tmux_fallback and tmux_fallback(text))):
-            # Includes the unsafe-input-mode refusal: HOLD, never drop. The pane will be
-            # back at its prose prompt eventually, and the event is still true.
-            log.warning("inbox: delivery of %s to %s refused/failed; holding it queued",
-                        event.get("kind"), target_desc)
+        if not peer.handed_off:
+            # CMX-482: HOLD, never a pane paste. The event is still true once the socket
+            # is back, and the queue is durable.
+            messenger.announce_unreachable(target_desc, via="decisions inbox",
+                                           wid=event_wid)
             _record_failure(store, target_desc, event,
-                            "peer socket unreachable, tmux paste refused" if tmux_fallback
-                            else f"peer socket unreachable ({no_fallback})")
+                            "peer socket unreachable (held; never pasted into the pane)")
             break
         store["last_delivery_failure"] = None
         store["queue"].pop(0)
@@ -3583,22 +3552,21 @@ def classifier_resumes(store: dict, statuses: dict[str, str], runs: list[dict],
 
 
 def send_resumes(events: list[dict]) -> None:
-    """Send each agent its :data:`RESUME_PROMPT`: the peer socket first, the pane paste
-    when no socket is reached, and never the paste after an adverse receipt (that would route
-    around a gate the agent chose). Each event is logged with ``delivered`` set, and a send
-    that failed puts its outage back, so the next idle tick tries again."""
+    """Send each agent its :data:`RESUME_PROMPT` over its peer socket — never a pane paste,
+    neither after an adverse receipt (that would route around a gate the agent chose) nor
+    when no socket is reached (CMX-482: a paste arrives as a user turn). Each event is
+    logged with ``delivered`` (and the send's ``outcome``) set, and a send that failed puts
+    its outage back, so the next idle tick tries again."""
     for event in events:
         outage = event.pop("outage", None)
         wid = event["wid"]
-        peer = messenger.send_peer(wid, "chela-inbox", RESUME_PROMPT)
-        if peer.handed_off:
-            delivered = peer.status not in messenger.ADVERSE_RECEIPT_STATUSES
-        else:
-            delivered = messenger.send_tmux(wid, RESUME_PROMPT)
-        event["payload"] = {**event["payload"], "delivered": bool(delivered)}
+        outcome = messenger.deliver_peer(wid, "chela-inbox", RESUME_PROMPT,
+                                         via="usage-outage resume")
+        delivered = outcome == messenger.DELIVERED
+        event["payload"] = {**event["payload"], "delivered": delivered, "outcome": outcome}
         if not delivered:
             event["summary"] = event["summary"].replace(
-                "was re-prompted to resume", "could not be re-prompted (the send failed)")
+                "was re-prompted to resume", f"could not be re-prompted ({outcome})")
             if outage:
                 with locked_store() as store:
                     store.setdefault("classifier_out", {}).setdefault(*outage)

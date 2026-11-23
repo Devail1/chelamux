@@ -84,10 +84,19 @@ def store_file(tmp_path, monkeypatch):
 
 @pytest.fixture
 def sends(monkeypatch):
-    """Capture every send_tmux — the ONLY way an event reaches a live session."""
+    """Capture every peer send — the ONLY way an event reaches a live session (CMX-482)."""
     calls: list[tuple[str, str]] = []
-    monkeypatch.setattr(inbox.messenger, "send_tmux",
-                        lambda wid, text: (calls.append((wid, text)), True)[1])
+    def peer(wid, frm, text):
+        # These tests were written when an idle orchestrator was reached by a pane paste
+        # and a busy one not at all (the autouse socket stub is unreachable). CMX-482
+        # removed the paste, so the socket stands in for it with the same reach: it
+        # delivers to an IDLE window only, and a busy one still holds the queue.
+        if inbox.agent_manager.status_by_wid().get(wid) != inbox.IDLE:
+            return inbox.messenger.PeerSendResult(False, None)
+        calls.append((wid, text))
+        return inbox.messenger.PeerSendResult(True, "sent")
+
+    monkeypatch.setattr(inbox.messenger, "send_peer", peer)
     return calls
 
 
@@ -3141,11 +3150,11 @@ def test_a_verdict_summary_carries_a_SNIPPET_of_the_title_not_the_whole_line(
     )
 
 
-# --- CMX-223: peer socket first, tmux paste as fallback, receipts recorded -------
+# --- CMX-223/482: the peer socket only, receipts recorded, never a tmux paste -----
 
 def test_delivery_prefers_the_peer_socket_and_skips_tmux(store_file, windows, sends, monkeypatch):
-    """The verdict-delivery path routes through the peer socket first, same as rooms
-    and `chela msg` — `send_tmux` is the fallback, not the only path."""
+    """The verdict-delivery path routes through the peer socket, same as rooms and
+    `chela msg`."""
     from chela import messenger
 
     _confirm_idle_immediately(monkeypatch)
@@ -3190,20 +3199,36 @@ def test_a_held_receipt_holds_the_event_queued_and_records_a_receipt(
     assert receipts[0]["wid"] == ORCH
 
 
-def test_peer_socket_unreachable_falls_back_to_tmux(store_file, windows, sends, monkeypatch):
-    """The existing contract, unchanged: no live socket -> tmux paste."""
+@pytest.fixture
+def pastes(monkeypatch):
+    """Record every `send_tmux` — the pane paste no agent message may take (CMX-482)."""
+    calls: list[tuple[str, str]] = []
+    monkeypatch.setattr(inbox.messenger, "send_tmux",
+                        lambda wid, text, **kw: (calls.append((wid, text)), True)[1])
+    return calls
+
+
+@pytest.mark.parametrize("status", [inbox.IDLE, inbox.BUSY])
+def test_peer_socket_unreachable_holds_and_never_pastes(store_file, windows, pastes,
+                                                        monkeypatch, status):
+    """CMX-482 negative control: no live socket → the event is HELD and announced, never
+    typed into the pane. The old path pasted it with `send_tmux` while idle."""
     from chela import messenger
 
-    _confirm_idle_immediately(monkeypatch)
-    _registered()
-    _statuses(monkeypatch, {ORCH: inbox.IDLE, AGENT: inbox.IDLE})
-    monkeypatch.setattr(inbox.messenger, "send_peer",
-                        lambda wid, frm, text: messenger.PeerSendResult(False, None))
+    _queue_one()
+    peer = _spy_peer(monkeypatch, messenger.PeerSendResult(False, None))
 
-    inbox.tick({ORCH: inbox.IDLE, AGENT: inbox.BUSY})
+    sent = _deliver({ORCH: status})
 
-    assert len(sends) == 1
-    assert sends[0][0] == ORCH
+    assert sent == []
+    assert len(peer) == 1                           # the socket WAS tried...
+    assert pastes == []                             # ...and the pane was NOT
+    assert len(inbox.load()["queue"]) == 1          # HELD in the durable queue
+    failure = inbox.load()["last_delivery_failure"]
+    assert failure["target"] == ORCH and "unreachable" in failure["reason"]
+    held = [e for e in event_log.read()["events"] if e["type"] == "peer_unreachable"]
+    assert [(e["payload"], e["wid"]) for e in held] == [
+        ({"target": ORCH, "via": "decisions inbox"}, ORCH)]
 
 
 # --- CMX-27: a BUSY orchestrator takes the peer socket, never a tmux paste ------------
@@ -3277,22 +3302,6 @@ def test_a_waiting_orchestrator_gets_nothing_on_either_path(
     assert peer == []                               # socket never even tried
     assert sends == []
     assert len(inbox.load()["queue"]) == 1
-
-
-def test_an_idle_orchestrator_still_tries_the_socket_then_falls_back_to_tmux(
-        store_file, windows, sends, monkeypatch):
-    """Idle is unchanged by CMX-27: socket first, tmux paste as fallback."""
-    from chela import messenger
-
-    _queue_one()
-    peer = _spy_peer(monkeypatch, messenger.PeerSendResult(False, None))
-
-    sent = _deliver({ORCH: inbox.IDLE})
-
-    assert len(sent) == 1
-    assert len(peer) == 1                           # socket first...
-    assert sends == [(ORCH, "📥 hello")]            # ...then the paste
-    assert inbox.load()["queue"] == []
 
 
 def test_an_adverse_receipt_while_busy_holds_the_event(
