@@ -341,6 +341,44 @@ SESSION_CACHE_SUBDIR = "by-session"
 MOD_CACHE_SUBDIR = "mod"
 
 
+# The plan limits chela draws a bar for (usage.limits); a gateway's spend_limit is not one.
+LIMIT_KEYS = ("five_hour", "seven_day")
+
+
+def cache_files(cache_dir: Path) -> list[tuple[Path, str]]:
+    """Every cache file with its producer: the statusLine's (``<window>.json``,
+    ``by-session/``) and, CMX-477, the chela-measure mod's (``mod/``)."""
+    return ([(f, "statusline") for f in cache_dir.glob("*.json")]
+            + [(f, "statusline") for f in (cache_dir / SESSION_CACHE_SUBDIR).glob("*.json")]
+            + [(f, "mod") for f in (cache_dir / MOD_CACHE_SUBDIR).glob("*.json")])
+
+
+def freshest_limits(cache_dir: Path) -> dict:
+    """``{key: (mtime, used_percentage, resets_at, source)}`` from the freshest cache file
+    that carries each limit, whichever producer wrote it (CMX-477)."""
+    best: dict = {}
+    for f, source in cache_files(cache_dir):
+        try:
+            mtime = f.stat().st_mtime
+            d = json.loads(f.read_text())
+        except (OSError, ValueError):
+            continue
+        rl = d.get("rate_limits") if isinstance(d, dict) else None
+        if not isinstance(rl, dict):
+            continue
+        for key in LIMIT_KEYS:
+            b = rl.get(key)
+            if not isinstance(b, dict):
+                continue
+            pct, reset = b.get("used_percentage"), b.get("resets_at")
+            if not isinstance(pct, (int, float)) or isinstance(pct, bool):
+                continue
+            if key not in best or mtime > best[key][0]:
+                best[key] = (mtime, float(pct), int(reset) if isinstance(reset, (int, float)) else None,
+                             source)
+    return best
+
+
 def _session_cache_path(session_id: str) -> Path | None:
     # SESSION_RE is the same shape the hook validates inline before writing
     # by-session/<sid>.json (scripts/cache-statusline.sh) — keep the two in step.

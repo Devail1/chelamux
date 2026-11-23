@@ -389,6 +389,24 @@ def test_doctor_names_the_source_of_each_limit_and_session(tmp_path):
     assert fed.detail == "- aaaaaaaa: mod (both fresh)\n    - bbbbbbbb: statusline"
 
 
+def test_newest_limits_names_the_producer_and_age_at_any_age(ctx):
+    _write(ctx / "mod" / f"{SID}.json", MEASURE["file"], age=3 * 3600)
+    _write(ctx / "by-session" / f"{SID}.json",
+           {"rate_limits": {"seven_day": {"used_percentage": 9, "resets_at": 1}}}, age=60)
+    lim = measure_mod.newest_limits(ctx, now=time.time())
+    assert (lim["five_hour"]["used_pct"], lim["five_hour"]["source"]) == (23.5, "mod")
+    assert 3 * 3600 - 5 < lim["five_hour"]["age_s"] < 3 * 3600 + 60
+    assert (lim["seven_day"]["used_pct"], lim["seven_day"]["source"]) == (9, "statusline")
+    assert measure_mod._limit_text(lim["five_hour"]) == "23.5% (mod, 180 min ago)"
+
+
+def test_newest_limits_with_no_producer_is_unknown(ctx):
+    lim = measure_mod.newest_limits(ctx)
+    assert lim["seven_day"] == {"used_pct": None, "source": None, "age_s": None,
+                                "reason": "no statusLine or mod rate_limits found"}
+    assert measure_mod._limit_text(lim["seven_day"]) == "unknown"
+
+
 def test_installed_state_reads_the_copy(tmp_path):
     dest = tmp_path / "chela-measure"
     assert measure_mod.installed_state(dest) is None

@@ -73,7 +73,9 @@ EXTRA_ROOTS_KEY = "usage_extra_roots"
 EXTRA_ROOTS_ENV = "CHELA_USAGE_EXTRA_ROOTS"
 DEFAULT_EXTRA_ROOTS = ("/mnt/c/Users/*/.claude/projects",)
 
-LIMIT_KEYS = ("five_hour", "seven_day")
+# CMX-477: the limit read lives in chela.context, so `chela doctor` (in the daemon, which
+# never imports this module) names each limit's producer from the same code.
+from chela.context import LIMIT_KEYS, freshest_limits  # noqa: E402, F401
 
 
 # ---------------------------------------------------------------------------
@@ -413,41 +415,6 @@ def label(row: dict, window_names: dict[str, str]) -> str:
 _SAMPLES: list[tuple[float, str, float, int]] = []
 _SAMPLES_MAX = 2000
 _SAMPLES_LOCK = threading.Lock()
-
-
-def _cache_files(cache_dir: Path) -> list[tuple[Path, str]]:
-    """Every cache file with its producer: the statusLine's (``<window>.json``,
-    ``by-session/``) and, CMX-477, the chela-measure mod's (``mod/``)."""
-    from chela import context
-    return ([(f, "statusline") for f in cache_dir.glob("*.json")]
-            + [(f, "statusline") for f in (cache_dir / context.SESSION_CACHE_SUBDIR).glob("*.json")]
-            + [(f, "mod") for f in (cache_dir / context.MOD_CACHE_SUBDIR).glob("*.json")])
-
-
-def freshest_limits(cache_dir: Path) -> dict:
-    """``{key: (mtime, used_percentage, resets_at, source)}`` from the freshest cache file
-    that carries each limit, whichever producer wrote it (CMX-477)."""
-    best: dict = {}
-    for f, source in _cache_files(cache_dir):
-        try:
-            mtime = f.stat().st_mtime
-            d = json.loads(f.read_text())
-        except (OSError, ValueError):
-            continue
-        rl = d.get("rate_limits") if isinstance(d, dict) else None
-        if not isinstance(rl, dict):
-            continue
-        for key in LIMIT_KEYS:
-            b = rl.get(key)
-            if not isinstance(b, dict):
-                continue
-            pct, reset = b.get("used_percentage"), b.get("resets_at")
-            if not isinstance(pct, (int, float)) or isinstance(pct, bool):
-                continue
-            if key not in best or mtime > best[key][0]:
-                best[key] = (mtime, float(pct), int(reset) if isinstance(reset, (int, float)) else None,
-                             source)
-    return best
 
 
 def burn_rate(samples: list[tuple[float, float, int | None]], cur: tuple[float, float, int | None]) -> float | None:

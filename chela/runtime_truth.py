@@ -3990,7 +3990,6 @@ def facts() -> list[Fact]:
             read_back=lambda: observed(_measure_mod().read_state()),
             report=lambda d, obs: _measure_mod().report(d, obs.value),
             unverifiable_level=WARN,      # a usage feed is optional: loud, never fatal
-            required=False,               # CMX-477: no producer is a first run's state
         ),
     ]
 

@@ -158,7 +158,25 @@ def statusline_wired(settings: Path | None = None) -> bool:
 def _limit_text(entry: dict) -> str:
     if entry.get("used_pct") is None:
         return "unknown"
-    return f"{entry['used_pct']:g}% ({entry.get('source')})"
+    age = entry.get("age_s")
+    when = f", {int(age // 60)} min ago" if isinstance(age, (int, float)) else ""
+    return f"{entry['used_pct']:g}% ({entry.get('source')}{when})"
+
+
+def newest_limits(cache_dir: Path, now: float | None = None) -> dict:
+    """``{five_hour|seven_day: {used_pct, source, age_s, reason}}``: the newest sample of
+    each limit and who wrote it, at any age (the bars' own staleness rules are
+    chela.usage's, which the daemon does not import)."""
+    from chela import context
+    now = time.time() if now is None else now
+    best = context.freshest_limits(cache_dir)
+    out = {}
+    for key in context.LIMIT_KEYS:
+        b = best.get(key)
+        out[key] = ({"used_pct": None, "source": None, "age_s": None,
+                     "reason": "no statusLine or mod rate_limits found"} if b is None else
+                    {"used_pct": b[1], "source": b[3], "age_s": now - b[0], "reason": None})
+    return out
 
 
 def report(chela_dir: Path, state: dict) -> list:
@@ -203,9 +221,9 @@ def report(chela_dir: Path, state: dict) -> list:
 
 def read_state() -> dict:
     """Everything :func:`report` reads, from the owners (files, settings, the cache dir)."""
-    from chela import config, usage
+    from chela import config
     cache_dir = config.CHELA_DIR / "context"
     return {"mod": installed_state(), "packaged_version": packaged_version(),
             "statusline": statusline_wired(),
-            "limits": usage.limits(cache_dir, history=False),
+            "limits": newest_limits(cache_dir),
             "sessions": session_sources(cache_dir)}
