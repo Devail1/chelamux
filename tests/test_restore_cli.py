@@ -2044,18 +2044,19 @@ def test_the_env_kwarg_from_a_real_Popen_call_reaches_the_classifier(tmp_path):
     assert result.returncode == 0
 
 
-def test_the_tmux_fence_classifier_exempts_a_new_session_via_the_s_flag_not_just_t():
-    """Direct unit test of `_tmux_violation`'s target-flag scan: `-t` targets an EXISTING
-    window/session, `-s` NAMES a new one, so `tmux new-session -s <safe_session>` — the
-    shape a test actually uses to create a scoped session — is exempt only because `-s` is
-    in the scan too. Every other test of this carve-out (including the two above) drives
-    `-t`-shaped argv; none of them would notice `-s` silently dropped from the flag tuple."""
+@pytest.mark.parametrize("extra", [[], ["-t", "SAFE"]])
+def test_the_tmux_fence_refuses_creating_the_never_exists_session(extra):
+    """CMX-473: `CHELA_TMUX_SESSION` is exempt because it can never exist. A spawn into a
+    missing session now creates it (`new-session -s`), so a create must be refused, or an
+    unstubbed spawn puts that session on the operator's live server."""
     from conftest import _tmux_violation
 
-    safe_session = os.environ["CHELA_TMUX_SESSION"]
-    assert _tmux_violation(
-        ["tmux", "new-session", "-s", safe_session], None
-    ) is None
+    safe = os.environ["CHELA_TMUX_SESSION"]
+    extra = [safe if x == "SAFE" else x for x in extra]
+    assert _tmux_violation(["tmux", "new-session", "-d", "-s", safe, *extra], None) is not None
+    # controls: a window in that (missing) session, and a create on a private socket
+    assert _tmux_violation(["tmux", "new-window", "-t", f"={safe}:"], None) is None
+    assert _tmux_violation(["tmux", "-L", "x", "new-session", "-s", safe], None) is None
 
 
 _EXPECTED_TMUX_MUTATING_SUBCOMMANDS = (

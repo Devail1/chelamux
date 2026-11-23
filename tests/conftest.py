@@ -882,14 +882,14 @@ def _tmux_violation(argv: list, env: dict | None) -> str | None:
         return None  # read-only, or a subcommand this fence doesn't police
     subcmd = rest[0]
     safe_session = os.environ.get("CHELA_TMUX_SESSION", "")
-    if safe_session:
+    # CMX-473: "can never exist" only holds while nothing CREATES it, and a spawn into a
+    # missing session now runs `new-session -s <it>`. So a create is never exempt.
+    if safe_session and subcmd != "new-session":
         target = None
-        for flag in ("-t", "-s"):  # -t targets an existing window/session, -s names a new one
-            try:
-                target = rest[rest.index(flag) + 1]
-                break
-            except (ValueError, IndexError):
-                continue
+        try:
+            target = rest[rest.index("-t") + 1]
+        except (ValueError, IndexError):
+            pass
         # CMX-470: chela's targets are exact-match (`=session`, `=session:@N`); `=` is
         # tmux syntax, not part of the name.
         if target is not None:
