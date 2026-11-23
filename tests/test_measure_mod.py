@@ -205,7 +205,7 @@ def test_install_copies_the_mod_records_chela_dir_and_leaves_tests_behind(tmp_pa
     assert measure_mod.install(dest, tmp_path / "cd") == dest
     files = sorted(str(p.relative_to(dest)) for p in dest.rglob("*") if p.is_file())
     assert files == [".claude-plugin/plugin.json", "chela.json", "hooks/hooks.json",
-                     "hooks/measure-cases.ts", "hooks/measure.ts", "hooks/register.ts"]
+                     "hooks/measure.ts", "hooks/register.ts"]
     assert json.loads((dest / "chela.json").read_text()) == {"chela_dir": str(tmp_path / "cd")}
     assert (dest / "hooks" / "measure.ts").read_bytes() == (MOD / "hooks" / "measure.ts").read_bytes()
     assert not list(dest.parent.glob(".chela-measure.*"))     # no temp folder left
@@ -227,6 +227,19 @@ def test_install_refuses_to_replace_a_folder_that_is_not_the_mod(tmp_path):
     with pytest.raises(FileExistsError):
         measure_mod.install(dest, tmp_path)
     assert json.loads((dest / ".claude-plugin" / "plugin.json").read_text())["name"] == "someone-elses"
+
+
+def test_a_failed_copy_leaves_no_temp_folder_and_the_old_copy_intact(tmp_path, monkeypatch):
+    dest = tmp_path / "chela-measure"
+    measure_mod.install(dest, tmp_path / "a")
+
+    def full(*a, **k):
+        raise OSError(28, "No space left on device")
+    monkeypatch.setattr(shutil, "copytree", full)
+    with pytest.raises(OSError):
+        measure_mod.install(dest, tmp_path / "b")
+    assert not list(tmp_path.glob(".chela-measure.*"))
+    assert json.loads((dest / "chela.json").read_text())["chela_dir"] == str(tmp_path / "a")
 
 
 def test_install_refuses_a_missing_packaged_mod(tmp_path):

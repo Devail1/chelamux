@@ -53,7 +53,8 @@ def is_ours(dest: Path) -> bool:
 
 def _ignore(_dir: str, names: list[str]) -> set[str]:
     # The mod's own tests and their fixture stay in the package; a session loads none of them.
-    return {n for n in names if n.endswith(".test.ts") or n == "__pycache__"}
+    return {n for n in names if n.endswith(".test.ts") or n.endswith("-cases.ts")
+            or n == "__pycache__"}
 
 
 def install(dest: Path, chela_dir: Path, src: Path | None = None) -> Path:
@@ -71,11 +72,14 @@ def install(dest: Path, chela_dir: Path, src: Path | None = None) -> Path:
     dest.parent.mkdir(parents=True, exist_ok=True)
     tmp = dest.parent / f".{MOD_NAME}.{os.getpid()}.tmp"
     shutil.rmtree(tmp, ignore_errors=True)
-    shutil.copytree(src, tmp, ignore=_ignore)
-    (tmp / CONFIG_FILE).write_text(json.dumps({"chela_dir": str(chela_dir)}) + "\n")
-    if dest.exists():
-        shutil.rmtree(dest)
-    tmp.rename(dest)
+    try:
+        shutil.copytree(src, tmp, ignore=_ignore)
+        (tmp / CONFIG_FILE).write_text(json.dumps({"chela_dir": str(chela_dir)}) + "\n")
+        if dest.exists():
+            shutil.rmtree(dest)
+        tmp.rename(dest)
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)     # a failed copy leaves no temp folder
     return dest
 
 
