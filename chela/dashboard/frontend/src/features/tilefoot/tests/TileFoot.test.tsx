@@ -87,7 +87,7 @@ test('the tooltip names the reading, the model and the cost; an estimate says so
   again({ ctx: undefined });
   expect(must(q('.gs-head')).title).toBe('');   // a reading that went away leaves no stale tooltip
   again({ ctx: { window_id: '@32', used_pct: 25, used: '50k', total: '200k', estimated: true } });
-  expect(must(q('.term-ctx-bar')).title).toBe('Context: 50k/200k (25%~) · estimate; run `chela install-statusline` for exact');
+  expect(must(q('.term-ctx-bar')).title).toBe('Context: 50k/200k (25%~) · window size estimated');
   expect(text(q('.gs-ctx'))).toBe('25%~ · 50k/200k');
   expect(must(q('.term-ctx-fill')).classList.contains('est')).toBe(true);
 });

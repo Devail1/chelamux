@@ -7,8 +7,8 @@ token counts but not the window — and sized ~159K against the 200K default: 80
 
 A session's window size does not change while it runs, so the fallback now takes the
 window (and model) from that SAME session's cache at any age, and only the window:
-usage still comes from the transcript. No cache for the session ever ⇒ the 200K
-default, ``estimated: True``, as before.
+usage still comes from the transcript. No cache for the session ever, and no other
+window source (CMX-475) ⇒ the window is UNKNOWN: no total and no %, never a guessed 200K.
 
 Every consumer is driven: ``/api/agents/context`` (the sidebar row, the pane/tile
 bottom bar and the phone view all render this one endpoint's rows), the Cost tab's
@@ -63,7 +63,13 @@ def env(tmp_path, monkeypatch):
         return path
 
     pane = SimpleNamespace(wid=WID, claude_pid=PID)
+    # CMX-475: the window-size sources beyond the statusLine stay silent here — a bare
+    # launch, no settings `model`, no explicit default — so only the cache can decide.
+    monkeypatch.setattr(context, "MANAGED_SETTINGS", ())
+    monkeypatch.setattr(context.config, "default_context_window_explicit", lambda: None)
     with (
+        patch.object(sessions, "_cmdline_argv", return_value=["claude"]),
+        patch("chela.launch_settings.read_environ", return_value={}),
         patch("chela.discovery.get_all_windows", return_value={NAME: WID}),
         patch.object(discovery, "get_windows_by_id", return_value={WID: NAME}),
         patch.object(discovery, "get_window_cwd_by_id", return_value="/nonexistent/cmx-292"),
@@ -84,6 +90,10 @@ def env(tmp_path, monkeypatch):
         )
 
 
+# (total_k, used_pct, estimated) of a reading whose window no source knows (CMX-475).
+UNKNOWN = (None, None, False)
+
+
 def _surfaces() -> dict[str, tuple]:
     """``{surface: (total_k, used_pct, estimated)}`` as each consumer reports it."""
     client = dash.app.test_client()
@@ -94,7 +104,8 @@ def _surfaces() -> dict[str, tuple]:
     return {
         "snapshot": (snap["total_k"], snap["used_pct"], snap["estimated"]),
         # sidebar row + pane bottom bar + phone view: one endpoint, rendered as `total`
-        "api": ({"1M": 1000.0, "200K": 200.0}[row["total"]], row["used_pct"], row["estimated"]),
+        "api": ({"1M": 1000.0, "200K": 200.0, None: None}[row["total"]], row["used_pct"],
+                row["estimated"]),
         "peek": (peek["total_k"], peek["used_pct"], peek["estimated"]),
     }
 
@@ -121,20 +132,20 @@ def test_the_stale_caches_usage_is_never_used_only_its_window(env):
     assert context.live_snapshot(NAME, WID)["used_k"] == 159.0
 
 
-def test_no_cache_ever_keeps_the_estimated_200k_default(env):
-    _assert_every_surface((200.0, 80, True))
+def test_no_cache_ever_is_an_unknown_window_not_a_200k_guess(env):
+    _assert_every_surface(UNKNOWN)
     assert context.live_snapshot(NAME, WID)["model"] == "claude-opus-5-5"
 
 
 def test_a_stale_cache_from_a_different_session_is_not_used(env):
     env.write(env.other, _payload(OTHER))
     env.write(env.window_file, _payload(OTHER))
-    _assert_every_surface((200.0, 80, True))
+    _assert_every_surface(UNKNOWN)
 
 
 def test_a_by_session_file_whose_payload_names_another_session_is_not_used(env):
     env.write(env.own, _payload(OTHER))
-    _assert_every_surface((200.0, 80, True))
+    _assert_every_surface(UNKNOWN)
 
 
 def test_a_stale_window_file_naming_the_same_session_supplies_the_window(env):
@@ -162,19 +173,19 @@ def test_a_fresh_cache_still_wins_over_the_transcript(env):
         "string", "null"])
 def test_an_unusable_cache_falls_back_to_the_estimate(env, data):
     env.write(env.own, data)
-    _assert_every_surface((200.0, 80, True))
+    _assert_every_surface(UNKNOWN)
 
 
 def test_an_unreadable_cache_falls_back_to_the_estimate(env):
     env.own.mkdir()  # IsADirectoryError — an OSError subclass
-    _assert_every_surface((200.0, 80, True))
+    _assert_every_surface(UNKNOWN)
 
 
 def test_a_cache_that_is_not_utf8_falls_back_to_the_estimate(env):
     env.own.write_bytes(b'{"session_id": "\xff\xfe"}')  # UnicodeDecodeError, a ValueError
     t = time.time() - 4 * 3600
     os.utime(env.own, (t, t))
-    _assert_every_surface((200.0, 80, True))
+    _assert_every_surface(UNKNOWN)
 
 
 def test_an_unusable_by_session_file_still_lets_the_window_file_answer(env):
@@ -197,10 +208,15 @@ def test_usage_beyond_the_reported_window_is_bumped_and_estimated(env):
     _assert_every_surface((1000.0, 16, True))
 
 
-def test_window_for_without_a_session_uses_the_default():
-    with patch.object(context.config, "default_context_window", return_value=200_000):
+def test_window_for_without_a_session_uses_only_an_explicit_default(monkeypatch):
+    monkeypatch.setattr(context, "MANAGED_SETTINGS", ())
+    with patch.object(context.config, "default_context_window_explicit", return_value=200_000):
         w = context.window_for(USED, None)
     assert (w["total_k"], w["used_pct"], w["estimated"], w["model"]) == (200.0, 80, True, None)
+    assert w["window_source"] == "config"
+    with patch.object(context.config, "default_context_window_explicit", return_value=None):
+        w = context.window_for(USED, None)
+    assert (w["total_k"], w["used_pct"], w["window_source"]) == (None, None, "unknown")
 
 
 def test_the_live_cost_row_carries_the_recovered_model(env):
@@ -215,9 +231,15 @@ def test_format_peek_names_the_window_and_percentage(env):
     assert "  context: ~159K / 1000K tokens (16%) (claude-opus-5-5)\n" in out
 
 
-def test_format_peek_marks_the_default_window_as_estimated(env):
-    out = orchestrator.format_peek(orchestrator.peek(WID))
+def test_format_peek_marks_a_configured_default_window_as_estimated(env):
+    with patch.object(context.config, "default_context_window_explicit", return_value=200_000):
+        out = orchestrator.format_peek(orchestrator.peek(WID))
     assert "  context: ~159K / 200K tokens (80%, est) (claude-opus-5-5)\n" in out
+
+
+def test_format_peek_with_an_unknown_window_shows_tokens_not_a_percent(env):
+    out = orchestrator.format_peek(orchestrator.peek(WID))
+    assert "  context: ~159K tokens (claude-opus-5-5)\n" in out
 
 
 def test_format_peek_without_a_window_keeps_the_bare_count():
@@ -234,4 +256,4 @@ def test_no_session_never_matches_a_window_file_that_names_none(env):
     del data["session_id"]
     env.write(env.window_file, data)
     w = context.window_for(USED, None, NAME)
-    assert (w["total_k"], w["used_pct"], w["estimated"]) == (200.0, 80, True)
+    assert (w["total_k"], w["used_pct"], w["estimated"]) == UNKNOWN

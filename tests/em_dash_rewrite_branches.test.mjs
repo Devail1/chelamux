@@ -100,7 +100,8 @@ test('a wall tile with an estimated reading says so in its context tooltip', asy
     await terminals.termTick();
     await settle();
     assert.ok(tileBar(), 'the wall rendered no context bar for @3');
-    assert.equal(tileBar().title, 'Context: 50k/200k (25%~) · estimate; run `chela install-statusline` for exact');
+    // CMX-475: the transcript reading is exact; only its window size can be estimated
+    assert.equal(tileBar().title, 'Context: 50k/200k (25%~) · window size estimated');
 });
 
 test('a wall tile with an exact reading has no estimate hint', async () => {

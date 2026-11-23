@@ -136,7 +136,7 @@ test('drilling in reads the context; its bar shows %, model, cost and the estima
   act(() => context.set([{ name: 'a1', used: '150k', total: '200k', used_pct: 75, model: 'opus', cost_usd: 1.5, estimated: true, session_name: 'cmx-1' }]));
   const label = $('#ctx-a1 .context-label') as HTMLElement;
   expect(label.textContent).toBe('Context: 150k/200k (75%~) · opus · $1.5 · est');
-  expect(label.title).toBe('cmx-1 · estimate from transcript; run `chela install-statusline` for exact context %');
+  expect(label.title).toBe('cmx-1 · window size estimated');
   expect([$('#ctx-a1 .context-bar-fill')?.className, $('#ctx-a1 .context-bar-fill')?.style.width]).toEqual(['context-bar-fill ctx-warn', '75%']);
   act(() => context.set([{ name: 'a1', used: '10k', total: '200k', used_pct: 81, session_name: 'cmx-1' }]));
   expect([label.textContent, label.title, $('#ctx-a1 .context-bar-fill')?.className]).toEqual(['Context: 10k/200k (81%)', 'cmx-1', 'context-bar-fill ctx-danger']);
@@ -144,6 +144,17 @@ test('drilling in reads the context; its bar shows %, model, cost and the estima
   expect([label.hasAttribute('title'), $('#ctx-a1 .context-bar-fill')?.className]).toEqual([false, 'context-bar-fill']);
   act(() => context.set([{ name: 'a1', used_pct: null }]));
   expect(label.textContent).toBe('Context: unavailable');
+  // CMX-475: the states with no %
+  act(() => context.set([{ name: 'a1', used: '300K', total: '1M', used_pct: 30, estimated: true, window_source: 'usage' }]));
+  expect(label.title).toBe('window inferred as 1M from usage past 200K');
+  act(() => context.set([{ name: 'a1', state: 'no_turns', used_pct: null }]));
+  expect(label.textContent).toBe('Context: —');
+  act(() => context.set([{ name: 'a1', state: 'compacted', used_pct: null, pre: '818.3K' }]));
+  expect([label.textContent, label.title]).toEqual(['Context: compacted', 'was 818.3K; the real % shows after the next turn']);
+  act(() => context.set([{ name: 'a1', state: 'compacted', used_pct: null }]));
+  expect(label.title).toBe('the real % shows after the next turn');
+  act(() => context.set([{ name: 'a1', used: '430K', used_pct: null, window_source: 'unknown' }]));
+  expect([label.textContent, label.title]).toEqual(['Context: 430K tokens', 'window size unknown']);
 });
 
 test('send a message: the dialog names the agent, a blank message sends nothing, Send posts and closes', async () => {
