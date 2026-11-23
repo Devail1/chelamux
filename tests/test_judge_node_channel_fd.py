@@ -107,14 +107,14 @@ def test_run_suite_survives_a_leaked_node_channel_fd(monkeypatch):
 
 @pytest.mark.skipif(not shutil.which("node"), reason="node is not installed")
 def test_test_js_suite_itself_survives_a_leaked_node_channel_fd(monkeypatch):
-    """Calls the REAL `test_js_suite` test function — not a parallel reproduction — with
+    """Calls the REAL `run_js_suite` every shard runs — not a parallel reproduction — with
     NODE_CHANNEL_FD poisoned. A regression that drops `_clean_env()` from that call site's
     `subprocess.run` (e.g. reverted back to inheriting the full environment) makes THIS
     fail, because that call site is exactly what runs here, unlike a copy of its logic."""
     import test_js_suites
 
     monkeypatch.setenv("NODE_CHANNEL_FD", _POISON_FD)
-    test_js_suites.test_js_suite(ROOT / "tests" / "views.test.mjs")
+    test_js_suites.run_js_suite(ROOT / "tests" / "views.test.mjs")
 
 
 def test_clean_env_strips_node_channel_serialization_mode_too(monkeypatch):

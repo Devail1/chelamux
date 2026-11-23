@@ -234,8 +234,15 @@ def _real_cases() -> list[js.Case]:
     cases.append(js.Case("tests/test_frontend.py", VITEST_NODE, True))
     for p in sorted((ROOT / "tests").glob("*.test.mjs")):
         rel = p.relative_to(ROOT).as_posix()
-        cases.append(js.Case(SUITES_PY, f"{SUITES_PY}::test_js_suite[{rel}]", True, rel))
+        node = _real_node(rel)
+        cases.append(js.Case(node.split("::")[0], node, True, rel))
     return cases
+
+
+def _real_node(rel: str) -> str:
+    """CMX-487: the node id of one real JS suite, in the shard file that runs it."""
+    from test_js_suites import shard_of
+    return f"tests/test_js_suites_{shard_of(ROOT / rel)}.py::test_js_suite[{rel}]"
 
 
 def test_the_real_sidebar_drag_ts_selects_its_killer_and_no_python_file():
@@ -248,10 +255,10 @@ def test_the_real_sidebar_drag_ts_selects_its_killer_and_no_python_file():
     specs = sel.env["CHELA_FRONTEND_VITEST_FILES"].split(os.pathsep)
     assert "src/features/sidebar/tests/drag.test.tsx" in specs
     assert "src/features/sidebar/tests/dragWrite.test.ts" in specs
-    assert f"{SUITES_PY}::test_js_suite[tests/sidebar_click_context.test.mjs]" in sel.nodes
-    assert [n for n in sel.nodes
-            if not n.startswith(f"{SUITES_PY}::test_js_suite[")] == [VITEST_NODE]
-    assert sel.confirm.nodes[:2] == [VITEST_NODE, SUITES_PY]
+    assert _real_node("tests/sidebar_click_context.test.mjs") in sel.nodes
+    assert [n for n in sel.nodes if "::test_js_suite[" not in n] == [VITEST_NODE]
+    assert sel.confirm.nodes[:5] == [
+        VITEST_NODE, *(f"tests/test_js_suites_{n}.py" for n in range(4))]
 
 
 # --- the judge: subset, then the ring -------------------------------------------------------

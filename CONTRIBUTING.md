@@ -32,7 +32,8 @@ uv run ruff check chela tests     # lint — CI gates on this
 uv run pytest -q                  # tests (parallel via pytest-xdist: `-n 4 --dist loadfile`)
 ```
 
-The JS suites (`*.test.mjs`) run inside pytest via `tests/test_js_suites.py`, so
+The JS suites (`*.test.mjs`) run inside pytest via `tests/test_js_suites.py`
+(found by glob, and spread over four shard files, `tests/test_js_suites_{0..3}.py`), so
 `pytest` covers them too — no separate `pnpm test` step. The repo uses **pnpm**, pinned
 by `package.json`'s `packageManager` (a 10.x — pnpm 11 needs a newer Node than the pinned
 20); `corepack enable` picks that version up for you.

@@ -17,6 +17,12 @@ So the list is gone. This globs the repo and runs what it FINDS — one pytest i
 file, so a failure names the file. Adding a ``.test.mjs`` anywhere wires it in by the
 act of creating it; there is no second list to forget.
 
+CMX-487: the items live in ``test_js_suites_{0..3}.py``, one shard each. ``--dist loadfile``
+keeps a file on one worker, and as one file these suites alone set the whole run's
+wall-clock. :func:`shard_of` picks a suite's shard from its path;
+:func:`test_every_js_suite_is_in_exactly_one_shard_file` fails if one is in none or in two.
+This file keeps the discovery, the runner and the fences.
+
 Two fences, because the failure mode here is a check that *silently* does nothing:
 
 * :func:`test_js_suites_are_discovered` fails if the glob finds nothing — a discovery
@@ -37,11 +43,13 @@ Two fences, because the failure mode here is a check that *silently* does nothin
   headless browser through playwright. The suite itself decides whether it could launch
   one (``tests/browser/fixture.mjs`` ``launchChromium``): under ``CHELA_REQUIRE_JS_TESTS``
   it FAILS; otherwise node skips every test quietly and prints :data:`_BROWSER_DID_NOT_RUN`,
-  which :func:`test_js_suite` turns into a loud pytest skip instead of a green pass.
+  which :func:`run_js_suite` turns into a loud pytest skip instead of a green pass.
 """
 
 from __future__ import annotations
 
+import hashlib
+import importlib
 import json
 import os
 import shutil
@@ -74,7 +82,22 @@ def runs_under_vitest(suite: Path) -> bool:
 
 
 _SUITES = js_suites()
-_IDS = [str(p.relative_to(ROOT)) for p in _SUITES]
+SHARDS = 4
+
+
+def shard_of(suite: Path) -> int:
+    """The shard a suite runs in: a hash of its repo-relative path, so it is the same in every
+    process (xdist workers must collect identical ids), on every machine and in every checkout.
+    Not ``hash()``, which is salted per process."""
+    rel = suite.relative_to(ROOT).as_posix()
+    return int(hashlib.sha1(rel.encode()).hexdigest(), 16) % SHARDS
+
+
+def shard_params(shard: int) -> pytest.MarkDecorator:
+    """The parametrize mark of ``test_js_suites_<shard>.py``: one item per suite in it."""
+    suites = [p for p in _SUITES if shard_of(p) == shard]
+    return pytest.mark.parametrize(
+        "suite", suites, ids=[str(p.relative_to(ROOT)) for p in suites])
 
 
 def _xdist_master() -> int | None:
@@ -115,6 +138,48 @@ def _node_or_skip(suites: list[Path]) -> str:
 def test_js_suites_are_discovered():
     """A glob that matches nothing would report green by running nothing."""
     assert _SUITES, f"no *.test.mjs found under {ROOT} — the JS suites are not being run"
+
+
+def test_every_js_suite_is_in_exactly_one_shard_file():
+    """CMX-487: a suite in no shard is never run, and one in two runs twice. Read from what the
+    shard FILES on disk collect, so a deleted file, a copy-pasted shard number or a fifth file
+    is red too, not only a wrong :func:`shard_of`."""
+    files = sorted(p.stem for p in (ROOT / "tests").glob("test_js_suites_*.py"))
+    assert files == [f"test_js_suites_{n}" for n in range(4)]
+    ran: list[Path] = []
+    for name in files:
+        module = importlib.import_module(name)
+        [mark] = module.test_js_suite.pytestmark
+        argname, suites = mark.args
+        assert (mark.name, argname) == ("parametrize", "suite")
+        assert mark.kwargs["ids"] == [str(p.relative_to(ROOT)) for p in suites]
+        ran += suites
+    assert sorted(ran) == js_suites()
+
+
+@pytest.mark.parametrize("shard", range(4))
+def test_each_shard_file_runs_its_suite_for_real(monkeypatch, shard):
+    """The shard's ``test_js_suite`` is a call to the one runner, not an empty body."""
+    module = importlib.import_module(f"test_js_suites_{shard}")
+    ran = []
+    monkeypatch.setattr(module, "run_js_suite", ran.append)
+    module.test_js_suite(_NODE_SUITE)
+    assert ran == [_NODE_SUITE]
+
+
+@pytest.mark.parametrize("rel,shard", [
+    ("tests/browser/work_desktop.test.mjs", 0),
+    ("tests/browser/overlays_phone.test.mjs", 1),
+    ("tests/browser/work_phone.test.mjs", 2),
+    ("tests/browser/dashboard.test.mjs", 3),
+    ("chela/dashboard/static/collab/fit.test.mjs", 0),
+])
+def test_a_suites_shard_is_the_same_in_every_process_and_checkout(monkeypatch, rel, shard):
+    """Literal shards: a salted ``hash()`` or one over the absolute path would not hold them."""
+    assert shard_of(ROOT / rel) == shard
+    elsewhere = Path("/somewhere/else")
+    monkeypatch.setattr(sys.modules[__name__], "ROOT", elsewhere)
+    assert shard_of(elsewhere / rel) == shard
 
 
 def _did_not_run(msg: str) -> None:
@@ -158,8 +223,8 @@ def _jsdom_or_skip(suite: Path) -> None:
 _BROWSER_DID_NOT_RUN = "browser suite DID NOT RUN"
 
 
-@pytest.mark.parametrize("suite", _SUITES, ids=_IDS)
-def test_js_suite(suite: Path):
+def run_js_suite(suite: Path) -> None:
+    """The body of every shard's ``test_js_suite``: run one suite, fail or skip on its result."""
     node = _node_or_skip([suite])
     if runs_under_vitest(suite):
         _vitest_or_skip(suite)
@@ -192,7 +257,7 @@ def test_a_browser_suite_that_could_not_launch_is_a_loud_skip_not_a_pass(monkeyp
         lambda *a, **k: subprocess.CompletedProcess(a, 0, out, b""),
     )
     with pytest.raises(pytest.skip.Exception, match="DID NOT RUN: Chromium could not launch"):
-        test_js_suite(suite)
+        run_js_suite(suite)
 
 
 @pytest.mark.parametrize("required", [True, False], ids=["required-fails", "optional-skips"])
@@ -265,7 +330,7 @@ def test_a_js_suite_runs_contained_with_its_full_call_pinned(monkeypatch, suite,
         lambda argv, **kw: (calls.append((argv, kw)),
                             subprocess.CompletedProcess(argv, 0, b"ok", b""))[1],
     )
-    test_js_suite(suite)
+    run_js_suite(suite)
     [(got, kw)] = calls
     assert got == argv(_NODE_SUITE)
     assert set(kw) == {"timeout", "cwd", "env", "watch"}
@@ -316,7 +381,7 @@ def test_a_missing_vitest_fails_under_require_and_skips_loudly_otherwise(monkeyp
                         lambda *_a, **_k: pytest.fail("ran a suite that cannot run"))
     with pytest.raises((pytest.fail.Exception, pytest.skip.Exception),
                        match="vitest is not installed.*approvals_wiring.test.mjs DID NOT RUN") as out:
-        test_js_suite(_VITEST_SUITE)
+        run_js_suite(_VITEST_SUITE)
     assert out.type is (pytest.fail.Exception if required else pytest.skip.Exception)
 
 
@@ -330,7 +395,7 @@ def test_a_node_test_suite_does_not_need_vitest(monkeypatch):
         sys.modules[__name__], "run_contained",
         lambda argv, **kw: (calls.append(argv), subprocess.CompletedProcess(argv, 0, b"", b""))[1],
     )
-    test_js_suite(_NODE_SUITE)
+    run_js_suite(_NODE_SUITE)
     assert calls == [["/opt/node", "--test", str(_NODE_SUITE)]]
 
 
@@ -346,7 +411,7 @@ def test_a_failing_suite_fails_its_item_and_never_reads_as_a_load_error(monkeypa
         lambda *a, **k: subprocess.CompletedProcess(a, 1, out, err),
     )
     with pytest.raises(pytest.fail.Exception) as failed:
-        test_js_suite(_VITEST_SUITE)
+        run_js_suite(_VITEST_SUITE)
     msg = str(failed.value)
     # Booleans, not `in msg`: pytest would print the message, and its error count would be read
     # by the judge as the very load error this test rules out.
