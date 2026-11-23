@@ -32,7 +32,40 @@ test('an estimate is marked in the chip and the tooltip', () => {
   const v = ctxView({ used_pct: 25, used: '50k', total: '200k', estimated: true });
   expect(v?.estimated).toBe(true);
   expect(v?.chip).toBe('25%~ · 50k/200k');
-  expect(v?.tip).toBe('Context: 50k/200k (25%~) · estimate; run `chela install-statusline` for exact');
+  expect(v?.tip).toBe('Context: 50k/200k (25%~) · window size estimated');
+  expect(ctxView({ used_pct: 30, used: '300K', total: '1M', estimated: true, window_source: 'usage' })?.tip)
+    .toBe('Context: 300K/1M (30%~) · window inferred as 1M from usage past 200K');
+  expect(ctxView({ used_pct: 30, used: '150K', total: '500K', estimated: true, window_source: 'config' })?.tip)
+    .toBe('Context: 150K/500K (30%~) · window from the configured default');
+});
+
+// CMX-475: the states that carry no %.
+test('no turn yet reads "—", never 0%', () => {
+  const v = ctxView({ state: 'no_turns', used_pct: null, model: 'opus' });
+  expect(v).toMatchObject({ chip: '—', width: '0%', sev: '', tip: 'Context: — (no turn yet) · opus' });
+  expect(v?.chip).not.toContain('0%');
+});
+
+test('after /compact: "compacted", never the stale pre-compact %', () => {
+  const v = ctxView({ state: 'compacted', used_pct: null, pre: '818.3K' });
+  expect(v).toMatchObject({ chip: 'compacted', width: '0%', sev: '' });
+  expect(v?.tip).toBe('Context: compacted (was 818.3K); the real % shows after the next turn');
+  expect(ctxView({ state: 'compacted' })?.tip).toBe('Context: compacted; the real % shows after the next turn');
+  // a compacted row that still carried a % must not show it
+  expect(ctxView({ state: 'compacted', used_pct: 82 })?.chip).toBe('compacted');
+});
+
+test('a state with no % still names the cost in its tooltip (0 included), and omits a missing one', () => {
+  expect(ctxView({ state: 'compacted', cost_usd: 4.2 })?.tip)
+    .toBe('Context: compacted; the real % shows after the next turn · $4.2');
+  expect(ctxView({ state: 'no_turns', cost_usd: 0 })?.tip).toBe('Context: — (no turn yet) · $0');
+  expect(ctxView({ state: 'no_turns', cost_usd: null })?.tip).toBe('Context: — (no turn yet)');
+});
+
+test('an unknown window shows absolute tokens, no %', () => {
+  const v = ctxView({ used: '430K', used_pct: null, total: null, window_source: 'unknown' });
+  expect(v).toMatchObject({ chip: '430K', width: '0%', tip: 'Context: 430K tokens · window size unknown' });
+  expect(v?.chip).not.toContain('%');
 });
 
 test('missing pieces read as absent, never as text', () => {

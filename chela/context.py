@@ -11,6 +11,7 @@ Agents' Claude Code status-line scripts cache JSON to
 
 import json
 import logging
+import re
 import sqlite3
 import time
 from contextlib import closing
@@ -20,12 +21,10 @@ from pathlib import Path
 from chela import cachekey, config, dispatcher, transcripts
 from chela.config import CHELA_DIR, CONTEXT_CACHE_DIR
 
-# Context-window size (tokens) assumed when deriving usage from the transcript
-# (the fallback): the transcript records token counts but not the window size.
-# The statusLine payload, when installed, carries the exact size and overrides
-# this — even once stale, for the same session (CMX-292, see window_for). Default 200k; bumped to 1M automatically when observed usage exceeds it.
-# A Timing-tab knob (CMX-217) — see config.default_context_window(); read per
-# call below, not latched here.
+# CMX-475: the transcript is the DEFAULT source of the context %, not a fallback. Its last
+# assistant turn's usage is the same figure the statusLine payload and `/context` report;
+# what the transcript does not record is the window size, which `resolve_window` finds
+# from an ordered list of sources and names. An unknown window shows tokens, not a %.
 
 log = logging.getLogger(__name__)
 
@@ -383,6 +382,8 @@ def _snapshot_from(path: Path, agent_name: str) -> dict | None:
     snap["ts"] = datetime.fromtimestamp(mtime, timezone.utc).isoformat()
     snap["source"] = "statusline"
     snap["estimated"] = False
+    snap["state"] = "ok"
+    snap["window_source"] = "statusline"
     return snap
 
 
@@ -438,68 +439,271 @@ def _reported_window(session_id: str | None, agent_name: str | None = None) -> t
     return None
 
 
-def window_for(used_tokens: int, session_id: str | None,
-               agent_name: str | None = None) -> dict:
-    """Size ``used_tokens`` of transcript usage against the session's context window.
+ONE_M = 1_000_000
+STANDARD_WINDOW = 200_000
 
-    The window is the one ``session_id``'s own statusLine reported (CMX-292), else
-    ``config.default_context_window()`` — bumped to 1M when observed usage exceeds
-    it, so 1M sessions don't read as >100% — and then ``estimated`` is True.
+# A model string naming a 1M-context variant: `opus[1m]`, `claude-sonnet-4-5[1m]`.
+_ONE_M_MARKER = re.compile(r"\[1m\]\s*\Z", re.IGNORECASE)
+
+# Claude Code's managed (org) settings file, per platform; it outranks every other
+# settings file. A seam: tests point it at a fixture.
+MANAGED_SETTINGS = (
+    Path("/Library/Application Support/ClaudeCode/managed-settings.json"),
+    Path("/etc/claude-code/managed-settings.json"),
+)
+
+
+def has_1m_marker(model: str | None) -> bool:
+    return isinstance(model, str) and bool(_ONE_M_MARKER.search(model.strip()))
+
+
+def _flag_model(args: list[str]) -> str | None:
+    """The value of the last ``--model X`` / ``--model=X`` in ``args``."""
+    found = None
+    for i, a in enumerate(args):
+        if a == "--model" and i + 1 < len(args):
+            found = args[i + 1]
+        elif a.startswith("--model="):
+            found = a.split("=", 1)[1]
+    return found or None
+
+
+def _launch_model(session_id: str | None, window_id: str | None) -> str | None:
+    """The model the session was LAUNCHED with: ``--model`` on the live claude process's
+    argv, else ``$ANTHROPIC_MODEL`` in its environment, else the ``--model`` chela
+    recorded for the session (CMX-372 launch settings). None when none names one."""
+    from chela import launch_settings, sessions
+    if window_id:
+        try:
+            pane = sessions.panes().get(window_id)
+            pid = pane.claude_pid if pane else None
+        except Exception:  # noqa: BLE001 — a context bar must never 500 the dashboard
+            log.debug("_launch_model(%s): pane lookup failed", window_id, exc_info=True)
+            pid = None
+        if pid:
+            model = _flag_model(launch_settings._claude_args(sessions._cmdline_argv(pid)))
+            if model:
+                return model
+            env_model = launch_settings.read_environ(pid).get("ANTHROPIC_MODEL", "").strip()
+            if env_model:
+                return env_model
+    flags = launch_settings.for_session(session_id).get("flags") if session_id else None
+    return _flag_model(flags) if isinstance(flags, list) else None
+
+
+def _settings_model(cwd: str | None) -> str | None:
+    """``model`` from Claude Code's settings, highest precedence first: managed, the
+    project's ``.claude/settings.local.json`` and ``.claude/settings.json`` (under the
+    session's cwd), then the user's ``settings.json``. None when none sets one."""
+    paths = list(MANAGED_SETTINGS)
+    if cwd:
+        paths += [Path(cwd) / ".claude" / "settings.local.json",
+                  Path(cwd) / ".claude" / "settings.json"]
+    paths.append(transcripts.claude_config_dir() / "settings.json")
+    for path in paths:
+        try:
+            data = json.loads(path.read_text())
+        except (ValueError, OSError):  # absent, unreadable, or not JSON: not a source
+            continue
+        model = data.get("model") if isinstance(data, dict) else None
+        if isinstance(model, str) and model.strip():
+            return model.strip()
+    return None
+
+
+def resolve_window(used_tokens: int | None, *, session_id: str | None = None,
+                   agent_name: str | None = None, model: str | None = None,
+                   cwd: str | None = None, window_id: str | None = None) -> dict:
+    """The session's context-window size and the source that decided it (CMX-475).
+
+    ``{"window": int | None, "source": str, "model": str | None}``. Checked in order;
+    the first that decides wins:
+
+    1. ``transcript`` — the transcript's model id names a 1M variant (``[1m]``);
+    2. ``launch`` — the model the session was launched with (``--model``,
+       ``$ANTHROPIC_MODEL``, the CMX-372 record) names a 1M variant;
+    3. ``settings`` — Claude Code's ``model`` setting (managed, project, user) does.
+       A launch model that names a model WITHOUT the marker overrides settings, as it
+       does in Claude Code, so it stops this step rather than falling through to it;
+    4. ``statusline`` — the session's own statusLine payload reported the size (at any
+       age: the window does not change while a session runs, CMX-292);
+    5. ``usage`` — the usage has already passed 200k (or the statusLine's reported size,
+       which is then evidently wrong), which only a 1M window holds;
+    6. ``config`` — the operator set ``default_context_window`` explicitly.
+
+    Otherwise ``window`` is None and ``source`` is ``unknown``: a bare model id does not
+    say which window it runs with, and guessing 200k would read a 1M session as 215%.
     """
     reported = _reported_window(session_id, agent_name)
-    window = reported[0] if reported else config.default_context_window()
-    if used_tokens > window and used_tokens <= 1_000_000:
-        window = 1_000_000
-    total_k = round(window / 1000, 1)
+    label = reported[1] if reported else None
+    if has_1m_marker(model):
+        return {"window": ONE_M, "source": "transcript", "model": label}
+    launched = _launch_model(session_id, window_id)
+    if launched is not None:
+        if has_1m_marker(launched):
+            return {"window": ONE_M, "source": "launch", "model": label}
+    elif has_1m_marker(_settings_model(cwd)):
+        return {"window": ONE_M, "source": "settings", "model": label}
+    used = used_tokens or 0
+    if reported and used <= reported[0]:
+        return {"window": reported[0], "source": "statusline", "model": label}
+    # A usage past 200k — or past a reported window, which is then evidently wrong
+    # (CMX-292) — is only held by a 1M window.
+    if used > (reported[0] if reported else STANDARD_WINDOW) and used <= ONE_M:
+        return {"window": ONE_M, "source": "usage", "model": label}
+    explicit = config.default_context_window_explicit()
+    if explicit:
+        return {"window": explicit, "source": "config", "model": label}
+    return {"window": None, "source": "unknown", "model": label}
+
+
+# Window sources that are an inference, not a statement of the session's window.
+_INFERRED_SOURCES = frozenset({"usage", "config"})
+
+
+def window_for(used_tokens: int, session_id: str | None,
+               agent_name: str | None = None, *, model: str | None = None,
+               cwd: str | None = None, window_id: str | None = None) -> dict:
+    """Size ``used_tokens`` of transcript usage against the session's context window.
+
+    The window comes from :func:`resolve_window`. With none known, ``total_k``,
+    ``used_pct``, ``free_k`` and ``free_pct`` are None — the reading is the absolute
+    ``used_k`` alone, never a % against a guessed window.
+    """
+    r = resolve_window(used_tokens, session_id=session_id, agent_name=agent_name,
+                       model=model, cwd=cwd, window_id=window_id)
+    window = r["window"]
     used_k = round(used_tokens / 1000, 1)
+    if not window:
+        return {"used_k": used_k, "total_k": None, "used_pct": None, "free_k": None,
+                "free_pct": None, "model": r["model"], "window_source": r["source"],
+                "estimated": False}
+    total_k = round(window / 1000, 1)
     used_pct = min(100, round(used_tokens / window * 100))
     return {
         "used_k": used_k, "total_k": total_k, "used_pct": used_pct,
         "free_k": round(total_k - used_k, 1), "free_pct": max(0, 100 - used_pct),
-        "model": reported[1] if reported else None,
-        "estimated": reported is None or window != reported[0],
+        "model": r["model"], "window_source": r["source"],
+        "estimated": r["source"] in _INFERRED_SOURCES,
     }
 
 
-def _transcript_snapshot(agent_name: str, window_id: str | None = None) -> dict | None:
-    """Context-only snapshot derived from the agent's active transcript.
-
-    Fallback when no fresh statusLine cache exists: no rate-limit/cost data. The
-    window size comes from the transcript's own session's statusLine cache when one
-    was ever written (stale is fine — see :func:`window_for`), else it is estimated.
-    """
-    u = transcripts.agent_context_from_transcript(agent_name, window_id)
-    if not u or not u.get("used_tokens"):
-        return None
-    w = window_for(u["used_tokens"], u.get("session_id"), agent_name)
+def _blank(agent_name: str) -> dict:
     return {
-        "name": agent_name,
-        "used_k": w["used_k"], "total_k": w["total_k"], "used_pct": w["used_pct"],
-        "messages_k": None, "messages_pct": None,
-        "free_k": w["free_k"], "free_pct": w["free_pct"],
-        "model": w["model"] or u.get("model"), "cost_usd": None,
+        "name": agent_name, "used_k": None, "total_k": None, "used_pct": None,
+        "messages_k": None, "messages_pct": None, "free_k": None, "free_pct": None,
+        "model": None, "cost_usd": None,
         "rate_limit_pct": None, "rate_limit_resets_at": None,
         "weekly_rl_pct": None, "weekly_rl_resets_at": None,
         "session_name": None, "branch": None, "ts": None,
-        "source": "transcript", "estimated": w["estimated"],
+        "source": "transcript", "estimated": False, "window_source": None,
+        "used_tokens": None,
     }
 
 
-def live_snapshot(agent_name: str, window_id: str | None = None) -> dict | None:
-    """Best available context snapshot for one agent.
+def transcript_reading(u: dict | None, agent_name: str,
+                       window_id: str | None = None) -> dict:
+    """A snapshot from one :func:`chela.transcripts.latest_context_usage` result.
 
-    Fresh statusLine cache (full, authoritative) if present, else a
-    transcript-derived estimate, else None. Pass ``window_id`` whenever the caller
-    has one (CMX-29): the cache is then read for THAT window's own session, and the
-    transcript fallback resolves the window's own transcript (never "newest JSONL in
+    ``state`` is ``ok`` (a reading), ``compacted`` (a ``/compact`` is newer than the last
+    usage: the old number is stale and is NOT shown — ``pre_k`` says what it was), or
+    ``no_turns`` (no assistant turn yet: a fresh session, or one ``/clear`` just started).
+    """
+    snap = _blank(agent_name)
+    if not u:
+        snap["state"] = "no_turns"
+        return snap
+    snap["ts"] = u.get("ts")
+    snap["model"] = u.get("model")
+    if u.get("compacted"):
+        pre = u.get("pre_tokens") or u.get("stale_used_tokens")
+        snap.update(state="compacted", pre_k=round(pre / 1000, 1) if pre else None)
+        return snap
+    used = u.get("used_tokens")
+    if not isinstance(used, int):
+        snap["state"] = "no_turns"
+        return snap
+    w = window_for(used, u.get("session_id"), agent_name, model=u.get("model"),
+                   cwd=u.get("cwd"), window_id=window_id)
+    snap.update(
+        state="ok", used_tokens=used,
+        used_k=w["used_k"], total_k=w["total_k"], used_pct=w["used_pct"],
+        free_k=w["free_k"], free_pct=w["free_pct"],
+        model=w["model"] or u.get("model"),
+        estimated=w["estimated"], window_source=w["window_source"],
+    )
+    return snap
+
+
+def _transcript_snapshot(agent_name: str, window_id: str | None = None) -> dict | None:
+    """The transcript's reading for ``agent_name`` — None only when no transcript resolves
+    (a resolved one with no assistant turn yet is a ``no_turns`` reading, not None)."""
+    try:
+        path = transcripts._resolve_agent_transcript(agent_name, window_id)
+        if path is None:
+            return None
+        u = transcripts.latest_context_usage(path)
+        if u and u.get("scan_exhausted"):
+            return None  # no reading in the scanned tail: unknown, so the statusLine stands
+        return transcript_reading(u, agent_name, window_id)
+    except Exception:  # noqa: BLE001 — a context bar must never 500 the dashboard
+        # Read on EVERY call now (not only when no statusLine cache exists), so a failing
+        # window resolution must leave the statusLine's reading standing, not take it down.
+        log.debug("_transcript_snapshot(%s, %s) failed", agent_name, window_id, exc_info=True)
+        return None
+
+
+# Fields only the statusLine payload carries: kept when the transcript's reading wins.
+_STATUSLINE_EXTRAS = ("cost_usd", "rate_limit_pct", "rate_limit_resets_at",
+                      "weekly_rl_pct", "weekly_rl_resets_at", "session_name", "branch")
+
+
+def _parse_ts(ts) -> datetime | None:
+    if not isinstance(ts, str) or not ts:
+        return None
+    try:
+        dt = datetime.fromisoformat(ts.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
+
+
+def pick(statusline: dict | None, transcript: dict | None) -> dict | None:
+    """The reading to show, from the two sources (CMX-475). Neither is required.
+
+    * a ``compacted`` or ``no_turns`` transcript wins outright: no turn has run since the
+      ``/compact`` (or since ``/clear`` started the session), so any number the statusLine
+      still carries is from before it — the stale value this exists to stop showing;
+    * otherwise the NEWER of the two by timestamp — the statusLine on a tie, since it also
+      carries the exact window size;
+    * the transcript's reading keeps the statusLine's cost and rate-limit fields.
+    """
+    if transcript is None:
+        return statusline
+    if statusline is None:
+        return transcript
+    t_state = transcript.get("state")
+    if t_state == "ok":
+        s_ts, t_ts = _parse_ts(statusline.get("ts")), _parse_ts(transcript.get("ts"))
+        if s_ts is None or t_ts is None or t_ts <= s_ts:
+            return statusline
+    merged = dict(transcript)
+    for key in _STATUSLINE_EXTRAS:
+        merged[key] = statusline.get(key)
+    return merged
+
+
+def live_snapshot(agent_name: str, window_id: str | None = None) -> dict | None:
+    """Best available context snapshot for one agent, or None when neither source has one.
+
+    The transcript's reading and a fresh statusLine cache, chosen by :func:`pick`. Pass
+    ``window_id`` whenever the caller has one (CMX-29): the cache is then read for THAT
+    window's own session, and the transcript is the window's own (never "newest JSONL in
     the cwd", which two windows sharing a directory would both be handed).
     """
-    if window_id:
-        sid = window_session(window_id)
-        if sid:
-            return (_cache_snapshot(agent_name, sid)
-                    or _transcript_snapshot(agent_name, window_id))
-    return _cache_snapshot(agent_name) or _transcript_snapshot(agent_name, window_id)
+    sid = window_session(window_id) if window_id else None
+    statusline = _cache_snapshot(agent_name, sid) if sid else _cache_snapshot(agent_name)
+    return pick(statusline, _transcript_snapshot(agent_name, window_id))
 
 
 # ---------------------------------------------------------------------------

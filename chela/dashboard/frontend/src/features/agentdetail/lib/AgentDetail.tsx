@@ -70,7 +70,16 @@ function ContextBar({ name, row }: { name: string; row: ContextRow | undefined }
     if (row.estimated) parts.push('est');
     label = parts.join(' · ');
     if (row.session_name) tips.push(row.session_name);
-    if (row.estimated) tips.push('estimate from transcript; run `chela install-statusline` for exact context %');
+    if (row.estimated) tips.push(row.window_source === 'usage' ? 'window inferred as 1M from usage past 200K' : 'window size estimated');
+  } else if (row?.state === 'no_turns') {
+    // CMX-475: no turn yet is "—", never 0%
+    label = 'Context: —';
+  } else if (row?.state === 'compacted') {
+    label = 'Context: compacted';
+    tips.push(`${row.pre ? `was ${String(row.pre)}; ` : ''}the real % shows after the next turn`);
+  } else if (row?.used) {
+    label = `Context: ${String(row.used)} tokens`;
+    tips.push('window size unknown');
   } else if (row) {
     label = 'Context: unavailable';
   }
