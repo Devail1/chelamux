@@ -1115,6 +1115,8 @@ def _watchdog(agent_status, *, stuck, nudged, check):
     extra = [
         patch.object(dispatcher, "_capture_pane", return_value=""),
         patch.object(dispatcher, "_agent_status", return_value=agent_status),
+        # CMX-478: the dialog is a question (a permission prompt is never Escaped)
+        patch.object(dispatcher, "_pending_dialog_tool", return_value="AskUserQuestion"),
         patch.object(dispatcher, "_pane_idle_empty_prompt", return_value=stuck),
         patch.object(dispatcher, "_pane_shows_activity", return_value=False),
         patch.object(dispatcher, "_dismiss_input_block",
