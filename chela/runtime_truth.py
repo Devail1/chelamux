@@ -3981,7 +3981,23 @@ def facts() -> list[Fact]:
             report=_closed_run_stalls_report,
             unverifiable_level=WARN,      # a tracker read is network: offline is not broken
         ),
+        Fact(
+            name="usage.sources",
+            declared_by="CHELA_DIR (where `chela install-mod` points the mod)",
+            owned_by="the installed chela-measure mod (~/.claude/skills/chela-measure), user "
+                     "settings' statusLine, and the snapshot files under CHELA_DIR/context",
+            declare=lambda: config.CHELA_DIR,
+            read_back=lambda: observed(_measure_mod().read_state()),
+            report=lambda d, obs: _measure_mod().report(d, obs.value),
+            unverifiable_level=WARN,      # a usage feed is optional: loud, never fatal
+            required=False,               # CMX-477: no producer is a first run's state
+        ),
     ]
+
+
+def _measure_mod():
+    from chela import measure_mod      # lazy: only doctor reads it
+    return measure_mod
 
 
 def _lines(items: list[str]) -> str:

@@ -721,7 +721,17 @@ def _break_telegram_sender_allowlist(tmp_path, monkeypatch):
     return doctor.WARN
 
 
+def _break_usage_sources(tmp_path, monkeypatch):
+    """The chela-measure mod is installed, but its chela.json points at ANOTHER chela dir:
+    every session without $CHELA_DIR feeds that one, and this chela's bars stay unknown
+    (CMX-477)."""
+    from chela import measure_mod
+    measure_mod.install(measure_mod.install_dir(), tmp_path / "elsewhere")
+    return doctor.WARN
+
+
 CORRUPTIONS = {
+    "usage.sources": _break_usage_sources,
     "telegram.sender_allowlist": _break_telegram_sender_allowlist,
     "relay.transcripts": _break_relay_transcripts,
     "env.file": _break_env_file,

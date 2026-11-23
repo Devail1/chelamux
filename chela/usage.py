@@ -415,16 +415,20 @@ _SAMPLES_MAX = 2000
 _SAMPLES_LOCK = threading.Lock()
 
 
-def _cache_files(cache_dir: Path) -> list[Path]:
+def _cache_files(cache_dir: Path) -> list[tuple[Path, str]]:
+    """Every cache file with its producer: the statusLine's (``<window>.json``,
+    ``by-session/``) and, CMX-477, the chela-measure mod's (``mod/``)."""
     from chela import context
-    return list(cache_dir.glob("*.json")) + list((cache_dir / context.SESSION_CACHE_SUBDIR).glob("*.json"))
+    return ([(f, "statusline") for f in cache_dir.glob("*.json")]
+            + [(f, "statusline") for f in (cache_dir / context.SESSION_CACHE_SUBDIR).glob("*.json")]
+            + [(f, "mod") for f in (cache_dir / context.MOD_CACHE_SUBDIR).glob("*.json")])
 
 
 def freshest_limits(cache_dir: Path) -> dict:
-    """``{key: (mtime, used_percentage, resets_at)}`` from the freshest cache file that
-    carries each limit."""
+    """``{key: (mtime, used_percentage, resets_at, source)}`` from the freshest cache file
+    that carries each limit, whichever producer wrote it (CMX-477)."""
     best: dict = {}
-    for f in _cache_files(cache_dir):
+    for f, source in _cache_files(cache_dir):
         try:
             mtime = f.stat().st_mtime
             d = json.loads(f.read_text())
@@ -441,7 +445,8 @@ def freshest_limits(cache_dir: Path) -> dict:
             if not isinstance(pct, (int, float)) or isinstance(pct, bool):
                 continue
             if key not in best or mtime > best[key][0]:
-                best[key] = (mtime, float(pct), int(reset) if isinstance(reset, (int, float)) else None)
+                best[key] = (mtime, float(pct), int(reset) if isinstance(reset, (int, float)) else None,
+                             source)
     return best
 
 
@@ -495,9 +500,9 @@ def limits(cache_dir: Path | None = None, now: float | None = None, history: boo
         b = best.get(key)
         entry = {"used_pct": None, "resets_at": None, "sampled_at": None,
                  "burn_pct_per_h": None, "projected_pct": None, "hits_100_before_reset": None,
-                 "reason": None}
+                 "reason": None, "source": None}
         if b is None:
-            entry["reason"] = "no statusLine rate_limits found"
+            entry["reason"] = "no statusLine or mod rate_limits found"
         elif now - b[0] > LIMIT_STALE_S:
             entry["reason"] = f"newest sample is {int((now - b[0]) // 60)} min old"
             entry["sampled_at"] = b[0]
@@ -505,8 +510,8 @@ def limits(cache_dir: Path | None = None, now: float | None = None, history: boo
             entry["reason"] = "the limit window has reset since the newest sample"
             entry["sampled_at"] = b[0]
         else:
-            mtime, pct, reset = b
-            entry.update(used_pct=pct, resets_at=reset, sampled_at=mtime)
+            mtime, pct, reset, source = b
+            entry.update(used_pct=pct, resets_at=reset, sampled_at=mtime, source=source)
             with _SAMPLES_LOCK:
                 if not any(s[1] == key and s[0] == mtime for s in _SAMPLES):
                     _SAMPLES.append((mtime, key, pct, reset))
