@@ -501,12 +501,12 @@ def test_pending_titles_argv(monkeypatch):
     monkeypatch.setattr(subprocess, "run", tmux)
     monkeypatch.setenv("CHELA_TMUX_SESSION", "chela")
     assert suggest_names.pending_titles() == {"@1": "T"}
-    assert tmux.calls == [["tmux", "list-windows", "-t", "chela", "-F",
+    assert tmux.calls == [["tmux", "list-windows", "-t", "=chela", "-F",
                            "#{window_id}\t#{@chela_title_pending}"]]
     suggest_names._set_pending("@2", "Next")
     suggest_names._set_pending("@1", None)
-    assert tmux.calls[1:] == [["tmux", "set-window-option", "-t", "chela:@2", "@chela_title_pending", "Next"],
-                              ["tmux", "set-window-option", "-u", "-t", "chela:@1", "@chela_title_pending"]]
+    assert tmux.calls[1:] == [["tmux", "set-window-option", "-t", "=chela:@2", "@chela_title_pending", "Next"],
+                              ["tmux", "set-window-option", "-u", "-t", "=chela:@1", "@chela_title_pending"]]
     assert tmux.kwargs == [{"capture_output": True, "text": True, "timeout": 5}] * 3
 
 

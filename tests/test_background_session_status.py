@@ -340,6 +340,7 @@ def test_without_the_move_the_window_keeps_its_own_session(moved_window, monkeyp
 def test_the_cli_status_lists_the_moved_session_name(monkeypatch, capsys):
     from chela import main
     monkeypatch.setattr(main.discovery, "get_all_windows", lambda: {"tradeplan": "@80"})
+    monkeypatch.setattr(main.discovery, "session_exists", lambda *a, **k: True)
     monkeypatch.setattr(main.discovery, "get_window_cwd", lambda name: "/w")
     monkeypatch.setattr(agent_manager, "session_status_map", lambda force=False: _moved_smap())
     monkeypatch.setattr(agent_manager, "claude_pid", lambda wid: PANE_CLAUDE)
@@ -352,6 +353,7 @@ def test_the_cli_status_lists_the_moved_session_name(monkeypatch, capsys):
 def test_the_cli_status_names_an_unmoved_session_without_the_moved_note(monkeypatch, capsys):
     from chela import main
     monkeypatch.setattr(main.discovery, "get_all_windows", lambda: {"tradeplan": "@80"})
+    monkeypatch.setattr(main.discovery, "session_exists", lambda *a, **k: True)
     monkeypatch.setattr(main.discovery, "get_window_cwd", lambda name: "/w")
     monkeypatch.setattr(agent_manager, "session_status_map", lambda force=False: _smap(
         by_pid={PANE_CLAUDE: "idle"}, names={PANE_CLAUDE: "tradeplan-main"}))
@@ -365,6 +367,7 @@ def test_the_cli_status_names_an_unmoved_session_without_the_moved_note(monkeypa
 def test_the_cli_status_without_sessions_never_queries_the_feed(monkeypatch, capsys):
     from chela import main
     monkeypatch.setattr(main.discovery, "get_all_windows", lambda: {"tradeplan": "@80"})
+    monkeypatch.setattr(main.discovery, "session_exists", lambda *a, **k: True)
     monkeypatch.setattr(main.discovery, "get_window_cwd", lambda name: "/w")
 
     def _boom(force=False):
@@ -450,6 +453,7 @@ def _drive_cli(monkeypatch, argv, smap):
     import sys
     from chela import main
     monkeypatch.setattr(main.discovery, "get_all_windows", lambda: {"tradeplan": "@80"})
+    monkeypatch.setattr(main.discovery, "session_exists", lambda *a, **k: True)
     monkeypatch.setattr(main.discovery, "get_window_cwd", lambda name: "/w")
     monkeypatch.setattr(agent_manager, "session_status_map", lambda force=False: smap)
     monkeypatch.setattr(agent_manager, "claude_pid", lambda wid: PANE_CLAUDE)

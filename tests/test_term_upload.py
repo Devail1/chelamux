@@ -88,7 +88,7 @@ def test_owner_upload_saves_the_file_and_types_exactly_the_mention_without_enter
     j = r.get_json()
     assert j["ok"] is True and j["name"] == "notes.txt" and j["path"] == "uploads/notes.txt"
     assert (ws["cwd"] / "uploads" / "notes.txt").read_bytes() == b"hello world"
-    assert ws["calls"] == [["tmux", "send-keys", "-t", f"{app_mod.TMUX_SESSION}:@1",
+    assert ws["calls"] == [["tmux", "send-keys", "-t", f"={app_mod.TMUX_SESSION}:@1",
                             "-l", "@uploads/notes.txt "]]
     flat = [a for c in ws["calls"] for a in c]
     assert "Enter" not in flat and "C-m" not in flat

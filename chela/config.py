@@ -573,26 +573,56 @@ def set_dispatch(key: str, raw: str) -> str | None:
 TMUX_SESSION = os.environ.get("CHELA_TMUX_SESSION", "chela")
 
 
-def current_session() -> str:
-    """The tmux session chela operates on, resolved LAZILY at call time.
+# Where :func:`session_source` got the session from — one label per precedence step, so a
+# service's log line and ``chela doctor`` both say WHICH rule picked it.
+SOURCE_ENV = "CHELA_TMUX_SESSION"
+SOURCE_PANE = "$TMUX_PANE"
+SOURCE_SERVICE = "service default ($TMUX_PANE ignored)"
+SOURCE_DEFAULT = "default"
+DEFAULT_SESSION = "chela"
+
+# CMX-470: set by a long-running service (daemon, dashboard, telegram) at startup, via
+# :func:`mark_service`. A process-local flag, never an env var: an env var would leak into
+# whatever the service spawns, and an agent pane must keep its own auto-derive.
+_SERVICE: str | None = None
+
+
+def mark_service(name: str) -> None:
+    """Declare this process a chela SERVICE named ``name``: from now on
+    :func:`current_session` ignores ``$TMUX_PANE`` (see :func:`session_source`)."""
+    global _SERVICE
+    _SERVICE = name
+
+
+def service_name() -> str | None:
+    """The service this process declared itself as, or ``None`` for a CLI / agent."""
+    return _SERVICE
+
+
+def session_source() -> tuple[str, str]:
+    """``(session, source)`` — the tmux session chela operates on, and which rule chose it.
 
     Precedence:
       1. explicit ``$CHELA_TMUX_SESSION`` — an override always wins;
-      2. else the caller's OWN pane's session, via ``$TMUX_PANE`` (tmux sets it
-         in every pane) — so an orchestrator agent living in whatever session the
-         fleet actually uses (e.g. ``myteam``) gets zero-config discovery, mirroring
-         how ``orchestrator.self_wid()`` derives the window from the same pane;
-      3. else ``"chela"``.
+      2. a SERVICE (:func:`mark_service`) never derives: it drives ``"chela"``. A
+         ``$TMUX_PANE`` in a service's environment only says which shell started it
+         (pm2 started from inside some tmux session), not which fleet it serves (CMX-470);
+      3. else the caller's OWN pane's session, via ``$TMUX_PANE`` (tmux sets it in every
+         pane) — so an orchestrator agent living in whatever session the fleet actually
+         uses (e.g. ``myteam``) gets zero-config discovery, mirroring how
+         ``orchestrator.self_wid()`` derives the window from the same pane;
+      4. else ``"chela"``.
 
-    Resolved per-call (never at import) so it can't cache a stale value, and so a
-    process with no tmux pane still imports cleanly. Grouped sessions share one
-    window list, so deriving a mirror (``webterm_myteam__*``) lists the same real
-    windows as its parent.
+    Resolved per-call (never at import) so it can't cache a stale value, and so a process
+    with no tmux pane still imports cleanly. Grouped sessions share one window list, so
+    deriving a mirror (``webterm_myteam__*``) lists the same real windows as its parent.
     """
     env = os.environ.get("CHELA_TMUX_SESSION")
     if env:
-        return env
+        return env, SOURCE_ENV
     pane = os.environ.get("TMUX_PANE")
+    if pane and _SERVICE is not None:
+        return DEFAULT_SESSION, SOURCE_SERVICE
     if pane:
         try:
             r = subprocess.run(
@@ -600,10 +630,38 @@ def current_session() -> str:
                 capture_output=True, text=True, timeout=5,
             )
             if r.returncode == 0 and r.stdout.strip():
-                return r.stdout.strip()
+                return r.stdout.strip(), SOURCE_PANE
         except (subprocess.TimeoutExpired, FileNotFoundError):
             pass
-    return "chela"
+    return DEFAULT_SESSION, SOURCE_DEFAULT
+
+
+def current_session() -> str:
+    """The tmux session chela operates on — :func:`session_source` without the why."""
+    return session_source()[0]
+
+
+def session_target(session: str | None = None) -> str:
+    """The EXACT-match tmux target for a session: ``=chela``.
+
+    tmux resolves a bare ``-t chela`` by PREFIX (then by fnmatch pattern): with no
+    ``chela`` session but a ``chela-services`` one, ``-t chela`` silently targets
+    ``chela-services``. The ``=`` prefix accepts only an exact name (CMX-470). Every tmux
+    target chela builds from a session name goes through here or :func:`window_target`;
+    ``tests/test_tmux_targets.py`` fails on any call site that doesn't.
+    """
+    name = current_session() if session is None else session
+    return name if name.startswith("=") else f"={name}"
+
+
+def window_target(window: str, session: str | None = None) -> str:
+    """The exact-session tmux target for a window of the session: ``=chela:@3``.
+
+    ``window`` is a window id (``@3``), a window name, or ``""`` for the session's next
+    free index (``new-window -t =chela:``).
+    """
+    return f"{session_target(session)}:{window}"
+
 
 # Window names to hide from discovery everywhere (dashboard, status, the ttyd
 # supervisor). For placeholder / keep-alive windows that aren't agents — e.g. a

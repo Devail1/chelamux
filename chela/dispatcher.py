@@ -17,6 +17,8 @@ from chela import basesync, concurrency, critic, envutil, epoch, event_log, flee
 from chela.config import (
     CHELA_DIR,
     TMUX_SESSION,
+    session_target,
+    window_target,
     dispatch_tick_interval,
     human_size,
     judge_max_concurrent,
@@ -422,7 +424,7 @@ def _inherited_env_names() -> set[str]:
     global and session tables (what tmux actually hands a new window). Values are never read
     out of the ``show-environment`` lines; a ``-NAME`` line is a removal marker, not a var."""
     names = set(os.environ)
-    for scope in (["-g"], ["-t", TMUX_SESSION]):
+    for scope in (["-g"], ["-t", session_target(TMUX_SESSION)]):
         try:
             out = subprocess.run(["tmux", "show-environment", *scope],
                                  capture_output=True, text=True, timeout=10)
@@ -1729,7 +1731,7 @@ def _capture_pane(window_name: str, *, ansi: bool = False) -> str:
     a plain capture strips the one attribute (SGR 2, faint) that tells Claude Code's ghost
     suggestion apart from a typed draft (see :func:`_drop_ghost_suggestion`).
     """
-    cmd = ["tmux", "capture-pane", "-p", "-t", f"{TMUX_SESSION}:{window_name}"]
+    cmd = ["tmux", "capture-pane", "-p", "-t", window_target(window_name, TMUX_SESSION)]
     if ansi:
         cmd.insert(2, "-e")
     out = subprocess.run(cmd, capture_output=True, text=True)
@@ -1975,7 +1977,7 @@ def _dismiss_input_block(window_id: str) -> None:
     """
     try:
         subprocess.run(
-            ["tmux", "send-keys", "-t", f"{TMUX_SESSION}:{window_id}", "Escape"],
+            ["tmux", "send-keys", "-t", window_target(window_id, TMUX_SESSION), "Escape"],
             capture_output=True, text=True, timeout=5,
         )
     except (OSError, subprocess.SubprocessError) as e:
@@ -3069,7 +3071,7 @@ def _read_pr_url(window_name: str | None, repo_dir: str | None = None) -> str | 
 
 def _kill_window(window_name: str) -> None:
     subprocess.run(
-        ["tmux", "kill-window", "-t", f"{TMUX_SESSION}:{window_name}"],
+        ["tmux", "kill-window", "-t", window_target(window_name, TMUX_SESSION)],
         capture_output=True,
     )
 
@@ -3095,7 +3097,7 @@ def _kill_windows_named(window_name: str) -> None:
     window" is ignored (nothing to clean up).
     """
     out = subprocess.run(
-        ["tmux", "list-windows", "-t", TMUX_SESSION, "-F", "#{window_id} #{window_name}"],
+        ["tmux", "list-windows", "-t", session_target(TMUX_SESSION), "-F", "#{window_id} #{window_name}"],
         capture_output=True, text=True,
     )
     if out.returncode != 0 or not isinstance(out.stdout, str):
@@ -3104,7 +3106,7 @@ def _kill_windows_named(window_name: str) -> None:
         wid, _, name = line.partition(" ")
         if name == window_name and wid:
             subprocess.run(
-                ["tmux", "kill-window", "-t", f"{TMUX_SESSION}:{wid}"],
+                ["tmux", "kill-window", "-t", window_target(wid, TMUX_SESSION)],
                 capture_output=True,
             )
 
@@ -3156,7 +3158,7 @@ def _new_window(window_name: str, cwd: str) -> str:
     # to tmux when a window shares that name, making it target that window's
     # index and fail with "index N in use".
     out = subprocess.run(
-        ["tmux", "new-window", "-t", f"{TMUX_SESSION}:", "-n", window_name,
+        ["tmux", "new-window", "-t", window_target("", TMUX_SESSION), "-n", window_name,
          "-c", cwd, "-P", "-F", "#{window_id}"],
         check=True, capture_output=True, text=True, env=envutil.child_env(),
     )
@@ -5414,7 +5416,7 @@ def _live_window_id(window_name: str | None) -> str | None:
     if not window_name:
         return None
     out = subprocess.run(
-        ["tmux", "list-windows", "-t", TMUX_SESSION, "-F", "#{window_id} #{window_name}"],
+        ["tmux", "list-windows", "-t", session_target(TMUX_SESSION), "-F", "#{window_id} #{window_name}"],
         capture_output=True, text=True,
     )
     if out.returncode != 0 or not isinstance(out.stdout, str):
@@ -6024,7 +6026,7 @@ def _prune_done_rows(
 
 def _tmux_windows() -> set[str]:
     out = subprocess.run(
-        ["tmux", "list-windows", "-t", TMUX_SESSION, "-F", "#W"],
+        ["tmux", "list-windows", "-t", session_target(TMUX_SESSION), "-F", "#W"],
         capture_output=True, text=True,
     )
     if out.returncode != 0:
@@ -6039,7 +6041,7 @@ def _tmux_window_ids() -> set[str]:
     it carries no epoch to verify against.
     """
     out = subprocess.run(
-        ["tmux", "list-windows", "-t", TMUX_SESSION, "-F", "#{window_id}"],
+        ["tmux", "list-windows", "-t", session_target(TMUX_SESSION), "-F", "#{window_id}"],
         capture_output=True, text=True,
     )
     if out.returncode != 0:
@@ -8437,7 +8439,7 @@ def _launch_agent(
     # so nothing launched in this pane (the agent itself, a repro, `chela` subcommands)
     # ever sees them.
     subprocess.run(
-        ["tmux", "send-keys", "-t", f"{TMUX_SESSION}:{target_id}",
+        ["tmux", "send-keys", "-t", window_target(target_id, TMUX_SESSION),
          _strip_agent_env_cmd(), "Enter"],
         check=True, capture_output=True,
     )
@@ -8445,7 +8447,7 @@ def _launch_agent(
     # (chela/mergegate.py) reads it to deny a nested `claude` launch; a human's own session
     # and the orchestrator never carry it.
     subprocess.run(
-        ["tmux", "send-keys", "-t", f"{TMUX_SESSION}:{target_id}",
+        ["tmux", "send-keys", "-t", window_target(target_id, TMUX_SESSION),
          f"export {mergegate.RUN_ENV}={shlex.quote(task_id)} "
          f"{mergegate.RUN_ROLE_ENV}={shlex.quote(role)}", "Enter"],
         check=True, capture_output=True,
@@ -8454,12 +8456,12 @@ def _launch_agent(
     # for peek/read/drive), then launch.
     if re.fullmatch(r"@\d+", target_id):
         subprocess.run(
-            ["tmux", "send-keys", "-t", f"{TMUX_SESSION}:{target_id}",
+            ["tmux", "send-keys", "-t", window_target(target_id, TMUX_SESSION),
              f"export CHELA_WID={target_id}", "Enter"],
             check=True, capture_output=True,
         )
     subprocess.run(
-        ["tmux", "send-keys", "-t", f"{TMUX_SESSION}:{target_id}", agent_cmd, "Enter"],
+        ["tmux", "send-keys", "-t", window_target(target_id, TMUX_SESSION), agent_cmd, "Enter"],
         check=True, capture_output=True,
     )
 

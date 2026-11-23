@@ -280,7 +280,7 @@ def close_window(wid: str) -> str | None:
     another tmux session) — the same kill ``chela close @N`` issues. ``None`` on success,
     else the error."""
     try:
-        proc = subprocess.run(["tmux", "kill-window", "-t", f"{config.current_session()}:{wid}"],
+        proc = subprocess.run(["tmux", "kill-window", "-t", config.window_target(wid)],
                               capture_output=True, text=True, timeout=10)
     except (FileNotFoundError, subprocess.TimeoutExpired) as e:
         return str(e)

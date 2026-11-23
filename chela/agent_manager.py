@@ -94,7 +94,7 @@ def _exact_pane_pid(window_id: str) -> str | None:
     for a bare name its exact name (tmux would also take a prefix).
     """
     result = subprocess.run(
-        ["tmux", "display-message", "-t", f"{config.current_session()}:{window_id}", "-p",
+        ["tmux", "display-message", "-t", config.window_target(window_id), "-p",
          "#{window_id}\t#{window_name}\t#{pane_pid}"],
         capture_output=True, text=True, timeout=5,
     )
@@ -653,7 +653,7 @@ def pane_command(window_id: str) -> str:
         return pane.command if pane is not None else ""
     try:
         out = subprocess.run(
-            ["tmux", "display-message", "-p", "-t", f"{config.current_session()}:{window_id}",
+            ["tmux", "display-message", "-p", "-t", config.window_target(window_id),
              "#{pane_current_command}"],
             capture_output=True, text=True, timeout=5,
         )
@@ -778,7 +778,7 @@ def is_manual_name(window_id: str) -> bool:
         return bool(pane and pane.manual_name)
     try:
         out = subprocess.run(
-            ["tmux", "display-message", "-p", "-t", f"{config.current_session()}:{window_id}",
+            ["tmux", "display-message", "-p", "-t", config.window_target(window_id),
              f"#{{{MANUAL_NAME_OPTION}}}"],
             capture_output=True, text=True, timeout=5,
         )
@@ -858,7 +858,7 @@ def start_agent(agent_name: str, cmd: str | None = None) -> dict:
 
     # The window KEEPS its name (CMX-62: a name changes only to resolve a duplicate);
     # just pin it so claude's shell-outs can't drift it to `git`/`node`.
-    lock_window_name(f"{config.current_session()}:{window_id}")
+    lock_window_name(config.window_target(window_id))
 
     log.info("Started agent %s (%s) from %s", agent_name, window_id, start_dir)
     return {"ok": True, "agent": agent_name, "detail": "started"}
@@ -901,7 +901,7 @@ def reconcile_window_names() -> list[str]:
     actions: list[str] = []
     try:
         out = subprocess.run(
-            ["tmux", "list-windows", "-t", config.current_session(), "-F",
+            ["tmux", "list-windows", "-t", config.session_target(), "-F",
              "#{window_id}\t#{window_name}\t#{pane_current_command}\t"
              "#{window_index}\t#{automatic-rename}\t#{allow-rename}\t"
              f"#{{{MANUAL_NAME_OPTION}}}"],
@@ -917,7 +917,7 @@ def reconcile_window_names() -> list[str]:
     for wid, name, cmd, _idx, auto, allow, _manual in rows:
         # "0" is tmux's off; anything else (on/unset) still lets tmux rename it.
         if "claude" in cmd and name not in NEVER_MANAGE and (auto != "0" or allow != "0"):
-            lock_window_name(f"{session}:{wid}")
+            lock_window_name(config.window_target(wid, session))
 
     def _index(row) -> int:
         try:
@@ -947,7 +947,7 @@ def reconcile_window_names() -> list[str]:
                 continue
             new = unique_name(name, taken)
             try:
-                subprocess.run(["tmux", "rename-window", "-t", f"{session}:{wid}", new],
+                subprocess.run(["tmux", "rename-window", "-t", config.window_target(wid, session), new],
                                capture_output=True, text=True, timeout=5)
             except (FileNotFoundError, subprocess.TimeoutExpired) as e:
                 log.warning("reconcile_window_names: rename %s failed: %s", wid, e)
@@ -1005,7 +1005,7 @@ def follow_folder_names(pending: dict[str, str]) -> list[str]:
     session = config.current_session()
     try:
         out = subprocess.run(
-            ["tmux", "list-windows", "-t", session, "-F",
+            ["tmux", "list-windows", "-t", config.session_target(session), "-F",
              "#{window_id}\t#{window_name}\t#{pane_start_path}\t"
              f"#{{{NAME_CWD_OPTION}}}\t#{{{MANUAL_NAME_OPTION}}}"],
             capture_output=True, text=True, timeout=5,
@@ -1047,7 +1047,7 @@ def follow_folder_names(pending: dict[str, str]) -> list[str]:
             continue
         pending.pop(wid)
         new = window_name_for_cwd(folder, taken - {name})
-        target = f"{session}:{wid}"
+        target = config.window_target(wid, session)
         try:
             subprocess.run(["tmux", "rename-window", "-t", target, new],
                            capture_output=True, text=True, timeout=5)

@@ -269,7 +269,7 @@ def dialog_showing(plain_pane: str) -> str | None:
 
 
 def _target(wid: str) -> str:
-    return f"{config.current_session()}:{wid}"
+    return config.window_target(wid)
 
 
 def _set_pending(wid: str, title: str | None) -> bool:
@@ -341,7 +341,7 @@ def pending_titles() -> dict[str, str]:
     can't say (a row then simply reads not pending)."""
     try:
         out = subprocess.run(
-            ["tmux", "list-windows", "-t", config.current_session(), "-F",
+            ["tmux", "list-windows", "-t", config.session_target(), "-F",
              f"#{{window_id}}\t#{{{PENDING_OPTION}}}"],
             capture_output=True, text=True, timeout=5,
         )

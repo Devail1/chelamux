@@ -186,7 +186,7 @@ def tmux(proc, monkeypatch):
 
 def test_per_window_claude_pid_names_the_root(tmux):
     assert agent_manager.claude_pid("@16") == 100
-    assert tmux.calls == [(["tmux", "display-message", "-t", "s:@16", "-p",
+    assert tmux.calls == [(["tmux", "display-message", "-t", "=s:@16", "-p",
                             "#{window_id}\t#{window_name}\t#{pane_pid}"],
                            {"capture_output": True, "text": True, "timeout": 5})]
     assert agent_manager.claude_pid("@20") == 201           # shell + child: unchanged

@@ -72,7 +72,7 @@ def test_a_missing_window_id_resolves_to_no_pid_not_the_current_window(tmux):
 def test_the_window_that_does_exist_still_resolves(tmux):
     assert agent_manager.claude_pid("@29") == OTHER_CLAUDE
     assert agent_manager.is_claude_running("@29") is True
-    assert tmux.calls[0] == ["tmux", "display-message", "-t", "s:@29", "-p",
+    assert tmux.calls[0] == ["tmux", "display-message", "-t", "=s:@29", "-p",
                              "#{window_id}\t#{window_name}\t#{pane_pid}"]
 
 
