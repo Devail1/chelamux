@@ -241,7 +241,10 @@ its cid for its mount, so a repaint never reconnects. The teardown blanks a fram
 crosses the iframe boundary is plan §3's table, one test per row in
 `features/paneframe/tests/boundary.test.tsx`. The 4 s tick's timer is the frame's; the
 reconcile it runs (drop and absorb panes) is `features/wall`'s `termTick`, handed in through
-`configurePaneFrames()` with the grid it rebuilds.
+`configurePaneFrames()` with the grid it rebuilds. The 30 s refresh reconciles the same way: only
+a mode switch rebuilds the wall, since a rebuild reloads every iframe (CMX-493). A pane's own
+page never takes the keyboard by itself while you type in another pane or a dashboard field
+(`static/term-focus.js`, injected into ttyd's page; `tests/browser/wall_focus_kept.test.mjs`).
 
 The Wall's shared state is `shared/store/wall.ts`: `termMode`, `pinnedPanes`, `minimizedPanes`
 and `wallLayout` (`{preset, locked, auto, focus}`; auto-arrange and Focus exclude each other in
