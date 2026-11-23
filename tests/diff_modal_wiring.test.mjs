@@ -17,7 +17,7 @@
 import { beforeAll, test } from 'vitest';
 import assert from 'node:assert/strict';
 import { JSDOM } from 'jsdom';   // needs `pnpm install` — tests/test_js_suites.py enforces it
-import { activateDom, flush, mountIslands } from './js_helpers/dashboard_dom.mjs';
+import { activateDom, flush, mountIslands, waitFor } from './js_helpers/dashboard_dom.mjs';
 
 // The modal's shell slot: mountIslands draws it from the shell's own table (features/shell).
 const MODAL_DIFF_HTML = '<div id="diff-modal-island"></div>';
@@ -40,14 +40,17 @@ const AGENTS = [{ name: 'w1', window_id: '@1', online: true }];
 // call site would make both rows carry the same chip class/label, which a
 // single-file fixture can never catch (its one row's real status happens to
 // be 'modified' too).
-const DIFF_STATE = {
+// The paths carry the session's wid (CMX-495), so the rows say WHOSE diff the modal shows.
+const diffPath = wid => `/api/agents/${encodeURIComponent(wid)}/diff`;
+const diffFiles = wid => [`${wid}/a.py`, `${wid}/b.py`];
+const diffState = wid => ({
     is_git: true, has_head: true,
     files: [
-        { path: 'a.py', status: 'modified', additions: 3, deletions: 1 },
-        { path: 'b.py', status: 'added', additions: 5, deletions: 0 },
+        { path: diffFiles(wid)[0], status: 'modified', additions: 3, deletions: 1 },
+        { path: diffFiles(wid)[1], status: 'added', additions: 5, deletions: 0 },
     ],
     additions: 8, deletions: 1,
-};
+});
 
 const diffReads = [];
 function fakeFetch(url) {
@@ -57,7 +60,10 @@ function fakeFetch(url) {
     else if (path.endsWith('/api/agents/context')) body = [];
     else if (path.endsWith('/api/rooms')) body = { rooms: {}, pending: [] };
     else if (path.startsWith('/api/term/ready')) body = { ready: true };
-    else if (path.endsWith('/diff')) { diffReads.push(path); body = DIFF_STATE; }
+    else if (path.endsWith('/diff')) {
+        diffReads.push(path);
+        body = diffState(decodeURIComponent(path.split('/').at(-2)));
+    }
     return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve(body) });
 }
 
@@ -71,7 +77,7 @@ function fakeGridStack() {
     return { init: () => grid };
 }
 
-let terminals, agentsStore, viewStore, closeDiffModal;
+let terminals, agentsStore, viewStore, closeDiffModal, openDiffModal;
 
 beforeAll(async () => {
     const dom = new JSDOM(`<!doctype html><html><body>${PANEL}</body></html>`,
@@ -88,7 +94,7 @@ beforeAll(async () => {
     globalThis.setInterval = () => 0;
     // Browser-faithful order: the islands, then the legacy graph (nav <-> main is a cycle).
     await mountIslands(dom.window);
-    ({ closeDiffModal } = await import('../chela/dashboard/frontend/src/features/diffmodal/index.ts'));
+    ({ closeDiffModal, openDiffModal } = await import('../chela/dashboard/frontend/src/features/diffmodal/index.ts'));
     (await import('../chela/dashboard/frontend/src/boot.ts')).start();
     ({ agents: agentsStore } = await import('../chela/dashboard/frontend/src/shared/store/agents.ts'));
     ({ view: viewStore } = await import('../chela/dashboard/frontend/src/shared/store/view.ts'));
@@ -106,6 +112,22 @@ function clickFilesChip(el) {
     el.click();
 }
 
+const rowFiles = () => [...document.querySelectorAll('.modal-diff .diff-file-row')].map(r => r.dataset.diffFile);
+
+// The modal opened on `wid`: it read that session's diff and drew that session's files.
+async function assertModalShows(wid, label) {
+    await waitFor(() => diffReads.length);
+    assert.deepEqual(diffReads, [diffPath(wid)], `${label}: the modal did not read THIS session's diff (${wid})`);
+    await waitFor(() => rowFiles().length);
+    assert.ok(dialog(), `${label}: the click never showed the diff modal`);
+    assert.deepEqual(rowFiles(), diffFiles(wid), `${label}: the diff modal did not render ${wid}'s fetched file list`);
+}
+
+async function closeModal(label) {
+    closeDiffModal();
+    await waitFor(() => !dialog());
+    assert.equal(dialog(), null, `${label}: closeDiffModal() did not close the modal`);
+}
 
 test('a real click on the wall tile\'s "Files" chip opens the diff modal island on THAT session\'s diff', async () => {
     assert.equal(dialog(), null, 'the diff modal starts open: the assertions below could not tell a real open from a no-op');
@@ -122,18 +144,35 @@ test('a real click on the wall tile\'s "Files" chip opens the diff modal island 
 
     // 🔴 GUARD (WIRING #2): the click reaches the island's openDiffModal.
     clickFilesChip(filesBtn);
-    await flush();
     // 🔴 GUARD (WIRING #3): the island is mounted from the real slot and shows the dialog.
+    await waitFor(dialog);
     assert.ok(dialog(), 'clicking the Files chip never showed the diff modal');
-    assert.deepEqual(diffReads, ['/api/agents/%401/diff'], 'the modal did not read THIS session\'s diff');
-    await flush();
-    assert.deepEqual([...document.querySelectorAll('.modal-diff .diff-file-row')].map(r => r.dataset.diffFile),
-        ['a.py', 'b.py'], 'the diff modal did not render the fetched file list');
+    await assertModalShows('@1', 'the wall tile');
+    // Literals, not the fixture's own helpers: the wid reached the read and the rows.
+    assert.deepEqual(diffReads, ['/api/agents/%401/diff']);
+    assert.deepEqual(rowFiles(), ['@1/a.py', '@1/b.py']);
 
     // A real Escape on the page closes it: the island's dismissal works on the real page too.
     document.activeElement.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }));
-    await flush();
+    await waitFor(() => !dialog());
     assert.equal(dialog(), null, 'Escape did not close the diff modal');
+});
+
+// CMX-495: the waits above must not turn "a modal opened" into a pass. Both halves of the
+// check reject another session's diff: the read's URL, and the rows on screen.
+test('negative control: a modal showing ANOTHER session\'s diff fails the check', async () => {
+    diffReads.length = 0;
+    openDiffModal('@9');
+    try {
+        await waitFor(() => rowFiles().length);
+        assert.deepEqual(rowFiles(), ['@9/a.py', '@9/b.py'], 'setup: the modal did not open on @9');
+        await assert.rejects(assertModalShows('@1', 'control'), /did not read THIS session's diff/);
+        diffReads.splice(0, diffReads.length, diffPath('@1'));   // the right read, the wrong rows
+        await assert.rejects(assertModalShows('@1', 'control'), /did not render @1's fetched file list/);
+    } finally {
+        diffReads.length = 0;
+        await closeModal('control');
+    }
 });
 
 // The chip used to be an inline `onclick="chela.openDiffModal('<wid>')"`, so a quote or an
@@ -148,11 +187,8 @@ for (const evilWid of ["@2'x", '@3&amp;']) {
             assert.ok(btn, `no .gs-files chip rendered for ${evilWid}`);
             diffReads.length = 0;
             clickFilesChip(btn);
-            await flush();
-            assert.deepEqual(diffReads, [`/api/agents/${encodeURIComponent(evilWid)}/diff`],
-                'the modal did not read the clicked wid\'s diff, intact');
-            closeDiffModal();
-            await flush();
+            await assertModalShows(evilWid, 'the wid, intact');
+            await closeModal('the wid, intact');
         } finally {
             // restore the single-agent fixture every other test in this file depends on
             agentsStore.set(AGENTS);
@@ -293,7 +329,6 @@ for (const evilWid of ["@2'x", '@3&amp;']) {
 
 test('the Files chip is also emitted (and wired end to end) in single-pane / mobile mode, not just the wall tile — at both desktop and phone widths, and it tracks the live selection rather than any fixed position', async () => {
     const sel = { get value() { return terminals.activePane(); } };   // the open single pane
-    const originalFetch = globalThis.fetch;
     const originalMatchMedia = window.matchMedia;
     try {
         // THREE agents. '@2' (the initial selection) sits at index 1, so it
@@ -304,15 +339,6 @@ test('the Files chip is also emitted (and wired end to end) in single-pane / mob
         agentsStore.set([...AGENTS,
             { name: 'w2', window_id: '@2', online: true },
             { name: 'w3', window_id: '@3', online: true }]);
-
-        globalThis.fetch = url => {
-            const path = String(url);
-            if (path.endsWith('/api/agents/%402/diff') || path.endsWith('/api/agents/%403/diff')) {
-                diffReads.push(path);
-                return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve(DIFF_STATE) });
-            }
-            return fakeFetch(url);
-        };
 
         // Round 6 (judge): stubViewport now takes a WIDTH and actually
         // evaluates the query it's handed, instead of a boolean captured
@@ -462,21 +488,9 @@ test('the Files chip is also emitted (and wired end to end) in single-pane / mob
                 `${label}: the diff modal starts open — the click assertion below could not tell a real open from a no-op`);
             diffReads.length = 0;
             clickFilesChip(filesBtn);
-            await flush();
-            assert.deepEqual(diffReads, [`/api/agents/${encodeURIComponent(expectedWid)}/diff`],
-                `${label}: the single-pane Files chip opened the wrong session: it must open ${expectedWid} (the DISPLAYED/selected agent), not a positional default`);
-            assert.ok(dialog(),
-                `${label}: clicking the single-pane Files chip never showed the diff modal — the non-draggable path's chip is present but dead`);
-
-            await flush();   // let openDiffModal's /diff fetch + _render resolve
-            const rows = document.querySelectorAll('.modal-diff .diff-file-row');
-            assert.equal(rows.length, 2,
-                `${label}: the diff modal did not render ${expectedWid}'s fetched file list when opened from single-pane mode — either the wrong session's /diff was requested, or none was`);
-
-            closeDiffModal();
-            await flush();
-            assert.equal(dialog(), null,
-                `${label}: closeDiffModal() did not close the modal that was opened from single-pane mode`);
+            // The DISPLAYED/selected agent's diff, not a positional default's.
+            await assertModalShows(expectedWid, label);
+            await closeModal(label);
         }
 
         // Desktop width, selection = '@2'. Establishes single-pane mode via
@@ -576,7 +590,6 @@ test('the Files chip is also emitted (and wired end to end) in single-pane / mob
         assert.equal(document.getElementById('term-stage').classList.contains('term-single'), false,
             `production force-single path JUST ABOVE the breakpoint (width === ${MOBILE_BREAKPOINT + 1}): renderTerminals() force-flipped persisted 'wall' mode to single — the force-single branch's breakpoint has drifted above ${MOBILE_BREAKPOINT}, desyncing it from style.css's own \`@media (max-width: ${MOBILE_BREAKPOINT}px)\` block`);
     } finally {
-        globalThis.fetch = originalFetch;
         window.matchMedia = originalMatchMedia;
         // restore the single-agent, wall-mode fixture every other test in this file depends on
         agentsStore.set(AGENTS);
