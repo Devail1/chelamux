@@ -423,6 +423,127 @@ def test_the_doctor_fact_reads_this_chelas_files_end_to_end(tmp_path, monkeypatc
     assert found[-1].detail == "- 0f0f0f0f: mod\n    - bbbbbbbb: statusline"
 
 
+def _doctor_lines():
+    """``chela doctor``'s usage.sources output from the files on disk, every field of it."""
+    fact = next(f for f in runtime_truth.facts() if f.name == "usage.sources")
+    return [(f.level, f.title, f.detail) for f in fact.report(fact.declare(), fact.read_back())]
+
+
+def test_the_doctor_fact_end_to_end_when_every_answer_differs(tmp_path, monkeypatch):
+    """🔴 GUARD: the same fact in a world where EVERY answer is the opposite of the healthy
+    test's: an old copy recording another dir, someone else's status line, a stale session, a
+    session with both files. A gatherer half that is a constant, or is derived from another
+    half (the package's version read from the installed copy), matches one world, never both."""
+    chela_dir, claude = tmp_path / "cd", tmp_path / "claude"
+    monkeypatch.setattr(config, "CHELA_DIR", chela_dir)
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(claude))
+    monkeypatch.setattr(config, "cache_stale_seconds", lambda: 7200)
+    dest = claude / "skills" / "chela-measure"
+    measure_mod.install(dest, tmp_path / "elsewhere")
+    (dest / ".claude-plugin" / "plugin.json").write_text('{"name": "chela-measure", "version": "0.0.9"}')
+    _write(claude / "settings.json", {"statusLine": {"command": "/usr/bin/my-own-line"}})
+    cache = chela_dir / "context"
+    _write(cache / "mod" / "cccccccc-stale.json", MEASURE["file"], age=3 * 3600 + 5)
+    _write(cache / "mod" / f"{SID}.json", {}, age=60)
+    _write(cache / "by-session" / f"{SID}.json",
+           {"rate_limits": {"seven_day": {"used_percentage": 9, "resets_at": 1}}}, age=5)
+    assert _doctor_lines() == [
+        (OK, f"chela-measure mod 0.0.9 installed at {dest}", ""),
+        (WARN, f"chela-measure writes to {tmp_path / 'elsewhere'}, not this CHELA_DIR {chela_dir}",
+         "A session without $CHELA_DIR feeds another chela. Re-run `chela install-mod`."),
+        (WARN, "chela-measure installed is 0.0.9, this chela ships 0.1.0",
+         "Re-run `chela install-mod`."),
+        (OK, "statusLine hook: not in user settings", ""),
+        (OK, "limits: 5h 23.5% (mod, 180 min ago) · 7d 9% (statusline, 0 min ago)", ""),
+        (OK, "1 session(s) fed: 0 by the mod, 1 by the statusLine",
+         "- 0f0f0f0f: statusline (both fresh)"),
+    ]
+
+
+def test_the_doctor_fact_end_to_end_with_nothing_there(tmp_path, monkeypatch):
+    """🔴 GUARD (acceptance): no mod, no statusLine, no files. Unknown with the reason, never 0%."""
+    monkeypatch.setattr(config, "CHELA_DIR", tmp_path / "cd")
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "claude"))
+    why = "no statusLine or mod rate_limits found"
+    assert _doctor_lines() == [
+        (OK, "chela-measure mod: not installed",
+         "`chela install-mod` feeds the 5h/7d limits, context and cost from "
+         "Claude Code's session.measure hook, with no statusLine."),
+        (OK, "statusLine hook: not in user settings", ""),
+        (OK, "limits: 5h unknown · 7d unknown", f"five_hour: {why}; seven_day: {why}"),
+        (OK, "no session has a fresh statusLine or mod snapshot", ""),
+    ]
+
+
+def test_the_doctor_fact_says_unrecorded_for_a_copy_with_no_chela_json(tmp_path, monkeypatch):
+    monkeypatch.setattr(config, "CHELA_DIR", tmp_path / "cd")
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "claude"))
+    dest = measure_mod.install(tmp_path / "claude" / "skills" / "chela-measure", tmp_path / "cd")
+    (dest / "chela.json").unlink()
+    assert [t for lvl, t, _ in _doctor_lines() if lvl == WARN] == [
+        f"chela-measure writes to (unrecorded), not this CHELA_DIR {tmp_path / 'cd'}"]
+
+
+def test_an_unreadable_usage_owner_is_a_warning_never_fatal(monkeypatch):
+    def boom():
+        raise OSError("denied")
+    monkeypatch.setattr(measure_mod, "read_state", boom)
+    fact = next(f for f in runtime_truth.facts() if f.name == "usage.sources")
+    found = runtime_truth.audit(fact)
+    assert [f.level for f in found] == [WARN]
+    assert found[0].title.startswith("CANNOT VERIFY usage.sources")
+
+
+def test_doctor_lists_at_most_twenty_sessions_and_counts_them_all(tmp_path):
+    sessions = {f"{i:08d}-x": {"mod": 1.0} for i in range(21)}
+    last = measure_mod.report(tmp_path, _state(tmp_path, sessions=sessions))[-1]
+    assert last.title == "21 session(s) fed: 21 by the mod, 0 by the statusLine"
+    assert last.detail.split("\n") == ["- 00000000: mod"] + [
+        f"    - {i:08d}: mod" for i in range(1, 20)]
+
+
+@pytest.mark.parametrize("age, fresh", [(600, True), (601, False)])
+def test_a_session_is_fresh_up_to_and_including_the_cutoff(ctx, age, fresh):
+    f = _mod(ctx)
+    os.utime(f, (1_000_000, 1_000_000))
+    got = measure_mod.session_sources(ctx, now=1_000_000 + age, stale_s=600)
+    assert got == ({SID: {"mod": float(age)}} if fresh else {})
+
+
+def test_the_config_dir_expands_a_tilde(monkeypatch):
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", "~/cfg")
+    assert measure_mod.claude_config_dir() == Path.home() / "cfg"
+
+
+@pytest.mark.parametrize("settings", ["[1]", '{"statusLine": {"command": 5}}', '{"statusLine": {}}'])
+def test_statusline_wired_survives_odd_settings(tmp_path, settings):
+    (tmp_path / "settings.json").write_text(settings)
+    assert measure_mod.statusline_wired(tmp_path / "settings.json") is False
+
+
+def test_install_ignores_a_cache_folder_and_a_crashed_runs_leftovers(tmp_path):
+    src = tmp_path / "src"
+    shutil.copytree(MOD, src)
+    (src / "hooks" / "__pycache__").mkdir()
+    (src / "hooks" / "__pycache__" / "x.pyc").write_text("x")
+    crashed = tmp_path / f".chela-measure.{os.getpid()}.tmp"
+    crashed.mkdir()
+    (crashed / "half.ts").write_text("half")
+    dest = measure_mod.install(tmp_path / "chela-measure", tmp_path / "cd", src=src)
+    assert not crashed.exists() and not (dest / "half.ts").exists()
+    assert not list(dest.rglob("__pycache__"))
+
+
+def test_the_cli_remove_refuses_a_foreign_folder(tmp_path, monkeypatch, capsys):
+    dest = tmp_path / "chela-measure"
+    dest.mkdir()
+    monkeypatch.setattr("sys.argv", ["chela", "install-mod", "--dir", str(dest), "--remove"])
+    with pytest.raises(SystemExit) as e:
+        main.main()
+    assert e.value.code == 1 and dest.exists()
+    assert "not removing it" in capsys.readouterr().err
+
+
 def test_newest_limits_names_the_producer_and_age_at_any_age(ctx):
     _write(ctx / "mod" / f"{SID}.json", MEASURE["file"], age=3 * 3600)
     _write(ctx / "by-session" / f"{SID}.json",
