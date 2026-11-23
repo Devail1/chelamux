@@ -566,12 +566,22 @@ def latest_context_usage(path: Path) -> dict | None:
       own ``compactMetadata`` when present.
 
     None when neither exists — a fresh session, or the new transcript ``/clear`` starts —
-    so no number is shown until the first turn. Every dict also carries ``model`` (the
+    so no number is shown until the first turn. When the scan budget ran out before either
+    was found, ``{"session_id", "scan_exhausted": True}`` instead: unknown, not "no turns".
+    Every other dict also carries ``model`` (the
     latest assistant turn's model id), ``cwd`` and ``session_id`` (the file stem).
     """
     rec = latest_record(path, lambda o: _is_usage_turn(o) or _is_compaction(o))
     if not rec:
-        return None
+        # The reverse scan stops after DEFAULT_MAX_SCAN_BYTES. A transcript longer than that
+        # with no match in its tail (large tool results since the last turn) is NOT a
+        # session with no turns: say "unknown", so a caller does not read it as "—" and
+        # let it beat a good statusLine reading.
+        try:
+            exhausted = path.stat().st_size > DEFAULT_MAX_SCAN_BYTES
+        except OSError:
+            exhausted = False
+        return {"session_id": path.stem, "scan_exhausted": True} if exhausted else None
     out: dict = {"session_id": path.stem, "cwd": rec.get("cwd"), "ts": rec.get("timestamp")}
     if _is_usage_turn(rec):
         msg = rec["message"]

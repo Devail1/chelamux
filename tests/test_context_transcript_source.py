@@ -190,6 +190,31 @@ def test_no_turns_beats_a_statusline_number(tmp_path, quiet):
         assert _live(p)["state"] == "no_turns"
 
 
+def _past_the_scan_budget(tmp_path: Path) -> Path:
+    """A real turn, then more than DEFAULT_MAX_SCAN_BYTES of non-turn records after it."""
+    filler = {"type": "user", "message": {"role": "user", "content": "x" * 60_000}}
+    n = transcripts.DEFAULT_MAX_SCAN_BYTES // 60_000 + 5
+    return _write(tmp_path, _turn(inp=90_000), *([filler] * n))
+
+
+def test_a_scan_that_runs_out_of_budget_is_unknown_not_no_turns(tmp_path, quiet):
+    """Code review: a turn further back than the scan budget is not "no turns" — reading it
+    so would let "—" beat a good statusLine reading."""
+    p = _past_the_scan_budget(tmp_path)
+    assert transcripts.latest_context_usage(p) == {"session_id": SID, "scan_exhausted": True}
+    sl = {"used_pct": 9, "source": "statusline", "state": "ok", "ts": "2026-11-22T10:00:00+00:00"}
+    with patch.object(context, "_cache_snapshot", lambda name, sid=None: sl):
+        assert _live(p) is sl
+    assert _live(p) is None                             # and alone: no reading, never "—"
+
+
+def test_a_short_transcript_with_no_turn_is_still_no_turns(tmp_path, monkeypatch):
+    p = _write(tmp_path, {"type": "user", "message": {"role": "user", "content": "hi"}})
+    assert transcripts.latest_context_usage(p) is None
+    p.unlink()                                           # stat fails: OSError → not exhausted
+    assert transcripts.latest_context_usage(p) is None
+
+
 def test_no_transcript_at_all_and_no_statusline_is_no_snapshot(quiet):
     assert _live(None) is None
 

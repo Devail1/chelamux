@@ -642,7 +642,10 @@ def _transcript_snapshot(agent_name: str, window_id: str | None = None) -> dict 
         path = transcripts._resolve_agent_transcript(agent_name, window_id)
         if path is None:
             return None
-        return transcript_reading(transcripts.latest_context_usage(path), agent_name, window_id)
+        u = transcripts.latest_context_usage(path)
+        if u and u.get("scan_exhausted"):
+            return None  # no reading in the scanned tail: unknown, so the statusLine stands
+        return transcript_reading(u, agent_name, window_id)
     except Exception:  # noqa: BLE001 — a context bar must never 500 the dashboard
         # Read on EVERY call now (not only when no statusLine cache exists), so a failing
         # window resolution must leave the statusLine's reading standing, not take it down.
