@@ -248,6 +248,16 @@ def test_install_refuses_a_missing_packaged_mod(tmp_path):
     assert not (tmp_path / "d").exists()
 
 
+def test_install_refuses_a_packaged_folder_with_no_manifest(tmp_path):
+    """A folder that exists but is not a plugin (a broken wheel) is never installed."""
+    src = tmp_path / "src"
+    (src / "hooks").mkdir(parents=True)
+    (src / "hooks" / "register.ts").write_text("x")
+    with pytest.raises(FileNotFoundError, match="the packaged mod is missing"):
+        measure_mod.install(tmp_path / "d", tmp_path, src=src)
+    assert not (tmp_path / "d").exists()
+
+
 @pytest.mark.parametrize("manifest", [None, "not json", '["a list"]', '{"name": "other"}'])
 def test_is_ours_reads_the_manifest_name_only(tmp_path, manifest):
     if manifest is not None:
@@ -398,6 +408,14 @@ def test_newest_limits_names_the_producer_and_age_at_any_age(ctx):
     assert 3 * 3600 - 5 < lim["five_hour"]["age_s"] < 3 * 3600 + 60
     assert (lim["seven_day"]["used_pct"], lim["seven_day"]["source"]) == (9, "statusline")
     assert measure_mod._limit_text(lim["five_hour"]) == "23.5% (mod, 180 min ago)"
+
+
+@pytest.mark.parametrize("bad", [[1, 2], "five_hour", 5, None])
+def test_a_file_whose_rate_limits_is_not_an_object_is_skipped(ctx, bad):
+    _write(ctx / "mod" / "aaaaaaaa-bad.json", {"rate_limits": bad}, age=0)
+    _write(ctx / "by-session" / f"{SID}.json", MEASURE["file"], age=60)
+    best = context.freshest_limits(ctx)
+    assert (best["five_hour"][1], best["five_hour"][3]) == (23.5, "statusline")
 
 
 def test_newest_limits_with_no_producer_is_unknown(ctx):
