@@ -392,6 +392,19 @@ def test_no_live_run_with_a_window_no_re_queue(reaped, sql):
     assert reaped.sent == [] and reaped.path.exists()
 
 
+def test_a_run_without_a_worktree_does_not_hide_the_one_that_matches(reaped):
+    with dispatcher._db() as conn:
+        conn.execute("UPDATE runs SET worktree_path=NULL")          # t9 comes first, no worktree
+        conn.execute(
+            "INSERT INTO runs (task_id, workflow_path, title, status, window_name, window_id, "
+            "worktree_path, branch_name, started_at, attempt, task_number) "
+            "VALUES ('t10', 'w', 'x', 'running', 'cmx-10', '@10', ?, 'b', "
+            "'2026-11-23T00:00:00+00:00', 1, 10)", (str(reaped.wt),))
+        conn.commit()
+    assert dispatcher.requeue_reaped_waiters() == ["t10"]
+    assert reaped.sent[0][0] == "@10"
+
+
 def test_a_record_for_another_directory_is_not_this_runs(reaped, tmp_path):
     reaped.path.unlink()
     _stopped(reaped.root, tmp_path / "CMX-99")
