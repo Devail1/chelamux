@@ -117,6 +117,7 @@ one. Turn the whole thing off with ``CHELA_INBOX_ENABLED=false``.
 from __future__ import annotations
 
 import fcntl
+import hashlib
 import json
 import logging
 import os
@@ -256,7 +257,9 @@ def _empty() -> dict:
             "denied_cursor": None, "denied_seen": {}, "denied_keys": {},
             # CMX-384: the runs whose agent got NO VERDICT from its classifier (an outage, not
             # a denial), by task id, until the agent moves on or is re-prompted to resume.
-            "classifier_out": {}}
+            "classifier_out": {},
+            # CMX-478: the permission prompts already told (`prompt_events`), by prompt_key.
+            "prompt_keys": {}}
 
 
 def _clear_address_alarm(store: dict) -> None:
@@ -2775,7 +2778,7 @@ def stale_reason(event: dict, runs: list[dict],
     # correct "never stale" answer, not an oversight.
     if kind not in ("run_review", "run_failed", "run_needs_human", "run_changes_requested",
                      "run_judge_clean", "run_judge_cannot_verify", "run_judge_blocked_race",
-                     "run_reopened", DENIED_KIND, *_CMX86_KINDS):
+                     "run_reopened", DENIED_KIND, PROMPT_KIND, *_CMX86_KINDS):
         return None
     payload = event.get("payload") or {}
     task_id = payload.get("task_id")
@@ -2827,6 +2830,8 @@ def stale_reason(event: dict, runs: list[dict],
                         f"{live_sha[:12]}) — the verdict no longer applies to the current head")
     elif kind == DENIED_KIND and status not in STUCK_RUN_STATES:
         return f"run is now {status!r} — the agent is no longer stopped on the denial"
+    elif kind == PROMPT_KIND and status not in STUCK_RUN_STATES:
+        return f"run is now {status!r} — the agent is no longer waiting on the prompt"
     elif kind == "run_failed" and status != "failed":
         return f"run is now {status!r}, not failed"
     elif kind == "run_needs_human":
@@ -3308,6 +3313,84 @@ RESUME_PROMPT = ("chela: the permission classifier is back. The no-verdict you g
                  "call unchanged.")
 
 
+# --- permission prompts of dispatched agents (CMX-478) ---------------------------------
+
+PROMPT_KIND = "run_permission_prompt"
+PROMPT_TYPE = hooks.event_type("PermissionRequest")    # "hook.permission_request"
+PROMPT_KEY_TTL_S = 10 * 60    # how long a prompt's key is remembered (prompt_key)
+# answered from the bound Telegram topic (chela.gateanswer) and, with no answer, Escaped by
+# the dispatcher's watchdog so the model falls back to its own default: not a human's prompt
+QUESTION_TOOL = "AskUserQuestion"
+
+
+def prompt_events(prompts: list[dict], runs: list[dict], store: dict, now: float,
+                  windows: dict[str, str] | None = None,
+                  now_epoch: str | None = None) -> list[dict]:
+    """``run_permission_prompt`` — a dispatched agent is blocked on a permission prompt.
+
+    Auto mode's classifier can hand a call to a human instead of deciding; the agent then
+    sits on the prompt until someone answers it in its pane. Nothing told anyone: on 11-22 one
+    sat 20 minutes before the 🧊 STUCK alarm. So each ``hook.permission_request`` from the
+    window of a ``claimed``/``running`` run is one notice, at once. The orchestrator's own
+    window and human sessions are skipped (as for denials), and so is an ``AskUserQuestion``
+    (:data:`QUESTION_TOOL`), which has its own Telegram path.
+
+    One notice per prompt: its :func:`prompt_key` is remembered in ``store["prompt_keys"]``
+    for :data:`PROMPT_KEY_TTL_S`, so a second copy of the same request is not a second notice.
+    """
+    orch = orchestrator_wid(store)
+    active: dict[str, dict] = {}
+    for run in runs:
+        if run.get("status") in STUCK_RUN_STATES and run.get("task_id"):
+            wid = run_wid(run, windows, now_epoch)
+            if wid:
+                active[wid] = run
+    keys: dict = {k: ts for k, ts in (store.get("prompt_keys") or {}).items()
+                  if now - ts < PROMPT_KEY_TTL_S}
+    out: list[dict] = []
+    for record in prompts:
+        wid = record.get("wid")
+        run = active.get(wid) if wid and wid != orch else None
+        if run is None or epoch.is_dangling(record.get("epoch"), now_epoch):
+            continue
+        payload = record.get("payload") or {}
+        if payload.get("tool_name") == QUESTION_TOOL:
+            continue
+        key = prompt_key(record)
+        if key in keys:
+            continue
+        keys[key] = now
+        task = run["task_id"]
+        tool, detail = notify.denied_detail(record)
+        out.append(_event(
+            PROMPT_KIND,
+            f"✋ {task} · {wid} is waiting on a permission prompt: {tool} {detail} — answer "
+            f"it in its pane. The agent is blocked until a human does.",
+            _run_payload(run, tool=tool, detail=detail, asked_at=record.get("ts"),
+                         session_id=payload.get("session_id") or None,
+                         tool_use_id=denial_key(payload), prompt_key=key),
+            wid=wid))
+    store["prompt_keys"] = keys
+    return out
+
+
+def prompt_key(record: dict) -> str:
+    """The dedupe key of one permission prompt.
+
+    Its ``tool_use_id`` when it carries one. Claude Code's ``PermissionRequest`` payload
+    usually does not (see :func:`chela.gateanswer.answer_permission_request`), so otherwise the
+    window, the session, the tool and its input: the same request inside
+    :data:`PROMPT_KEY_TTL_S` is the same prompt, whose notice has already gone out.
+    """
+    payload = record.get("payload") or {}
+    tuid = denial_key(payload)
+    if tuid:
+        return tuid
+    blob = json.dumps([record.get("wid"), payload.get("session_id"), payload.get("tool_name"),
+                       payload.get("tool_input")], sort_keys=True, default=str)
+    return "req:" + hashlib.sha256(blob.encode()).hexdigest()[:24]
+
+
 def read_denials(store: dict, now: float) -> tuple[list[dict], dict]:
     """New ``hook.permission_denied`` records since the store's cursor, and the next cursor.
 
@@ -3322,8 +3405,8 @@ def read_denials(store: dict, now: float) -> tuple[list[dict], dict]:
         return [], {"seq": tip["seq"], "boot": tip["boot_id"], "at": now}
     # CMX-384: a tool call that ran is the evidence the classifier answers again. Read only
     # while an outage is open: PostToolUse is most of the log's volume.
-    types = [notify.DENIED_TYPE, POST_TOOL_TYPE] if store.get("classifier_out") else \
-        [notify.DENIED_TYPE]
+    types = [notify.DENIED_TYPE, PROMPT_TYPE, POST_TOOL_TYPE] if store.get("classifier_out") \
+        else [notify.DENIED_TYPE, PROMPT_TYPE]
     batch = event_log.read(cursor.get("seq"), after_boot=cursor.get("boot"), types=types)
     events = batch["events"]
     if batch["gap"] is not None:
@@ -3632,7 +3715,11 @@ def tick(prev: dict[str, str], runs: list[dict] | None = None) -> dict[str, str]
         events += stuck_events(runs, store, probes, now, uptime, windows=windows,
                                now_epoch=now_epoch, daemon=daemon,
                                held=held is not None and not held.expired(now))
-        events += denied_events(denials, runs, store, now, windows=windows, now_epoch=now_epoch)
+        # CMX-478: the same cursor carries the permission prompts; each goes to its own scan
+        events += denied_events([d for d in denials if d.get("type") != PROMPT_TYPE],
+                                runs, store, now, windows=windows, now_epoch=now_epoch)
+        events += prompt_events([d for d in denials if d.get("type") == PROMPT_TYPE],
+                                runs, store, now, windows=windows, now_epoch=now_epoch)
         store["denied_cursor"] = denied_cursor
         resumes = classifier_resumes(store, statuses, runs, now, windows=windows,
                                      now_epoch=now_epoch)
