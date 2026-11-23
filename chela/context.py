@@ -455,9 +455,7 @@ def _cache_snapshot(agent_name: str, session_id: str | None = None) -> dict | No
     too, and the NEWER of the two fresh snapshots wins, whichever wrote it.
     """
     snap = _statusline_snapshot(agent_name, session_id)
-    if not session_id:
-        return _public(snap)
-    mod_file = _mod_cache_path(session_id)
+    mod_file = _mod_cache_path(session_id or "")      # None for a missing or unsafe id
     mod = _snapshot_from(mod_file, agent_name, "mod") if mod_file is not None else None
     if mod and (not snap or mod["_mtime"] > snap["_mtime"]):
         snap = mod
