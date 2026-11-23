@@ -272,18 +272,33 @@ test('⭐ a keybar HEIGHT change alone re-fits (ResizeObserver on the bar)', () 
     assert.equal(fitVar(), openFit(60));
 });
 
-test('⭐ a freshly rebuilt pane re-fits if the keyboard is already up (renderTerminals)', async () => {
+test('⭐ a render re-fits the pane AND its terminal if the keyboard is already up, without rebuilding it', async () => {
+    const { ifr, calls } = paneTerm();
     keyboard(true);                       // keyboard up, but NO event: only the render may notice
-    const before = document.querySelector('#term-stage .term-pane');
-    // A second agent appears → the stage signature changes → the single pane is rebuilt.
+    // A second agent appears: the open pane is not its business (CMX-493, no reload).
     agentsStore.set([...AGENTS, { name: 'two', window_id: '@2', online: true }]);
     await terminals.renderTerminals();
-    const after = document.querySelector('#term-stage.term-single .term-pane');
-    assert.ok(after && after !== before, 'the single pane must have been rebuilt');
-    assert.ok(root().classList.contains('kb-fit'), 'the rebuilt pane must be fitted by renderTerminals itself');
+    assert.equal(document.querySelector('#term-stage.term-single .term-pane iframe.term-frame'), ifr, 'the terminal must be kept');
+    assert.ok(root().classList.contains('kb-fit'), 'the pane must be fitted by renderTerminals itself');
     assert.equal(fitVar(), openFit());
+    assert.deepEqual(calls, [openFit()], 'term.fit() runs after the fit is applied');
     agentsStore.set(AGENTS);
     await terminals.renderTerminals();
+});
+
+test('⭐ a freshly rebuilt pane (another pane opened) re-fits if the keyboard is already up', async () => {
+    agentsStore.set([...AGENTS, { name: 'two', window_id: '@2', online: true }]);
+    await terminals.renderTerminals();    // keyboard down: nothing fitted yet
+    const first = terminals.activePane();
+    const before = document.querySelector('#term-stage .term-pane');
+    keyboard(true);
+    await terminals.showPane(first === '@2' ? '@1' : '@2');
+    const after = document.querySelector('#term-stage.term-single .term-pane');
+    assert.ok(after && after !== before, 'another pane is a rebuild');
+    assert.ok(root().classList.contains('kb-fit'));
+    assert.equal(fitVar(), openFit());
+    agentsStore.set(AGENTS);
+    await terminals.showPane(first);
 });
 
 

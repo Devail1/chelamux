@@ -10,6 +10,138 @@ history lives in `git log`.
 
 ## [Unreleased]
 
+## [0.20.1] — 2026-11-23
+
+### Added
+
+- **The orchestrator inbox hears about a dispatched agent's permission prompt at once.** Each
+  `PermissionRequest` hook from a running or claimed run's window queues one
+  `run_permission_prompt` notice ("✋ CMX-N · @N is waiting on a permission prompt: Bash … —
+  answer it in its pane"), deduplicated per prompt, on the next inbox tick. It interrupts the
+  digest like a denial does. The needs-input phone push (`CHELA_NOTIFY_URL`, Telegram included)
+  now reaches the human too, since the prompt is no longer dismissed before it can fire.
+  (CMX-478)
+
+- **Where verification time goes: `docs/spikes/TEST_SPEED.md`.** It measures one full suite
+  (14,647 tests in 641 s; peak anonymous memory 3.39 GB), the box's free memory on a normal
+  day, and today's judge round and hand-in timings. It also proposes the follow-up slices,
+  each with its expected saving:
+  - split `tests/test_js_suites.py`, which sets the suite's wall-clock on its own;
+  - share one green baseline per tree;
+  - select tests for shell-script mutations and by line coverage;
+  - admit a second suite slot only when memory allows.
+
+  (CMX-480)
+
+### Changed
+
+- **The device you're using sets a terminal's size.** A tmux window has one size, and with a
+  desktop tab left open and visible the phone in your hand got the desktop's width and had to
+  scroll sideways. Now each pane reports user input (a key, a tap or click, a scroll, a keybar
+  key or Paste, focusing the pane from the page), and the client with the latest input is the
+  only one `window-size largest` counts: every other client of that window gets `ignore-size`,
+  visible or not. A resize alone is never input. With no input for
+  `CHELA_TERM_ACTIVE_INPUT_MINUTES` (default 10) the largest visible client wins again, and
+  typing at the desk takes the size straight back. A presented window keeps its fixed size.
+  (CMX-476)
+
+### Fixed
+
+- **The Caddy example in `docs/ORG_SETUP.md` §2(a) now tells chela who approved.** It only
+  stripped `Tailscale-User-Login` and never set it, so with
+  `CHELA_DASHBOARD_IDENTITY_HEADER=tailscale` every dashboard approval was recorded as
+  `dashboard`. The site block now runs caddy-tailscale's `tailscale_auth` and sets
+  `Tailscale-User-Login` / `Tailscale-User-Name` from it (which also replaces any copy a
+  client sent). It works for user-owned devices only, not tagged ones. The README now points
+  to §2 for remote access. (CMX-468)
+
+- **A PyPI install has a terminal wall.** The wheel now ships the ttyd supervisor
+  (`agent-terminals.sh`) and the `chela-env.sh` loader it sources, behind a new command,
+  `chela agent-terminals` (`uvx chelamux agent-terminals` works too). Before, the wall's
+  tiles stayed empty unless you fetched both scripts from the release tag. It warns when
+  `ttyd` is not on PATH, and it never creates the tmux session: it waits for it
+  (`CHELA_TERM_HEAL=false`; started directly, the script still self-heals). (CMX-469)
+- **The terminal wall runs on macOS's stock `/bin/bash` 3.2.** The supervisor used bash 4
+  associative arrays (`declare -A`) and failed on a Mac without Homebrew bash. A test now
+  rejects bash-4-only syntax in it and runs it under a real bash 3.2 when the `bash:3.2`
+  image is available. (CMX-469)
+
+- **chela only ever drives the tmux session named exactly `chela`.** tmux matches a bare
+  `-t chela` by prefix, so with no `chela` session but a `chela-services` one, every chela
+  command used `chela-services`. All of chela's tmux targets are now exact (`=chela`,
+  `=chela:@3`), and `chela status` exits with "no session chela" when it is missing.
+- **The services (daemon, dashboard, telegram, collab) no longer pick their session from the
+  tmux pane they were started in.** They drive `CHELA_TMUX_SESSION`, else `chela`, and log
+  which session they use and why. Interactive agents still derive it from their own pane.
+- **`chela doctor` warns** when a service was started inside a tmux pane, and when a session
+  whose name starts with `chela` exists next to `chela`. `docs/ORG_SETUP.md` §1 says to start
+  the services outside tmux (or set `CHELA_TMUX_SESSION`) and never to name a session
+  `chela-*`. (CMX-470)
+
+- **The update check on a PyPI install no longer logs a `NotAGitCheckout` traceback.** chela
+  now detects how it was installed: a git checkout, `uv tool`, `uvx` or pip into a venv. A
+  non-git install compares its version with PyPI's latest (cached for an hour) and the daemon
+  logs one INFO line per check. `/api/update/status` reports `install`, `latest` and
+  `behind`. The update banner and Settings > Update name the matching command
+  (`uv tool upgrade chelamux`, or "uvx always runs the latest; restart the services") instead
+  of offering "Update & restart". `chela doctor` shows the install kind and whether a newer
+  version exists, and `chela update` on a package install says how to upgrade it. (CMX-471)
+
+- **The context % no longer needs the installed status line, and is right after `/compact`.**
+  It now comes from the session transcript: the last assistant turn's input, cache-read and
+  cache-creation tokens, which is the figure Claude Code's own `/context` prints. That covers
+  sessions started before `chela install-statusline`, org-managed settings that override the
+  status line, and users with a status line of their own. Where the status line is installed
+  and has the newer reading, chela uses it. After a `/compact`, the bar reads "compacted"
+  instead of the stale pre-compact number until the next turn. A session with no turn yet
+  (including one `/clear` just started) reads "—", never 0%. The window size (1M or 200k)
+  comes from the first source that knows it: a `[1m]` model in the transcript, the launch
+  `--model` or `ANTHROPIC_MODEL`, Claude's `model` setting, the status line, or usage past
+  200k. When none knows it, the bar shows tokens ("430K") with no %, and never guesses
+  200k. `chela doctor` names each live session's source and flags a session with none as
+  unknown. (CMX-475)
+
+- **The watchdog no longer dismisses a dispatched agent's permission prompt.** When auto mode
+  handed a call to a human, the dispatcher's watchdog saw the agent `waiting` and sent Escape
+  within seconds, as if it were an unanswerable `AskUserQuestion`. Escape on a permission
+  prompt denies the call and interrupts the turn ("Interrupted · What should Claude do
+  instead?"), so the agent stopped and nobody could approve it. The watchdog now Escapes (and
+  later fails) only a dialog the run's newest `PermissionRequest` hook names as an
+  `AskUserQuestion`; a permission prompt, or a dialog it cannot name, stays open for a human.
+  (CMX-478)
+
+- **A focused Wall pane keeps the keyboard.** Another pane loading or reconnecting took it: ttyd
+  focuses its terminal whenever its socket opens, so the ring, the cursor and your keys went to
+  that pane. A pane now takes focus by itself only when you are not typing in another pane or a
+  dashboard field. And the 30 s refresh no longer reloads every pane when a window opened or
+  closed just before it; nor, in single-pane view, the open pane. (CMX-493)
+
+### Documentation
+
+- **`docs/ORG_SETUP.md` covers what a real macOS work-Mac setup ran into.** §1 shows a launchd
+  LaunchAgent in place of PM2 (plist sketch, logs, restart). §2(a) shows signing the embedded
+  node in interactively with `tags tag:org-chela` and no auth key, and lists three pitfalls:
+  two Caddy processes on one `state_dir` ("Duplicate node key"), a `| tee`'d Caddy outliving
+  its tmux window, and the Tailscale app signing the host back in. §2 adds the iPhone fix for
+  "server can't be found" on `*.ts.net`. §3 adds a one-phone `hosts` IP-alias policy and its
+  IP-reuse caveat. §4 adds Caddy `admin off`, the plugin's `webui false`, a 700/600 state dir
+  and a Time Machine exclusion. §5 names tsnet's peerapi as an open LAN port. (CMX-472)
+
+- **`docs/TMUX_TOUCHPOINTS.md` lists every place chela types into or reads a tmux pane.**
+  One row per call site, each with what it sends or reads, whether it arrives as a user turn
+  or a native message with `from`, a bucket (agent message, launch and seed, state read, slash
+  command, human input, display) and a keep / replace / remove recommendation. It records the
+  Claude Code native features relied on, checked against the installed 2.1.330 binary, and
+  writes out five follow-up slices, the first being to drop the silent tmux fallback for agent
+  messages. `tests/test_tmux_touchpoints.py` parses `chela/` and fails on a pane-touching site
+  with no row, so a new one can't land unlisted. (CMX-474)
+
+- **Agent standing rules: no shell-based writes.** A dispatched agent changes files only with
+  the Edit or Write tool, never `sed -i`, `perl -pi`, `tee`, a `>` redirect or a heredoc into
+  `python`/`cat`. Auto mode asks a human about those, so an unattended run stalled on the
+  prompt for hours. The rule absorbs the existing "commit and PR messages via
+  `git commit -F <file>`" line. (CMX-481)
+
 ## [0.20.0] — 2026-11-22
 
 ### Added

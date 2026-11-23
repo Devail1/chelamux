@@ -101,6 +101,10 @@ def fleet(tmp_path, monkeypatch, request):
     # plugin.hooks_attributed (CMX-203): the same feed, as the live-session map — empty,
     # so a hook-blind session a corruption plants is closed unless it says otherwise.
     monkeypatch.setattr(runtime_truth, "_live_sessions", lambda: {})
+    # context.source (CMX-475): the one live session has a readable context %.
+    monkeypatch.setattr(runtime_truth, "_context_snapshots", lambda: [
+        ("cmx-66", "@1", {"source": "transcript", "state": "ok", "used_pct": 12,
+                          "used_k": 120.0, "window_source": "statusline"})])
     monkeypatch.setattr(config, "DISPATCH_WORKFLOWS", [repo / "WORKFLOW.md"])
     capabilities.publish(capabilities.effective())
 
@@ -614,6 +618,14 @@ def _break_native_status_feed(tmp_path, monkeypatch):
     return doctor.ERROR
 
 
+def _break_context_source(tmp_path, monkeypatch):
+    """CMX-475: a live session whose context % has no usable source — neither a transcript
+    nor a status line — is UNKNOWN, and says so, never 0%."""
+    monkeypatch.setattr(runtime_truth, "_context_snapshots",
+                        lambda: [("cmx-66", "@1", None)])
+    return doctor.WARN
+
+
 def _break_upstream_synced(tmp_path, monkeypatch):
     """The branch is diverged from its upstream — the fingerprint an upstream history
     rewrite (`git filter-repo` + force-push) leaves behind (CMX-168), same shape as
@@ -721,7 +733,17 @@ def _break_telegram_sender_allowlist(tmp_path, monkeypatch):
     return doctor.WARN
 
 
+def _break_usage_sources(tmp_path, monkeypatch):
+    """The chela-measure mod is installed, but its chela.json points at ANOTHER chela dir:
+    every session without $CHELA_DIR feeds that one, and this chela's bars stay unknown
+    (CMX-477)."""
+    from chela import measure_mod
+    measure_mod.install(measure_mod.install_dir(), tmp_path / "elsewhere")
+    return doctor.WARN
+
+
 CORRUPTIONS = {
+    "usage.sources": _break_usage_sources,
     "telegram.sender_allowlist": _break_telegram_sender_allowlist,
     "relay.transcripts": _break_relay_transcripts,
     "env.file": _break_env_file,
@@ -760,6 +782,7 @@ CORRUPTIONS = {
     "repo.services_current": _break_services_current,
     "install.package_current": _break_package_current,
     "agents.native_status_feed": _break_native_status_feed,
+    "context.source": _break_context_source,
     "restore.dead_epoch_rows": _break_restore_dead_epoch,
     "dispatch.unresolved_depends": _break_unresolved_depends,
     "judge.blocked_race": _break_judge_blocked_race,

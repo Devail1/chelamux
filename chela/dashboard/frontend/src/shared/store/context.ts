@@ -12,6 +12,13 @@ export type ContextRow = {
   total?: number | string | null;
   used_pct?: number | null;
   estimated?: boolean;
+  /** CMX-475: `compacted` (a /compact is newer than the last usage: no % until the next
+   * turn) or `no_turns` (no assistant turn yet: "—", never 0%); `ok` or absent otherwise. */
+  state?: 'ok' | 'compacted' | 'no_turns' | null;
+  /** The source that decided the window size; `unknown` leaves used_pct null. */
+  window_source?: string | null;
+  /** The pre-compact size, for the compacted state's tooltip. */
+  pre?: number | string | null;
   model?: string | null;
   cost_usd?: number | null;
   /** The pane's git branch (the tile footer shows it). */

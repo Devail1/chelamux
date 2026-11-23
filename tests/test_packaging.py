@@ -74,12 +74,18 @@ def test_the_wheel_carries_every_tracked_runtime_file(wheel):
     "chela/dashboard/static/app/manifest.json",   # the committed dashboard bundle
     "chela/dashboard/templates/index.html",
     "chela/dashboard/static/term-reconnect.js",   # ttyd page shims
+    "chela/dashboard/static/term-focus.js",
     "chela/dashboard/static/term-upload.js",
     "chela/dashboard/static/term-touch.css",
     "chela/mergegate.py",                         # copied into the plugin's hooks/
     "chela/scripts/cache-statusline.sh",          # the statusLine hook
     "chela/scripts/agent-terminals.sh",           # CMX-469: the terminal wall's supervisor
     "chela/scripts/chela-env.sh",                 # ... and the env loader it sources
+    # CMX-477: the chela-measure mod `chela install-mod` copies out of the install
+    "chela/mods/chela-measure/.claude-plugin/plugin.json",
+    "chela/mods/chela-measure/hooks/hooks.json",
+    "chela/mods/chela-measure/hooks/register.ts",
+    "chela/mods/chela-measure/hooks/measure.ts",
 ])
 def test_the_wheel_carries_the_named_runtime_files(wheel, path):
     """The same claim with literal paths, so an empty `git ls-files` can't make the

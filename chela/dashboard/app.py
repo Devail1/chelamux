@@ -1421,6 +1421,12 @@ def _term_reconnect_shim() -> str:
     return '<script src="/' + asset_path("term-reconnect.js") + '"></script>'
 
 
+def _term_focus_shim() -> str:
+    """CMX-493: a pane that (re)connects never takes the keyboard from the pane being typed in
+    (static/term-focus.js). Synchronous, so it wraps ``focus()`` before ttyd's body script."""
+    return '<script src="/' + asset_path("term-focus.js") + '"></script>'
+
+
 def _term_upload_shim() -> str:
     """CMX-412: the file drop/paste shim, with the Settings switch read at serve time (the
     route re-checks it per upload, so a pane opened before a switch-off is still refused)."""
@@ -1562,7 +1568,7 @@ def term_http(wid, rest):
     ctype = (resp.headers.get("Content-Type") or "")
     if "text/html" in ctype.lower():
         html = _externalize_ttyd_bundle(body.decode("utf-8", "replace"))
-        shims = (_term_reconnect_shim()
+        shims = (_term_reconnect_shim() + _term_focus_shim()
                  + _term_theme_shim() + _TERM_FONT_CSS + _TERM_BOOT_CSS + _TERM_FONT_PREF_SHIM
                  + _term_presence_shim(wid)
                  + _term_upload_shim()
@@ -4864,6 +4870,13 @@ def api_agents_context():
             "branch": s.get("branch"),
             "source": s.get("source"),
             "estimated": s.get("estimated", False),
+            # CMX-475: `ok` | `compacted` (a /compact is newer than the last usage — no %
+            # until the next turn) | `no_turns` (nothing to read yet: "—", never 0%).
+            "state": s.get("state", "ok"),
+            # Which source decided the window size; `unknown` ⇒ used_pct is None and
+            # `used` is the absolute reading.
+            "window_source": s.get("window_source"),
+            "pre": _fmt_k(s.get("pre_k")),
             "ts": s.get("ts"),
         })
     return jsonify(results)
