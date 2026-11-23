@@ -220,6 +220,49 @@ def test_a_holder_yields_when_blocked_hours_open_and_resumes_after(one_slot, clo
     assert "yielding the suite slot after this experiment" in capsys.readouterr().err
 
 
+def test_a_battery_waiting_after_a_yield_is_recorded_as_waiting(one_slot, clock, monkeypatch):
+    clock.now = datetime(2026, 11, 23, 2, 55)
+    states = []
+
+    def sleep(s):
+        states.extend(r["state"] for r in _records(one_slot))
+        clock.sleep(s)
+
+    monkeypatch.setattr(suite_guard.time, "sleep", sleep)
+    with suite_guard.battery(one_slot / "CMX-7", "self-check", max_wait=60):
+        clock.now = datetime(2026, 11, 23, 3, 5)
+        suite_guard.yield_slot()
+        assert [r["state"] for r in _records(one_slot)] == ["running"]
+    assert set(states) == {"waiting"}
+    assert suite_guard._held.battery is None
+    with suite_guard.slot(one_slot / "CMX-7", max_wait=1):     # no battery: no record
+        clock.now = datetime(2026, 11, 23, 3, 5)
+        suite_guard.yield_slot()
+    assert _records(one_slot) == []
+
+
+def test_a_state_that_cannot_be_written_drops_the_stale_waiting_record(one_slot, monkeypatch):
+    real = suite_guard._battery_record
+    monkeypatch.setattr(suite_guard, "_battery_record",
+                        lambda c, k, s: None if s == "running" else real(c, k, s))
+    with suite_guard.battery(one_slot / "CMX-7", "sweep", max_wait=1):
+        assert _records(one_slot) == []
+
+
+def test_a_blocked_waiter_holds_no_line_for_a_repo_that_is_not_blocked(one_slot):
+    waits = one_slot / "suite-slots" / "waits"
+    waits.mkdir(parents=True)
+    rec = {"pid": os.getpid(), "start": suite_guard._proc_stat(os.getpid())[1], "cwd": "/w/A",
+           "waiting_since": 1.0, "waited": 0, "rank": 0, "blocked_until": None}
+    (waits / "a.json").write_text(json.dumps(rec))
+    me = waits / "me.json"
+    assert suite_guard._must_queue(me, 2.0, 3) is True
+    assert suite_guard.outranking(3) == ["A"]
+    (waits / "a.json").write_text(json.dumps({**rec, "blocked_until": "04:30"}))
+    assert suite_guard._must_queue(me, 2.0, 3) is False
+    assert suite_guard.outranking(3) == []
+
+
 def test_the_judge_yields_between_experiments_never_before_the_first(monkeypatch, tmp_path):
     calls = []
     monkeypatch.setattr(suite_guard, "yield_slot", lambda: calls.append(1) or "")
@@ -297,8 +340,8 @@ def test_a_reaped_waiter_is_re_queued_once_through_its_own_agent(reaped):
     assert dispatcher.requeue_reaped_waiters() == ["t9"]
     [(wid, frm, text)] = reaped.sent
     assert (wid, frm) == ("@9", "chela")
-    assert text.startswith("🧠 chela: your `chela task-finished` was killed (the low-memory "
-                           "reaper) while it was still WAITING for the suite slot")
+    assert text.startswith("🧠 chela: your `chela task-finished` was killed (most likely by the "
+                           "low-memory reaper) while it was WAITING for the suite slot")
     assert "once" in text and "if it is killed again, stop and report" in text
     assert not reaped.path.exists()
     assert suite_guard.requeued_recently(reaped.wt)
@@ -409,6 +452,19 @@ def test_a_record_for_another_directory_is_not_this_runs(reaped, tmp_path):
     reaped.path.unlink()
     _stopped(reaped.root, tmp_path / "CMX-99")
     assert dispatcher.requeue_reaped_waiters() == []
+
+
+@pytest.mark.parametrize("sub,resumed", [("", True), ("sub", True), ("../CMX-99", False)])
+def test_a_command_its_agent_already_re_ran_is_not_asked_for_again(reaped, sub, resumed):
+    d = reaped.path.parent
+    (d / "0-junk.json").write_text("{not json")
+    (d / "1-live.json").write_text(json.dumps({
+        "pid": os.getpid(), "start": suite_guard._proc_stat(os.getpid())[1],
+        "cwd": str(reaped.wt / sub), "kind": "sweep", "state": "waiting", "since": 2.0}))
+    assert suite_guard.live_battery_in(reaped.wt) is resumed
+    assert dispatcher.requeue_reaped_waiters() == ([] if resumed else ["t9"])
+    assert len(reaped.sent) == (0 if resumed else 1)
+    assert not reaped.path.exists() and (d / "1-live.json").exists()
 
 
 def test_a_record_without_a_cwd_is_skipped(reaped):

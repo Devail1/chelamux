@@ -367,11 +367,12 @@ def _must_queue(me: Path, since: float, rank: int = RANK_UNKNOWN) -> bool:
     """Is a waiter AHEAD of us (:func:`queue_key`) still queued? Then it goes first: a
     battery that frees its slot and takes the next one a millisecond later must not starve a
     run already waiting, and a Medium hand-in must not take the slot an Urgent judge is
-    queued for (CMX-445). A stopped waiter (a fleet pause, ``T``) does not hold the line."""
+    queued for (CMX-445). A stopped waiter (a fleet pause, ``T``) does not hold the line, nor
+    one its own blocked hours hold (CMX-479): another repo may have none."""
     mine = queue_key(rank, since, me.name)
     for path, rec in _ledgers():
         opened = rec.get("waiting_since")
-        if path == me or opened is None or rec["state"] in ("T", "t"):
+        if path == me or opened is None or rec["state"] in ("T", "t") or rec.get("blocked_until"):
             continue
         try:
             theirs = queue_key(_rank(rec.get("rank")), float(opened), path.name)
@@ -390,6 +391,8 @@ def outranking(rank: int, exclude_pid: int | None = None) -> list[str]:
         opened = rec.get("waiting_since")
         if opened is None or rec["state"] in ("T", "t") or rec.get("pid") == exclude_pid:
             continue
+        if rec.get("blocked_until"):
+            continue            # CMX-479: its own blocked hours hold it — it cannot take a slot
         theirs = _rank(rec.get("rank"))
         if theirs >= rank:
             continue
@@ -736,9 +739,13 @@ def yield_slot() -> str:
               "resuming once it is free again", file=sys.stderr, flush=True)
     else:
         return ""
+    # ⏳ CMX-479: between two experiments no file is mutated — killed in THIS wait, the
+    # battery is a reaped waiter like any other.
+    _set_battery_state(WAITING)
     _held.fd = None
     os.close(fd)
     _held.fd = _acquire(d, k, cwd, rank, on_wait, None, poll, claimed, windows)
+    _set_battery_state(RUNNING)
     return names
 
 
@@ -782,20 +789,50 @@ def battery(cwd: str | Path, kind: str, on_wait=None, max_wait: float | None = N
     # ⏳ CMX-479: recorded BEFORE the wait — on 11-23 the reaper killed three runs that were
     # only waiting, and a record written once the slot was held never saw them.
     rec = _battery_record(cwd, kind, WAITING)
+    _held.battery = (cwd, kind, rec)
     try:
         with slot(cwd, on_wait=on_wait, max_wait=max_wait, poll=poll, rank=rank):
-            _battery_record(cwd, kind, RUNNING)
+            _set_battery_state(RUNNING)
             yield
     except (Exception, SystemExit):
         _drop(rec)
         raise
     except BaseException:
         raise              # stopped by a signal — the record says so once we are gone
+    finally:
+        _held.battery = None
     _drop(rec)
 
 
-# A battery record's ``state``: queued for the slot (no file touched yet), or holding it.
+# A battery record's ``state``: queued for the slot (no file mutated), or holding it.
 WAITING, RUNNING = "waiting", "running"
+
+
+def _set_battery_state(state: str) -> None:
+    """Rewrite this thread's battery record as ``state``. One that cannot be rewritten is
+    dropped: a stale ``"waiting"`` would call a run killed mid-mutation untouched."""
+    cwd, kind, rec = getattr(_held, "battery", None) or (None, None, None)
+    if rec is not None and _battery_record(cwd, kind, state) is None:
+        _drop(rec)
+
+
+def live_battery_in(worktree: str | Path) -> bool:
+    """Is a live battery recorded in ``worktree`` now (waiting or running)?"""
+    dead = {path for path, _rec in stopped_batteries()}
+    try:
+        root, files = Path(worktree).resolve(), list(_batteries_dir().glob("*.json"))
+    except OSError:
+        return False
+    for path in files:
+        if path in dead:
+            continue
+        try:
+            here = Path(json.loads(path.read_text())["cwd"]).resolve()
+        except (OSError, ValueError, KeyError, TypeError):
+            continue
+        if here == root or root in here.parents:
+            return True
+    return False
 
 
 def _battery_record(cwd: str | Path, kind: str, state: str = RUNNING) -> Path | None:

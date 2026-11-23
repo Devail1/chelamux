@@ -324,10 +324,11 @@ run never strands a slot.
   not gated.
 - **A waiter the reaper killed is re-queued once** (CMX-479). On 11-23 the 03:30 nautilus
   cron took the box to 2.7 GB available and Claude Code's low-memory reaper killed three
-  agents' runs that were only *waiting* for the slot. A waiting `chela` process holds about
-  40 MB, so making it lighter would not have saved it: the reaper stops an agent's
-  background tasks whatever their size. A battery now records itself before it waits
-  (`state: "waiting"`). Once its blocked hours are over and one suite's peak of memory is
+  agents' runs that were only *waiting* for the slot. Six real waiters
+  measured on 11-24 peaked at 38-45 MB (113 MB for one resumed mid-battery). The reaper is
+  Claude Code's own and was not observed, but at that size there is little to trim, so chela
+  recovers instead. A battery now records itself before it waits (`state: "waiting"`, also
+  while it waits after a yield). Once its blocked hours are over and one suite's peak of memory is
   available, the daemon asks that run's own agent, over the peer socket, to re-run its
   `chela task-finished` / `chela judge sweep` / `chela judge self-check` once. The re-run
   happens in the agent's session, never in the daemon. A worktree is re-queued at most once

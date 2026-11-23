@@ -3372,11 +3372,11 @@ STOPPED_BATTERIES_KIND = "suite_runs_stopped"
 REQUEUE_COMMANDS = {"sweep": "chela judge sweep", "self-check": "chela judge self-check",
                     "task-finished": "chela task-finished"}
 REQUEUE_PROMPT = (
-    "🧠 chela: your `{cmd}` was killed (the low-memory reaper) while it was still WAITING "
-    "for the suite slot — it had not started a suite, so no file was mutated. The blocked "
-    "hours are over and memory is back: run that same command again now, once, exactly as "
-    "you ran it (run_in_background). This is its one automatic re-queue; if it is killed "
-    "again, stop and report.")
+    "🧠 chela: your `{cmd}` was killed (most likely by the low-memory reaper) while it was "
+    "WAITING for the suite slot, with no file mutated. It is outside blocked hours and memory "
+    "is back: unless you stopped it on purpose, check `git diff`, then run that same command "
+    "again now, once, exactly as you ran it (run_in_background). This is its one automatic "
+    "re-queue; if it is killed again, stop and report.")
 
 
 def _active_run_in(cwd: str) -> sqlite3.Row | None:
@@ -3423,6 +3423,9 @@ def requeue_reaped_waiters() -> list[str]:
             if rec.get("state") != suite_guard.WAITING or cmd is None or not isinstance(cwd, str):
                 continue
             if suite_guard.blocked_until(suite_guard.blocked_windows(cwd)):
+                continue
+            if suite_guard.live_battery_in(cwd):
+                path.unlink(missing_ok=True)      # its agent already re-ran it
                 continue
             if suite_guard.requeued_recently(cwd):
                 continue
