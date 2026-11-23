@@ -313,6 +313,26 @@ run never strands a slot.
   either.
 - **Bounded.** A run waits at most 4 of its own suite timeouts. After that it is CANNOT
   VERIFY ("no suite slot came free in …"), never a pass.
+- **Not inside blocked hours** (CMX-479). No slot is granted while the local time is inside
+  the worktree's `sweep.blocked_hours` (its `WORKFLOW.md`; no `WORKFLOW.md` is the default
+  `03:00-04:30`). This holds for every run: a hand-in, a self-check, an agent's sweep and a
+  judge round. The waiter prints `⏳ blocked hours until 04:30 …`, its park says
+  "waiting for a suite slot: blocked hours until 04:30", and time spent blocked does not
+  count toward the 4-timeout bound. A battery already running when the window opens finishes
+  its current experiment and gives the slot up the same way. When the window ends, the queue
+  resumes in its usual order with no restart. `suite_slots: 0` (admission control off) is
+  not gated.
+- **A waiter the reaper killed is re-queued once** (CMX-479). On 11-23 the 03:30 nautilus
+  cron took the box to 2.7 GB available and Claude Code's low-memory reaper killed three
+  agents' runs that were only *waiting* for the slot. A waiting `chela` process holds about
+  40 MB, so making it lighter would not have saved it: the reaper stops an agent's
+  background tasks whatever their size. A battery now records itself before it waits
+  (`state: "waiting"`). Once its blocked hours are over and one suite's peak of memory is
+  available, the daemon asks that run's own agent, over the peer socket, to re-run its
+  `chela task-finished` / `chela judge sweep` / `chela judge self-check` once. The re-run
+  happens in the agent's session, never in the daemon. A worktree is re-queued at most once
+  in 12 hours; a second kill, or a run with no live agent to ask, goes to the
+  stopped-runs notice below.
 
 Every `run_suite` call takes a slot, including a judge's targeted subset runs, which are
 smaller than a full suite. That is the safe side of the trade.

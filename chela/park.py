@@ -101,7 +101,11 @@ def slot(run: dict, wait: dict | None, holders: list[str]) -> dict | None:
     since = (wait or {}).get("waiting_since")
     if run.get("status") not in ACTIVE or since is None:
         return None
-    return {"kind": SLOT, "reason": slot_reason(holders), "since": float(since), "at": None,
+    # ⏳ CMX-479: held by blocked hours, not by a holder — say until when.
+    until = (wait or {}).get("blocked_until")
+    reason = (f"waiting for a suite slot: blocked hours until {until} (`sweep.blocked_hours`)"
+              if until else slot_reason(holders))
+    return {"kind": SLOT, "reason": reason, "since": float(since), "at": None,
             "until": None, "by": "suite slot"}
 
 

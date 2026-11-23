@@ -482,11 +482,13 @@ def test_waits_in_credits_only_this_worktree(slots_on, monkeypatch, tmp_path):
         (waits / f"{i}.json").write_text(json.dumps({"pid": i, "start": "s", "cwd": cwd,
                                                      "waiting_since": since,
                                                      "waited": waited}))
-    assert suite_guard.waits_in(wt) == {"waiting_since": 30.0, "waited": 12.0}
+    assert suite_guard.waits_in(wt) == {"waiting_since": 30.0, "waited": 12.0,
+                                        "blocked_until": None}
     assert suite_guard.waits_in(tmp_path / "elsewhere") is None
     (waits / "bad.json").write_text(json.dumps({"pid": 9, "start": "s", "cwd": str(wt),
                                                 "waiting_since": "soon", "waited": 0}))
-    assert suite_guard.waits_in(wt) == {"waiting_since": 30.0, "waited": 12.0}
+    assert suite_guard.waits_in(wt) == {"waiting_since": 30.0, "waited": 12.0,
+                                        "blocked_until": None}
 
 
 def test_ledger_write_never_raises(slots_on, monkeypatch, caplog):
