@@ -183,6 +183,8 @@ def test_the_seeded_rules_file_stays_under_the_length_cap():
     "`[c]hela …`",
     "Reply to the orchestrator with SendMessage, not tmux",
     "`git commit -F <file>`",
+    "Change files only with the Edit or Write tool, never `sed -i`, `perl -pi`, `tee`",
+    "a `>` redirect into a repo file, or a heredoc into `python` or `cat`",
 ])
 def test_the_seeded_file_carries_each_rule_on_one_line(needle):
     rules = [ln for ln in _RULES_FILE.read_text(encoding="utf-8").splitlines()
