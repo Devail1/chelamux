@@ -33,6 +33,15 @@ What observes a file, in the order it is checked (all of them, unioned):
 4. a coverage-derived map, when ``pytest-cov`` is installed in the judged tree: one baseline
    run with ``--cov-context=test`` records which test touched which file. Cached per head sha.
 
+⚡ CMX-489: a SHELL script (``.sh``) has no import graph — a test or a module RUNS it by its
+path. So its observers are the test files that name it (rule 3), plus the observers of every
+Python module that names it (``scripts/agent-terminals.sh`` is named by ``chela/main.py``,
+``chela/service_code.py`` …, so whatever observes those modules may run it), plus — the same
+way — the observers of every other shell script that names it (``run-chela.sh`` sources
+``chela-env.sh``). A ``.sh`` used to run the full suite for every experiment: one shell-script
+PR's round paid 8 full suites (59 min). A file under ``.github/workflows/`` stays full-suite
+whatever its suffix: it is tool config, which CI enforces and no test observes.
+
 ⚡ CMX-174: a ``judge.test_cmd`` that is ONE Vitest invocation (``pnpm exec vitest run``)
 selects too. Its universe is the baseline's own JSON report (one case per test, keyed by its
 test FILE), and a mutated ``.ts``/``.tsx`` file selects the test files whose import graph
@@ -84,6 +93,11 @@ from pathlib import Path
 PY_SUFFIXES = (".py",)
 JS_SUFFIXES = (".js", ".mjs", ".cjs")
 TS_SUFFIXES = (".ts", ".tsx")
+SH_SUFFIXES = (".sh",)
+# ⚡ CMX-489: tool config. CI runs it; no test observes it — always the full suite.
+WORKFLOWS_DIR = ".github/workflows/"
+# Never walked for modules/scripts that name a shell script: not this repo's own source.
+_SKIP_DIRS = frozenset({"node_modules", "__pycache__", "venv", "site-packages"})
 # How a specifier with no (or a `.js`) extension resolves: TS ESM spells `./a.ts` as `./a.js`.
 _JS_RESOLVE = ("", ".js", ".mjs", ".ts", ".tsx", "/index.js", "/index.ts", "/index.tsx")
 
@@ -462,6 +476,7 @@ class Selector:
     _py_imports: dict[str, set[str]] = field(default_factory=dict, repr=False)
     _js_closure: dict[str, set[str]] = field(default_factory=dict, repr=False)
     _specs: list[str] | None = field(default=None, repr=False)
+    _namers: list[str] | None = field(default=None, repr=False)
 
     # -- cached reads --
 
@@ -501,7 +516,37 @@ class Selector:
         js = {c.js for c in self.cases if c.js}
         return py, js
 
-    def observers(self, rel: str) -> set[str]:
+    def _naming_sources(self) -> list[str]:
+        """⚡ CMX-489: every non-test Python module and every shell script under ``root``
+        (repo-relative, sorted; walked once per selector) — what can RUN a shell script by
+        naming it. Dot-directories (``.git``, ``.venv``) but ``.github``, and vendored trees,
+        are skipped."""
+        if self._namers is None:
+            py_tests, _ = self._sources()
+            out: list[str] = []
+            for d, dirs, files in os.walk(self.root):
+                dirs[:] = [x for x in dirs if x not in _SKIP_DIRS
+                           and (x == ".github" or not x.startswith("."))]
+                for f in files:
+                    if f.endswith(PY_SUFFIXES + SH_SUFFIXES):
+                        rel = (Path(d) / f).relative_to(self.root).as_posix()
+                        if rel not in py_tests:
+                            out.append(rel)
+            self._namers = sorted(out)
+        return self._namers
+
+    def _shell_observers(self, rel: str, seen: set[str]) -> set[str]:
+        """⚡ CMX-489: the observers of every module or script that names the shell script
+        ``rel``, followed through scripts that name scripts (``seen`` breaks a cycle)."""
+        found: set[str] = set()
+        for src in self._naming_sources():
+            if src in seen or not names_it(self._read(src), rel):
+                continue
+            seen.add(src)
+            found |= self.observers(src, seen)
+        return found
+
+    def observers(self, rel: str, _seen: set[str] | None = None) -> set[str]:
         """Test SOURCES (Python test files and JS suites) that can observe ``rel``."""
         py_tests, js_tests = self._sources()
         found: set[str] = set()
@@ -512,13 +557,18 @@ class Selector:
             found |= {t for t in py_tests if _imports_module(self._imports_of(t), targets)}
         elif rel.endswith(JS_SUFFIXES + TS_SUFFIXES):
             found |= {t for t in js_tests if rel in self._closure_of(t)}
+        elif rel.endswith(SH_SUFFIXES):
+            found |= self._shell_observers(rel, _seen if _seen is not None else {rel})
         found |= {t for t in py_tests | js_tests if t != rel and names_it(self._read(t), rel)}
         found |= {t for t in self.coverage.get(rel, ()) if t in py_tests}
         return found
 
     def select(self, rel: str) -> Selection:
         rel = Path(rel).as_posix()
-        if not rel.endswith(PY_SUFFIXES + JS_SUFFIXES + TS_SUFFIXES):
+        if rel.startswith(WORKFLOWS_DIR):
+            return Selection([], 0, "a CI workflow file is tool config no test observes — "
+                                    "full suite")
+        if not rel.endswith(PY_SUFFIXES + JS_SUFFIXES + TS_SUFFIXES + SH_SUFFIXES):
             return Selection([], 0, f"{Path(rel).suffix or 'no-suffix'} is not a file type "
                                     "selection can reason about — full suite")
         if Path(rel).name == "conftest.py":
