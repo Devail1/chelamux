@@ -1801,6 +1801,34 @@ def cmd_agent_terminals(args) -> None:
     os.execve(bash, [bash, str(script)], env)
 
 
+def cmd_install_mod(args) -> None:
+    """Install (or ``--remove``) the chela-measure mod (CMX-477).
+
+    Copies the packaged mod to ``~/.claude/skills/chela-measure`` (``--dir`` overrides),
+    which Claude Code >= 2.1.301 auto-loads as a user plugin: no settings.json edit, and the
+    person's own status line stays theirs. The statusLine hook stays the fallback.
+    """
+    from chela import measure_mod
+
+    dest = Path(args.dir).expanduser() if args.dir else measure_mod.install_dir()
+    try:
+        if args.remove:
+            if measure_mod.remove(dest):
+                print(f"removed {dest}")
+            else:
+                print(f"not installed at {dest}")
+            return
+        measure_mod.install(dest, config.CHELA_DIR)
+    except (OSError, FileExistsError) as e:
+        print(f"install-mod: {e}", file=sys.stderr)
+        sys.exit(1)
+    print(f"installed {measure_mod.MOD_NAME} at {dest}")
+    print(f"it writes to {config.CHELA_DIR / 'context' / 'mod'}/<session>.json "
+          "($CHELA_DIR in a session's environment wins)")
+    print("Needs Claude Code >= 2.1.301. New sessions load it; a running one after /reload-plugins.")
+    print("Check it with `chela doctor` (usage.sources) after a session's next turn.")
+
+
 def cmd_install_statusline(args) -> None:
     """Print (or write) the Claude Code statusLine hook that feeds the context bar.
 
@@ -5199,6 +5227,17 @@ def main() -> None:
     p_sl.add_argument("--force", action="store_true", help="Overwrite an existing statusLine (with --write)")
     p_sl.add_argument("--settings", default=None, help="settings.json path (default: ~/.claude/settings.json)")
 
+    # install-mod — the chela-measure mod (CMX-477): limits/context/cost without a statusLine
+    p_im = sub.add_parser(
+        "install-mod",
+        help="Install the chela-measure mod: feeds the 5h/7d limits, context and cost "
+             "from Claude Code's session.measure hook, without a statusLine",
+    )
+    p_im.add_argument("--remove", action="store_true", help="Remove the installed mod")
+    p_im.add_argument("--dir", default=None,
+                      help="Install folder (default: ~/.claude/skills/chela-measure, "
+                           "under $CLAUDE_CONFIG_DIR when set)")
+
     # telegram — bridge N agent windows and their topics (outbound + inbound)
     p_tg = sub.add_parser(
         "telegram",
@@ -5526,6 +5565,8 @@ def main() -> None:
         cmd_agent_terminals(args)
     elif args.command == "install-statusline":
         cmd_install_statusline(args)
+    elif args.command == "install-mod":
+        cmd_install_mod(args)
     elif args.command == "telegram":
         if args.tg_cmd == "send-file":
             cmd_telegram_send_file(args)
