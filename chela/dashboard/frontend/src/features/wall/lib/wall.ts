@@ -207,11 +207,12 @@ export function setTermMode(m: string): void {
 
 /** The Wall view, in wall mode: a sidebar click then minimizes an open pane (CMX-139). */
 export const isWallVisible = (): boolean => view.get() === 'terminals' && mode === 'wall';
-// By wid (a rename is no change); the open pane counts in single mode only, where it is drawn.
-const sigOf = (wids: string[]) => `${mode}|${mode === 'single' ? active : ''}|${wids.slice().sort().join(',')}`;
+// By wid (a rename is no change). Single mode draws the open pane only, so the rest of the fleet
+// is no change there (CMX-493: a window opening elsewhere reloaded the pane being typed into).
+const sigOf = (wids: string[]) => (mode === 'single' ? `single|${active}` : `wall|${wids.slice().sort().join(',')}`);
 
-/** Render the Wall (the view's tick). Keeps every live iframe unless the mode, the single pane or
- * the pane set changed. `ctxRead`: the tick's shared context read (CMX-166). */
+/** Render the Wall (the view's tick). Keeps every live iframe unless the mode or the single pane
+ * changed; a changed pane set is reconciled in place. `ctxRead`: the tick's shared context read (CMX-166). */
 export async function renderTerminals(ctxRead?: Promise<unknown> | null): Promise<void> {
   if (!BOOT.terminalsEnabled) return;
   if (!rows().length) setRows(await api('/api/agents'));
@@ -222,6 +223,12 @@ export async function renderTerminals(ctxRead?: Promise<unknown> | null): Promis
   mountDock($('term-min-dock'));
   if (!wids.includes(active)) active = initialPane(wids);
   if (sigOf(wids) === termSig) return;
+  // CMX-493: the wall is up and only the pane set moved: take the change in place. A rebuild
+  // reloads every iframe, the one being typed into included.
+  if (mode === 'wall' && wids.length && G.hasGrid() && $('term-stage')?.querySelector('.grid-stack')) {
+    await reconcile();
+    return applyTermStatus();
+  }
   termSig = sigOf(wids);
   await resolveReady(wids); // before building: a ready pane draws its iframe with no placeholder
   document.body.classList.remove('pane-is-maximized'); // its pane is going
@@ -304,7 +311,9 @@ export function dropTerminalPane(wid: string): void {
   setMinimized(wid, false);
   forgetAutoDock(wid);
   refit();
-  termSig = sigOf(renderedWids); // what is on screen is the baseline: no rebuild of the survivors
+  // what is on screen is the baseline: no rebuild of the survivors. A single pane that ended has
+  // none: the next render picks a live pane (or this one, back).
+  termSig = mode === 'single' && !renderedWids.length ? '' : sigOf(renderedWids);
 }
 
 /** Bring a pane to the user: the Wall, restored if minimized, scrolled to, focused, flashed. */
