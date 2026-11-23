@@ -364,6 +364,7 @@ write_map               # write an (empty) map even before any agent is seen
 # tmux detaches it — which frees the slot. --max-clients headroom absorbs the rest.
 CUR=""          # this tick's live wids, space-separated
 SESSION_STATE="" # present | absent: last tick's answer, so a transition is logged once
+ABSENT_TICKS=0   # consecutive ticks the session was absent; reap only from the 2nd
 while :; do
     exit_if_stranded
 
@@ -374,6 +375,7 @@ while :; do
         [[ "${SESSION_STATE}" == absent ]] && \
             echo "agent-terminals: tmux session '${TMUX_SESSION}' is back"
         SESSION_STATE=present
+        ABSENT_TICKS=0
         while IFS=$'\t' read -r wid name; do
             [[ -z "$wid" ]] && continue
             in_list "$wid" "${CUR}" || CUR="${CUR:+${CUR} }${wid}"
@@ -389,12 +391,15 @@ while :; do
             echo "agent-terminals: no tmux session '${TMUX_SESSION}' — no windows; the next spawn creates it"
         fi
         SESSION_STATE=absent
+        ABSENT_TICKS=$(( ABSENT_TICKS + 1 ))
     fi
 
-    # Guard: an empty result while we have running ttyds AND a live session is almost
-    # certainly a transient discovery hiccup (python import / tmux mid-write), not
-    # "every agent vanished" — skip this tick rather than nuke everything.
-    if [[ -z "${CUR}" && -n "${TRACKED}" && "${SESSION_STATE}" == present ]]; then
+    # Guard: an empty result while we have running ttyds is almost certainly a transient
+    # hiccup (python import / tmux mid-write, one has-session that failed on a busy
+    # server), not "every agent vanished" — skip this tick rather than nuke everything.
+    # A session that is STILL absent on the next tick is really gone: its ttyds are reaped
+    # then, never held forever (CMX-473).
+    if [[ -z "${CUR}" && -n "${TRACKED}" && ( "${SESSION_STATE}" == present || ABSENT_TICKS -lt 2 ) ]]; then
         echo "agent-terminals: discovery returned empty; keeping current set"
         nap "${POLL}"; continue
     fi

@@ -312,14 +312,40 @@ def test_a_missing_session_is_no_windows_and_is_never_created(shell, heal, tmp_p
     assert "new-session" not in (tmp_path / "tmux.log").read_text()
 
 
+def test_one_failed_session_check_does_not_reap_the_wall(tmp_path):
+    """A single has-session failure (a busy server) must not tear every tile down: the set
+    is kept for that tick and only a session still absent on the next tick is reaped."""
+    env = _layout(tmp_path)
+    _windows(tmp_path, "@8")
+    proc = _start("host", tmp_path, env)
+    try:
+        _wait_map(tmp_path, {"@8": 6200})
+        pid = int((tmp_path / "pids" / "6200").read_text())
+        log = tmp_path / "tmux.log"
+        (tmp_path / "session").unlink()
+        n = log.read_text().count("has-session")
+        deadline = time.monotonic() + 10
+        while log.read_text().count("has-session") < n + 1:
+            assert time.monotonic() < deadline
+            time.sleep(0.05)
+        (tmp_path / "session").write_text("")     # back before the second check
+        time.sleep(3)
+        assert _alive(pid), "one failed session check reaped a live tile"
+        assert json.loads((tmp_path / "chela" / "agent_terminals.json").read_text()) == {"@8": 6200}
+    finally:
+        proc.send_signal(signal.SIGTERM)
+        out, _ = proc.communicate(timeout=30)
+    assert "- @8 (window gone)" not in out, out
+
+
 def test_negative_control_the_old_empty_guard_held_a_dead_sessions_ttyds(tmp_path):
     """The guard that skips an empty tick while ttyds run must NOT apply when the session is
     absent: with it applied (the old reading), the ended session's ttyd is held forever."""
     env = _layout(tmp_path)
     script = tmp_path / "scripts" / "agent-terminals.sh"
     text = script.read_text()
-    held = text.replace('-n "${TRACKED}" && "${SESSION_STATE}" == present ]]',
-                        '-n "${TRACKED}" ]]')
+    held = text.replace('( "${SESSION_STATE}" == present || ABSENT_TICKS -lt 2 )',
+                        'true')
     assert held != text
     script.write_text(held)
     _windows(tmp_path, "@7")

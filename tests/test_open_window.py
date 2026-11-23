@@ -149,6 +149,7 @@ def test_the_dispatcher_recreates_a_missing_session_with_its_agent_window(tmux, 
     [(argv, _)] = rec.creates()
     assert argv[:9] == ["tmux", "new-session", "-d", "-s", SESSION, "-n", "cmx-1", "-c", "/wt"]
     assert rec.windows() == []
+    assert rec.creates()[0][1]["timeout"] is None      # never a TimeoutExpired mid-dispatch
 
 
 def test_the_dispatcher_raises_when_the_window_cannot_open(tmux, monkeypatch):
@@ -174,4 +175,4 @@ def test_the_orchestrator_autolaunch_opens_through_open_window(monkeypatch):
     monkeypatch.setattr(autolaunch.config, "remote_control_enabled", lambda: False)
     autolaunch._spawn_orchestrator_window("/repo")
     assert seen == [(autolaunch.WINDOW_NAME, "/repo",
-                     {"session": autolaunch.TMUX_SESSION, "check": True})]
+                     {"session": autolaunch.TMUX_SESSION, "check": True, "timeout": None})]

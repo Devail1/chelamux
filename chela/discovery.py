@@ -82,7 +82,7 @@ def list_sessions() -> list[str] | None:
 
 
 def open_window(name: str, cwd: str, command: Sequence[str] = (), *,
-                session: str | None = None, timeout: float = 10,
+                session: str | None = None, timeout: float | None = 10,
                 check: bool = False) -> subprocess.CompletedProcess:
     """Open window ``name`` in ``cwd`` in the chela session; prints its ``@id`` on stdout.
 

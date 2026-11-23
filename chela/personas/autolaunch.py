@@ -247,7 +247,8 @@ def _spawn_orchestrator_window(repo_dir: str) -> str:
                    capture_output=True)  # best-effort: clear any stale same-name window first
     envutil.scrub_tmux_secrets()    # CMX-425: the window inherits the server's global env
     # CMX-473: creates the session with this window first when it is missing.
-    out = discovery.open_window(WINDOW_NAME, repo_dir, session=TMUX_SESSION, check=True)
+    out = discovery.open_window(WINDOW_NAME, repo_dir, session=TMUX_SESSION, check=True,
+                              timeout=None)   # as before: no timeout, only CalledProcessError
     wid = out.stdout.strip() if isinstance(out.stdout, str) else ""
     target = wid if re.fullmatch(r"@\d+", wid) else WINDOW_NAME
     if re.fullmatch(r"@\d+", target):

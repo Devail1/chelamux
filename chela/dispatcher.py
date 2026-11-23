@@ -3157,7 +3157,8 @@ def _new_window(window_name: str, cwd: str) -> str:
     _scrub_node_ipc_env()
     # CMX-473: when the session is gone (its last window was closed), this creates it with
     # THIS window as its first one; otherwise a plain `new-window`.
-    out = discovery.open_window(window_name, cwd, session=TMUX_SESSION, check=True)
+    out = discovery.open_window(window_name, cwd, session=TMUX_SESSION, check=True,
+                              timeout=None)   # as before: no timeout, only CalledProcessError
     wid = out.stdout.strip() if isinstance(out.stdout, str) else ""
     return wid if re.fullmatch(r"@\d+", wid) else window_name
 
