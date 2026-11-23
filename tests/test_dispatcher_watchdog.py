@@ -95,6 +95,9 @@ def ticking(tmp_path, monkeypatch):
     monkeypatch.setattr(dispatcher, "_fire_after_done", lambda wf: None)
     monkeypatch.setattr(dispatcher, "_spawn", lambda *a, **kw: False)
     monkeypatch.setattr(dispatcher, "_send_seed", lambda *a, **kw: True)
+    # CMX-478: the dialog a `waiting` row shows is a question unless a test says otherwise
+    # (only a question is ever Escaped — see the CMX-478 section below).
+    monkeypatch.setattr(dispatcher, "_pending_dialog_tool", lambda row: "AskUserQuestion")
     return repo
 
 
@@ -703,3 +706,154 @@ def test_a_watchdog_write_does_not_lock_out_a_later_rows_hand_in(
     assert _status_of(b_id)[0] == "awaiting_review"
     assert not (wt_b / ".chela-task-finished-request.json").exists()
     assert not [r for r in caplog.records if "database is locked" in r.getMessage()]
+
+
+# ---- ✋ CMX-478: a permission prompt is a human's — never Escaped, never failed ----------
+#
+# 11-22, CMX-475 (@120): auto mode handed a Bash call to a human at 22:57:11; this watchdog
+# logged "blocked on an input dialog (AskUserQuestion?); sent Escape" at 22:57:16. Escape on
+# a permission prompt DENIES it and interrupts the turn ("Interrupted · What should Claude do
+# instead?"), so the agent stopped and the human found nothing to answer.
+
+# What Claude Code paints for a permission prompt.
+_PERMISSION = (
+    "╭───────────────────────────────────╮\n"
+    "│ Bash command                      │\n"
+    "│   python3 - <<'EOF'               │\n"
+    "│ Do you want to proceed?           │\n"
+    "│ ❯ 1. Yes                          │\n"
+    "│   2. No, and tell Claude what to do differently (esc)\n"
+    "╰───────────────────────────────────╯\n"
+)
+
+
+@pytest.mark.parametrize("dialog", ["Bash", "Edit", None])
+@pytest.mark.parametrize("nudged", [None, _OLD], ids=["first_encounter", "grace_expired"])
+def test_a_permission_prompt_is_never_escaped_or_failed(ticking, monkeypatch, dialog, nudged):
+    """A `waiting` run whose dialog is a permission prompt — or one that cannot be named —
+    is left for a human at both watchdog steps: no Escape on first encounter, no failure a
+    grace later. Its row is untouched, and the hold is counted. The negative controls are
+    the two question tests above (same row, same status, a question → Escape, then fail)."""
+    task_id = _seed_running(ticking, nudged=nudged)
+    monkeypatch.setattr(dispatcher, "_pending_dialog_tool", lambda row: dialog)
+    monkeypatch.setattr(dispatcher, "_capture_pane", lambda w, **_: _PERMISSION)
+    monkeypatch.setattr(dispatcher, "_agent_status", lambda w, **_: "waiting")
+    escaped = []
+    monkeypatch.setattr(dispatcher, "_dismiss_input_block", escaped.append)
+
+    summary = dispatcher.tick(ticking / "WORKFLOW.md")
+
+    assert escaped == []
+    assert summary["watchdog_unblocked"] == 0
+    assert summary["reconciled_failed"] == 0
+    assert summary["watchdog_prompt_held"] == 1
+    assert _status_of(task_id)[0] == "running"
+    assert _row(task_id)["idle_nudged_at"] == nudged
+
+
+def _seed_window(task_id: str, wid: str = "@120") -> None:
+    with dispatcher._db() as conn:
+        conn.execute("UPDATE runs SET window_id=? WHERE task_id=?", (wid, task_id))
+        conn.commit()
+
+
+def _log_request(tool: str, wid: str = "@120", ts: float | None = None) -> None:
+    from chela import event_log
+    record = event_log.append("hook.permission_request", f"permission asked — {tool}",
+                              {"tool_name": tool, "tool_input": {}}, wid=wid)
+    if ts is not None:                       # rewrite the stamp: the log has no ts argument
+        path = event_log.log_path()
+        lines = path.read_text().splitlines()
+        lines[-1] = json.dumps({**record, "ts": ts})
+        path.write_text("\n".join(lines) + "\n")
+
+
+# captured at import, before `ticking` stubs it
+_REAL_PENDING = dispatcher._pending_dialog_tool
+
+
+@pytest.fixture
+def real_log(tmp_path, monkeypatch):
+    """A per-test event log, and the real `_pending_dialog_tool` reading it."""
+    monkeypatch.setenv("CHELA_EVENTS_FILE", str(tmp_path / "events.jsonl"))
+    monkeypatch.setattr(dispatcher, "_pending_dialog_tool", _REAL_PENDING)
+
+
+@pytest.mark.parametrize(("tool", "escapes"), [("Bash", False), ("AskUserQuestion", True)])
+def test_the_11_22_incident_through_tick_and_the_real_event_log(
+        ticking, real_log, monkeypatch, tool, escapes):
+    """End to end, no stub between the hook record and the decision: a running row in window
+    @120, `waiting`, whose newest `hook.permission_request` is a Bash call → NOT Escaped
+    (the 11-22 Escape). The same row with an AskUserQuestion record IS Escaped — the negative
+    control proving the arm still runs."""
+    task_id = _seed_running(ticking, nudged=None)
+    _seed_window(task_id)
+    _log_request(tool)
+    monkeypatch.setattr(dispatcher, "_capture_pane", lambda w, **_: _PERMISSION)
+    monkeypatch.setattr(dispatcher, "_agent_status", lambda w, **_: "waiting")
+    escaped = []
+    monkeypatch.setattr(dispatcher, "_dismiss_input_block", escaped.append)
+
+    summary = dispatcher.tick(ticking / "WORKFLOW.md")
+
+    assert escaped == ([WID] if escapes else [])
+    assert summary["watchdog_unblocked"] == (1 if escapes else 0)
+    assert summary["watchdog_prompt_held"] == (0 if escapes else 1)
+
+
+def _row_for(window_id, started_at=_OLD, window_epoch=None):
+    return {"window_id": window_id, "started_at": started_at, "window_epoch": window_epoch}
+
+
+def test_a_window_id_from_a_dead_tmux_server_is_unknown(real_log, monkeypatch):
+    """tmux renumbers on restart: once the server that issued the row's id is gone, @120's
+    records belong to whoever holds the number now, so the dialog is unknown."""
+    monkeypatch.setattr(dispatcher.epoch, "current", lambda: "e1")
+    _log_request("AskUserQuestion")
+    assert dispatcher._pending_dialog_tool(_row_for("@120", window_epoch="e0")) is None
+    assert dispatcher._pending_dialog_tool(_row_for("@120", window_epoch="e1")) == \
+        "AskUserQuestion"
+    assert dispatcher._pending_dialog_tool(_row_for("@120", window_epoch=None)) == \
+        "AskUserQuestion"                    # unstamped is unknown, not stale
+
+
+def test_pending_dialog_tool_is_the_newest_request_of_this_window(real_log):
+    _log_request("AskUserQuestion")
+    _log_request("Bash")
+    _log_request("AskUserQuestion", wid="@7")            # another window's — not ours
+    assert dispatcher._pending_dialog_tool(_row_for("@120")) == "Bash"
+    _log_request("AskUserQuestion")
+    assert dispatcher._pending_dialog_tool(_row_for("@120")) == "AskUserQuestion"
+
+
+@pytest.mark.parametrize("window_id", [None, "", "cmx-1", "@12x", " "])
+def test_pending_dialog_tool_without_a_window_id_is_unknown(real_log, window_id):
+    _log_request("AskUserQuestion", wid="@120")
+    assert dispatcher._pending_dialog_tool(_row_for(window_id)) is None
+
+
+def test_pending_dialog_tool_with_no_record_is_unknown(real_log):
+    assert dispatcher._pending_dialog_tool(_row_for("@120")) is None
+
+
+def test_a_request_older_than_the_run_is_a_previous_holder_of_the_id(real_log):
+    """tmux recycles ids: a question logged before this run started is not its dialog."""
+    started = datetime.now(timezone.utc) - timedelta(minutes=10)
+    _log_request("AskUserQuestion", ts=started.timestamp() - 60)
+    assert dispatcher._pending_dialog_tool(_row_for("@120", started.isoformat())) is None
+    _log_request("AskUserQuestion", ts=started.timestamp() + 60)
+    assert dispatcher._pending_dialog_tool(_row_for("@120", started.isoformat())) == \
+        "AskUserQuestion"
+
+
+def test_a_request_with_no_tool_name_is_unknown(real_log):
+    from chela import event_log
+    event_log.append("hook.permission_request", "x", {"tool_input": {}}, wid="@120")
+    assert dispatcher._pending_dialog_tool(_row_for("@120")) is None
+
+
+def test_an_unreadable_event_log_is_unknown_and_never_raises(real_log, monkeypatch):
+    def boom(*a, **k):
+        raise RuntimeError("log unreadable")
+    monkeypatch.setattr(dispatcher.event_log, "read", boom)
+    assert dispatcher._pending_dialog_tool(_row_for("@120")) is None
