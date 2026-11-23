@@ -111,7 +111,7 @@ Columns: **site** (`file:function`), **what it sends or reads, and why**, **arri
 | `chela/suggest_names.py:_deliver` | Same for a suggested title: native `idle`, no queued rc rename, `-e` capture, `dialog_showing`, empty prompt (the CMX-434 gates). | Read + writes `/rename` | 4 | keep |
 | `chela/suggest_names.py:deliver_title` | The locked public entry that calls `_deliver`. | Read + writes `/rename` | 4 | keep |
 | `chela/agent_manager.py:stop_agent` | Types `/exit` through `send_tmux` with `interrupt=True`, so Escape **cancels a turn in progress**. Checks nothing first: no status, no draft (a draft gets `/exit` appended and submitted). | A slash command | 4 | replace |
-| `chela/dispatcher.py:_dismiss_input_block` | Sends Escape to a dispatched agent stuck on an AskUserQuestion or permission dialog with no human there, so the model falls back to its own default. A `PreToolUse` hook that refuses AskUserQuestion when `CHELA_RUN` is set would mean the dialog never opens. chela already ships gate hooks. | A control key | 4 | replace |
+| `chela/dispatcher.py:_dismiss_input_block` | Sends Escape to a dispatched agent stuck on an AskUserQuestion with no human there, so the model falls back to its own default. Since CMX-478 a permission prompt is never Escaped (Escape denies the call); it alerts the inbox. A `PreToolUse` hook that refuses AskUserQuestion when `CHELA_RUN` is set would mean the dialog never opens. chela already ships gate hooks. | A control key | 4 | replace |
 | `chela/messenger.py:send_escape` | One Escape keypress (`/esc` on Telegram, fleet pause). | A control key | 4 | keep |
 | `chela/messenger.py:send_key` | One tmux key name (`Up`, `C-c`, `Enter`…). Primitive behind the Telegram keyboard and the AskUserQuestion answer keys. | A control key | 4 | keep |
 | `chela/messenger.py:resend_enter` | A bare Enter for a typed prompt the TUI didn't submit (seed retries, image chip). Not needed for the seed after slice 2; `deliver_image` still uses it. | A control key | 4 | keep |
@@ -267,7 +267,7 @@ driving window), not a removed fallback. When the socket can't be
 
 * **Scope:** a `PreToolUse` hook that refuses `AskUserQuestion` inside a dispatched run
   (`CHELA_RUN` set), with a reason telling the agent to pick its own default. It replaces
-  `dispatcher._dismiss_input_block`'s Escape. A permission dialog still reads `waiting`
-  natively and is handled as it is today.
+  `dispatcher._dismiss_input_block`'s Escape. A permission prompt is out of scope: since
+  CMX-478 it is never Escaped and alerts the inbox.
 * **Negative control:** a dispatched-run AskUserQuestion is refused by the hook, and the
   watchdog sends no Escape. The old path sends Escape.
