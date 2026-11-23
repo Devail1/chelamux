@@ -55,6 +55,13 @@ test('after /compact: "compacted", never the stale pre-compact %', () => {
   expect(ctxView({ state: 'compacted', used_pct: 82 })?.chip).toBe('compacted');
 });
 
+test('a state with no % still names the cost in its tooltip (0 included), and omits a missing one', () => {
+  expect(ctxView({ state: 'compacted', cost_usd: 4.2 })?.tip)
+    .toBe('Context: compacted; the real % shows after the next turn · $4.2');
+  expect(ctxView({ state: 'no_turns', cost_usd: 0 })?.tip).toBe('Context: — (no turn yet) · $0');
+  expect(ctxView({ state: 'no_turns', cost_usd: null })?.tip).toBe('Context: — (no turn yet)');
+});
+
 test('an unknown window shows absolute tokens, no %', () => {
   const v = ctxView({ used: '430K', used_pct: null, total: null, window_source: 'unknown' });
   expect(v).toMatchObject({ chip: '430K', width: '0%', tip: 'Context: 430K tokens · window size unknown' });
