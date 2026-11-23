@@ -53,7 +53,7 @@ _SAFE_NAME_RE = re.compile(r"^[^\x00-\x1f\x7f-\x9f]{1,128}$")
 
 
 def _target(wid: str) -> str:
-    return f"{config.current_session()}:{wid}"
+    return config.window_target(wid)
 
 
 def _get_option(wid: str, option: str) -> str:
@@ -214,7 +214,7 @@ def flush_pending() -> dict[str, str]:
     """Retry every queued rename once — the daemon's per-tick call. ``{wid: outcome}``."""
     try:
         out = subprocess.run(
-            ["tmux", "list-windows", "-t", config.current_session(), "-F",
+            ["tmux", "list-windows", "-t", config.session_target(), "-F",
              f"#{{window_id}}\t#{{{PENDING_OPTION}}}\t#{{{PUSHED_OPTION}}}"],
             capture_output=True, text=True, timeout=5,
         )

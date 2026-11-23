@@ -114,6 +114,9 @@ def fleet(tmp_path, monkeypatch, request):
     # The in-flight run was spawned under that same server, so its recorded id still names
     # its agent.
     monkeypatch.setattr(discovery, "session_exists", lambda *a, **k: True)
+    # CMX-470: and no lookalike session sits next to it (a real `list-sessions` would read
+    # the developer's own server, or fail on a CI box with none).
+    monkeypatch.setattr(discovery, "list_sessions", lambda: [config.current_session()])
     monkeypatch.setattr(discovery, "get_windows_by_id", lambda: {"@1": "cmx-66"})
     # tmux.node_ipc_env: the global environment table carries no leaked Node IPC vars —
     # the state `dispatcher._new_window`'s scrub is supposed to leave behind after every

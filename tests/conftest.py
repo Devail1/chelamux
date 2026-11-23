@@ -890,6 +890,10 @@ def _tmux_violation(argv: list, env: dict | None) -> str | None:
                 break
             except (ValueError, IndexError):
                 continue
+        # CMX-470: chela's targets are exact-match (`=session`, `=session:@N`); `=` is
+        # tmux syntax, not part of the name.
+        if target is not None:
+            target = target.removeprefix("=")
         if target is not None and (target == safe_session
                                     or target.startswith(f"{safe_session}:")):
             return None  # scoped to a session that can never exist
@@ -900,6 +904,16 @@ def _tmux_violation(argv: list, env: dict | None) -> str | None:
         "seam that issues it (e.g. `monkeypatch.setattr(restore_mod, "
         "'_default_kill_window', lambda wid: None)`)."
     )
+
+
+@pytest.fixture(autouse=True)
+def _not_a_chela_service(monkeypatch):
+    """CMX-470: `config.mark_service` (called by `cmd_run`, `cmd_dashboard`, …) flips a
+    process-global flag that makes `current_session()` ignore `$TMUX_PANE`. Reset it per
+    test, so a test that runs a service entrypoint can't change session resolution for
+    every later test on the same worker."""
+    from chela import config
+    monkeypatch.setattr(config, "_SERVICE", None)
 
 
 @pytest.fixture(autouse=True)

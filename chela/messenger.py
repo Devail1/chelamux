@@ -215,7 +215,7 @@ def refuses_paste(window_id: str) -> str | None:
     msg``, the Telegram bridge) — and in bash-input mode every one of them would have been
     executed just the same.
     """
-    mode = pane_input_mode(_capture_pane(f"{config.current_session()}:{window_id}"))
+    mode = pane_input_mode(_capture_pane(config.window_target(window_id)))
     return mode if mode in UNSAFE_INPUT_MODES else None
 
 
@@ -242,7 +242,7 @@ def send_tmux(window_id: str, text: str, *, interrupt: bool = True) -> bool:
     caller that already verified the session idle and must never cancel a turn
     (:mod:`chela.rc_rename`).
     """
-    target = f"{config.current_session()}:{window_id}"
+    target = config.window_target(window_id)
     unsafe = refuses_paste(window_id)
     if unsafe:
         log.warning("refusing to type into %s: its prompt is in %s-input mode — the text "
@@ -330,7 +330,7 @@ def resend_enter(window_id: str) -> bool:
     pane may have flipped to bash-input mode since the original paste, and an
     Enter sent into that mode would execute whatever now sits on that line.
     """
-    target = f"{config.current_session()}:{window_id}"
+    target = config.window_target(window_id)
     unsafe = refuses_paste(window_id)
     if unsafe:
         log.warning("refusing to send Enter into %s: its prompt is in %s-input mode",
@@ -357,7 +357,7 @@ def capture_pane(window_id: str, *, ansi: bool = False) -> str:
     renderer parses); the default (no ``-e``) returns plain text. Read-only —
     ``capture-pane`` never mutates the pane.
     """
-    target = f"{config.current_session()}:{window_id}"
+    target = config.window_target(window_id)
     cmd = ["tmux", "capture-pane", "-p", "-t", target]
     if ansi:
         cmd.insert(2, "-e")  # -> tmux capture-pane -e -p -t <target>
@@ -375,7 +375,7 @@ def pane_size(window_id: str) -> tuple[int, int] | None:
     strips trailing blanks, so the capture alone can't tell a mostly-empty 120-column pane
     from a 2-column one. Read-only, like :func:`capture_pane`.
     """
-    target = f"{config.current_session()}:{window_id}"
+    target = config.window_target(window_id)
     cmd = ["tmux", "display-message", "-p", "-t", target, "#{pane_width}x#{pane_height}"]
     try:
         out = subprocess.run(cmd, capture_output=True, text=True, timeout=5)
@@ -547,7 +547,7 @@ def send_key(window_id: str, key: str) -> bool:
     so the caller asks for it explicitly). Read-only otherwise; returns True on
     success, False if tmux errors.
     """
-    target = f"{config.current_session()}:{window_id}"
+    target = config.window_target(window_id)
     try:
         subprocess.run(
             ["tmux", "send-keys", "-t", target, key],
