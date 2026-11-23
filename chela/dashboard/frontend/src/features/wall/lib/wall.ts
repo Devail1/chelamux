@@ -222,7 +222,10 @@ export async function renderTerminals(ctxRead?: Promise<unknown> | null): Promis
   mountWallToolbar($('wall-toolbar-island'));
   mountDock($('term-min-dock'));
   if (!wids.includes(active)) active = initialPane(wids);
-  if (sigOf(wids) === termSig) return;
+  if (sigOf(wids) === termSig) {
+    if (mode === 'single') pinKeybar(); // CMX-102: the kept pane still re-fits to the keyboard
+    return;
+  }
   // CMX-493: the wall is up and only the pane set moved: take the change in place. A rebuild
   // reloads every iframe, the one being typed into included.
   if (mode === 'wall' && wids.length && G.hasGrid() && $('term-stage')?.querySelector('.grid-stack')) {
