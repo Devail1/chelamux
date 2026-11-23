@@ -161,6 +161,57 @@ def test_the_dispatcher_raises_when_the_window_cannot_open(tmux, monkeypatch):
         dispatcher._new_window("cmx-1", "/wt")
 
 
+def _stub_spawn(monkeypatch):
+    from chela import agent_manager
+    monkeypatch.setattr(discovery, "get_all_windows", lambda: {})
+    monkeypatch.setattr(discovery.config, "current_session", lambda: SESSION)
+    monkeypatch.setattr(agent_manager, "lock_window_name", lambda *a, **k: None)
+
+
+def test_a_sandboxed_share_recreates_a_missing_session_with_its_window(
+        tmux, monkeypatch, tmp_path):
+    from chela import share_sandbox, spawn
+    rec = tmux(exists=[False])
+    _stub_spawn(monkeypatch)
+    monkeypatch.setattr(share_sandbox, "preflight", lambda real, net="none": "")
+    monkeypatch.setattr(share_sandbox, "new_session_id", lambda: "sid")
+    monkeypatch.setattr(share_sandbox, "launcher_argv",
+                        lambda sid, real, net: ["docker", "run", sid, net])
+    result = spawn.spawn_sandbox_window(tmp_path)
+    assert (result.ok, result.name, result.wid) == (True, "sandbox-1", "@9"), result.error
+    [(argv, _)] = rec.creates()
+    assert argv == ["tmux", "new-session", "-d", "-s", SESSION, "-n", "sandbox-1",
+                    "-c", str(tmp_path.resolve()), "-P", "-F", "#{window_id}",
+                    "--", "docker", "run", "sid", "none"]
+    assert rec.windows() == []
+
+
+def test_a_human_spawn_recreates_a_missing_session_with_its_window(tmux, monkeypatch, tmp_path):
+    from chela import spawn
+    rec = tmux(exists=[False])
+    _stub_spawn(monkeypatch)
+    monkeypatch.setattr(spawn.config, "remote_control_enabled", lambda: False)
+    result = spawn.spawn_window(tmp_path, name="mine")
+    assert (result.ok, result.name, result.wid) == (True, "mine", "@9"), result.error
+    [(argv, _)] = rec.creates()
+    assert argv == ["tmux", "new-session", "-d", "-s", SESSION, "-n", "mine",
+                    "-c", str(tmp_path.resolve()), "-P", "-F", "#{window_id}"]
+    assert rec.windows() == []
+
+
+def test_the_autolaunched_orchestrator_recreates_a_missing_session(tmux, monkeypatch):
+    from chela.personas import autolaunch
+    rec = tmux(exists=[False])
+    monkeypatch.setattr(autolaunch, "TMUX_SESSION", SESSION)
+    monkeypatch.setattr(autolaunch.config, "remote_control_enabled", lambda: False)
+    autolaunch._spawn_orchestrator_window("/repo")
+    [(argv, kw)] = rec.creates()
+    assert argv == ["tmux", "new-session", "-d", "-s", SESSION, "-n", autolaunch.WINDOW_NAME,
+                    "-c", "/repo", "-P", "-F", "#{window_id}"]
+    assert kw["timeout"] is None
+    assert rec.windows() == []
+
+
 def test_the_orchestrator_autolaunch_opens_through_open_window(monkeypatch):
     from chela.personas import autolaunch
     seen = []

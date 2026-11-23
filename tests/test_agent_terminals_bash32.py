@@ -338,6 +338,47 @@ def test_one_failed_session_check_does_not_reap_the_wall(tmp_path):
     assert "- @8 (window gone)" not in out, out
 
 
+def test_only_consecutive_failed_session_checks_reap_the_wall(tmp_path):
+    """Two failed has-session checks with a good one BETWEEN them are two separate hiccups:
+    the present tick resets the count, so the second one reaps nothing either. Each blip is
+    one-shot (the stub consumes `blip` and fails exactly that call), so no tick is timed."""
+    env = _layout(tmp_path)
+    log = tmp_path / "tmux.log"
+    blip = tmp_path / "blip"
+    _stub(tmp_path / "bin" / "tmux",
+          f'if [ "$1" = has-session ]; then\n'
+          f'  if [ -e "{blip}" ]; then rm "{blip}"; echo blipped >> "{log}"; exit 1; fi\n'
+          f'  echo has-session >> "{log}"\n'
+          "fi\nexit 0\n")
+
+    def wait(pred, what):
+        deadline = time.monotonic() + 30
+        while not pred():
+            assert time.monotonic() < deadline, what
+            time.sleep(0.05)
+
+    _windows(tmp_path, "@8")
+    proc = _start("host", tmp_path, env)
+    try:
+        _wait_map(tmp_path, {"@8": 6200})
+        pid = int((tmp_path / "pids" / "6200").read_text())
+        for _ in range(2):
+            blip.write_text("")
+            wait(lambda: not blip.exists(), "the supervisor never checked the session")
+            n = log.read_text().count("has-session")
+            # two good checks: the blip's tick is over and a present tick ran in full
+            wait(lambda: log.read_text().count("has-session") >= n + 2, "it stopped polling")
+        assert _alive(pid), "two isolated session-check failures reaped a live tile"
+        assert int((tmp_path / "pids" / "6200").read_text()) == pid
+    finally:
+        proc.send_signal(signal.SIGTERM)
+        out, _ = proc.communicate(timeout=30)
+    assert log.read_text().count("blipped") == 2
+    assert out.count("no tmux session 'chela' — no windows") == 2, out   # both were seen
+    assert out.count("discovery returned empty; keeping current set") == 2, out
+    assert "- @8 (window gone)" not in out, out
+
+
 def test_negative_control_the_old_empty_guard_held_a_dead_sessions_ttyds(tmp_path):
     """The guard that skips an empty tick while ttyds run must NOT apply when the session is
     absent: with it applied (the old reading), the ended session's ttyd is held forever."""
