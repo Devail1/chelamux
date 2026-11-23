@@ -1093,7 +1093,7 @@ def _pane_root(wid: str) -> int | str:
     """The pid of the window's only pane, or why it can't be determined."""
     try:
         p = subprocess.run(
-            ["tmux", "list-panes", "-t", f"{config.current_session()}:{wid}",
+            ["tmux", "list-panes", "-t", config.window_target(wid),
              "-F", "#{pane_pid}\t#{pane_dead}"],
             capture_output=True, text=True, timeout=5)
     except (OSError, subprocess.TimeoutExpired):

@@ -61,7 +61,7 @@ def _capture_send_keys(monkeypatch, dispatcher, tmux_global: str = "",
             return SimpleNamespace(stdout="@100\n", returncode=0)
         if argv[:3] == ["tmux", "show-environment", "-g"]:
             return SimpleNamespace(stdout=tmux_global, returncode=0)
-        if argv[:4] == ["tmux", "show-environment", "-t", dispatcher.TMUX_SESSION]:
+        if argv[:4] == ["tmux", "show-environment", "-t", f"={dispatcher.TMUX_SESSION}"]:
             return SimpleNamespace(stdout=tmux_session, returncode=0)
         if argv[:2] == ["tmux", "send-keys"] and len(argv) > 4:
             sent.append(argv[4])

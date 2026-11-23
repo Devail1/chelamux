@@ -316,10 +316,10 @@ def spawn_window(cwd: str | os.PathLike, *, command: str | None = None,
         name = agent_manager.window_name_for_cwd(real, taken)
     if not _WINDOW_NAME_RE.match(name):
         return SpawnResult(ok=False, error=f"invalid window name: {name}")
-    target = f"{session}:{name}"
+    target = config.window_target(name, session)
     try:
         proc = subprocess.run(
-            ["tmux", "new-window", "-t", f"{session}:", "-n", name, "-c", real,
+            ["tmux", "new-window", "-t", config.window_target("", session), "-n", name, "-c", real,
              "-P", "-F", "#{window_id}"],
             capture_output=True, text=True, timeout=10, env=envutil.child_env(),
         )
@@ -417,7 +417,7 @@ def spawn_sandbox_window(cwd: str | os.PathLike, net: str = "none") -> SpawnResu
     argv = share_sandbox.launcher_argv(share_sandbox.new_session_id(), real, net)
     try:
         proc = subprocess.run(
-            ["tmux", "new-window", "-t", f"{session}:", "-n", name, "-c", real,
+            ["tmux", "new-window", "-t", config.window_target("", session), "-n", name, "-c", real,
              "-P", "-F", "#{window_id}", "--", *argv],
             capture_output=True, text=True, timeout=10, env=envutil.child_env(),
         )
@@ -428,6 +428,6 @@ def spawn_sandbox_window(cwd: str | os.PathLike, net: str = "none") -> SpawnResu
         return SpawnResult(ok=False, error=err)
     wid = (proc.stdout or "").strip()
     have_wid = bool(_WID_RE.fullmatch(wid))
-    agent_manager.lock_window_name(wid if have_wid else f"{session}:{name}")
+    agent_manager.lock_window_name(wid if have_wid else config.window_target(name, session))
     log.info("spawned sandboxed session %s (%s, net=%s) in %s", name, wid or "no-id", net, real)
     return SpawnResult(ok=True, name=name, wid=wid if have_wid else None, cwd=real)

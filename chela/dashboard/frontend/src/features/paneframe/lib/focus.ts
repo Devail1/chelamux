@@ -7,6 +7,8 @@
 // frame can answer or the whole window is unfocused (a screenshot tool steals OS focus: keep
 // marking the pane focus returns to). Every tick re-asserts exactly one `.term-focused`.
 
+import { reportInput } from './watch.ts';
+
 /** `fn()`, or undefined when it throws (a cross-document access the browser refuses). */
 export function attempt<T>(fn: () => T): T | undefined {
   try {
@@ -74,6 +76,7 @@ export function stopFocusTracking(): void {
  * reliably move it from another focused pane (the ring moves, typing does not), so focus the
  * element too and route into xterm (`term`, ttyd's page global). All three, unconditionally. */
 export function focusFrame(ifr: HTMLIFrameElement): void {
+  reportInput(ifr); // CMX-476: focusing a pane from the page is input on this device
   attempt(() => ifr.contentWindow?.focus());
   attempt(() => ifr.focus());
   attempt(() => (ifr.contentWindow as (Window & { term?: { focus?: () => void } }) | null)?.term?.focus?.());

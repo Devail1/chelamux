@@ -28,6 +28,8 @@ chela-agent-terminals --interpreter none -- agent-terminals`). It needs `ttyd` o
 the tmux session, only waits for it: after a reboot the wall fills in once a session exists
 (starting one from the dashboard creates it).
 
+Run `pm2 start` from a shell outside tmux, or set `CHELA_TMUX_SESSION=chela` in `chela.env`, and never name another tmux session `chela-*` (`chela doctor` warns about both).
+
 **Do not start** `chela-telegram` or `chela-collab`: delete those two lines from your copy of
 the ecosystem file, so a cold `pm2 start` cannot bring them back. In `chela.env` and
 `secrets.env`, **leave unset**:

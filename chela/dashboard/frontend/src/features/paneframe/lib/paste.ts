@@ -9,6 +9,7 @@
 import { api } from '../../../shared/api/index.ts';
 import { uriListToText } from '../model.ts';
 import { host } from './host.ts';
+import { framesOf, reportInput } from './watch.ts';
 
 const postJson = (path: string, body: unknown) =>
   api(path, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
@@ -17,6 +18,7 @@ const postJson = (path: string, body: unknown) =>
 export async function termKey(key: string): Promise<void> {
   const wid = host.activeWid();
   if (!wid) return;
+  framesOf(wid).forEach(reportInput); // CMX-476: a keybar key is input on this device
   await postJson('/api/term/key', { agent: wid, key }).catch((e: unknown) => console.error('termKey', e));
 }
 
@@ -78,6 +80,7 @@ export async function termPaste(btn: HTMLElement): Promise<void> {
   const wid = host.activeWid();
   const cb = (navigator as Partial<Navigator>).clipboard as Partial<Clipboard> | undefined;
   if (!wid) return;
+  framesOf(wid).forEach(reportInput); // CMX-476: a paste is input on this device
   if (!cb || (!cb.read && !cb.readText)) return flash(btn, 'No clipboard');
   try {
     const got = await (async () => (cb.read ? cb.read.call(cb) : (cb.readText as () => Promise<string>).call(cb)))().catch(() => DENIED);

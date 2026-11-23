@@ -176,7 +176,7 @@ def _rename(wid: str, name: str) -> bool:
     """Rename ``wid`` to ``name`` and mark it manual, as the dashboard rename does."""
     from chela import agent_manager, rc_rename
 
-    target = f"{config.current_session()}:{wid}"
+    target = config.window_target(wid)
     try:
         out = subprocess.run(["tmux", "rename-window", "-t", target, name],
                              capture_output=True, text=True, timeout=5)

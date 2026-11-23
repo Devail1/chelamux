@@ -243,11 +243,11 @@ def _spawn_orchestrator_window(repo_dir: str) -> str:
     pane shell, or ``agent_manager.claude_pid`` never correlates it and the window gets no
     Telegram topic. Returns the new window's ``@id`` (or the bare name if tmux gave no id).
     """
-    subprocess.run(["tmux", "kill-window", "-t", f"{TMUX_SESSION}:{WINDOW_NAME}"],
+    subprocess.run(["tmux", "kill-window", "-t", config.window_target(WINDOW_NAME, TMUX_SESSION)],
                    capture_output=True)  # best-effort: clear any stale same-name window first
     envutil.scrub_tmux_secrets()    # CMX-425: the window inherits the server's global env
     out = subprocess.run(
-        ["tmux", "new-window", "-t", f"{TMUX_SESSION}:", "-n", WINDOW_NAME,
+        ["tmux", "new-window", "-t", config.window_target("", TMUX_SESSION), "-n", WINDOW_NAME,
          "-c", repo_dir, "-P", "-F", "#{window_id}"],
         check=True, capture_output=True, text=True, env=envutil.child_env(),
     )
@@ -259,7 +259,7 @@ def _spawn_orchestrator_window(repo_dir: str) -> str:
         # actor stamp is load-bearing: it is how contract.merge knows THIS merge came from the
         # auto-launched orchestrator and must therefore hold a live attended-lease to proceed.
         subprocess.run(
-            ["tmux", "send-keys", "-t", f"{TMUX_SESSION}:{target}",
+            ["tmux", "send-keys", "-t", config.window_target(target, TMUX_SESSION),
              f"export CHELA_WID={target} {config.ACTOR_ENV}={config.AUTO_ORCHESTRATOR_ACTOR}",
              "Enter"],
             check=True, capture_output=True,
@@ -278,7 +278,7 @@ def _spawn_orchestrator_window(repo_dir: str) -> str:
     if config.remote_control_enabled():
         rc_cmd = _add_remote_control(cmd, WINDOW_NAME)
         if rc_cmd != cmd:
-            rc_rename.mark_launched(f"{TMUX_SESSION}:{target}", WINDOW_NAME)
+            rc_rename.mark_launched(config.window_target(target, TMUX_SESSION), WINDOW_NAME)
         cmd = rc_cmd
     # CMX-223: a chela-owned, deterministic peer-messaging socket path, same as the
     # dispatcher's own agents — lets messenger.send_peer address this window without
@@ -289,7 +289,7 @@ def _spawn_orchestrator_window(repo_dir: str) -> str:
         if socket_arg:
             cmd = f"{cmd} {socket_arg}"
     subprocess.run(
-        ["tmux", "send-keys", "-t", f"{TMUX_SESSION}:{target}", cmd, "Enter"],
+        ["tmux", "send-keys", "-t", config.window_target(target, TMUX_SESSION), cmd, "Enter"],
         check=True, capture_output=True,
     )
     return target
@@ -386,7 +386,7 @@ def evaluate_teardown(store: dict, statuses: dict[str, str],
 
 
 def _kill_orchestrator_window(wid: str) -> None:
-    subprocess.run(["tmux", "kill-window", "-t", f"{TMUX_SESSION}:{wid}"], capture_output=True)
+    subprocess.run(["tmux", "kill-window", "-t", config.window_target(wid, TMUX_SESSION)], capture_output=True)
 
 
 def teardown(wid: str, reason: str) -> dict:

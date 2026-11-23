@@ -126,7 +126,7 @@ def test_retry_kills_stale_window_before_new_window(tmp_path):
     assert "kill-window" in kinds
     assert "new-window" in kinds
     assert kinds.index("kill-window") < kinds.index("new-window")
-    assert f"{dispatcher.TMUX_SESSION}:@42" in fake.killed_targets()
+    assert f"={dispatcher.TMUX_SESSION}:@42" in fake.killed_targets()
 
     # No duplicate-named windows survive: exactly one window named `branch`.
     assert sum(1 for _, n in fake.windows if n == branch) == 1
@@ -160,8 +160,8 @@ def test_spawn_targets_captured_id_not_bare_name(tmp_path):
     # new-window returned @100 (FakeTmux's first id).
     new_id = "@100"
     # agent-cmd send-keys targeted <session>:@100, not <session>:test-1.
-    assert f"{dispatcher.TMUX_SESSION}:{new_id}" in fake.send_keys_targets()
-    assert f"{dispatcher.TMUX_SESSION}:test-1" not in fake.send_keys_targets()
+    assert f"={dispatcher.TMUX_SESSION}:{new_id}" in fake.send_keys_targets()
+    assert f"={dispatcher.TMUX_SESSION}:test-1" not in fake.send_keys_targets()
     # readiness poll and prompt send used the bare @id (helpers prepend session).
     assert ready_targets == [new_id]
     assert captured["send_tmux_target"] == new_id
@@ -287,8 +287,8 @@ def test_kill_windows_named_only_matches_exact_name(tmp_path):
     assert "test-1" not in surviving
     assert surviving == {"other", "test-10"}
     assert fake.killed_targets() == [
-        f"{dispatcher.TMUX_SESSION}:@1",
-        f"{dispatcher.TMUX_SESSION}:@2",
+        f"={dispatcher.TMUX_SESSION}:@1",
+        f"={dispatcher.TMUX_SESSION}:@2",
     ]
 
 
