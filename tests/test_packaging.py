@@ -273,7 +273,6 @@ def test_agent_terminals_execs_bash_on_the_script_with_this_python(execs, monkey
     monkeypatch.setenv("CHELA_TMUX_SESSION", "kept")
     monkeypatch.setenv("TMUX", "/tmp/tmux-1000/default,1,0")
     monkeypatch.setenv("TMUX_PANE", "%3")
-    monkeypatch.setenv("CHELA_TERM_HEAL", "true")        # nor does an exported heal
     with pytest.raises(_Exec):
         main.cmd_agent_terminals(argparse.Namespace())
     [(path, argv, env)] = calls
@@ -282,7 +281,6 @@ def test_agent_terminals_execs_bash_on_the_script_with_this_python(execs, monkey
     assert env["PYTHON"] == sys.executable
     assert env["CHELA_TMUX_SESSION"] == "kept"
     assert "TMUX" not in env and "TMUX_PANE" not in env
-    assert env["CHELA_TERM_HEAL"] == "false"
     assert capsys.readouterr().err == ""
 
 

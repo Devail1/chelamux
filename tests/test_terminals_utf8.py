@@ -55,12 +55,13 @@ def test_the_reason_for_u_is_written_down_next_to_it():
     )
 
 
-def test_the_anchor_session_is_not_confused_for_the_client():
-    """The supervisor also creates the SHARED session when it has gone missing — since
-    CMX-21 through `chela.discovery.ensure_session` (a scrubbed `new-session -A -d`). That one is a detached server-side helper writing to no terminal, so it
-    needs no `-u`; this test pins that the assertion above is about the ttyd client and
-    does not silently start passing because some other tmux call grew the flag."""
+def test_the_only_new_session_is_the_ttyd_client():
+    """CMX-473: the supervisor never creates the SHARED session (no anchor, no heal: a
+    spawn creates it with its own window first). So the one `new-session` in the script's
+    code is the ttyd client's grouped session, the one the `-u` assertion above is about,
+    and it does not silently start passing because some other tmux call grew the flag."""
     sh = AGENT_TERMINALS_SH.read_text()
-    assert "discovery.ensure_session" in sh, \
-        "the session-recreate helper moved; re-check the regex"
+    code = "\n".join(line for line in sh.splitlines() if not line.lstrip().startswith("#"))
+    assert "ensure_session" not in code and "open_window" not in code
+    assert code.count("new-session") == 1, [ln for ln in code.splitlines() if "new-session" in ln]
     assert _spawn_tmux_invocation().count("new-session") == 1

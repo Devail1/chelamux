@@ -27,6 +27,7 @@ import ast
 import inspect
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -161,17 +162,22 @@ def _wait(pred, timeout=15, proc=None, msg=""):
     return False
 
 
-# --- half 1: a missing session must not be fatal ---
+# --- half 1: a missing session must not be fatal — and is not created either ---
 
-def test_missing_session_is_created_not_fatal(env, sock):
-    """Pre-fix: session absent -> exit 1, and pm2 hot-loops it. Now: create it, stay up."""
+def test_missing_session_is_not_fatal_and_is_never_created(env, sock):
+    """Pre-fix: session absent -> exit 1, and pm2 hot-loops it. Then it healed by creating
+    the session with an empty `shell-1` anchor. CMX-473: no anchor — the supervisor stays
+    up, reads "no session" as "no windows" (an empty map) and leaves the create to a spawn."""
     assert not _has_session(env, sock)
     proc = _run_bg(env)
     try:
-        assert _wait(lambda: _has_session(env, sock), proc=proc,
-                     msg="it exited instead of creating the missing session"), \
-            "supervisor never created the missing session"
-        assert proc.poll() is None, "supervisor exited after creating the session"
+        map_file = Path(env["CHELA_DIR"]) / "agent_terminals.json"
+        assert _wait(lambda: map_file.exists(), timeout=10, proc=proc,
+                     msg="it exited instead of waiting"), "no map file written"
+        time.sleep(3)  # >= 3 poll ticks at CHELA_TERM_POLL=1
+        assert proc.poll() is None, "supervisor exited over a missing session"
+        assert json.loads(map_file.read_text()) == {}
+        assert not _has_session(env, sock), "the supervisor created the session"
     finally:
         _reap(proc)
 
@@ -278,66 +284,108 @@ def test_live_session_and_its_windows_are_never_recreated(env, sock):
         time.sleep(5)  # >= 4 poll ticks at CHELA_TERM_POLL=1
         assert proc.poll() is None
         assert _session_id(env, sock) == sid, "the live session was RECREATED (new session id)"
-        assert "agentwin" in _windows(env, sock), "self-heal destroyed a live agent window"
-        assert discovery.ANCHOR_WINDOW not in _windows(env, sock), \
-            "self-heal added an anchor window to a live session"
+        assert _windows(env, sock) == ["agentwin"], "the supervisor changed a live session"
     finally:
         _reap(proc)
 
 
-def test_create_is_a_noop_even_if_the_has_session_gate_lies(env, sock):
-    """The incident's mechanism, isolated: a false-negative existence check must NOT
-    become a recreate. `new-session -A` is what guarantees that, so we force the gate to
-    lie and assert the live session survives untouched anyway."""
+def test_open_window_never_clobbers_even_if_the_has_session_gate_lies(env, sock):
+    """A false-negative existence check (or a lost create race) must NOT become a
+    recreate: `new-session` without `-A` refuses a duplicate, and open_window then opens
+    its window in the live session with `new-window`."""
     _tmux(env, sock, "new-session", "-d", "-s", SESSION, "-n", "agentwin")
     sid = _session_id(env, sock)
 
     with patch.dict(os.environ, env, clear=False):  # PATH shim -> scratch socket
         with patch("chela.discovery.session_exists", side_effect=[False, True]):
-            assert discovery.ensure_session() is True  # gate says "missing" — it isn't
+            proc = discovery.open_window("w", "/")   # gate says "missing" — it isn't
 
+    assert proc.returncode == 0, proc.stderr
     assert _session_id(env, sock) == sid, "a lying gate recreated the live session"
-    assert _windows(env, sock) == ["agentwin"], "a lying gate mutated a live session's windows"
+    assert _windows(env, sock) == ["agentwin", "w"]
 
 
-def test_session_recreated_after_it_disappears(env, sock):
-    """The session vanishing mid-run heals on the next poll tick, not just at boot."""
+def test_supervisor_serves_a_session_a_spawn_recreates(env, sock):
+    """The session ending under the supervisor (its last window closed) is not fatal and
+    is not healed: the wall empties, and a later spawn's session is served."""
+    with patch.dict(os.environ, env, clear=False):
+        first = discovery.open_window("one", "/").stdout.strip()
     proc = _run_bg(env)
-    try:
-        assert _wait(lambda: _has_session(env, sock), proc=proc, msg="never created")
-        # kill only OUR scratch session, on OUR scratch socket
-        _tmux(env, sock, "kill-session", "-t", SESSION, check=False)
-        assert not _has_session(env, sock)
+    map_file = Path(env["CHELA_DIR"]) / "agent_terminals.json"
 
-        assert _wait(lambda: _has_session(env, sock), proc=proc,
-                     msg="it exited when the session was killed"), \
-            "supervisor did not recreate the vanished session"
+    def _map():
+        try:
+            return json.loads(map_file.read_text())
+        except (OSError, ValueError):
+            return None
+    try:
+        assert _wait(lambda: first in (_map() or {}), proc=proc, msg="never served"), _map()
+        _tmux(env, sock, "kill-window", "-t", first)     # the LAST window: session ends
+        assert not _has_session(env, sock)
+        assert _wait(lambda: _map() == {}, proc=proc, msg="exited on session end"), _map()
+        time.sleep(2)
+        assert not _has_session(env, sock), "the supervisor recreated the session"
+        with patch.dict(os.environ, env, clear=False):
+            second = discovery.open_window("two", "/").stdout.strip()
+        assert _windows(env, sock) == ["two"]
+        assert _wait(lambda: second in (_map() or {}), proc=proc, msg="never served"), _map()
     finally:
         _reap(proc)
 
 
-# --- the Python half (chela.discovery), used by the dashboard's spawn path ---
+# --- the Python half (chela.discovery.open_window), used by every spawn path ---
 
-def test_ensure_session_creates_when_missing(env, sock):
+def test_open_window_creates_the_session_with_that_window_first(env, sock):
+    """CMX-473: no `shell-1` anchor. The session is born with the spawned window as its
+    only window, and the call prints that window's id."""
     with patch.dict(os.environ, env, clear=False):
         assert not _has_session(env, sock)
-        assert discovery.ensure_session() is True
-        assert _has_session(env, sock)
-        assert _windows(env, sock) == [discovery.ANCHOR_WINDOW]
+        proc = discovery.open_window("agent", "/tmp", ["sleep", "600"])
+    assert proc.returncode == 0, proc.stderr
+    assert re.fullmatch(r"@\d+", proc.stdout.strip()), proc.stdout
+    assert _windows(env, sock) == ["agent"]
+    out = _tmux(env, sock, "list-windows", "-t", SESSION, "-F",
+                "#{window_id} #{pane_current_path} #{pane_start_command}").stdout.split(None, 2)
+    assert out[0] == proc.stdout.strip()
+    assert out[1] == "/tmp"
+    assert "sleep" in out[2] and "600" in out[2]
 
 
-def test_ensure_session_is_idempotent(env, sock):
+def test_negative_control_the_old_anchor_create_shows_shell_1(env, sock):
+    """⭐ What every new user saw before: the session created with an anchor, then the
+    real window, left an empty `shell-1` first in the list (the sidebar, the Wall)."""
+    _tmux(env, sock, "new-session", "-A", "-d", "-s", SESSION, "-n", "shell-1", check=False)
+    _tmux(env, sock, "new-window", "-t", f"{SESSION}:", "-n", "agent")
+    assert _windows(env, sock) == ["shell-1", "agent"]
+
+
+def test_open_window_in_a_live_session_adds_a_window(env, sock):
     with patch.dict(os.environ, env, clear=False):
-        assert discovery.ensure_session() is True
+        discovery.open_window("one", "/")
         sid = _session_id(env, sock)
-        assert discovery.ensure_session() is True   # no-op the second time
-        assert _session_id(env, sock) == sid
+        proc = discovery.open_window("two", "/")
+    assert proc.returncode == 0, proc.stderr
+    assert _session_id(env, sock) == sid
+    assert _windows(env, sock) == ["one", "two"]
 
 
-def test_ensure_session_false_when_tmux_unreachable(env):
+def test_open_window_raises_when_tmux_is_unreachable(env):
     with patch.dict(os.environ, env, clear=False):
         with patch("chela.discovery.subprocess.run", side_effect=FileNotFoundError):
-            assert discovery.ensure_session() is False
+            with pytest.raises(FileNotFoundError):
+                discovery.open_window("w", "/")
+
+
+def test_open_window_check_raises_on_a_failed_create(env):
+    """`check=True` (the dispatcher's spawn) turns a failed tmux call into
+    CalledProcessError, like subprocess.run would; without it the result carries it."""
+    failed = subprocess.CompletedProcess(["tmux"], 1, "", "boom")
+    with patch.dict(os.environ, env, clear=False), \
+            patch("chela.discovery.session_exists", return_value=True), \
+            patch("chela.discovery.subprocess.run", return_value=failed):
+        assert discovery.open_window("w", "/").returncode == 1
+        with pytest.raises(subprocess.CalledProcessError):
+            discovery.open_window("w", "/", check=True)
 
 
 # --- issue #436: teardown reap must never fail the test it is cleaning up after ---
@@ -867,3 +915,42 @@ def test_promptness_checks_are_not_absorbed_into_reap(tmp_path):
             )
         finally:
             _reap(proc)
+
+
+# --- CMX-473 acceptance: the last window closes, nothing recreates it, a spawn does ---
+
+def test_after_the_last_window_closes_readers_see_no_windows_and_a_spawn_recreates(
+        env, sock, tmp_path, monkeypatch):
+    """Closing the last real window ends the session. Until the next spawn every reader the
+    daemon, the dashboard and Telegram use sees NO windows — none errors, none creates the
+    session — and the next spawn recreates it with that spawned window first and only."""
+    from chela import agent_manager, dispatcher, rc_rename, sessions, spawn, suggest_names
+    from chela.telegram import reconcile
+
+    monkeypatch.setattr(dispatcher, "TMUX_SESSION", SESSION)
+    project = tmp_path / "proj"
+    project.mkdir()
+    with patch.dict(os.environ, env, clear=False):
+        first = discovery.open_window("first", "/").stdout.strip()
+        assert discovery.get_windows_by_id() == {first: "first"}      # positive control
+        _tmux(env, sock, "kill-window", "-t", first)
+        assert not _has_session(env, sock)
+
+        assert discovery.get_windows_by_id() == {}
+        assert sessions._load_panes() == {}
+        assert dispatcher._tmux_windows() == set()
+        assert dispatcher._tmux_window_ids() == set()
+        assert agent_manager.reconcile_window_names() == []
+        assert agent_manager.follow_folder_names({}) == []
+        assert rc_rename.flush_pending() == {}
+        assert suggest_names.pending_titles() == {}
+        assert reconcile.live_agent_windows() == ({}, set())
+        assert not _has_session(env, sock), "a reader created the session"
+
+        monkeypatch.setattr(spawn.config, "remote_control_enabled", lambda: False)
+        res = spawn.spawn_window(project)
+    assert res.ok, res.error
+    assert res.name == "proj"
+    assert _windows(env, sock) == ["proj"], "the session came back with an extra window"
+    wid = _tmux(env, sock, "list-windows", "-t", SESSION, "-F", "#{window_id}").stdout.strip()
+    assert res.wid == wid

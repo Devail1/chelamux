@@ -1025,7 +1025,7 @@ def test_spawn_sandbox_window_launches_the_web_mode_launcher(monkeypatch, tmp_pa
         returncode, stdout, stderr = 0, "@17\n", ""
 
     monkeypatch.setattr(sb, "preflight", lambda cwd, net="none": pre.append(net))
-    monkeypatch.setattr(spawn.discovery, "ensure_session", lambda: True)
+    monkeypatch.setattr(spawn.discovery, "session_exists", lambda *a, **k: True)
     monkeypatch.setattr(spawn.discovery, "get_all_windows", lambda: [])
     monkeypatch.setattr(spawn.agent_manager, "lock_window_name", lambda t: None)
     monkeypatch.setattr(spawn.subprocess, "run", lambda argv, **kw: calls.append(argv) or P())

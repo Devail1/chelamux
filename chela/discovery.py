@@ -7,17 +7,12 @@ tmux never lies about what is live right now.
 from __future__ import annotations
 import logging
 import subprocess
+from collections.abc import Sequence
 
 from chela import config, envutil, probecache
 from chela.config import IGNORE_WINDOWS
 
 log = logging.getLogger(__name__)
-
-# Name of the window ensure_session() creates to anchor a freshly created session
-# (tmux has no windowless session). A plain placeholder shell — never a Claude Code
-# session, so (unlike a launcher's window, CMX-39) its name never reaches claude.ai.
-ANCHOR_WINDOW = "shell-1"
-
 
 def _get_live_windows() -> dict[str, str]:
     """Live windows of the chela session as ``{window_id: window_name}``."""
@@ -86,65 +81,67 @@ def list_sessions() -> list[str] | None:
     return [line.strip() for line in r.stdout.splitlines() if line.strip()]
 
 
-def ensure_session(session: str | None = None) -> bool:
-    """The session exists — creating it if it doesn't. True unless tmux is unreachable.
+def open_window(name: str, cwd: str, command: Sequence[str] = (), *,
+                session: str | None = None, timeout: float = 10,
+                check: bool = False) -> subprocess.CompletedProcess:
+    """Open window ``name`` in ``cwd`` in the chela session; prints its ``@id`` on stdout.
 
-    A missing session is an expected BOOT-ORDERING condition, not an error: nothing
-    outside chela recreates it, so after a reboot (or `wsl --shutdown`, which takes
-    the whole tmux server with it) the first chela process to come up finds nothing
-    there. It is chela's OWN session, so the right move is to create it rather than
-    fail — callers that treated "no session" as fatal turned a recoverable boot race
-    into an outage (see the crash-loop note in scripts/agent-terminals.sh).
+    CMX-473 — there is NO anchor window. When the session exists this is a plain
+    ``new-window``. When it does not (a fresh boot, a ``wsl --shutdown``, or the user
+    closed its last window, which ends a tmux session), the session is created WITH this
+    window as its first one — ``new-session -d -s <session> -n <name> -c <cwd>`` — instead
+    of an empty placeholder shell that then shows up as a session of its own on the
+    sidebar, the Wall and Telegram. So "no session" just means "no windows": every
+    reader treats it that way, and only a spawn (this function) ever creates the session.
 
-    CREATE-ONLY, NEVER CLOBBER — the session holds the user's live agent windows, so
-    destroying it must be impossible, not merely unlikely. ``-A`` (attach-or-create)
-    is the safe primitive: on a session that already exists it is a genuine no-op
-    (same session id, same windows), where a plain ``new-session -s`` would fail with
-    "duplicate session". So even if the ``session_exists`` gate false-negatives — a
-    transient client error against a busy server — the worst case is a no-op. The gate
-    is the optimisation; ``-A`` is the guarantee. We touch nothing that already exists.
+    CREATE-ONLY, NEVER CLOBBER: ``new-session`` without ``-A`` on a session that already
+    exists fails with "duplicate session" and touches nothing. That is how a lost race
+    (two spawners both saw it missing) resolves: the loser re-checks, finds the session,
+    and opens its window with ``new-window`` like any other spawn.
 
-    That also makes it race-safe: two starters may create concurrently and the loser's
-    call is simply absorbed. Note ``-A -d`` exits NONZERO with no tty ("open terminal
-    failed") even on success, so the exit code is ignored — ``has-session`` alone decides.
+    🧯 CMX-21 — creating the session can START the tmux server, whose global env every
+    later window inherits, so that call runs with :func:`chela.envutil.server_env` and the
+    server's table is scrubbed once it exists. Any open is REFUSED (returncode 1, no tmux
+    call at all) when ``TMUX_TMPDIR`` names a directory that no longer exists: tmux would
+    silently fall back to the default socket, i.e. the live server. ``new-window`` gets
+    :func:`chela.envutil.child_env`, as before.
 
-    A session must own at least one window, so an anchor window (``shell-1``) is
-    created with it; passing ``-n``
-    is itself what pins automatic-rename off, so no follow-up option write is needed.
-
-    🧯 CMX-21 — a heal must never resurrect the LIVE server polluted, or on the wrong
-    socket. It REFUSES (False, logged loudly) when ``TMUX_TMPDIR`` names a directory that
-    no longer exists: tmux silently falls back to the default socket then, which is how an
-    orphaned perf-harness supervisor re-created the live server from its own env on
-    2026-10-06. Otherwise it creates the server from :func:`chela.envutil.server_env` and,
-    once created, unsets the same set from the server's global table.
+    ``command`` (argv, optional) is the window's command, run by tmux with no shell in
+    between; empty means the default shell. ``check=True`` raises
+    :class:`subprocess.CalledProcessError` on failure, like :func:`subprocess.run`.
     """
     session = session or config.current_session()
+    tail = ["-n", name, "-c", cwd, "-P", "-F", "#{window_id}"]
+    if command:
+        tail += ["--", *command]
     missing = envutil.tmux_tmpdir_missing()
     if missing:
-        log.error("REFUSING to heal-create tmux session '%s': TMUX_TMPDIR=%s does not "
-                  "exist, and tmux would silently fall back to the DEFAULT socket (the "
-                  "live server). Unset TMUX_TMPDIR or recreate the dir.", session, missing)
-        return False
-    if session_exists(session):
-        return True
-    try:
-        subprocess.run(
-            ["tmux", "new-session", "-A", "-d", "-s", session, "-n", ANCHOR_WINDOW],
-            capture_output=True, text=True, timeout=10,
-            # CMX-390 / CMX-21: if this call STARTS the tmux server, the server's global env —
-            # which every later window inherits — is born from this one; keep pm2's IPC leak,
-            # Claude session markers, proxies and harness vars out of it.
-            env=envutil.server_env(),
+        log.error("REFUSING to open window %s in tmux session '%s': TMUX_TMPDIR=%s does not "
+                  "exist, and tmux would silently fall back to the DEFAULT socket (the live "
+                  "server). Unset TMUX_TMPDIR or recreate the dir.", name, session, missing)
+        proc = subprocess.CompletedProcess(
+            ["tmux"], 1, "", f"refusing to use tmux: TMUX_TMPDIR={missing} does not exist")
+    else:
+        proc: subprocess.CompletedProcess | None = None
+        if not session_exists(session):
+            proc = subprocess.run(
+                ["tmux", "new-session", "-d", "-s", session, *tail],
+                capture_output=True, text=True, timeout=timeout,
+                env=envutil.server_env(),
+            )
+            if proc.returncode == 0:
+                log.info("Created tmux session '%s' with window %s", session, name)
+                envutil.scrub_tmux_secrets()   # CMX-21: and TMUX_TMPDIR, which server_env kept
+            elif session_exists(session):
+                proc = None    # lost the create race: the session is there now
+    if proc is None:
+        proc = subprocess.run(
+            ["tmux", "new-window", "-t", config.window_target("", session), *tail],
+            capture_output=True, text=True, timeout=timeout, env=envutil.child_env(),
         )
-    except (subprocess.TimeoutExpired, FileNotFoundError):
-        log.warning("tmux unreachable; could not create session '%s'", session)
-        return False
-    if session_exists(session):
-        log.info("Created tmux session '%s'", session)
-        envutil.scrub_tmux_secrets()   # CMX-21: and TMUX_TMPDIR, which server_env kept
-        return True
-    return False
+    if check and proc.returncode != 0:
+        raise subprocess.CalledProcessError(proc.returncode, proc.args, proc.stdout, proc.stderr)
+    return proc
 
 
 def get_window_cwd_by_id(window_id: str) -> str | None:

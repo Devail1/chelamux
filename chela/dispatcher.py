@@ -13,7 +13,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path, PurePosixPath
 from typing import NamedTuple
 
-from chela import basesync, concurrency, critic, envutil, epoch, event_log, fleet, flaky, generated, handinmove, hold, judge, judge_timing, memcap, mergegate, park, release_notes, reviewgate, risktier, sizegate, sweep, verdictcarry
+from chela import basesync, concurrency, critic, discovery, envutil, epoch, event_log, fleet, flaky, generated, handinmove, hold, judge, judge_timing, memcap, mergegate, park, release_notes, reviewgate, risktier, sizegate, sweep, verdictcarry
 from chela.config import (
     CHELA_DIR,
     TMUX_SESSION,
@@ -3119,14 +3119,9 @@ def _new_window(window_name: str, cwd: str) -> str:
     under a subprocess mock that returns no stdout).
     """
     _scrub_node_ipc_env()
-    # Trailing ':' forces session resolution; a bare session name is ambiguous
-    # to tmux when a window shares that name, making it target that window's
-    # index and fail with "index N in use".
-    out = subprocess.run(
-        ["tmux", "new-window", "-t", window_target("", TMUX_SESSION), "-n", window_name,
-         "-c", cwd, "-P", "-F", "#{window_id}"],
-        check=True, capture_output=True, text=True, env=envutil.child_env(),
-    )
+    # CMX-473: when the session is gone (its last window was closed), this creates it with
+    # THIS window as its first one; otherwise a plain `new-window`.
+    out = discovery.open_window(window_name, cwd, session=TMUX_SESSION, check=True)
     wid = out.stdout.strip() if isinstance(out.stdout, str) else ""
     return wid if re.fullmatch(r"@\d+", wid) else window_name
 

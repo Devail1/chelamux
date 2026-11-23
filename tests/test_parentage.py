@@ -445,7 +445,7 @@ def _cli(argv):
 
 @pytest.fixture()
 def tmux_spawn(monkeypatch, tmp_path):
-    monkeypatch.setattr(spawn.discovery, "ensure_session", lambda: True)
+    monkeypatch.setattr(spawn.discovery, "session_exists", lambda *a, **k: True)
     monkeypatch.setattr(spawn.discovery, "get_all_windows", lambda: {})
     monkeypatch.setattr(spawn.envutil, "scrub_tmux_secrets", lambda: None)
     monkeypatch.setattr(spawn.agent_manager, "lock_window_name", lambda *a, **kw: None)
