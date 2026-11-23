@@ -13,6 +13,7 @@ from __future__ import annotations
 import json
 import sqlite3
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock
 
@@ -410,15 +411,16 @@ def test_prune_snapshots_deletes_old_keeps_recent(db_and_cache):
 
 
 def test_transcript_snapshot_reads_default_context_window_live_not_the_200k_literal(monkeypatch):
-    """🔴 WIRING — `_transcript_snapshot` is `default_context_window()`'s only consumer.
-    Pin the knob to 500k with usage well under it: the derived window must be 500k
-    (`total_k == 500.0`). A hardcoded `200000` yields 200.0 — and would also flip
-    `used_pct`, so this cannot pass on a latched literal."""
-    monkeypatch.setattr(
-        context.transcripts, "agent_context_from_transcript",
-        lambda name, window_id=None: {"used_tokens": 50_000},
-    )
-    monkeypatch.setattr(context.config, "default_context_window", lambda: 500_000)
+    """🔴 WIRING — the transcript reading sizes against the knob, read per call. CMX-475:
+    only an operator-SET value counts (the built-in default is no knowledge of a window),
+    so the knob is set through its env var. Pin it to 500k with usage well under it: the
+    derived window must be 500k (`total_k == 500.0`); a hardcoded `200000` yields 200.0."""
+    monkeypatch.setattr(context.transcripts, "_resolve_agent_transcript",
+                        lambda name, window_id=None: Path("/nonexistent/s.jsonl"))
+    monkeypatch.setattr(context.transcripts, "latest_context_usage",
+                        lambda path: {"used_tokens": 50_000, "session_id": None})
+    monkeypatch.setattr(context, "MANAGED_SETTINGS", ())
+    monkeypatch.setenv("CHELA_DEFAULT_CONTEXT_WINDOW", "500000")
 
     snap = context._transcript_snapshot("agent-1")
 
