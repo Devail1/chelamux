@@ -1,0 +1,5 @@
+{
+  "name": "chela-measure",
+  "version": "0.1.0",
+  "description": "chela's usage feed (Claude Code >= 2.1.301): on each session.measure, writes the context fill, the 5h/7d rate limits and the cost to $CHELA_DIR/context/mod/<session>.json, tagged source \"mod\". Draws nothing, keeps no state, passes every event on."
+}

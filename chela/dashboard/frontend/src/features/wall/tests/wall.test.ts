@@ -24,13 +24,13 @@ beforeEach(() => {
 });
 
 /** The Wall on screen over `rows` (each one ready), in `m` mode ('phone': a phone's width). A
- * wall of one throwaway window first, so no earlier test's render can match this one. */
+ * throwaway single pane first, so no earlier test's render (or grid) can match this one. */
 async function show(rows: ReturnType<typeof agent>[], m = 'wall') {
   const seeded = { ...localStorage }; // what the test stored: the throwaway wall must not overwrite it
   setPhone(false);
   ready('@reset');
   agents.set([agent('@reset')]);
-  setTermMode('wall');
+  setTermMode('single');
   await settle();
   localStorage.clear();
   for (const [k, v] of Object.entries(seeded)) localStorage.setItem(k, String(v));
@@ -88,6 +88,59 @@ test('a render with the same window set keeps every tile and iframe (no reload)'
   await renderTerminals();
   expect(document.querySelector('#term-stage iframe')).toBe(before);
   expect(gs.init).toHaveBeenCalledTimes(1);
+});
+
+// CMX-493: the 30 s refresh sees a window come or go before the 4 s tick does.
+test('a refresh whose window set changed keeps the surviving iframes, in the wall', async () => {
+  await show([agent('@1'), agent('@2')]);
+  const kept = tile('@1')?.querySelector('iframe');
+  expect(kept).toBeTruthy();
+  ready('@3');
+  agents.set([agent('@1'), agent('@3')]);
+  host.tabSignal.mockClear();
+  await renderTerminals();
+  expect(tiles()).toEqual(['@1', '@3']);
+  expect(tile('@1')?.querySelector('iframe')).toBe(kept);
+  expect(gs.init).toHaveBeenCalledTimes(1);
+  expect(host.tabSignal).toHaveBeenCalledTimes(1); // the status repaint
+  serve((p) => (p.endsWith('/api/agents') ? [] : {}));
+  agents.set([]);
+  await renderTerminals(); // the last window went: nothing to reconcile onto
+  expect(document.getElementById('term-stage')?.textContent).toBe('No active agents');
+  agents.set([agent('@1')]);
+  await renderTerminals(); // and back: a fresh grid
+  expect(tiles()).toEqual(['@1']);
+  expect(gs.init).toHaveBeenCalledTimes(2);
+});
+
+test('a wall whose grid element left the page is rebuilt, not reconciled', async () => {
+  await show([agent('@1')]);
+  document.getElementById('term-stage')?.replaceChildren();
+  ready('@2');
+  agents.set([agent('@1'), agent('@2')]);
+  await renderTerminals();
+  expect(tiles()).toEqual(['@1', '@2']);
+  expect(gs.init).toHaveBeenCalledTimes(2);
+});
+
+test('single mode: another window coming or going never reloads the open pane', async () => {
+  await show([agent('@1'), agent('@2')], 'single');
+  const kept = document.querySelector('#term-stage iframe');
+  expect(kept).toBeTruthy();
+  const open = activePane();
+  agents.set([agent(open), agent('@9')]);
+  await renderTerminals();
+  expect(document.querySelector('#term-stage iframe')).toBe(kept);
+  await showPane('@9'); // another pane is a change
+  expect(pane()).toBe('@9');
+  dropTerminalPane('@9');
+  await renderTerminals(); // ended, and its window is back: drawn again
+  expect(document.querySelector('#term-stage .pane-ended')).toBeNull();
+  expect(pane()).toBe('@9');
+  dropTerminalPane('@1'); // not the open pane: the one on screen is still the baseline
+  const still = document.querySelector('#term-stage [data-frame-for]');
+  await renderTerminals();
+  expect(document.querySelector('#term-stage [data-frame-for]')).toBe(still);
 });
 
 test('no window: "No active agents" and no grid', async () => {

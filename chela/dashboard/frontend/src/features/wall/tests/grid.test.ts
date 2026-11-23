@@ -5,18 +5,18 @@ import { afterAll, beforeAll, beforeEach, describe, expect, test, vi } from 'vit
 import css from '../../../../../static/style.css?raw';
 import { agents } from '../../../shared/store/agents.ts';
 import { setPinned, setWallAuto, setWallFocus, setWallLocked, setWallPreset, wallLayout } from '../../../shared/store/wall.ts';
-import { configureWall, renderTerminals, setTermMode, termTick } from '../index.ts';
+import { configureWall, setTermMode, termTick } from '../index.ts';
 import { agent, freshGrid, gs, ready, saved, serve, settle, tile, type Cell } from './setup.ts';
 
 configureWall({ selectView() {}, tabSignal() {} });
 
-/** A wall over `rows` (each ready), from the saved `layout` (none by default). A wall of one
- * throwaway window first, so no earlier test's render can match this one; the grid before it
+/** A wall over `rows` (each ready), from the saved `layout` (none by default). A throwaway
+ * single pane first, so no earlier test's grid is reconciled into this one; the grid before it
  * (an earlier test's) may have saved its layout on a preset change, so that is dropped. */
 async function wall(rows: ReturnType<typeof agent>[], layout?: Record<string, Cell>) {
   ready('@reset');
   agents.set([agent('@reset')]);
-  setTermMode('wall');
+  setTermMode('single');
   await settle();
   localStorage.removeItem('pc_wall_layout');
   if (layout) localStorage.setItem('pc_wall_layout', JSON.stringify(layout));
@@ -24,7 +24,8 @@ async function wall(rows: ReturnType<typeof agent>[], layout?: Record<string, Ce
   serve((p) => (p.endsWith('/api/agents') ? rows : {}));
   ready(...rows.map((a) => a.window_id));
   agents.set(rows);
-  await renderTerminals();
+  setTermMode('wall');
+  await settle();
 }
 const cells = (...wids: string[]) => Object.fromEntries(wids.map((w) => [w, gs.cell(w)]));
 const c = (x: number, y: number, w: number, h: number): Cell => ({ x, y, w, h });

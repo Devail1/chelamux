@@ -158,7 +158,10 @@ branch. What to do when a run stops for a human (retry, reopen, override, close)
   %, because nothing says whether its window is 200k or 1M. This hook is the default and works on
   every Claude Code chela supports. On Claude Code 2.1.301 or later you can instead
   opt in to the [`chela-hooks` Mod](../mods/chela-hooks/README.md), which feeds the same
-  cache and draws chela's status line without editing `settings.json`.
+  cache and draws chela's status line without editing `settings.json`. Or run
+  `chela install-mod`: the `chela-measure` mod feeds the context, the 5h/7d limits and the
+  cost from Claude Code's `session.measure` hook, leaves your own status line alone, and
+  works from a PyPI install ([ORG_SETUP](ORG_SETUP.md#context-the-5h7d-limits-and-cost-without-a-status-line)).
 - **Phone push when an agent blocks**: set `CHELA_NOTIFY_URL` (ntfy / Telegram /
   webhook); see [Needs-input notifications](https://chela.pages.dev/docs#needs-input).
 - **Remote access**: the dashboard binds `127.0.0.1` with no built-in auth by
