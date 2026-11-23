@@ -144,6 +144,28 @@ refuses to start a share (`Sharing is off`), so there are no guest links, no pre
 shared typing. There is no other way to let a second person into a session; anyone who needs
 the dashboard needs their own grant on the tailnet (section 3).
 
+### Context, the 5h/7d limits and cost without a status line
+
+Your organization may manage the status line, or you may already run your own. Either way,
+`chela install-mod` feeds the same figures from a Claude Code mod (Claude Code 2.1.301 or
+later). It copies the `chela-measure` mod into `~/.claude/skills/`, where Claude Code
+auto-loads it. It does not edit `settings.json` and it draws nothing on screen, so it runs
+beside your status line and your own mods. The figures are the context fill, the 5h/7d plan
+limits and the session cost. Install it from a PyPI install. You don't need a repo checkout.
+
+| With | Context bar | 5h/7d bars | Cost |
+|---|---|---|---|
+| the mod | yes | yes | yes |
+| the statusLine hook (`chela install-statusline`) | yes | yes | yes |
+| both | the fresher one wins | the fresher one wins | the fresher one wins |
+| neither (mods blocked, no status line) | yes, estimated from the transcript | **unknown**, never 0% | tokens only, in the transcript-based usage view |
+
+An organization can block the mod. Two managed settings do it: `strictKnownMarketplaces`,
+unless that list holds `{"source": "skills-dir"}`, and `allowManagedHooksOnly`. Run
+`chela doctor` after a session's first turn. Its `usage.sources` lines name the producer for
+each session and for each limit. If no session shows `mod`, the mod is blocked: see
+[spikes/SESSION_MEASURE.md](spikes/SESSION_MEASURE.md) §4 and §6.
+
 ### Controls the UI hides with those services off
 
 The dashboard reads both from configuration when the page loads, so they are hidden as long

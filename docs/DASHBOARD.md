@@ -218,4 +218,6 @@ judges, subagents and background sessions. Each row has its requests, token kind
 cache-hit rate. On WSL it also reads the Windows-side transcripts; set `usage_extra_roots` in
 `~/.chela/config.json` or `CHELA_USAGE_EXTRA_ROOTS` (`[]` for none) to change the extra roots.
 
-The limit bars need the statusLine hook: `uv run chela install-statusline --write`.
+The limit bars need a producer. Use the statusLine hook (`uv run chela install-statusline --write`),
+or the `chela-measure` mod (`chela install-mod`), which leaves your status line alone. When both
+run, the fresher sample wins. With neither, the bars read unknown, never 0%.
