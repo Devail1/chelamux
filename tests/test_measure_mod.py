@@ -494,6 +494,23 @@ def test_an_unreadable_usage_owner_is_a_warning_never_fatal(monkeypatch):
     assert found[0].title.startswith("CANNOT VERIFY usage.sources")
 
 
+def test_a_real_zero_percent_is_printed_as_zero_not_unknown(tmp_path):
+    """A limit that truly reads 0% is a figure; only a missing one is unknown."""
+    lim = {"five_hour": {"used_pct": 0.0, "source": "mod", "age_s": 119.9, "reason": None},
+           "seven_day": {"used_pct": None, "source": None, "age_s": None, "reason": "why"}}
+    line = next(f for f in measure_mod.report(tmp_path, _state(tmp_path, limits=lim))
+                if f.title.startswith("limits:"))
+    assert (line.title, line.detail) == ("limits: 5h 0% (mod, 1 min ago) · 7d unknown",
+                                         "seven_day: why")
+
+
+def test_the_cli_says_where_the_mod_writes(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(config, "CHELA_DIR", tmp_path / "cd")
+    monkeypatch.setattr("sys.argv", ["chela", "install-mod", "--dir", str(tmp_path / "d")])
+    main.main()
+    assert f"it writes to {tmp_path}/cd/context/mod/<session>.json" in capsys.readouterr().out
+
+
 def test_doctor_lists_at_most_twenty_sessions_and_counts_them_all(tmp_path):
     sessions = {f"{i:08d}-x": {"mod": 1.0} for i in range(21)}
     last = measure_mod.report(tmp_path, _state(tmp_path, sessions=sessions))[-1]
