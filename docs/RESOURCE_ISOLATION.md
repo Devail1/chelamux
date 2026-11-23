@@ -440,6 +440,8 @@ between two mutations exactly as it does for an agent (the rest is owed):
 The notice says which: "skipped — dispatch paused …", "skipped — inside blocked hours
 03:00-04:30 …", "yielded: dispatch paused", "yielded: blocked hours 03:00-04:30". A hand run
 (`chela judge nightly-sweep` without `--trigger`) is not held off: someone asked for it.
+Since CMX-479 it still cannot take the suite slot inside blocked hours, so it waits to start;
+one already running when the window opens runs on.
 
 **Throughput.** The notice rates the battery (mutations/hour) only above a minimum sample, 10
 mutations or 10 minutes; below it, it says "too few to rate".
