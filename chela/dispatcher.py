@@ -33,6 +33,7 @@ from chela.config import (
     judge_max_experiments,
     worktree_disk_budget_bytes,
 )
+from chela.hooks import QUESTION_TOOL
 from chela.messenger import messaging_socket_launch_arg, resend_enter, send_tmux
 from chela.sandbox import sandbox_launch_arg
 from chela.sources import Task, get_source, run_risk
@@ -1988,7 +1989,6 @@ def _dismiss_input_block(window_id: str) -> None:
 # Escape DENIES the call and interrupts the turn ("Interrupted · What should Claude do
 # instead?"), so the agent stops and the human who would have approved it finds nothing to
 # answer. On 11-22 this watchdog did exactly that to CMX-475, 5 s after the prompt opened.
-QUESTION_TOOL = "AskUserQuestion"
 _PERMISSION_REQUEST_TYPE = "hook.permission_request"
 
 
@@ -1999,10 +1999,11 @@ def _pending_dialog_tool(row) -> str | None:
 
     Claude Code fires ``PermissionRequest`` for an ``AskUserQuestion`` too (that is the hook
     :mod:`chela.gateanswer` answers through), so the newest record names the dialog on screen.
-    A record older than the run is a previous holder of a recycled window id, not this run's.
+    A record older than the run is a previous holder of a recycled window id, not this run's,
+    and so is every record once the tmux server that issued the row's id is gone.
     """
     wid = (row["window_id"] or "").strip()
-    if not re.fullmatch(r"@\d+", wid):
+    if not re.fullmatch(r"@\d+", wid) or epoch.is_dangling(row["window_epoch"], epoch.current()):
         return None
     started = _parse_ts(row["started_at"])
     try:

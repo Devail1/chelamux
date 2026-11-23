@@ -801,8 +801,20 @@ def test_the_11_22_incident_through_tick_and_the_real_event_log(
     assert summary["watchdog_prompt_held"] == (0 if escapes else 1)
 
 
-def _row_for(window_id, started_at=_OLD):
-    return {"window_id": window_id, "started_at": started_at}
+def _row_for(window_id, started_at=_OLD, window_epoch=None):
+    return {"window_id": window_id, "started_at": started_at, "window_epoch": window_epoch}
+
+
+def test_a_window_id_from_a_dead_tmux_server_is_unknown(real_log, monkeypatch):
+    """tmux renumbers on restart: once the server that issued the row's id is gone, @120's
+    records belong to whoever holds the number now, so the dialog is unknown."""
+    monkeypatch.setattr(dispatcher.epoch, "current", lambda: "e1")
+    _log_request("AskUserQuestion")
+    assert dispatcher._pending_dialog_tool(_row_for("@120", window_epoch="e0")) is None
+    assert dispatcher._pending_dialog_tool(_row_for("@120", window_epoch="e1")) == \
+        "AskUserQuestion"
+    assert dispatcher._pending_dialog_tool(_row_for("@120", window_epoch=None)) == \
+        "AskUserQuestion"                    # unstamped is unknown, not stale
 
 
 def test_pending_dialog_tool_is_the_newest_request_of_this_window(real_log):

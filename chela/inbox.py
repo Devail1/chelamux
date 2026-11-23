@@ -3320,12 +3320,13 @@ PROMPT_TYPE = hooks.event_type("PermissionRequest")    # "hook.permission_reques
 PROMPT_KEY_TTL_S = 10 * 60    # how long a prompt's key is remembered (prompt_key)
 # answered from the bound Telegram topic (chela.gateanswer) and, with no answer, Escaped by
 # the dispatcher's watchdog so the model falls back to its own default: not a human's prompt
-QUESTION_TOOL = "AskUserQuestion"
+QUESTION_TOOL = hooks.QUESTION_TOOL
 
 
 def prompt_events(prompts: list[dict], runs: list[dict], store: dict, now: float,
                   windows: dict[str, str] | None = None,
-                  now_epoch: str | None = None) -> list[dict]:
+                  now_epoch: str | None = None,
+                  statuses: dict[str, str] | None = None) -> list[dict]:
     """``run_permission_prompt`` — a dispatched agent is blocked on a permission prompt.
 
     Auto mode's classifier can hand a call to a human instead of deciding; the agent then
@@ -3334,6 +3335,10 @@ def prompt_events(prompts: list[dict], runs: list[dict], store: dict, now: float
     window of a ``claimed``/``running`` run is one notice, at once. The orchestrator's own
     window and human sessions are skipped (as for denials), and so is an ``AskUserQuestion``
     (:data:`QUESTION_TOOL`), which has its own Telegram path.
+
+    A prompt already answered by the time this tick reads it (the window is affirmatively
+    ``busy`` or ``idle`` in ``statuses``) is not a notice: the agent is not blocked any more.
+    An unreadable status is not evidence of an answer, so it is still told.
 
     One notice per prompt: its :func:`prompt_key` is remembered in ``store["prompt_keys"]``
     for :data:`PROMPT_KEY_TTL_S`, so a second copy of the same request is not a second notice.
@@ -3356,6 +3361,8 @@ def prompt_events(prompts: list[dict], runs: list[dict], store: dict, now: float
         payload = record.get("payload") or {}
         if payload.get("tool_name") == QUESTION_TOOL:
             continue
+        if (statuses or {}).get(wid) in (BUSY, IDLE):
+            continue                         # answered already: nobody is blocked
         key = prompt_key(record)
         if key in keys:
             continue
@@ -3392,7 +3399,9 @@ def prompt_key(record: dict) -> str:
 
 
 def read_denials(store: dict, now: float) -> tuple[list[dict], dict]:
-    """New ``hook.permission_denied`` records since the store's cursor, and the next cursor.
+    """New ``hook.permission_denied`` and ``hook.permission_request`` records since the
+    store's cursor, and the next cursor. The caller splits them by ``type`` (:func:`tick`):
+    a request is a prompt (:func:`prompt_events`), never a denial.
 
     I/O (the event log), so the caller runs it OUTSIDE the store lock. Like
     :class:`chela.notify.DeniedWatch`: the first read only anchors at the log's tip — an
@@ -3719,7 +3728,8 @@ def tick(prev: dict[str, str], runs: list[dict] | None = None) -> dict[str, str]
         events += denied_events([d for d in denials if d.get("type") != PROMPT_TYPE],
                                 runs, store, now, windows=windows, now_epoch=now_epoch)
         events += prompt_events([d for d in denials if d.get("type") == PROMPT_TYPE],
-                                runs, store, now, windows=windows, now_epoch=now_epoch)
+                                runs, store, now, windows=windows, now_epoch=now_epoch,
+                                statuses=statuses)
         store["denied_cursor"] = denied_cursor
         resumes = classifier_resumes(store, statuses, runs, now, windows=windows,
                                      now_epoch=now_epoch)

@@ -67,10 +67,10 @@ def _queued(kind=inbox.PROMPT_KIND):
     return [e for e in inbox.load()["queue"] if e["kind"] == kind]
 
 
-def _events(prompts, runs=None, store=None, now=1000.0):
+def _events(prompts, runs=None, store=None, now=1000.0, statuses=None):
     store = {**inbox._empty(), "orchestrator": ORCH} if store is None else store
     return inbox.prompt_events(prompts, [_run()] if runs is None else runs, store, now,
-                               now_epoch="e1"), store
+                               now_epoch="e1", statuses=statuses), store
 
 
 # --- VERIFY: the acceptance test — a fake hook, end to end -------------------------------
@@ -200,3 +200,25 @@ def test_a_queued_prompt_notice_is_stale_once_the_run_settled():
     assert inbox.stale_reason(event, [_run("running")]) is None
     assert inbox.stale_reason(event, [_run("awaiting_review")]) == (
         "run is now 'awaiting_review' — the agent is no longer waiting on the prompt")
+
+
+@pytest.mark.parametrize(("status", "told"), [
+    (inbox.BUSY, False), (inbox.IDLE, False), (inbox.WAITING, True), (None, True)])
+def test_a_prompt_already_answered_by_the_tick_is_not_a_notice(status, told):
+    """A human who approved in seconds leaves the agent busy (or idle): no false alarm. An
+    unreadable status is not evidence of an answer, so it is still told."""
+    statuses = {} if status is None else {AGENT: status}
+    out, store = _events([_ask(AGENT)], statuses=statuses)
+    assert len(out) == (1 if told else 0)
+    assert bool(store["prompt_keys"]) is told   # an untold prompt is not marked as told
+
+
+def test_tick_hands_the_live_statuses_to_the_prompt_scan(monkeypatch):
+    """Through tick(): an agent already busy again by the tick is not reported."""
+    monkeypatch.setattr(inbox.agent_manager, "status_by_wid",
+                        lambda: {ORCH: inbox.BUSY, AGENT: inbox.BUSY})
+    runs = [_run()]
+    inbox.tick({}, runs=runs)
+    _ask(AGENT)
+    inbox.tick({}, runs=runs)
+    assert _queued() == []
