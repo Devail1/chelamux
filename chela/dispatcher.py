@@ -33,6 +33,7 @@ from chela.config import (
     judge_max_experiments,
     worktree_disk_budget_bytes,
 )
+from chela.hooks import QUESTION_TOOL
 from chela.messenger import messaging_socket_launch_arg, resend_enter, send_tmux
 from chela.sandbox import sandbox_launch_arg
 from chela.sources import Task, get_source, run_risk
@@ -1967,12 +1968,13 @@ def _judge_model_call_failed(wf: WorkflowDef, row: sqlite3.Row) -> bool:
 
 
 def _dismiss_input_block(window_id: str) -> None:
-    """Send Escape to a window whose agent is blocked on an input dialog.
+    """Send Escape to a window whose agent is blocked on an ``AskUserQuestion``.
 
-    A dispatched agent has no human to answer an ``AskUserQuestion`` (or a gated
-    permission prompt); left alone it hangs until MAX_ATTEMPTS. Escape cancels the
-    dialog so the model falls back to its own default and keeps working. Best-effort
-    and never raises — a failed send is caught by the next watchdog tick.
+    A dispatched agent has no human to answer a question; left alone it hangs until
+    MAX_ATTEMPTS. Escape cancels the dialog so the model falls back to its own default
+    and keeps working. Never sent for a permission prompt (CMX-478, see
+    :data:`QUESTION_TOOL`). Best-effort and never raises — a failed send is caught by the
+    next watchdog tick.
     """
     try:
         subprocess.run(
@@ -1981,6 +1983,40 @@ def _dismiss_input_block(window_id: str) -> None:
         )
     except (OSError, subprocess.SubprocessError) as e:
         log.warning("Task dialog-dismiss on %s failed: %s", window_id, e)
+
+
+# CMX-478: the one dialog the watchdog may Escape. A permission prompt is never Escaped:
+# Escape DENIES the call and interrupts the turn ("Interrupted · What should Claude do
+# instead?"), so the agent stops and the human who would have approved it finds nothing to
+# answer. On 11-22 this watchdog did exactly that to CMX-475, 5 s after the prompt opened.
+_PERMISSION_REQUEST_TYPE = "hook.permission_request"
+
+
+def _pending_dialog_tool(row) -> str | None:
+    """The tool a waiting run's dialog is for: the ``tool_name`` of the newest
+    ``hook.permission_request`` its window logged since the run started, or ``None`` when that
+    cannot be read (no recorded window id, no record, an unreadable log).
+
+    Claude Code fires ``PermissionRequest`` for an ``AskUserQuestion`` too (that is the hook
+    :mod:`chela.gateanswer` answers through), so the newest record names the dialog on screen.
+    A record older than the run is a previous holder of a recycled window id, not this run's,
+    and so is every record once the tmux server that issued the row's id is gone.
+    """
+    wid = (row["window_id"] or "").strip()
+    if not re.fullmatch(r"@\d+", wid) or epoch.is_dangling(row["window_epoch"], epoch.current()):
+        return None
+    started = _parse_ts(row["started_at"])
+    try:
+        records = event_log.read(types=[_PERMISSION_REQUEST_TYPE], wid=wid)["events"]
+    except Exception as e:  # noqa: BLE001 — unreadable is unknown, and unknown never Escapes
+        log.warning("watchdog: reading %s's permission requests failed: %s", wid, e)
+        return None
+    for record in reversed(records):
+        if started is not None and (record.get("ts") or 0) < started.timestamp():
+            return None
+        tool = (record.get("payload") or {}).get("tool_name")
+        return tool if isinstance(tool, str) and tool else None
+    return None
 
 
 def _agent_status(window_id: str) -> str | None:
@@ -6238,6 +6274,7 @@ def tick(workflow_path: str | Path) -> dict:
         "pr_state_refreshed": 0,
         "watchdog_renudged": 0,
         "watchdog_unblocked": 0,
+        "watchdog_prompt_held": 0,
         "watchdog_parked": 0,
         "tracker_struck": 0,
         "tracker_transitions": 0,
@@ -6849,6 +6886,12 @@ def tick(workflow_path: str | Path) -> dict:
                     # Telegram still wins. If it is STILL waiting a grace after the
                     # Escape, it is not recovering: fail it into re-dispatch.
                     if status == "waiting":
+                        # CMX-478: only an affirmative question is Escaped or failed. A
+                        # permission prompt (or a dialog that cannot be named) is left for a
+                        # human: the inbox has already told the orchestrator about it.
+                        if _pending_dialog_tool(row) != QUESTION_TOOL:
+                            summary["watchdog_prompt_held"] += 1
+                            continue
                         if nudged is not None and nudge_expired:
                             if _is_rework(row):
                                 _rework_failed(
