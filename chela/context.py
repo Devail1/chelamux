@@ -265,16 +265,19 @@ def prune_snapshots(older_than_days: int = 30) -> int:
 
 
 def _prune_session_cache(older_than_days: int) -> None:
-    """Drop ``by-session/*.json`` files untouched for ``older_than_days`` (CMX-29).
+    """Drop ``by-session/*.json`` and ``mod/*.json`` files untouched for ``older_than_days``
+    (CMX-29, CMX-477).
 
     One file per Claude session ever run, so unlike ``<window>.json`` (overwritten in
     place) they accrue; the same retention as the snapshot history bounds them.
     """
     cutoff = time.time() - older_than_days * 86400
-    try:
-        files = list((CONTEXT_CACHE_DIR / SESSION_CACHE_SUBDIR).glob("*.json"))
-    except OSError:
-        return
+    files: list[Path] = []
+    for sub in (SESSION_CACHE_SUBDIR, MOD_CACHE_SUBDIR):    # CMX-477: the mod's accrue too
+        try:
+            files += list((CONTEXT_CACHE_DIR / sub).glob("*.json"))
+        except OSError:
+            continue
     for f in files:
         try:
             if f.stat().st_mtime < cutoff:
@@ -329,6 +332,51 @@ def cache_path(agent_name: str) -> Path:
 # window when its payload's own ``session_id`` is that window's session.
 SESSION_CACHE_SUBDIR = "by-session"
 
+# CMX-477: the chela-measure mod (``chela/mods/chela-measure``, ``chela install-mod``) writes
+# the same statusLine-shaped payload from Claude Code's ``session.measure`` hook, tagged
+# ``"source": "mod"``, to ``mod/<session_id>.json``: a file of its own, so the two producers
+# never clobber each other and ``chela doctor`` can say which one feeds a session. Readers
+# take whichever fresh file is NEWER.
+MOD_CACHE_SUBDIR = "mod"
+
+
+# The plan limits chela draws a bar for (usage.limits); a gateway's spend_limit is not one.
+LIMIT_KEYS = ("five_hour", "seven_day")
+
+
+def cache_files(cache_dir: Path) -> list[tuple[Path, str]]:
+    """Every cache file with its producer: the statusLine's (``<window>.json``,
+    ``by-session/``) and, CMX-477, the chela-measure mod's (``mod/``)."""
+    return ([(f, "statusline") for f in cache_dir.glob("*.json")]
+            + [(f, "statusline") for f in (cache_dir / SESSION_CACHE_SUBDIR).glob("*.json")]
+            + [(f, "mod") for f in (cache_dir / MOD_CACHE_SUBDIR).glob("*.json")])
+
+
+def freshest_limits(cache_dir: Path) -> dict:
+    """``{key: (mtime, used_percentage, resets_at, source)}`` from the freshest cache file
+    that carries each limit, whichever producer wrote it (CMX-477)."""
+    best: dict = {}
+    for f, source in cache_files(cache_dir):
+        try:
+            mtime = f.stat().st_mtime
+            d = json.loads(f.read_text())
+        except (OSError, ValueError):
+            continue
+        rl = d.get("rate_limits") if isinstance(d, dict) else None
+        if not isinstance(rl, dict):
+            continue
+        for key in LIMIT_KEYS:
+            b = rl.get(key)
+            if not isinstance(b, dict):
+                continue
+            pct, reset = b.get("used_percentage"), b.get("resets_at")
+            if not isinstance(pct, (int, float)) or isinstance(pct, bool):
+                continue
+            if key not in best or mtime > best[key][0]:
+                best[key] = (mtime, float(pct), int(reset) if isinstance(reset, (int, float)) else None,
+                             source)
+    return best
+
 
 def _session_cache_path(session_id: str) -> Path | None:
     # SESSION_RE is the same shape the hook validates inline before writing
@@ -337,6 +385,11 @@ def _session_cache_path(session_id: str) -> Path | None:
     if not session_id or not sessions.SESSION_RE.match(session_id):
         return None
     return CONTEXT_CACHE_DIR / SESSION_CACHE_SUBDIR / f"{session_id}.json"
+
+
+def _mod_cache_path(session_id: str) -> Path | None:
+    own = _session_cache_path(session_id)
+    return None if own is None else CONTEXT_CACHE_DIR / MOD_CACHE_SUBDIR / own.name
 
 
 def _payload_session_id(path: Path) -> str | None:
@@ -367,8 +420,11 @@ def window_session(window_id: str | None) -> str | None:
         return None
 
 
-def _snapshot_from(path: Path, agent_name: str) -> dict | None:
-    """Full snapshot from a fresh statusLine cache file, or None if absent/stale."""
+def _snapshot_from(path: Path, agent_name: str, source: str = "statusline") -> dict | None:
+    """Full snapshot from a fresh statusLine-shaped cache file, or None if absent/stale.
+
+    ``source`` names the producer: ``"statusline"`` (scripts/cache-statusline.sh) or
+    ``"mod"`` (the chela-measure mod, CMX-477)."""
     try:
         mtime = path.stat().st_mtime
     except OSError:
@@ -380,10 +436,11 @@ def _snapshot_from(path: Path, agent_name: str) -> dict | None:
         return None
     snap["name"] = agent_name
     snap["ts"] = datetime.fromtimestamp(mtime, timezone.utc).isoformat()
-    snap["source"] = "statusline"
+    snap["source"] = source
     snap["estimated"] = False
     snap["state"] = "ok"
-    snap["window_source"] = "statusline"
+    snap["window_source"] = source
+    snap["_mtime"] = mtime
     return snap
 
 
@@ -393,7 +450,25 @@ def _cache_snapshot(agent_name: str, session_id: str | None = None) -> dict | No
     With a session id, only that session's numbers are served: its ``by-session`` file,
     else the window file if (and only if) its payload names that same session. Without
     one, the window file as-is (the pre-CMX-29 read, for callers with no window id).
+
+    CMX-477: with a session id, the chela-measure mod's ``mod/<sid>.json`` is a candidate
+    too, and the NEWER of the two fresh snapshots wins, whichever wrote it.
     """
+    snap = _statusline_snapshot(agent_name, session_id)
+    mod_file = _mod_cache_path(session_id or "")      # None for a missing or unsafe id
+    mod = _snapshot_from(mod_file, agent_name, "mod") if mod_file is not None else None
+    if mod and (not snap or mod["_mtime"] > snap["_mtime"]):
+        snap = mod
+    return _public(snap)
+
+
+def _public(snap: dict | None) -> dict | None:
+    if snap:
+        snap.pop("_mtime", None)
+    return snap
+
+
+def _statusline_snapshot(agent_name: str, session_id: str | None) -> dict | None:
     window_file = cache_path(agent_name)
     if not session_id:
         return _snapshot_from(window_file, agent_name)
@@ -418,7 +493,7 @@ def _reported_window(session_id: str | None, agent_name: str | None = None) -> t
     """
     if not session_id:
         return None
-    paths = [_session_cache_path(session_id)]
+    paths = [_session_cache_path(session_id), _mod_cache_path(session_id)]
     if agent_name:
         paths.append(cache_path(agent_name))
     for path in paths:
