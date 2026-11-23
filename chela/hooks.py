@@ -277,6 +277,10 @@ BULK_BUDGET = 1024
 # The tools that BLOCK on a human (chela.telegram.hookgate re-exports this): their
 # ``tool_input`` IS the question, and the gate reads every option back out of the log.
 INTERACTIVE_TOOLS: tuple[str, ...] = ("AskUserQuestion", "ExitPlanMode")
+# CMX-478: the one PermissionRequest that is a question, not a permission prompt. The inbox
+# does not report it as a permission prompt, and it is the only dialog the dispatcher's
+# watchdog may Escape. One constant, so the two can never disagree about which is which.
+QUESTION_TOOL = "AskUserQuestion"
 
 
 def event_type(hook_event_name: str) -> str:

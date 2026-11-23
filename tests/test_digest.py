@@ -54,7 +54,7 @@ ON = {"enabled": True, "interrupt": list(digest.DEFAULT_INTERRUPT), "times": ["0
     "run_failed", "orchestrator.merge_failed", "release_major_tag_failed",
     "run_ci_known_flake",
     "suite_oom_kill", "judge_oom",
-    "run_permission_denied",
+    "run_permission_denied", "run_permission_prompt",
     "keeper_proposals",
     "orchestrator.moved",
     "orchestrator.escalation.unknown_ci",
