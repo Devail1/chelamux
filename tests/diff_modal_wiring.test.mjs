@@ -14,7 +14,7 @@
 //
 // Run: pnpm exec vitest run tests/diff_modal_wiring.test.mjs (tests/test_js_suites.py
 // runs every .test.mjs inside pytest, by discovery).
-import { beforeAll, test } from 'vitest';
+import { afterEach, beforeAll, test } from 'vitest';
 import assert from 'node:assert/strict';
 import { JSDOM } from 'jsdom';   // needs `pnpm install` — tests/test_js_suites.py enforces it
 import { activateDom, flush, mountIslands, waitFor } from './js_helpers/dashboard_dom.mjs';
@@ -104,6 +104,14 @@ beforeAll(async () => {
     await terminals.renderTerminals();
 });
 
+// A failed test must not leave its modal open for the next one.
+afterEach(async () => {
+    closeDiffModal();
+    await waitFor(() => !dialog());
+});
+
+// Assert on `!dialog()`, never assert.equal(dialog(), null): that failure serialises the whole
+// jsdom element, and the run hangs instead of going red.
 const dialog = () => document.querySelector('[role="dialog"].modal-diff');
 
 // A real click: the chip's handler is React's (features/tilefoot), not an inline attribute.
@@ -126,11 +134,11 @@ async function assertModalShows(wid, label) {
 async function closeModal(label) {
     closeDiffModal();
     await waitFor(() => !dialog());
-    assert.equal(dialog(), null, `${label}: closeDiffModal() did not close the modal`);
+    assert.ok(!dialog(), `${label}: closeDiffModal() did not close the modal`);
 }
 
 test('a real click on the wall tile\'s "Files" chip opens the diff modal island on THAT session\'s diff', async () => {
-    assert.equal(dialog(), null, 'the diff modal starts open: the assertions below could not tell a real open from a no-op');
+    assert.ok(!dialog(), 'the diff modal starts open: the assertions below could not tell a real open from a no-op');
 
     // 🔴 GUARD (WIRING #1): the footer must emit the chip: the only path into the surface.
     const filesBtn = document.querySelector('.term-ctx-bar[data-ctx-for="@1"] .gs-files');
@@ -155,7 +163,7 @@ test('a real click on the wall tile\'s "Files" chip opens the diff modal island 
     // A real Escape on the page closes it: the island's dismissal works on the real page too.
     document.activeElement.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }));
     await waitFor(() => !dialog());
-    assert.equal(dialog(), null, 'Escape did not close the diff modal');
+    assert.ok(!dialog(), 'Escape did not close the diff modal');
 });
 
 // CMX-495: the waits above must not turn "a modal opened" into a pass. Both halves of the
@@ -484,7 +492,7 @@ test('the Files chip is also emitted (and wired end to end) in single-pane / mob
             assert.ok(/<circle|<path/.test(filesBtn.innerHTML),
                 `${label}: the single-pane Files chip rendered no SVG glyph content — the git-compare icon is empty`);
 
-            assert.equal(dialog(), null,
+            assert.ok(!dialog(),
                 `${label}: the diff modal starts open — the click assertion below could not tell a real open from a no-op`);
             diffReads.length = 0;
             clickFilesChip(filesBtn);
