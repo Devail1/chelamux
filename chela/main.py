@@ -65,6 +65,7 @@ from chela import (
     scheduler,
     sessionids,
     sidebar_archive,
+    slot_alerts,
     spawn,
     suite_guard,
     sweep_nightly,
@@ -1682,6 +1683,13 @@ def _print_park(r: dict) -> None:
     p = park.state(r)
     if p:
         print(_park_line(p, time.time()))
+
+
+def cmd_slots(args) -> None:
+    """⏳ CMX-494: `chela slots` — who holds a suite slot and who waits for one, in queue order."""
+    for line in slot_alerts.lines(suite_guard.slots(), suite_guard.held(),
+                                  suite_guard.queued(), time.time()):
+        print(line)
 
 
 def _parker() -> tuple[bool, str]:
@@ -4723,6 +4731,9 @@ def main() -> None:
              "(sent back) and needs_human (the loop gave up) — with PR URL + age",
     )
 
+    sub.add_parser("slots", help="Who holds a suite slot and who waits for one, in queue "
+                                 "order, with rank and wait time")
+
     # park / unpark (CMX-318) — hold a running agent on purpose, so it is not called stuck
     p_park = sub.add_parser(
         "park", help="Hold a running run on purpose: no stuck notice while parked "
@@ -5515,6 +5526,8 @@ def main() -> None:
         cmd_dispatch(args)
     elif args.command == "dispatch-runs":
         cmd_dispatch_runs(args)
+    elif args.command == "slots":
+        cmd_slots(args)
     elif args.command == "park":
         cmd_park(args)
     elif args.command == "unpark":

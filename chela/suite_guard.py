@@ -25,6 +25,8 @@ this is what that one choke point wraps it in.
 5. **Waiters are ranked, and a holder yields to a better one** (CMX-445) — a free slot goes
    to judge rounds first, then hand-ins by issue priority (Urgent, High, Medium, Low, none),
    then the nightly sweep; first come first served only among equals (:func:`queue_key`).
+   The priority is the run's own, by worktree, for whichever command asks (:func:`run_rank`,
+   CMX-494).
    A self-check or hand-in sweep gives its slot up between two experiments when a better
    waiter is queued, and takes it back after (:func:`yield_slot`). On 11-19 a Medium
    self-check held the only slot for 2 h 08 m while an Urgent judge waited 1 h 13 m.
@@ -39,6 +41,7 @@ import json
 import logging
 import os
 import shlex
+import sqlite3
 import subprocess
 import sys
 import tempfile
@@ -216,7 +219,88 @@ def _rank(raw) -> int:
     return raw
 
 
-_waited = 0.0                     # seconds THIS process has spent waiting for a slot
+def _task_rank(rank: int, raw) -> int:
+    """⏳ CMX-494: the task's own rank behind a queue rank. A judge queues at
+    :data:`RANK_JUDGE`, so its task's rank is a separate field (it orders judge rounds among
+    themselves); for everyone else the queue rank IS the task's."""
+    return _rank(raw) if rank == RANK_JUDGE else rank
+
+
+RANK_LABELS = {RANK_JUDGE: "judge", RANK_URGENT: "Urgent", RANK_HIGH: "High",
+               RANK_MEDIUM: "Medium", RANK_LOW: "Low", RANK_UNKNOWN: "no priority",
+               RANK_SWEEP: "nightly sweep"}
+
+
+def rank_label(rank: int, task_rank: int) -> str:
+    """``"Urgent"``, or ``"judge, Urgent"`` for a judge round of an Urgent task."""
+    if rank == RANK_JUDGE:
+        return f"{RANK_LABELS[RANK_JUDGE]}, {RANK_LABELS[task_rank]}"
+    return RANK_LABELS[rank]
+
+
+JUDGE_DIR_PREFIX = "judge-"       # ``judge.judge_worktree_path``: ``<root>/judge-<task_id>``
+_last_rank: dict[str, int] = {}   # per cwd: the last rank the run DB gave
+
+
+def _run_row(cwd: str | Path) -> dict | None:
+    """The run whose worktree holds ``cwd`` — its own worktree, or its judge's checkout beside
+    it — as ``{task_id, priority}``, or None when no run does. A LOCAL read of the run DB (the
+    dispatcher keeps ``runs.priority`` current), never a tracker call. Raises ``sqlite3.Error``
+    / ``OSError`` when the DB cannot be read: that is not "no run"."""
+    db = config.CHELA_DIR / "scheduler.db"
+    if not db.exists():
+        return None
+    dirs: list[Path] = []             # the deepest first
+    for here in (Path(cwd).absolute(), Path(cwd).resolve()):
+        dirs += [d for d in (here, *here.parents) if d not in dirs]
+    judged = {d.name.removeprefix(JUDGE_DIR_PREFIX): d for d in dirs
+              if d.name.startswith(JUDGE_DIR_PREFIX)}
+    marks = ",".join("?" * len(dirs))
+    task_marks = ",".join("?" * len(judged))
+    with contextlib.closing(sqlite3.connect(f"{db.resolve().as_uri()}?mode=ro", uri=True,
+                                            timeout=1.0)) as conn:
+        rows = conn.execute(
+            "SELECT task_id, worktree_path, priority FROM runs WHERE worktree_path IN "
+            f"({marks}) OR task_id IN ({task_marks}) ORDER BY started_at DESC",
+            [*map(str, dirs), *judged]).fetchall()
+    best = None
+    for task_id, worktree, priority in rows:
+        path = Path(str(worktree))
+        if path not in dirs:
+            path = judged.get(task_id)
+            if path is None or Path(str(worktree)).parent != path.parent:
+                continue              # a directory that only LOOKS like this run's judge
+        depth = len(path.parts)
+        if best is None or depth > best[0]:
+            best = (depth, {"task_id": task_id, "priority": priority})
+    return best[1] if best else None
+
+
+def run_rank(cwd: str | Path) -> int:
+    """⏳ CMX-494: where the dispatched run that owns ``cwd`` queues, by its issue's priority
+    as the run DB has it NOW. A directory no run owns is :data:`RANK_UNKNOWN`; a DB that
+    cannot be read keeps the last rank it gave for ``cwd`` (else unknown) — a moment's lock
+    must not drop an Urgent waiter to the back of the queue."""
+    key = str(cwd)
+    try:
+        row = _run_row(cwd)
+    except (sqlite3.Error, OSError):
+        log.debug("suite_guard: could not read the run's priority", exc_info=True)
+        return _last_rank.get(key, RANK_UNKNOWN)
+    _last_rank[key] = handin_rank(row["priority"]) if row else RANK_UNKNOWN
+    return _last_rank[key]
+
+
+def _ranks(cwd: str, rank: int | None) -> tuple[int, int]:
+    """``(queue rank, task rank)`` of an acquirer in ``cwd``, read now. ``rank`` None is the
+    run's own; an explicit one (the nightly sweep) is kept as given."""
+    if rank is None:
+        mine = run_rank(cwd)
+        return mine, mine
+    return rank, run_rank(cwd) if rank == RANK_JUDGE else rank
+
+
+_waited = 0.0                    # seconds THIS process has spent waiting for a slot
 _held = threading.local()         # CMX-393: ``depth`` of this thread's hold — a nested slot re-enters
 _waited_lock = threading.Lock()
 _thread_waited: dict[tuple[int, str], float] = {}  # per (thread, cwd): what a ledger publishes
@@ -306,10 +390,13 @@ class _Ledger:
     (``None`` once it holds a slot) and how long it has waited in all. It is what orders the
     queue (:func:`_must_queue`) and what the stuck probes credit (:func:`waits_in`)."""
 
-    def __init__(self, cwd: str, rank: int = RANK_UNKNOWN):
+    def __init__(self, cwd: str, rank: int = RANK_UNKNOWN, task_rank: int | None = None):
         self.path = _waits_dir() / f"{os.getpid()}-{threading.get_ident()}.json"
         self.cwd, self.waited = cwd, _thread_waited.get((threading.get_ident(), cwd), 0.0)
-        self.rank = rank
+        self.rank, self.task_rank = rank, _task_rank(rank, task_rank)
+        # When THIS wait began: ``waiting_since`` is the CLAIM time, which for a battery that
+        # yielded its slot is before it first held it.
+        self.opened = time.time()
         stat = _proc_stat(os.getpid())
         self.start = stat[1] if stat else None
 
@@ -319,7 +406,9 @@ class _Ledger:
             tmp = self.path.with_suffix(".tmp")
             tmp.write_text(json.dumps({"pid": os.getpid(), "start": self.start,
                                        "cwd": self.cwd, "waiting_since": waiting_since,
-                                       "waited": self.waited, "rank": self.rank}))
+                                       "waited": self.waited, "rank": self.rank,
+                                       "task_rank": self.task_rank,
+                                       "opened": self.opened}))
             tmp.replace(self.path)
         except OSError:
             log.debug("suite_guard: could not publish the slot wait", exc_info=True)
@@ -346,25 +435,26 @@ def _ledgers() -> list[tuple[Path, dict]]:
     return out
 
 
-def queue_key(rank: int, since: float, name: str) -> tuple:
+def queue_key(rank: int, since: float, name: str, task_rank=None) -> tuple:
     """⏳ CMX-445: where a waiter stands in the queue — rank first (:data:`RANK_JUDGE` …
-    :data:`RANK_SWEEP`), then age (first come first served among equals), then its ledger
-    name so two waiters never tie."""
-    return (rank, since, name)
+    :data:`RANK_SWEEP`), then the task's own rank (CMX-494: among judge rounds), then age
+    (first come first served among equals), then its ledger name so two waiters never tie."""
+    return (rank, _task_rank(rank, task_rank), since, name)
 
 
-def _must_queue(me: Path, since: float, rank: int = RANK_UNKNOWN) -> bool:
+def _must_queue(me: Path, since: float, rank: int = RANK_UNKNOWN, task_rank=None) -> bool:
     """Is a waiter AHEAD of us (:func:`queue_key`) still queued? Then it goes first: a
     battery that frees its slot and takes the next one a millisecond later must not starve a
     run already waiting, and a Medium hand-in must not take the slot an Urgent judge is
     queued for (CMX-445). A stopped waiter (a fleet pause, ``T``) does not hold the line."""
-    mine = queue_key(rank, since, me.name)
+    mine = queue_key(rank, since, me.name, task_rank)
     for path, rec in _ledgers():
         opened = rec.get("waiting_since")
         if path == me or opened is None or rec["state"] in ("T", "t"):
             continue
         try:
-            theirs = queue_key(_rank(rec.get("rank")), float(opened), path.name)
+            theirs = queue_key(_rank(rec.get("rank")), float(opened), path.name,
+                               rec.get("task_rank"))
         except (TypeError, ValueError):
             continue
         if theirs < mine:
@@ -431,6 +521,38 @@ def waiters(exclude_pid: int | None = None) -> list[str]:
     return [name for _since, name in sorted(out)]
 
 
+def queued() -> list[dict]:
+    """⏳ CMX-494: every open slot wait in the order it will be served — ``{name, cwd, pid,
+    rank, task_rank, since, stopped}``, ``since`` being when THIS wait began (a yielded
+    battery's earlier hold is not a wait). ``stopped``: a paused waiter, which does not hold
+    the line."""
+    out = []
+    for path, rec in _ledgers():
+        if rec.get("waiting_since") is None:
+            continue
+        rank = _rank(rec.get("rank"))
+        try:
+            claimed = float(rec["waiting_since"])
+            since = float(rec.get("opened") or claimed)
+        except (TypeError, ValueError):
+            continue
+        cwd = str(rec.get("cwd") or "?")
+        out.append((queue_key(rank, claimed, path.name, rec.get("task_rank")), {
+            "name": Path(cwd).name, "cwd": cwd, "pid": rec.get("pid"), "rank": rank,
+            "task_rank": _task_rank(rank, rec.get("task_rank")), "since": since,
+            "stopped": rec["state"] in ("T", "t")}))
+    return [w for _key, w in sorted(out, key=lambda kw: kw[0])]
+
+
+def wait_rank(worktree: str | Path) -> tuple[int, int] | None:
+    """``(rank, task_rank)`` of the first-served open wait inside ``worktree``, or None."""
+    root = Path(worktree).resolve()
+    for w in queued():
+        if root in (Path(w["cwd"]), *Path(w["cwd"]).parents):
+            return w["rank"], w["task_rank"]
+    return None
+
+
 def _take(d: Path, k: int) -> int | None:
     """An fd holding one of the ``k`` slot locks, or None when every one is held."""
     for i in range(k):
@@ -486,8 +608,14 @@ def holders(locks: Path = Path("/proc/locks")) -> list[str]:
     run's "waiting for a suite slot (holder: …)" names (CMX-318). A slot file whose lock is
     free holds nobody, whatever its stale record says. When ``/proc/locks`` cannot be read,
     a record whose process is still alive is named instead."""
+    return [h["name"] for h in held(locks)]
+
+
+def held(locks: Path = Path("/proc/locks")) -> list[dict]:
+    """:func:`holders`, with each one's record: ``{name, cwd, pid, since, rank, task_rank}``
+    (CMX-494). What a record does not say is None; its rank then reads as unknown."""
     d = config.CHELA_DIR / SLOTS_DIRNAME
-    held = _flocked(locks)
+    locked = _flocked(locks)
     out = []
     for i in range(slots()):
         path = d / f"slot-{i}"
@@ -499,16 +627,17 @@ def holders(locks: Path = Path("/proc/locks")) -> list[str]:
             rec = json.loads(path.read_text() or "{}")
         except (OSError, ValueError):
             rec = {}
-        if held is not None:
+        if locked is not None:
             dev = f"{os.major(st.st_dev):02x}:{os.minor(st.st_dev):02x}"
-            if (dev, st.st_ino) not in held:
+            if (dev, st.st_ino) not in locked:
                 continue
         elif not isinstance(rec, dict) or _proc_stat(_int(rec.get("pid"))) is None:
             continue
-        try:
-            out.append(Path(rec["cwd"]).name)
-        except (KeyError, TypeError):
-            out.append("unknown")
+        rec = rec if isinstance(rec, dict) else {}
+        cwd, rank = rec.get("cwd"), _rank(rec.get("rank"))
+        out.append({"name": Path(cwd).name if isinstance(cwd, str) else "unknown", "cwd": cwd,
+                    "pid": rec.get("pid"), "since": rec.get("since"), "rank": rank,
+                    "task_rank": _task_rank(rank, rec.get("task_rank"))})
     return out
 
 
@@ -524,19 +653,22 @@ class SlotTimeout(TimeoutError):
     suite that could not be run — CANNOT VERIFY, never a pass."""
 
 
-def _acquire(d: Path, k: int, cwd: str, rank: int, on_wait, max_wait: float | None,
+def _acquire(d: Path, k: int, cwd: str, rank: int | None, on_wait, max_wait: float | None,
              poll: float, since: float | None = None) -> int:
     """Wait (visibly, in :func:`queue_key` order) for one of the ``k`` slots and return its
     fd, at most ``max_wait`` seconds (:class:`SlotTimeout`); the wait is credited. ``since``
-    is where it stands among equals (default: now)."""
+    is where it stands among equals (default: now). ``rank`` None is the run's own
+    (:func:`run_rank`), re-read every poll: raising the issue's priority re-ranks a waiter
+    that is already queued (CMX-494)."""
     global _waited
-    ledger = _Ledger(cwd, rank)
-    opened = time.time()
+    ledger = _Ledger(cwd, *_ranks(cwd, rank))
+    opened = ledger.opened
     since = opened if since is None else since
     started, fd = None, None
     try:
         while True:
-            if not _must_queue(ledger.path, since, rank) and (fd := _take(d, k)) is not None:
+            if (not _must_queue(ledger.path, since, ledger.rank, ledger.task_rank)
+                    and (fd := _take(d, k)) is not None):
                 break
             if started is None:
                 started = time.monotonic()
@@ -549,6 +681,10 @@ def _acquire(d: Path, k: int, cwd: str, rank: int, on_wait, max_wait: float | No
                 raise SlotTimeout(f"no suite slot came free in {max_wait:.0f}s "
                                   f"(all {k} busy: {_holders(d, k)})")
             time.sleep(poll)
+            now_ranked = _ranks(cwd, rank)
+            if now_ranked != (ledger.rank, ledger.task_rank):
+                ledger.rank, ledger.task_rank = now_ranked
+                ledger.write(since)
     finally:
         if started is not None:
             spent = time.monotonic() - started
@@ -561,8 +697,9 @@ def _acquire(d: Path, k: int, cwd: str, rank: int, on_wait, max_wait: float | No
                 on_wait(None)
     try:
         os.ftruncate(fd, 0)
-        os.pwrite(fd, json.dumps({"pid": os.getpid(), "cwd": cwd,
-                                  "since": time.time()}).encode(), 0)
+        os.pwrite(fd, json.dumps({"pid": os.getpid(), "cwd": cwd, "since": time.time(),
+                                  "rank": ledger.rank,
+                                  "task_rank": ledger.task_rank}).encode(), 0)
     except BaseException:
         os.close(fd)
         raise
@@ -571,10 +708,10 @@ def _acquire(d: Path, k: int, cwd: str, rank: int, on_wait, max_wait: float | No
 
 @contextlib.contextmanager
 def slot(cwd: str | Path, on_wait=None, max_wait: float | None = None,
-         poll: float | None = None, rank: int = RANK_UNKNOWN):
+         poll: float | None = None, rank: int | None = None):
     """Hold one of the K suite slots for the ``with`` body; wait (visibly, in
     :func:`queue_key` order — ``rank`` first, then first come first served) for one first,
-    at most ``max_wait`` seconds (:class:`SlotTimeout`).
+    ``rank`` None being that of the run whose worktree ``cwd`` is (:func:`run_rank`), at most ``max_wait`` seconds (:class:`SlotTimeout`).
 
     ``on_wait(since)`` is told when a wait begins (``since`` = its wall-clock start) and
     ends (``None``). With ``K == 0`` the body runs at once. A slot dir that cannot be made
@@ -629,7 +766,7 @@ def yield_slot() -> str:
     if hold is None or fd is None:
         return ""
     d, k, cwd, rank, on_wait, claimed, poll = hold
-    better = outranking(rank)
+    better = outranking(_ranks(cwd, rank)[0])     # its rank NOW: a raised issue stays put
     if not better:
         return ""
     names = ", ".join(better)
@@ -670,9 +807,10 @@ def battery(cwd: str | Path, kind: str, on_wait=None, max_wait: float | None = N
     :func:`stopped_batteries`.
 
     ⏳ CMX-445: ``rank`` is where it queues (:func:`queue_key`); None ranks it by ``kind`` —
-    a ``"judge"`` first, anything else as a hand-in of unknown priority."""
+    a ``"judge"`` first, anything else by the priority of the run whose worktree ``cwd`` is
+    (CMX-494, :func:`run_rank`), whichever command started it."""
     nested = bool(getattr(_held, "depth", 0))
-    rank = _KIND_RANKS.get(kind, RANK_UNKNOWN) if rank is None else rank
+    rank = _KIND_RANKS.get(kind) if rank is None else rank
     with slot(cwd, on_wait=on_wait, max_wait=max_wait, poll=poll, rank=rank):
         if nested:
             yield
