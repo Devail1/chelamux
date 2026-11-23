@@ -74,6 +74,7 @@ def test_the_wheel_carries_every_tracked_runtime_file(wheel):
     "chela/dashboard/static/app/manifest.json",   # the committed dashboard bundle
     "chela/dashboard/templates/index.html",
     "chela/dashboard/static/term-reconnect.js",   # ttyd page shims
+    "chela/dashboard/static/term-focus.js",
     "chela/dashboard/static/term-upload.js",
     "chela/dashboard/static/term-touch.css",
     "chela/mergegate.py",                         # copied into the plugin's hooks/
