@@ -516,34 +516,94 @@ def iter_turns(path: Path, include_sidechain: bool = False) -> Iterator[dict]:
         return
 
 
-def latest_context_usage(path: Path) -> dict | None:
-    """Context-window token usage from the most recent assistant message.
+def _is_usage_turn(o: dict) -> bool:
+    """A main-conversation assistant record that carries a real ``usage`` block.
 
-    Returns ``{"used_tokens": int, "model": str | None, "session_id": str}`` where
-    ``used_tokens`` is ``input + cache_read + cache_creation`` of the last assistant
-    turn — i.e. everything resident in the context window on that turn — and
-    ``session_id`` is the session the transcript belongs to (its file stem). None if
-    no assistant message with a usage block is found. This is the zero-setup fallback
-    for the context bar; the statusLine payload (when installed) is authoritative and
-    also carries the exact window size, which the transcript does not record (CMX-292:
-    ``session_id`` is what lets the fallback recover that size from the session's own
-    cache once it has gone stale).
+    ``<synthetic>`` records (an API error Claude Code writes as an assistant message)
+    carry an all-zero usage that is not a reading of the context, and a sidechain's usage
+    is a sub-agent's own context, not this session's.
     """
-    rec = latest_record(
-        path,
-        lambda o: o.get("type") == "assistant"
-        and isinstance(o.get("message"), dict)
-        and isinstance(o["message"].get("usage"), dict),
-    )
+    msg = o.get("message")
+    return (o.get("type") == "assistant"
+            and not o.get("isSidechain")
+            and isinstance(msg, dict)
+            and isinstance(msg.get("usage"), dict)
+            and msg.get("model") != "<synthetic>")
+
+
+def _is_compaction(o: dict) -> bool:
+    """A ``/compact`` (or auto-compact) marker: the ``compact_boundary`` system record, or
+    the summary entry Claude Code writes right before it (``isCompactSummary``)."""
+    if o.get("isSidechain"):
+        return False
+    return ((o.get("type") == "system" and o.get("subtype") == "compact_boundary")
+            or o.get("isCompactSummary") is True)
+
+
+def usage_tokens(u: dict) -> int:
+    """Tokens resident in the context window on a turn: ``input + cache_read +
+    cache_creation``. ``output_tokens`` is NOT counted — that is the figure Claude Code's
+    own ``/context`` prints (verified on a real transcript: 635,067 input-side tokens with
+    256 output read as "635.1k", where counting output would read 635.3k) and the one its
+    status line's ``used_percentage`` is computed from (``total_input_tokens``)."""
+    def n(key: str) -> int:
+        v = u.get(key)
+        return v if isinstance(v, int) and not isinstance(v, bool) and v > 0 else 0
+    return n("input_tokens") + n("cache_read_input_tokens") + n("cache_creation_input_tokens")
+
+
+def latest_context_usage(path: Path) -> dict | None:
+    """The session's context reading from its transcript, or None when it has none yet.
+
+    Reads back from the end for the newer of two records (CMX-475):
+
+    * the latest assistant turn with a ``usage`` block — ``used_tokens`` is
+      :func:`usage_tokens` of it, ``ts`` its timestamp, ``compacted`` False;
+    * a compaction marker (:func:`_is_compaction`). When one is NEWER than the last usage,
+      that usage is the pre-compact number and is stale: ``compacted`` is True,
+      ``used_tokens`` is None, and ``stale_used_tokens`` keeps the old figure only so a
+      caller can say what it replaced. ``pre_tokens``/``post_tokens`` are Claude Code's
+      own ``compactMetadata`` when present.
+
+    None when neither exists — a fresh session, or the new transcript ``/clear`` starts —
+    so no number is shown until the first turn. When the scan budget ran out before either
+    was found, ``{"session_id", "scan_exhausted": True}`` instead: unknown, not "no turns".
+    Every other dict also carries ``model`` (the
+    latest assistant turn's model id), ``cwd`` and ``session_id`` (the file stem).
+    """
+    rec = latest_record(path, lambda o: _is_usage_turn(o) or _is_compaction(o))
     if not rec:
-        return None
-    u = rec["message"]["usage"]
-    used = (
-        (u.get("input_tokens") or 0)
-        + (u.get("cache_read_input_tokens") or 0)
-        + (u.get("cache_creation_input_tokens") or 0)
+        # The reverse scan stops after DEFAULT_MAX_SCAN_BYTES. A transcript longer than that
+        # with no match in its tail (large tool results since the last turn) is NOT a
+        # session with no turns: say "unknown", so a caller does not read it as "—" and
+        # let it beat a good statusLine reading.
+        try:
+            exhausted = path.stat().st_size > DEFAULT_MAX_SCAN_BYTES
+        except OSError:
+            exhausted = False
+        return {"session_id": path.stem, "scan_exhausted": True} if exhausted else None
+    out: dict = {"session_id": path.stem, "cwd": rec.get("cwd"), "ts": rec.get("timestamp")}
+    if _is_usage_turn(rec):
+        msg = rec["message"]
+        out.update(used_tokens=usage_tokens(msg["usage"]), model=msg.get("model"),
+                   compacted=False)
+        return out
+    meta = rec.get("compactMetadata")
+    meta = meta if isinstance(meta, dict) else {}
+
+    def tok(key: str) -> int | None:
+        v = meta.get(key)
+        return v if isinstance(v, int) and not isinstance(v, bool) and v >= 0 else None
+
+    prev = latest_record(path, _is_usage_turn)
+    prev_msg = prev["message"] if prev else {}
+    out.update(
+        used_tokens=None, compacted=True,
+        model=prev_msg.get("model") if prev else None,
+        stale_used_tokens=usage_tokens(prev_msg["usage"]) if prev else None,
+        pre_tokens=tok("preTokens"), post_tokens=tok("postTokens"),
     )
-    return {"used_tokens": used, "model": rec["message"].get("model"), "session_id": path.stem}
+    return out
 
 
 def agent_context_from_transcript(agent_name: str, window_id: str | None = None) -> dict | None:
