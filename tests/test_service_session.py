@@ -453,3 +453,16 @@ def test_real_tmux_session_present_is_exact(scratch_tmux, present, ok):
     r = _run_sh(body, TMUX_SESSION="chela")
     assert (r.returncode == 0) is ok, r.stderr
     assert _sessions(scratch_tmux) == set(present)   # never created anything
+
+
+@needs_tmux
+def test_real_tmux_session_present_never_asks_with_tmux_tmpdir_gone(scratch_tmux, tmp_path):
+    """CMX-21: with TMUX_TMPDIR pointing at a deleted dir, tmux falls back to the DEFAULT
+    socket dir — where this scratch server (and, live, the operator's) actually is. So the
+    session there must NOT answer: session_present refuses before asking."""
+    scratch_tmux("new-session", "-d", "-s", "chela")
+    body = (_sh_functions("tmux_tmpdir_missing", "session_present")
+            + "\nsession_present\n")
+    assert _run_sh(body, TMUX_SESSION="chela").returncode == 0          # control
+    r = _run_sh(body, TMUX_SESSION="chela", TMUX_TMPDIR=str(tmp_path / "gone"))
+    assert r.returncode != 0, "asked tmux through the fallback socket"

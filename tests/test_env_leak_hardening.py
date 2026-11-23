@@ -391,7 +391,8 @@ def test_negative_control_an_orphan_with_its_dir_intact_keeps_serving(env, sock,
     out = tmp_path / "orphan-ok.log"
     pid = _orphan(env, out)
     try:
-        assert _wait(lambda: "dynamic supervisor" in out.read_text()), out.read_text()
+        assert _wait(lambda: out.exists() and "dynamic supervisor" in out.read_text()), \
+            out.read_text() if out.exists() else "no log"
         time.sleep(2)
         assert not _gone(pid), out.read_text()
     finally:
