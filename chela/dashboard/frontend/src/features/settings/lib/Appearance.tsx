@@ -1,7 +1,10 @@
 // CMX-221 (CMX-212 P15): the Appearance tab: the theme (CMX-381: it re-themes the terminals too)
-// and the terminal faces and size. Per browser, applied live to every open pane.
+// and the terminal faces and size, per browser, applied live to every open pane; and CMX-492's
+// resource stats switch.
 import { useState } from 'react';
-import { FieldRow, Select } from '../../../shared/ui/index.ts';
+import { useStore } from '../../../shared/store/index.ts';
+import { FieldRow, Select, Toggle } from '../../../shared/ui/index.ts';
+import { resourcesShown, setResourcesShown } from '../../resources/index.ts';
 import { TERM_FONT_LABELS, TERM_LATIN_LABELS, TERM_SIZES, THEME_LABELS, optionsOf } from '../model.ts';
 import { DEFAULTS, KEYS, setTermPref, setTheme } from './prefs.ts';
 import { Section } from './parts.tsx';
@@ -16,6 +19,7 @@ export function Appearance() {
   const [latin, setLatin] = usePref('latin');
   const [font, setFont] = usePref('font');
   const [size, setSize] = usePref('size');
+  const stats = useStore(resourcesShown);
   return (
     <>
       <Section title="Theme">
@@ -36,6 +40,13 @@ export function Appearance() {
         <FieldRow id="term-size-select" label="Size" keywords="terminal font size zoom px">
           <Select value={size} options={TERM_SIZES.map((s) => ({ value: s, label: `${s}px` }))} onChange={(v) => { setTermPref('size', v); setSize(v); }} />
         </FieldRow>
+      </Section>
+      <Section title="Sidebar">
+        <FieldRow id="resource-stats-toggle" label="Show resource stats" keywords="cpu ram memory disk host footer strip poll battery">
+          <Toggle value={stats} onChange={setResourcesShown} />
+        </FieldRow>
+        <p className="s-desc">The host&apos;s CPU, RAM and disk use at the foot of the sidebar. Saved per device; off also stops
+          this device asking for them.</p>
       </Section>
     </>
   );

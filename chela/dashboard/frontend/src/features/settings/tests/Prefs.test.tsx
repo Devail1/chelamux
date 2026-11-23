@@ -4,7 +4,7 @@
 import { fireEvent } from '@testing-library/react';
 import { afterEach, expect, test, vi } from 'vitest';
 import { applySavedTheme, setTheme } from '../index.ts';
-import { must, openOn, pick, posts, routes, settle, type, visible } from './setup.tsx';
+import { must, openOn, pick, posts, routes, rowOf, settle, type, visible } from './setup.tsx';
 
 // 🔐 CMX-447: seed the page's session token before the modules under test read it at import.
 // Unseeded it is '', and an assertion against '' passes for a request that sends an EMPTY
@@ -94,6 +94,20 @@ test.each([
   await openOn('appearance');
   await pick(id, label);
   expect([localStorage.getItem(key), seen.prefs]).toEqual([value, 1]);
+});
+
+test('Show resource stats: in Appearance, on by default; off is stored on this device, on clears it', async () => {
+  await openOn('appearance');
+  const toggle = () => must(document.getElementById('resource-stats-toggle'));
+  expect(must(toggle().closest('.settings-tabpanel')).getAttribute('data-tab')).toBe('appearance');
+  expect([rowOf('resource-stats-toggle').querySelector('.field-label')?.textContent, toggle().getAttribute('aria-checked')])
+    .toEqual(['Show resource stats', 'true']);
+  fireEvent.click(toggle());
+  await settle(1);
+  expect([toggle().getAttribute('aria-checked'), localStorage.getItem('chela_hide_resource_stats')]).toEqual(['false', '1']);
+  fireEvent.click(toggle());
+  await settle(1);
+  expect([toggle().getAttribute('aria-checked'), localStorage.getItem('chela_hide_resource_stats')]).toEqual(['true', null]);
 });
 
 // --- Collaboration -------------------------------------------------------------------------

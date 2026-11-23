@@ -9,6 +9,7 @@ import { api } from '../../../shared/api/index.ts';
 import { registerLane } from '../../../shared/scheduler/index.ts';
 import { createStore, useStore } from '../../../shared/store/index.ts';
 import { humanBytes, level } from '../model.ts';
+import { resourcesShown } from './shown.ts';
 
 type Sample = Partial<Record<'cpu_pct' | 'mem_pct' | 'mem_used' | 'mem_total' | 'disk_pct' | 'disk_used' | 'disk_total', number | null>>;
 type Metric = { id: string; label: string; pct: keyof Sample; used?: keyof Sample; total?: keyof Sample };
@@ -24,9 +25,10 @@ export const resources = createStore<Sample | null>(null);
 
 /** Never throws out: a transient failure keeps the last sample (the next tick retries). */
 export async function tickResources(): Promise<void> {
+  if (!resourcesShown.get()) return; // CMX-492: hidden on this device means no request at all
   try {
     const data = (await api('/api/resources')) as Sample | null;
-    if (data) resources.set(data);
+    if (data && resourcesShown.get()) resources.set(data); // hidden mid-read: drop the reply
   } catch (e) {
     console.error('tickResources', e);
   }
@@ -47,6 +49,8 @@ function Readout({ m, data }: { m: Metric; data: Sample }) {
 
 export function Resources() {
   const data = useStore(resources);
+  const shown = useStore(resourcesShown);
+  if (!shown) return null;
   return (
     <div className="res-strip" id="resources-strip" hidden={!data}>
       {data && METRICS.map((m) => <Readout key={m.id} m={m} data={data} />)}
@@ -55,3 +59,10 @@ export function Resources() {
 }
 
 registerLane('resources', () => tickResources());
+
+// Off drops the sample, so turning it back on shows nothing until the read it starts lands,
+// never the numbers from before.
+resourcesShown.subscribe(() => {
+  if (resourcesShown.get()) void tickResources();
+  else resources.set(null);
+});

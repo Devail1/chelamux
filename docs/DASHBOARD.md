@@ -43,6 +43,8 @@ windows with no working directory fall into **Other**.
 - **Hold <kbd>Alt</kbd> to number the rows**; <kbd>Alt</kbd>+<kbd>1</kbd>..<kbd>9</kbd> opens
   that session, in any view and from inside a focused terminal. The numbers go on the first
   nine visible session rows; collapsed groups and Archived are skipped.
+- **The host's CPU, RAM and disk use** sit at the sidebar's foot. Settings > Appearance >
+  *Show resource stats* turns them off per device, which also stops that device polling for them.
 - **Custom groups** are created, renamed and deleted in the VIEW menu. A row's
   **Move to group…** item appears only when Group by is *Custom groups*.
 
