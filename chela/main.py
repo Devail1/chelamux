@@ -154,6 +154,15 @@ class GracefulShutdown:
 def cmd_status(args) -> None:
     """List the agent windows chela can see in the tmux session."""
     session = config.current_session()
+    # CMX-470: refuse a missing session outright. tmux would PREFIX-match a bare `-t chela`
+    # onto e.g. `chela-services`; every target is exact now, so the honest answer is "no
+    # session", never another session's windows.
+    if not discovery.session_exists(session):
+        print(f"no session {session}: tmux has no session named exactly '{session}'.",
+              file=sys.stderr)
+        print("Start it (`chela start`), or point CHELA_TMUX_SESSION at the session that "
+              "is really there.", file=sys.stderr)
+        sys.exit(1)
     windows = discovery.get_all_windows()
     if not windows:
         print(f"No windows found in tmux session '{session}'.")
@@ -219,8 +228,24 @@ def _restore_gather() -> tuple[list, list[dict]]:
     return verdicts, dispatcher.list_runs()
 
 
+def _declare_service(name: str) -> str:
+    """Mark this process as the chela service ``name`` (CMX-470: it then ignores
+    ``$TMUX_PANE`` — see :func:`chela.config.session_source`) and log which tmux session
+    it drives and why. Returns the session."""
+    config.mark_service(name)
+    session, source = config.session_source()
+    if source == config.SOURCE_SERVICE:
+        log.warning("chela %s: driving tmux session %r — %s. It was started inside a tmux "
+                    "pane (%s); set CHELA_TMUX_SESSION to drive another session.",
+                    name, session, source, os.environ.get("TMUX_PANE"))
+    else:
+        log.info("chela %s: driving tmux session %r (from %s)", name, session, source)
+    return session
+
+
 def cmd_run(args) -> None:
     """Run the daemon loop: scheduler tick every pass, dispatcher on its own cadence."""
+    _declare_service("daemon")
     log.info("chela daemon starting (session=%s, poll=%ds)",
              config.current_session(), config.scheduler_poll_interval())
     scheduler.init()  # open the WAL scheduler DB + init schema once, before ticking
@@ -2173,6 +2198,7 @@ def cmd_telegram(args) -> None:
     if getattr(args, "sandbox_relay", None):
         _cmd_sandbox_relay(args.sandbox_relay)
         return
+    _declare_service("telegram")
 
     token = os.environ.get("TELEGRAM_BOT_TOKEN")
     chat = os.environ.get("TELEGRAM_CHAT_ID")
@@ -2445,6 +2471,7 @@ def cmd_dashboard(args) -> None:
         os.environ["CHELA_DASH_HOST"] = args.host
     if args.port:
         os.environ["CHELA_DASHBOARD_PORT"] = str(args.port)
+    _declare_service("dashboard")
     host, port = config.dashboard_host(), config.dashboard_port()
     log.info("chela dashboard on http://%s:%s (zero auth — keep it loopback/tailnet)", host, port)
     dashboard_app.main()
@@ -2454,6 +2481,7 @@ def cmd_collab(args) -> None:
     """``chela collab`` — host the live-share bridges in their own process (CMX-434), so a
     dashboard deploy never ends a share. Runs under PM2 as ``chela-collab``."""
     from chela import collab_host
+    _declare_service("collab")
     if not config.COLLAB_RELAY:
         log.warning("chela collab: CHELA_COLLAB_RELAY is empty — shares can't start until it is set")
     collab_host.run_service()

@@ -6,7 +6,7 @@ export { PaneFrame, type PaneFrameProps } from './lib/PaneFrame.tsx';
 export type { PaneFrameHost } from './lib/host.ts';
 export { forgetReady, isReady, markReady, readiness, READY_MAX_TRIES, READY_POLL_MS, resolveReady, retryReady, type Readiness } from './lib/ready.ts';
 export { applyTermFocus, focusedPane, focusFrame } from './lib/focus.ts';
-export { framesOf, isSuspended, isWatched, reportWatch, suspendedPanes, TERM_HIDE_GRACE_MS, widOfFrame } from './lib/watch.ts';
+export { framesOf, INPUT_EVENTS, INPUT_REPORT_MS, isSuspended, isWatched, reportInput, reportWatch, suspendedPanes, TERM_HIDE_GRACE_MS, widOfFrame, wireInputReport } from './lib/watch.ts';
 export { htmlToText, termKey, termPaste } from './lib/paste.ts';
 export { wireIframeShortcuts } from './lib/shortcuts.ts';
 export { cidOfSrc, frameSrc, isPaletteKey, newCid, termSrc, uriListToText, widOfSrc } from './model.ts';

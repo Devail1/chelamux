@@ -52,10 +52,15 @@ pm2 delete chela-daemon chela-dashboard chela-telegram
 pm2 start ~/.chela/ecosystem.config.js && pm2 save
 ```
 
-and it must be run from a shell that is **not inside tmux**: `config.current_session()`
-falls back to deriving the session from `$TMUX_PANE`, so a leaked pane makes a service
-silently target whatever session that pane was in: a `webterm_*` *mirror*, in the case
-that bit us. `run-chela.sh` strips `TMUX`/`TMUX_PANE` for exactly this reason.
+and it should be run from a shell that is **not inside tmux**. `config.current_session()`
+derives the session from `$TMUX_PANE` for an interactive agent, and before CMX-470 a
+service did the same, so a leaked pane made it silently target whatever session that pane
+was in: a `webterm_*` *mirror*, in the case that bit us. The services (daemon, dashboard,
+telegram, collab) now ignore `$TMUX_PANE` and drive `CHELA_TMUX_SESSION`, else `chela`;
+each logs which session it drives and why, and `chela doctor` warns when one was started
+inside a pane. `run-chela.sh` still strips `TMUX`/`TMUX_PANE`, for everything the service
+spawns. Never name another tmux session `chela-*`: tmux matches a bare `-t chela` by prefix.
+chela's own targets are exact (`=chela`), and `chela doctor` warns about such a session.
 
 Nor from a shell that descends from a PM2-run service: an agent window chela spawned
 before CMX-191, or one the daemon's tmux server was born under. PM2 exports each process's

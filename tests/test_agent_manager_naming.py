@@ -164,7 +164,7 @@ def test_reconcile_renames_the_newer_duplicate_and_keeps_the_older(monkeypatch):
                                ("@4", "shell-1", "bash", 2, "0", "0"))
     assert actions == ["shell-1 -> shell-1-2"]
     renames = [(c[3], c[4]) for c in fake.calls if c[:2] == ["tmux", "rename-window"]]
-    assert renames == [("sess:@13", "shell-1-2")]       # the NEWER one; @4 untouched
+    assert renames == [("=sess:@13", "shell-1-2")]       # the NEWER one; @4 untouched
 
 
 def test_reconcile_duplicate_suffix_is_collision_safe(monkeypatch):
@@ -190,7 +190,7 @@ def test_reconcile_manual_name_wins_a_duplicate_over_an_older_window(monkeypatch
                                ("@2", "billing", "claude", 2, "0", "0", "1"))
     assert actions == ["billing -> billing-2"]
     renames = [(c[3], c[4]) for c in fake.calls if c[:2] == ["tmux", "rename-window"]]
-    assert renames == [("sess:@1", "billing-2")]
+    assert renames == [("=sess:@1", "billing-2")]
 
 
 def test_reconcile_never_renames_two_colliding_manual_names(monkeypatch, caplog):
@@ -219,8 +219,8 @@ def test_reconcile_never_renames_dispatch_or_judge_windows(monkeypatch):
 def test_mark_manual_name_sets_the_window_user_option(monkeypatch):
     fake = _FakeTmux()
     monkeypatch.setattr(subprocess, "run", fake)
-    agent_manager.mark_manual_name("sess:@7")
-    assert fake.calls == [["tmux", "set-window-option", "-t", "sess:@7",
+    agent_manager.mark_manual_name("=sess:@7")
+    assert fake.calls == [["tmux", "set-window-option", "-t", "=sess:@7",
                            agent_manager.MANUAL_NAME_OPTION, "1"]]
 
 
@@ -269,7 +269,7 @@ def test_reconcile_three_way_duplicate_gives_each_newer_window_a_distinct_suffix
                                ("@1", "shell-1", "claude", 1, "0", "0"),
                                ("@3", "shell-1", "claude", 3, "0", "0"))
     renames = [(c[3], c[4]) for c in fake.calls if c[:2] == ["tmux", "rename-window"]]
-    assert renames == [("sess:@3", "shell-1-2"), ("sess:@5", "shell-1-3")]
+    assert renames == [("=sess:@3", "shell-1-2"), ("=sess:@5", "shell-1-3")]
     assert actions == ["shell-1 -> shell-1-2", "shell-1 -> shell-1-3"]
 
 
@@ -279,7 +279,7 @@ def test_reconcile_window_age_is_the_numeric_index_not_its_string(monkeypatch):
                          ("@10", "tradeplan", "claude", 10, "0", "0"),
                          ("@9", "tradeplan", "claude", 9, "0", "0"))
     renames = [(c[3], c[4]) for c in fake.calls if c[:2] == ["tmux", "rename-window"]]
-    assert renames == [("sess:@10", "tradeplan-2")]
+    assert renames == [("=sess:@10", "tradeplan-2")]
 
 
 def test_reconcile_manual_flag_is_exactly_one_not_any_value(monkeypatch):
@@ -289,7 +289,7 @@ def test_reconcile_manual_flag_is_exactly_one_not_any_value(monkeypatch):
                          ("@1", "billing", "claude", 1, "0", "0"),
                          ("@2", "billing", "claude", 2, "0", "0", "0"))
     renames = [(c[3], c[4]) for c in fake.calls if c[:2] == ["tmux", "rename-window"]]
-    assert renames == [("sess:@2", "billing-2")]
+    assert renames == [("=sess:@2", "billing-2")]
 
 
 def test_reconcile_two_manual_names_still_suffix_a_non_manual_third(monkeypatch, caplog):
@@ -301,7 +301,7 @@ def test_reconcile_two_manual_names_still_suffix_a_non_manual_third(monkeypatch,
                                    ("@2", "billing", "claude", 2, "0", "0", "1"),
                                    ("@3", "billing", "claude", 3, "0", "0", "1"))
     renames = [(c[3], c[4]) for c in fake.calls if c[:2] == ["tmux", "rename-window"]]
-    assert renames == [("sess:@1", "billing-2")]
+    assert renames == [("=sess:@1", "billing-2")]
     assert actions == ["billing -> billing-2"]
     assert [r for r in caplog.records if r.levelname == "WARNING" and "billing" in r.getMessage()]
 
@@ -377,4 +377,4 @@ def test_is_manual_name_is_false_when_tmux_fails(monkeypatch):
     monkeypatch.setattr(subprocess, "run", lambda cmd, **kw: (calls.append(cmd), types.SimpleNamespace(
         returncode=0, stdout="1\n", stderr=""))[1])
     assert agent_manager.is_manual_name("@4") is True
-    assert calls == [["tmux", "display-message", "-p", "-t", "sess:@4", "#{@chela_manual_name}"]]
+    assert calls == [["tmux", "display-message", "-p", "-t", "=sess:@4", "#{@chela_manual_name}"]]

@@ -14,7 +14,7 @@ import { host, type PaneFrameHost } from './host.ts';
 import { PaneFrame } from './PaneFrame.tsx';
 import { markReady, readiness } from './ready.ts';
 import { wireIframeShortcuts } from './shortcuts.ts';
-import { installWatch, isSuspended, reportWatch, suspendedPanes } from './watch.ts';
+import { installWatch, isSuspended, reportWatch, suspendedPanes, wireInputReport } from './watch.ts';
 
 type Slot = { wid: string; key: number };
 
@@ -27,6 +27,7 @@ const onWall = () => BOOT.terminalsEnabled && view.get() === 'terminals';
 function loaded(ifr: HTMLIFrameElement): void {
   wireIframeShortcuts(ifr);
   reportWatch(ifr); // this fresh connection's watched state (CMX-175)
+  wireInputReport(ifr); // input makes this the device in use (CMX-476)
   host.frameLoaded();
 }
 

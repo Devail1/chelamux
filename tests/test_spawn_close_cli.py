@@ -140,7 +140,7 @@ def close_env(monkeypatch):
 
 def test_close_kills_a_live_chela_window_scoped_to_the_session(close_env, capsys):
     assert _main(["close", "@5"]) is None
-    assert close_env == [["tmux", "kill-window", "-t", "chela:@5"]]
+    assert close_env == [["tmux", "kill-window", "-t", "=chela:@5"]]
     assert "closed @5 (proj)" in capsys.readouterr().out
 
 
@@ -165,7 +165,7 @@ def test_close_refuses_the_registered_orchestrator_window(close_env, monkeypatch
 
 def test_orchestrator_flag_allows_closing_the_orchestrator_window(close_env):
     assert _main(["close", "@1", "--orchestrator"]) is None
-    assert close_env == [["tmux", "kill-window", "-t", "chela:@1"]]
+    assert close_env == [["tmux", "kill-window", "-t", "=chela:@1"]]
 
 
 def test_close_refuses_a_window_an_in_flight_run_claims(close_env, capsys):
@@ -176,7 +176,7 @@ def test_close_refuses_a_window_an_in_flight_run_claims(close_env, capsys):
 
 def test_force_kills_a_window_an_in_flight_run_claims(close_env):
     assert _main(["close", "@7", "--force"]) is None
-    assert close_env == [["tmux", "kill-window", "-t", "chela:@7"]]
+    assert close_env == [["tmux", "kill-window", "-t", "=chela:@7"]]
 
 
 def test_close_reports_a_failed_kill(close_env, monkeypatch, capsys):

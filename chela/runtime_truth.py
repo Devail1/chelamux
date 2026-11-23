@@ -348,24 +348,41 @@ def _session_read() -> Observation:
                              "exist. chela IS a tmux orchestrator: with no tmux, nothing "
                              "it reports about the fleet means anything.")
     session = config.current_session()
-    return observed(discovery.session_exists(session))
+    return observed({"exists": discovery.session_exists(session),
+                     "sessions": discovery.list_sessions()})
+
+
+def lookalike_sessions(session: str, sessions: list[str]) -> list[str]:
+    """Sessions whose name STARTS WITH ``session`` but isn't it — e.g. ``chela-services``
+    next to ``chela``. Before CMX-470 a bare ``-t chela`` prefix-matched one of these the
+    moment ``chela`` itself was gone; every target is exact now, but a lookalike is still
+    one hand-typed ``tmux attach -t chela`` away from the wrong fleet."""
+    return sorted(s for s in sessions if s != session and s.startswith(session))
 
 
 def _session_report(session: str, obs: Observation) -> list[Finding]:
     out: list[Finding] = []
-    if os.environ.get("CHELA_TMUX_SESSION"):
-        source = "CHELA_TMUX_SESSION"
-    elif os.environ.get("TMUX_PANE"):
-        source = "$TMUX_PANE"
+    _, source = config.session_source()
+    service = config.service_name()
+    if source == config.SOURCE_PANE:
         out.append(Finding(
             WARN, f"tmux session {session!r} — DERIVED from $TMUX_PANE, not configured",
             "Correct for an agent in its own pane; wrong for a service, where a leaked "
-            "TMUX_PANE silently targets a webterm_* mirror session. Services must start "
-            "via scripts/run-chela.sh (`env -u TMUX -u TMUX_PANE`).",
+            "TMUX_PANE silently targets the session it was started from (or a webterm_* "
+            "mirror). chela's services ignore $TMUX_PANE (CMX-470); start any other "
+            "long-running chela process outside tmux, or set CHELA_TMUX_SESSION.",
         ))
-    else:
-        source = "default"
-    if obs.value:
+    elif source == config.SOURCE_SERVICE:
+        out.append(Finding(
+            WARN, f"service {service!r} was started inside a tmux pane — ignoring "
+                  f"$TMUX_PANE, driving {session!r}",
+            "A service never takes its session from the shell that started it. If "
+            f"{session!r} is the fleet, pin it anyway: set CHELA_TMUX_SESSION={session} "
+            "in the service's env (or start it via scripts/run-chela.sh, outside tmux) "
+            "and this goes quiet.",
+        ))
+    value = obs.value
+    if value["exists"]:
         out.append(Finding(OK, f"tmux session {session!r} exists ({source})"))
     else:
         out.append(Finding(
@@ -374,6 +391,26 @@ def _session_report(session: str, obs: Observation) -> list[Finding]:
             "send-keys, the dispatcher and the terminal wall resolve against it, and they "
             "will all find nothing. Start it (`chela start`), or point "
             "CHELA_TMUX_SESSION at the session that is really there.",
+        ))
+    sessions = value["sessions"]
+    if sessions is None:
+        if not value["exists"]:            # no server at all: the WARN above already says it
+            return out
+        out.append(Finding(
+            WARN, "cannot list tmux sessions — lookalike session names are unchecked",
+            "`tmux list-sessions` failed, so chela cannot tell whether a session named "
+            f"like {session!r}-something exists alongside it.",
+        ))
+        return out
+    lookalikes = lookalike_sessions(session, sessions)
+    if lookalikes:
+        out.append(Finding(
+            WARN, f"tmux session(s) {', '.join(map(repr, lookalikes))} start with "
+                  f"{session!r} but aren't it",
+            f"tmux resolves a bare `-t {session}` by PREFIX, so with {session!r} gone any "
+            "tool (or hand-typed command) that isn't exact lands in one of these. chela's "
+            f"own targets are exact (`={session}`); rename these anyway — never name a "
+            f"session {session}-*.",
         ))
     return out
 

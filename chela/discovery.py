@@ -24,7 +24,7 @@ def _get_live_windows() -> dict[str, str]:
     session = config.current_session()
     try:
         result = subprocess.run(
-            ["tmux", "list-windows", "-t", session,
+            ["tmux", "list-windows", "-t", config.session_target(session),
              "-F", "#{window_id}\t#{window_name}"],
             capture_output=True, text=True, timeout=5,
         )
@@ -66,11 +66,24 @@ def session_exists(session: str | None = None) -> bool:
     """True if the chela tmux session is live right now."""
     session = session or config.current_session()
     try:
-        r = subprocess.run(["tmux", "has-session", "-t", session],
+        r = subprocess.run(["tmux", "has-session", "-t", config.session_target(session)],
                            capture_output=True, text=True, timeout=5)
         return r.returncode == 0
     except (subprocess.TimeoutExpired, FileNotFoundError):
         return False
+
+
+def list_sessions() -> list[str] | None:
+    """Every tmux session name on the server, or ``None`` when tmux cannot be asked (no
+    binary, no server, a timeout) — unknown, never an empty fleet."""
+    try:
+        r = subprocess.run(["tmux", "list-sessions", "-F", "#{session_name}"],
+                           capture_output=True, text=True, timeout=5)
+    except (subprocess.TimeoutExpired, FileNotFoundError):
+        return None
+    if r.returncode != 0:
+        return None
+    return [line.strip() for line in r.stdout.splitlines() if line.strip()]
 
 
 def ensure_session(session: str | None = None) -> bool:
