@@ -59,6 +59,7 @@ DEFAULT_INTERRUPT = (
     "*oom_kill*",                 # a low-memory kill (not `*oom*`: that is every room_* too)
     "*_oom",
     "run_permission_denied",      # an agent is blocked on a permission it was refused
+    "run_permission_prompt",      # an agent is blocked on a permission prompt (CMX-478)
     "keeper_proposals",           # board changes waiting for an approval
     "orchestrator.moved",         # the inbox now delivers to a different window
     "orchestrator.escalation.*",  # chela itself asked for a human
@@ -99,6 +100,7 @@ NEEDS_NAMES = (
     ("keeper_proposals", "board changes await approval"),
     ("run_ci_known_flake", "CI red on known flakes after re-runs"),
     ("run_permission_denied", "agent refused a permission"),
+    ("run_permission_prompt", "agent waits on a permission prompt"),
     ("orchestrator.moved", "inbox now delivers to a new window"),
     ("*_failed", "failed"),
 )
