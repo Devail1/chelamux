@@ -88,7 +88,8 @@ from pathlib import Path, PurePosixPath
 from typing import NamedTuple
 
 from chela import (
-    envutil, generated, judge_select, judge_timing, procguard, risktier, suite_guard, toolconfig,
+    baseline_cache, envutil, generated, judge_select, judge_timing, procguard, risktier,
+    suite_guard, toolconfig,
 )
 
 log = logging.getLogger(__name__)
@@ -889,9 +890,20 @@ def run_baseline(
     cov_note = "coverage map: cached" if cov else ""
     extra_env: dict[str, str] = {}
     cov_file = scratch / ".coverage"
-    if cov is None and _has_pytest_cov(worktree):
+    wants_cov = cov is None and _has_pytest_cov(worktree)
+    # ⚡ CMX-488: a green baseline of this exact tree + command is already on file (the
+    # self-check's, read by the sweep and the judge). Not when this run would ALSO build a
+    # coverage map: the cached entry has none, and reuse may never cost the map.
+    key = baseline_cache.key_for(worktree, test_cmd)
+    if not wants_cov:
+        reused = _reuse_baseline(worktree, key, junit, cov)
+        if reused is not None:
+            return reused
+    if wants_cov:
         cov_args, extra_env = judge_select.coverage_args(cov_file)
         args += cov_args
+    flakes_before = len(flakes) if flakes is not None else 0
+    flakes = flakes if flakes is not None else []
     baseline = run_suite(judge_select.extend(test_cmd, args), worktree, timeout, extra_env)
     if not baseline.green and extra_env and not baseline.timed_out:
         log.warning("judge: the baseline is red UNDER COVERAGE — re-running it plain")
@@ -917,9 +929,51 @@ def run_baseline(
     if cases is None:
         return (baseline, None, "the baseline wrote no readable JUnit report — every mutation "
                                 "runs the full suite")
+    if len(flakes) == flakes_before:
+        _store_baseline(worktree, key, baseline, junit)
     selector = judge_select.Selector(worktree, cases, cov or {})
     why = f"per-mutation selection over the baseline's {len(cases)} test(s)"
     return baseline, selector, why + (f"; {cov_note}" if cov_note else "")
+
+
+def _reuse_baseline(
+    worktree: Path, key: "baseline_cache.Key | None", junit: Path,
+    cov: dict[str, list[str]] | None,
+) -> tuple[SuiteResult, "judge_select.Selector", str] | None:
+    """⚡ CMX-488: the green baseline cached for exactly ``key`` — its JUnit report written to
+    this run's own ``junit`` path and read back as this run's universe — or ``None`` (a miss:
+    the caller runs the suite as before). An entry whose report does not parse here is a miss
+    too: unknown never reads as green."""
+    hit = baseline_cache.load(key)
+    if hit is None or key is None:
+        return None
+    try:
+        junit.write_text(hit.junit)
+    except OSError:
+        return None
+    cases = judge_select.parse_junit(worktree, junit)
+    if cases is None:
+        return None
+    log.info("judge: reusing the green baseline cached for tree %s", key.tree[:12])
+    baseline = SuiteResult(True, 0, hit.passed, 0, 0, hit.tail,
+                           run={"cmd": key.test_cmd, "cwd": str(worktree),
+                                "reused_tree": key.tree})
+    why = (f"per-mutation selection over the baseline's {len(cases)} test(s); baseline "
+           f"reused: the green run cached for tree {key.tree[:12]}")
+    if cov:
+        why += "; coverage map: cached"
+    return baseline, judge_select.Selector(worktree, cases, cov or {}), why
+
+
+def _store_baseline(worktree: Path, key: "baseline_cache.Key | None", baseline: SuiteResult,
+                    junit: Path) -> None:
+    """⚡ CMX-488: file a GREEN, flake-free baseline for the next reader of the same tree —
+    only if the tree it ran on is still the tree it was keyed to (an edit mid-run, or a suite
+    that writes untracked files into the worktree, stores nothing)."""
+    if key is None or not baseline.green or baseline_cache.tree_sha(worktree) != key.tree:
+        return
+    baseline_cache.save(key, passed=baseline.passed, failed=baseline.failed,
+                        errors=baseline.errors, tail=baseline.tail, junit=junit)
 
 
 def rerun_skip_reason(baseline: SuiteResult, named: list[str]) -> str:
