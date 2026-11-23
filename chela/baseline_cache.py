@@ -1,28 +1,17 @@
 """⚡ CMX-488: one GREEN baseline per tree, shared by self-check, sweep and the judge.
 
 A core hand-in runs the self-check and then the sweep on the same tree, and the judge's
-first round measures that same tree again in its own worktree. Each used to run its own
-full-suite baseline (~7 min apiece). This module keys a green baseline's JUnit report by
-``(tree sha, test_cmd, deselects)`` under ``$CHELA_DIR/baselines`` so the second and third
-reader reuse the first one's run instead (``docs/spikes/TEST_SPEED.md`` §4, slice D).
+first round measures that tree again in its own worktree. A green baseline's JUnit report is
+filed under ``$CHELA_DIR/baselines`` by ``(tree sha, test_cmd, deselects)`` so the later
+readers reuse it (``docs/spikes/TEST_SPEED.md`` §4, slice D).
 
-The rules, each one fail-closed:
-
-* **The tree sha is the WORKING tree**, not HEAD: tracked edits and untracked, non-ignored
-  files are hashed in (a throwaway index, ``git add -A`` + ``git write-tree``). A self-check
-  on uncommitted edits therefore keys to what it actually ran, and a judge of the committed
-  head only reuses it if the trees are byte-identical.
-* **Reuse never crosses tree shas.** The entry stores its own key and a read checks it
-  field by field; a file for another tree, command or deselect set is a miss.
-* **Only green is stored**, and only a run whose tree did not move under it (the sha is
-  taken before and after; a mismatch stores nothing). A baseline that read green only
-  because a flake was re-run is not stored either: the flake is evidence that belongs to the
-  run that saw it.
+* **The tree sha is the WORKING tree's**, not HEAD's: tracked edits and untracked,
+  non-ignored files count, so a self-check on uncommitted edits keys to what it ran.
+* **Reuse never crosses tree shas.** An entry stores its own key and a read checks it.
 * **Unknown never reads as green.** A missing, unreadable, malformed or non-green entry, or
-  a tree sha that cannot be computed, is a miss and the suite runs as before.
+  a tree sha that cannot be computed, is a miss and the suite runs.
 
-The cache is an optimisation only: every failure here returns ``None``/``""`` and never
-raises into the judge.
+The cache is an optimisation: a failure here is a miss, never an exception into the judge.
 """
 from __future__ import annotations
 
@@ -31,7 +20,6 @@ import json
 import logging
 import os
 import shlex
-import shutil
 import subprocess
 import tempfile
 from dataclasses import dataclass
@@ -44,22 +32,22 @@ log = logging.getLogger(__name__)
 #: Bumped when the entry layout changes: an older entry is then a miss, never misread.
 VERSION = 1
 GIT_TIMEOUT = 120
+#: A report is megabytes and every tree adds one: only the newest are kept.
+KEEP = 60
+#: Ignored dirs no suite reads its result from; ``.venv``/``node_modules`` are fingerprinted.
+CACHE_DIRS = frozenset({"__pycache__", ".pytest_cache", ".ruff_cache"})
+MAX_IGNORED_BYTES = 256 * 1024 * 1024
 
 
 def cache_dir() -> Path:
-    """``$CHELA_DIR/baselines`` — read per call, so a test's scratch ``CHELA_DIR`` holds."""
-    return Path(os.environ.get("CHELA_DIR") or config.CHELA_DIR) / "baselines"
+    return Path(config.CHELA_DIR) / "baselines"
 
 
-def _git_env(index: Path | None = None) -> dict[str, str]:
-    """The operator's env minus any ``GIT_*`` that would point git at another repo/index."""
+def _git(worktree: Path, *args: str, index: Path | None = None) -> str | None:
+    # ⛔ No operator GIT_* (GIT_DIR, GIT_INDEX_FILE): they would point git at another repo.
     env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
     if index is not None:
         env["GIT_INDEX_FILE"] = str(index)
-    return env
-
-
-def _git(worktree: Path, *args: str, env: dict[str, str]) -> str | None:
     try:
         out = subprocess.run(["git", "-C", str(worktree), *args], capture_output=True,
                              text=True, errors="replace", env=env, timeout=GIT_TIMEOUT)
@@ -69,143 +57,154 @@ def _git(worktree: Path, *args: str, env: dict[str, str]) -> str | None:
 
 
 def tree_sha(worktree: Path) -> str:
-    """The sha of the worktree's CURRENT contents (tracked edits and untracked, non-ignored
-    files included), written through a throwaway index so the real one is never touched.
-    ``""`` when it cannot be computed: no sha, no reuse."""
-    worktree = Path(worktree)
-    real_index = _git(worktree, "rev-parse", "--path-format=absolute", "--git-path", "index",
-                      env=_git_env())
-    if not real_index:
-        return ""
+    """The sha of the worktree's CURRENT contents; ``""`` when it cannot be computed.
+
+    ⛔ Built from HEAD in a throwaway index, never a copy of the real one: a copy carries its
+    stat cache with a newer index mtime, which defeats git's racy-edit check (a same-size
+    edit would keep the OLD sha), plus its skip-worktree/assume-unchanged bits."""
     try:
         with tempfile.TemporaryDirectory(prefix="chela-baseline-tree-") as scratch:
             index = Path(scratch) / "index"
-            if Path(real_index).is_file():      # the stat cache: hash only what changed
-                shutil.copyfile(real_index, index)
-            env = _git_env(index)
-            if _git(worktree, "add", "-A", env=env) is None:
-                return ""
-            return _git(worktree, "write-tree", env=env) or ""
+            for args in (("read-tree", "HEAD"), ("add", "-A")):
+                if _git(worktree, *args, index=index) is None:
+                    return ""
+            return _git(worktree, "write-tree", index=index) or ""
     except OSError:
         return ""
 
 
-def split_deselects(test_cmd: str) -> tuple[str, tuple[str, ...]] | None:
-    """``(the command without its deselects, the sorted deselected node ids)``, so the same
-    deselect set in another order keys to the same entry. ``None`` if the command does not
-    tokenise (⇒ no key, no reuse)."""
+def _tool_dir_lines(path: Path, name: str) -> list[str]:
+    """What a provisioned dependency dir has INSTALLED (its bytes differ per worktree)."""
+    if name == ".venv":
+        return sorted(p.name for p in path.glob("lib/*/site-packages/*.dist-info"))
+    lock = path / ".package-lock.json"
+    return [hashlib.sha256(lock.read_bytes()).hexdigest()] if lock.is_file() else []
+
+
+def env_sha(worktree: Path) -> str:
+    """What the tree sha cannot see and a suite can: the ignored files (by content) and the
+    installed packages. ``""`` when unknown. ⛔ Without it, a judge whose worktree lacks an
+    ignored file the agent's had would reuse that green, be red on every mutation for want of
+    the file, and report every guard KILLED."""
+    worktree = Path(worktree)
+    listed = _git(worktree, "ls-files", "-z", "-o", "-i", "--exclude-standard", "--directory")
+    if listed is None:
+        return ""
+    lines: list[str] = []
+    budget = MAX_IGNORED_BYTES
+    try:
+        for rel in sorted(filter(None, listed.split("\0"))):
+            path, parts = worktree / rel, Path(rel).parts
+            if any(part in CACHE_DIRS for part in parts):
+                continue
+            if parts[-1] in (".venv", "node_modules"):
+                lines += [rel, *_tool_dir_lines(path, parts[-1])]
+                continue
+            for f in sorted(path.rglob("*")) if path.is_dir() else [path]:
+                name = f.relative_to(worktree)
+                if not f.is_file() or any(part in CACHE_DIRS for part in name.parts):
+                    continue
+                budget -= f.stat().st_size
+                if budget < 0:
+                    return ""
+                lines += [str(name), hashlib.sha256(f.read_bytes()).hexdigest()]
+    except OSError:
+        return ""
+    return hashlib.sha256(json.dumps(lines).encode()).hexdigest()
+
+
+def deselects_of(test_cmd: str) -> tuple[str, ...] | None:
+    """The sorted node ids ``test_cmd`` deselects; ``None`` if it does not tokenise."""
     try:
         tokens = shlex.split(test_cmd)
     except ValueError:
         return None
-    rest: list[str] = []
-    deselects: set[str] = set()
-    i = 0
-    while i < len(tokens):
-        tok = tokens[i]
-        if tok == "--deselect" and i + 1 < len(tokens):
-            deselects.add(tokens[i + 1])
-            i += 2
-            continue
-        if tok.startswith("--deselect="):
-            deselects.add(tok[len("--deselect="):])
-        else:
-            rest.append(tok)
-        i += 1
-    return shlex.join(rest), tuple(sorted(deselects))
+    found = {t.removeprefix("--deselect=") for t in tokens if t.startswith("--deselect=")}
+    found |= {b for a, b in zip(tokens, tokens[1:]) if a == "--deselect"}
+    return tuple(sorted(found))
 
 
 @dataclass(frozen=True)
 class Key:
     tree: str
-    test_cmd: str
+    test_cmd: str           # verbatim: quoting changes what the shell runs
     deselects: tuple[str, ...]
+    env: str = ""           # :func:`env_sha`
 
-    @property
-    def digest(self) -> str:
-        raw = json.dumps([VERSION, self.tree, self.test_cmd, list(self.deselects)])
-        return hashlib.sha256(raw.encode()).hexdigest()
+    def fields(self) -> dict:
+        return {"version": VERSION, "tree": self.tree, "test_cmd": self.test_cmd,
+                "deselects": list(self.deselects), "env": self.env}
 
     def path(self) -> Path:
-        return cache_dir() / f"{self.digest}.json"
+        raw = json.dumps(self.fields(), sort_keys=True)
+        return cache_dir() / f"{hashlib.sha256(raw.encode()).hexdigest()}.json"
 
 
 def key_for(worktree: Path, test_cmd: str) -> Key | None:
     """The cache key for ``test_cmd`` on ``worktree`` as it is NOW, or ``None``."""
-    split = split_deselects(test_cmd)
-    if split is None:
+    deselects = deselects_of(test_cmd)
+    if deselects is None:
         return None
-    sha = tree_sha(worktree)
-    if not sha:
-        return None
-    return Key(sha, split[0], split[1])
+    sha, env = tree_sha(worktree), env_sha(worktree)
+    return Key(sha, test_cmd, deselects, env) if sha and env else None
 
 
 @dataclass(frozen=True)
 class Entry:
     passed: int
-    failed: int
-    errors: int
     tail: str
     junit: str          # the JUnit report's text, written back to the reader's own scratch
 
 
-def _count(value: object) -> bool:
-    return isinstance(value, int) and not isinstance(value, bool)
-
-
 def load(key: Key | None) -> Entry | None:
-    """The GREEN baseline stored for exactly ``key``, or ``None`` (a miss). Anything short of
-    a well-formed, green entry whose stored key matches field by field is a miss."""
+    """The GREEN baseline stored for exactly ``key``, or ``None`` (a miss)."""
     if key is None:
         return None
     try:
-        data = json.loads(key.path().read_text())
+        data = json.loads(key.path().read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return None
     if not isinstance(data, dict):
         return None
-    if (data.get("version") != VERSION or data.get("tree") != key.tree
-            or data.get("test_cmd") != key.test_cmd
-            or data.get("deselects") != list(key.deselects)):
+    want = {**key.fields(), "green": True, "failed": 0, "errors": 0}
+    if any(type(data.get(k)) is not type(v) or data[k] != v for k, v in want.items()):
         return None
-    if data.get("green") is not True or data.get("exit_code") != 0:
+    passed, tail, junit = data.get("passed"), data.get("tail"), data.get("junit")
+    if type(passed) is not int or passed <= 0:
+        return None     # a "green" that ran nothing is not green
+    if not isinstance(junit, str) or not isinstance(tail, str):
         return None
-    passed, failed, errors = (data.get(k) for k in ("passed", "failed", "errors"))
-    if not (_count(passed) and _count(failed) and _count(errors)):
-        return None
-    assert isinstance(passed, int) and isinstance(failed, int) and isinstance(errors, int)
-    if passed <= 0 or failed or errors:
-        return None     # a "green" that ran nothing, or reported failures, is not green
-    junit, tail = data.get("junit"), data.get("tail")
-    if not isinstance(junit, str) or not junit or not isinstance(tail, str):
-        return None
-    return Entry(passed, failed, errors, tail, junit)
+    return Entry(passed, tail, junit)
 
 
 def save(key: Key | None, *, passed: int, failed: int, errors: int, tail: str,
          junit: Path) -> bool:
-    """Store a GREEN baseline under ``key``. The caller vouches it is green; this refuses
-    counts that say otherwise. Written atomically, so a reader never sees half a file."""
+    """File a GREEN baseline under ``key``, atomically. Counts that are not green are refused."""
     if key is None or passed <= 0 or failed or errors:
         return False
+    tmp = ""
     try:
-        report = junit.read_text()
-    except OSError:
-        return False
-    if not report:
-        return False
-    data = {"version": VERSION, "tree": key.tree, "test_cmd": key.test_cmd,
-            "deselects": list(key.deselects), "green": True, "exit_code": 0,
-            "passed": passed, "failed": failed, "errors": errors, "tail": tail,
-            "junit": report}
-    try:
+        data = {**key.fields(), "green": True, "passed": passed, "failed": failed,
+                "errors": errors, "tail": tail, "junit": junit.read_text(encoding="utf-8")}
         cache_dir().mkdir(parents=True, exist_ok=True)
-        fd, tmp = tempfile.mkstemp(dir=cache_dir(), prefix=".tmp-", suffix=".json")
-        with os.fdopen(fd, "w") as fh:
+        fd, tmp = tempfile.mkstemp(dir=cache_dir(), prefix=".tmp-")
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
             json.dump(data, fh)
         os.replace(tmp, key.path())
-    except OSError as e:
-        log.warning("baseline cache: could not store %s: %s", key.digest[:12], e)
+    except (OSError, ValueError) as e:
+        log.warning("baseline cache: could not store a baseline: %s", e)
+        if tmp:
+            Path(tmp).unlink(missing_ok=True)
         return False
+    _prune()
     return True
+
+
+def _prune() -> None:
+    try:
+        # every file, not just entries: a killed writer's temp file ages out too
+        entries = sorted(cache_dir().iterdir(), key=lambda p: p.stat().st_mtime_ns)
+        for old in entries[:-KEEP]:
+            old.unlink(missing_ok=True)
+    except OSError:
+        pass

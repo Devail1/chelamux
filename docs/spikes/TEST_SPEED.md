@@ -290,7 +290,9 @@ the suite as today, so unknown never reads as green.
 * **Status: shipped (CMX-488)**, in `chela/baseline_cache.py`, read and written by
   `judge.run_baseline`. The tree sha is the working tree's (tracked edits and untracked,
   non-ignored files), so a self-check on uncommitted edits only matches a judge of a commit
-  with the same contents. A flake-rescued green and a tree that changed mid-run are not
+  with the same contents. The key also carries the worktree's ignored files and installed
+  packages: a judge worktree missing an ignored file would otherwise reuse a green it cannot
+  reproduce and read every mutation as killed. A flake-rescued green and a tree that changed mid-run are not
   stored. Until A1 caches the coverage map with the entry, a run that would build the map
   runs the suite instead of reusing.
 

@@ -902,8 +902,8 @@ def run_baseline(
     if wants_cov:
         cov_args, extra_env = judge_select.coverage_args(cov_file)
         args += cov_args
-    flakes_before = len(flakes) if flakes is not None else 0
-    flakes = flakes if flakes is not None else []
+    flakes = [] if flakes is None else flakes
+    flakes_before = len(flakes)
     baseline = run_suite(judge_select.extend(test_cmd, args), worktree, timeout, extra_env)
     if not baseline.green and extra_env and not baseline.timed_out:
         log.warning("judge: the baseline is red UNDER COVERAGE — re-running it plain")
@@ -948,16 +948,16 @@ def _reuse_baseline(
     if hit is None or key is None:
         return None
     try:
-        junit.write_text(hit.junit)
-    except OSError:
+        junit.write_text(hit.junit, encoding="utf-8")
+    except (OSError, ValueError):
         return None
     cases = judge_select.parse_junit(worktree, junit)
     if cases is None:
+        # ⛔ The caller's own run must not find this report if it writes none itself.
+        junit.unlink(missing_ok=True)
         return None
     log.info("judge: reusing the green baseline cached for tree %s", key.tree[:12])
-    baseline = SuiteResult(True, 0, hit.passed, 0, 0, hit.tail,
-                           run={"cmd": key.test_cmd, "cwd": str(worktree),
-                                "reused_tree": key.tree})
+    baseline = SuiteResult(True, 0, hit.passed, 0, 0, hit.tail)
     why = (f"per-mutation selection over the baseline's {len(cases)} test(s); baseline "
            f"reused: the green run cached for tree {key.tree[:12]}")
     if cov:

@@ -14,6 +14,7 @@ daemon.
 """
 from __future__ import annotations
 
+import shutil
 import sqlite3
 import subprocess
 import sys
@@ -21,7 +22,7 @@ from pathlib import Path
 
 import pytest
 
-from chela import judge
+from chela import baseline_cache, judge
 from chela import judge_select as js
 
 TEST_CMD = f'"{sys.executable}" -m pytest -q -p no:cacheprovider'
@@ -641,6 +642,13 @@ def test_a_green_coverage_baseline_builds_the_map_and_caches_it_per_head_sha(
     # ⚡ CMX-488: same tree, same command ⇒ the 2nd reuses the 1st's green baseline outright.
     assert "baseline reused" in why2
     assert [env for _, env in fake_cov["runs"]] == [COV_ENV]
+    assert len(fake_cov["parsed"]) == 1
+
+    shutil.rmtree(baseline_cache.cache_dir())           # no baseline on file: it runs, PLAIN
+    b2, s2, why2 = judge.run_baseline(root, TEST_CMD, 120, tmp_path)
+    assert b2.green and s2.coverage == {"pkg/widget.py": ["test_indirect.py"]}
+    assert "coverage map: cached" in why2 and "reused" not in why2
+    assert [env for _, env in fake_cov["runs"]] == [COV_ENV, {}]
     assert len(fake_cov["parsed"]) == 1
 
     (root / "test_unrelated.py").write_text("def test_nothing():\n    assert 1\n")
