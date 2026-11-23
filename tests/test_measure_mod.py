@@ -18,7 +18,7 @@ from pathlib import Path
 
 import pytest
 
-from chela import config, context, main, measure_mod, usage
+from chela import config, context, main, measure_mod, runtime_truth, usage
 from chela.runtime_truth import OK, WARN
 
 REPO = Path(__file__).resolve().parent.parent
@@ -397,6 +397,30 @@ def test_doctor_names_the_source_of_each_limit_and_session(tmp_path):
     assert "statusLine hook: wired in user settings" in by_title
     fed = by_title["2 session(s) fed: 1 by the mod, 1 by the statusLine"]
     assert fed.detail == "- aaaaaaaa: mod (both fresh)\n    - bbbbbbbb: statusline"
+
+
+def test_the_doctor_fact_reads_this_chelas_files_end_to_end(tmp_path, monkeypatch):
+    """The ``usage.sources`` fact from real files: nothing here builds its ``state`` by hand,
+    so a half of ``read_state`` that reads the wrong place shows in the printed lines. The
+    path is spelled from the directory, as measure.ts writes it."""
+    chela_dir, claude = tmp_path / "cd", tmp_path / "claude"
+    monkeypatch.setattr(config, "CHELA_DIR", chela_dir)
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(claude))
+    _write(chela_dir / "context" / "mod" / f"{SID}.json", MEASURE["file"], age=1)
+    # Two sessions, so the session count cannot be a constant and both producers are named.
+    _write(chela_dir / "context" / "by-session" / "bbbbbbbb-2.json", {}, age=1)
+    measure_mod.install(claude / "skills" / "chela-measure", chela_dir)
+    _write(claude / "settings.json", {"statusLine": {"command": "/h/cache-statusline.sh"}})
+
+    fact = next(f for f in runtime_truth.facts() if f.name == "usage.sources")
+    found = fact.report(fact.declare(), fact.read_back())
+    assert [(f.level, f.title) for f in found] == [
+        (OK, f"chela-measure mod 0.1.0 installed at {claude / 'skills' / 'chela-measure'}"),
+        (OK, "statusLine hook: wired in user settings"),
+        (OK, "limits: 5h 23.5% (mod, 0 min ago) · 7d 7% (mod, 0 min ago)"),
+        (OK, "2 session(s) fed: 1 by the mod, 1 by the statusLine"),
+    ]
+    assert found[-1].detail == "- 0f0f0f0f: mod\n    - bbbbbbbb: statusline"
 
 
 def test_newest_limits_names_the_producer_and_age_at_any_age(ctx):
