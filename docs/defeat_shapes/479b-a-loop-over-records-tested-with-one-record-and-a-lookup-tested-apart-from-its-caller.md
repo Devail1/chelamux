@@ -1,9 +1,7 @@
 ## 479b. A loop over records is tested with one record; a lookup is tested apart from its caller
 
-**Guard claimed:** `requeue_reaped_waiters` skips a record that must not be re-queued and
-handles the others; the slot obeys the blocked hours of the worktree it runs in.
-
-**What the guard actually asserted:** every skip reason had a test, and every test had exactly
+**Assertion form:** `requeue_reaped_waiters` skips a record that must not be re-queued and
+handles the others; the slot obeys the blocked hours of the worktree it runs in. Every skip reason had a test, and every test had exactly
 **one** record, so `continue`, `break` and `return` were the same thing. `blocked_windows` was
 tested against many `WORKFLOW.md` files and `slot()` against many clocks, but every `slot()`
 test ran in a directory with no `WORKFLOW.md`: the default window, whatever path was passed.
