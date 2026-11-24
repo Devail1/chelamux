@@ -1090,9 +1090,10 @@ def requeued_recently(cwd: str | Path, now: float | None = None) -> bool:
     data = _requeued()
     if "?" in data:
         return True
-    at = data.get(str(Path(cwd).resolve()))
-    if at is None:
+    key = str(Path(cwd).resolve())
+    if key not in data:
         return False
+    at = data[key]
     if isinstance(at, bool) or not isinstance(at, (int, float)):
         return True
     return now - at < REQUEUE_ONCE_SECONDS

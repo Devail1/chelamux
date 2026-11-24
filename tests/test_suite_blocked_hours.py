@@ -720,7 +720,430 @@ def test_mark_requeued_drops_old_entries(one_slot, tmp_path):
     assert list(data) == [str((tmp_path / "new").resolve())]
 
 
-@pytest.mark.parametrize("raw", ["{not json", "[1, 2]", json.dumps({"X": "soon"})])
+def test_mark_requeued_keeps_every_entry_still_in_date(one_slot, tmp_path):
+    suite_guard.mark_requeued(tmp_path / "a", now=1.0)
+    suite_guard.mark_requeued(tmp_path / "b", now=12 * 3600.0)
+    assert suite_guard.requeued_recently(tmp_path / "a", now=12 * 3600.0) is True
+    assert suite_guard.requeued_recently(tmp_path / "b", now=12 * 3600.0) is True
+
+
+def test_a_requeue_record_that_cannot_be_opened_buys_none(one_slot, tmp_path):
+    (one_slot / "suite-slots" / "requeued.json").mkdir(parents=True)
+    assert suite_guard.requeued_recently(tmp_path / "CMX-1") is True
+
+
+# --- round 2: each invariant, driven end to end ---------------------------------------------
+
+@pytest.mark.parametrize("block,at,free_at", [
+    ("sweep:\n  blocked_hours: off\n", (3, 30), (3, 30)),
+    ("sweep:\n  blocked_hours: [\"01:00-02:00\"]\n", (1, 30), (2, 0)),
+    ("sweep:\n  blocked_hours: [\"01:00-02:00\"]\n", (3, 30), (3, 30)),
+    # A second window of the list, and one window running straight into the next.
+    ("sweep:\n  blocked_hours: [\"01:00-02:00\", \"05:00-06:00\"]\n", (5, 0), (6, 0)),
+    ("sweep:\n  blocked_hours: [\"01:00-02:00\", \"02:00-03:00\"]\n", (1, 30), (3, 0)),
+    ("sweep:\n  blocked_hours: [\"23:00-01:00\"]\n", (23, 30), (1, 0)),
+])
+def test_the_slot_itself_obeys_its_own_worktrees_windows(one_slot, clock, block, at, free_at):
+    wt = _wf(one_slot / "CMX-1", block)
+    clock.now = datetime(2026, 11, 23, *at)
+    with suite_guard.slot(wt):
+        assert (clock.now.hour, clock.now.minute) == free_at
+        clock.now = datetime(2026, 11, 24, *at)               # a yield reads the same windows
+        want = "" if at == free_at else clock.now
+        yielded = suite_guard.yield_slot()
+        assert bool(yielded) is bool(want)
+        assert (clock.now.hour, clock.now.minute) == free_at
+
+
+def test_a_window_that_becomes_another_says_the_new_end_and_starts_one_wait(one_slot, clock,
+                                                                          monkeypatch, capsys):
+    wt = _wf(one_slot / "CMX-1", "sweep:\n  blocked_hours: [\"01:00-02:00\", \"02:00-03:00\"]\n")
+    clock.now = datetime(2026, 11, 23, 1, 0)
+    said, waits = [], []
+
+    def sleep(s):
+        said.append(_ledger(one_slot)["blocked_until"])
+        clock.sleep(s)
+
+    monkeypatch.setattr(suite_guard.time, "sleep", sleep)
+    with suite_guard.slot(wt, on_wait=waits.append):
+        pass
+    assert said == ["02:00"] * 6 + ["03:00"] * 6
+    assert capsys.readouterr().err.count("⏳ blocked hours until") == 2
+    assert len(waits) == 2 and waits[0] is not None and waits[1] is None
+
+
+def test_the_end_of_the_day_is_midnight():
+    assert suite_guard.blocked_until([(22 * 60, 24 * 60)], datetime(2026, 11, 23, 23, 0)) == "00:00"
+
+
+@pytest.mark.parametrize("poll", [0.25, 7])
+def test_a_blocked_wait_polls_at_the_callers_pace_and_reports_itself(one_slot, clock, monkeypatch,
+                                                                    poll):
+    slept, waits = [], []
+
+    def sleep(s):
+        slept.append(s)
+        assert waits == [_ledger(one_slot)["waiting_since"]]   # reported before the first poll
+        clock.sleep(s)
+
+    monkeypatch.setattr(suite_guard.time, "sleep", sleep)
+    with suite_guard.slot(one_slot / "CMX-1", on_wait=waits.append, poll=poll):
+        assert waits[1:] == [None]
+    assert slept == [poll] * 8
+
+
+def _fake_seconds(monkeypatch):
+    real = {"t": 1000.0}
+    monkeypatch.setattr(suite_guard.time, "time", lambda: real["t"])
+    monkeypatch.setattr(suite_guard.time, "monotonic", lambda: real["t"])
+    return real
+
+
+def test_blocked_time_is_credited_as_a_wait_to_every_clock_that_excuses_one(one_slot, clock,
+                                                                           monkeypatch):
+    """A battery's own budget (``busy_clock``) and the stuck probes (the ledger) both excuse
+    it — else a hand-in queued at 03:10 is out of budget, or "stuck", at 04:30."""
+    real = _fake_seconds(monkeypatch)
+    _script_sleeps(monkeypatch, clock, [lambda: real.update(t=5800.0) or setattr(
+        clock, "now", datetime(2026, 11, 23, 4, 30))])
+    before = suite_guard.busy_clock()
+    with suite_guard.slot(one_slot / "CMX-1"):
+        assert suite_guard.waited_seconds() == 4800
+        assert suite_guard.busy_clock() == before
+        assert suite_guard.waits_in(one_slot / "CMX-1") == {
+            "waiting_since": None, "waited": 4800, "blocked_until": None}
+
+
+def test_two_windows_in_one_wait_are_both_excused_and_nothing_else_is(one_slot, clock,
+                                                                     monkeypatch):
+    """30 s queued, blocked, 20 s queued, blocked again: a 60 s bound is 10 s away, and the
+    wait times out exactly there."""
+    fd = _hold_the_slot(one_slot)
+    real = _fake_seconds(monkeypatch)
+    clock.now = datetime(2026, 11, 23, 2, 59)
+    since = []
+
+    def after(seconds, day, h, m):
+        def step():
+            since.append(real["t"] - suite_guard.queued()[0]["since"])
+            real["t"] += seconds
+            clock.now = datetime(2026, 11, day, h, m)
+        return step
+
+    _script_sleeps(monkeypatch, clock, [
+        after(30, 23, 3, 0), after(5400, 23, 4, 30), after(20, 24, 3, 0),
+        after(5400, 24, 4, 30), after(9, 24, 4, 31), after(1, 24, 4, 32)])
+    with pytest.raises(suite_guard.SlotTimeout):
+        with suite_guard.slot(one_slot / "CMX-1", max_wait=60):
+            pass
+    os.close(fd)
+    assert (clock.now.day, clock.now.minute) == (24, 32)
+    assert [since[i] for i in (0, 1, 2, 4, 5)] == [0, 30, 30, 50, 59]
+
+
+def test_a_suite_already_holding_the_slot_runs_on_inside_the_window(one_slot, clock):
+    """The experiment in flight finishes: a nested slot (each ``run_suite``) is not gated."""
+    clock.now = datetime(2026, 11, 23, 2, 55)
+    with suite_guard.battery(one_slot / "CMX-7", "self-check"):
+        clock.now = datetime(2026, 11, 23, 3, 5)
+        with suite_guard.slot(one_slot / "CMX-7"):
+            assert clock.sleeps == []
+        with suite_guard.battery(one_slot / "CMX-7", "sweep"):
+            assert clock.sleeps == []
+            [rec] = _records(one_slot)
+            assert (rec["kind"], rec["state"]) == ("self-check", "running")
+        [rec] = _records(one_slot)
+        assert (rec["kind"], rec["state"]) == ("self-check", "running")
+    assert _records(one_slot) == []
+
+
+def test_yielding_without_a_hold_inside_the_window_is_a_no_op(one_slot, clock):
+    assert suite_guard.yield_slot() == ""
+    assert clock.sleeps == []
+
+
+def test_a_yielded_holder_keeps_its_claim_time_rank_and_reports_the_wait(one_slot, clock,
+                                                                        monkeypatch):
+    clock.now = datetime(2026, 11, 23, 2, 55)
+    recs, waits = [], []
+
+    def sleep(s):
+        recs.append(_ledger(one_slot))
+        clock.sleep(s)
+
+    monkeypatch.setattr(suite_guard.time, "sleep", sleep)
+    with suite_guard.slot(one_slot / "CMX-7", rank=3, on_wait=waits.append, max_wait=0):
+        claimed = suite_guard._held.hold[5]
+        clock.now = datetime(2026, 11, 23, 3, 5)
+        assert suite_guard.yield_slot() == "blocked hours until 04:30"   # no bound: no timeout
+    assert recs and all((r["waiting_since"], r["rank"], r["blocked_until"])
+                        == (claimed, 3, "04:30") for r in recs)
+    assert waits == [claimed, None]
+
+
+def test_after_the_window_the_better_ranked_waiter_goes_first(one_slot, clock, monkeypatch):
+    """At 04:30 the slot is free and a judge is queued too: the hand-in lets it go first."""
+    waits = one_slot / "suite-slots" / "waits"
+    waits.mkdir(parents=True)
+    peer = waits / "peer.json"
+    peer.write_text(json.dumps({
+        "pid": os.getpid(), "start": suite_guard._proc_stat(os.getpid())[1], "cwd": "/w/J",
+        "waiting_since": 9e12, "waited": 0, "rank": 0, "blocked_until": "04:30"}))
+    polls = []
+
+    def at(h, m, done=False):
+        def step():
+            polls.append((clock.now.strftime("%H:%M"), suite_guard.holders()))
+            clock.now = datetime(2026, 11, 23, h, m)
+            if done:
+                peer.unlink()
+        return step
+
+    _script_sleeps(monkeypatch, clock, [at(4, 30), at(4, 31), at(4, 32, done=True)])
+    with suite_guard.slot(one_slot / "CMX-1", rank=3):
+        assert clock.now == datetime(2026, 11, 23, 4, 32)
+    assert polls == [("03:10", []), ("04:30", []), ("04:31", [])]
+
+
+@pytest.mark.parametrize("flip", [False, True])
+def test_a_blocked_waiter_hides_no_other_one_in_the_line(one_slot, monkeypatch, flip):
+    waits = one_slot / "suite-slots" / "waits"
+    recs = [(waits / f"{name}.json", {"cwd": f"/w/{name}", "waiting_since": 1.0, "rank": 0,
+                                      "pid": 1, "state": "S", "blocked_until": until})
+            for name, until in (("A", "04:30"), ("B", None))]
+    monkeypatch.setattr(suite_guard, "_ledgers", lambda: recs[::-1] if flip else recs)
+    assert suite_guard._must_queue(waits / "me.json", 2.0, 3) is True
+    assert suite_guard.outranking(3) == ["B"]
+
+
+def test_batteries_that_cannot_be_listed_are_no_live_battery(one_slot, monkeypatch):
+    class Dir:
+        def glob(self, _p):
+            raise PermissionError("no")
+
+    monkeypatch.setattr(suite_guard, "_batteries_dir", Dir)
+    assert suite_guard.live_battery_in(one_slot / "CMX-1") is False
+
+
+# --- round 2: a battery's record, through every way its wait can go -------------------------
+
+def test_the_record_says_the_same_battery_waiting_and_running(one_slot, clock, monkeypatch):
+    recs = []
+
+    def sleep(s):
+        recs.extend(_records(one_slot))
+        clock.sleep(s)
+
+    monkeypatch.setattr(suite_guard.time, "sleep", sleep)
+    with suite_guard.battery(one_slot / "CMX-7", "self-check"):
+        recs.extend(_records(one_slot))
+    me = (os.getpid(), suite_guard._proc_stat(os.getpid())[1], str(one_slot / "CMX-7"),
+          "self-check")
+    assert {(r["pid"], r["start"], r["cwd"], r["kind"]) for r in recs} == {me}
+    assert [r["state"] for r in recs] == ["waiting"] * 8 + ["running"]
+
+
+def test_a_battery_that_yields_to_a_better_waiter_is_recorded_as_waiting(one_slot, clock,
+                                                                        monkeypatch):
+    clock.now = datetime(2026, 11, 23, 12, 0)
+    waits = one_slot / "suite-slots" / "waits"
+    waits.mkdir(parents=True)
+    peer, states = waits / "peer.json", []
+
+    def sleep(_s):
+        states.extend(r["state"] for r in _records(one_slot))
+        peer.unlink()
+
+    monkeypatch.setattr(suite_guard.time, "sleep", sleep)
+    with suite_guard.battery(one_slot / "CMX-7", "sweep", rank=3):
+        peer.write_text(json.dumps({
+            "pid": os.getpid(), "start": suite_guard._proc_stat(os.getpid())[1], "cwd": "/w/J",
+            "waiting_since": 1.0, "waited": 0, "rank": 0, "blocked_until": None}))
+        assert suite_guard.yield_slot() == "J"
+        assert [r["state"] for r in _records(one_slot)] == ["running"]
+    assert states == ["waiting"]
+
+
+@pytest.mark.parametrize("yielded", [False, True])
+def test_a_battery_killed_in_its_wait_leaves_a_waiting_record(one_slot, clock, monkeypatch,
+                                                             yielded):
+    if yielded:
+        clock.now = datetime(2026, 11, 23, 2, 55)
+
+    def kill(_s):
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(suite_guard.time, "sleep", kill)
+    with pytest.raises(KeyboardInterrupt):
+        with suite_guard.battery(one_slot / "CMX-7", "sweep"):
+            clock.now = datetime(2026, 11, 23, 3, 5)
+            suite_guard.yield_slot()
+    [rec] = _records(one_slot)
+    assert (rec["state"], rec["kind"]) == ("waiting", "sweep")
+    assert suite_guard._held.battery is None
+    assert suite_guard.holders() == []
+
+
+@pytest.mark.parametrize("exc", [ValueError, SystemExit])
+def test_a_battery_that_ends_by_raising_leaves_none(one_slot, exc):
+    with pytest.raises(exc):
+        with suite_guard.battery(one_slot / "CMX-7", "sweep"):
+            raise exc
+    assert _records(one_slot) == [] and suite_guard._held.battery is None
+
+
+def test_a_battery_that_times_out_waiting_leaves_none(one_slot):
+    fd = _hold_the_slot(one_slot)
+    with pytest.raises(suite_guard.SlotTimeout):
+        with suite_guard.battery(one_slot / "CMX-7", "sweep", max_wait=0, poll=0.01):
+            pass
+    os.close(fd)
+    assert _records(one_slot) == []
+
+
+def test_the_judge_yields_with_the_last_mutation_restored(monkeypatch, tmp_path):
+    src = tmp_path / "m.py"
+    src.write_text("a = 1\n")
+    seen, ran = [], []
+    monkeypatch.setattr(suite_guard, "yield_slot",
+                        lambda: seen.append((src.read_text(), len(ran))) or "")
+
+    def measure(*_a, **_k):
+        ran.append(src.read_text())
+        return judge.Outcome(judge.Experiment("g", "m.py", "a = 1", "a = 2"), judge.KILLED, "",
+                             None, None, "")
+
+    monkeypatch.setattr(judge, "_measure", measure)
+    exp = {"guard": "g", "file": "m.py", "before": "a = 1", "after": "a = 2"}
+    outcomes, err = judge._apply_each(tmp_path, "true", [exp, exp], None, 30, None, None,
+                                      progress=None, heartbeat=None)
+    assert (len(outcomes), err) == (2, "")
+    assert ran == ["a = 2\n"] * 2
+    assert seen == [("a = 1\n", 1)]
+
+
+# --- round 2: the re-queue, one record among others -----------------------------------------
+
+def _second_run(reaped, status="running"):
+    wt = reaped.root / "CMX-10"
+    wt.mkdir()
+    with dispatcher._db() as conn:
+        conn.execute(
+            "INSERT INTO runs (task_id, workflow_path, title, status, window_name, window_id, "
+            "worktree_path, branch_name, started_at, attempt, task_number) "
+            "VALUES ('t10', 'w', 'x', ?, 'cmx-10', '@10', ?, 'b', "
+            "'2026-11-23T00:00:00+00:00', 1, 10)", (status, str(wt)))
+        conn.commit()
+    _stopped(reaped.root, wt, name="z")                 # after the first record, same age
+    return wt
+
+
+def _break_first(reaped, monkeypatch, how):
+    first = json.loads(reaped.path.read_text())
+    if how == "judge":
+        reaped.path.write_text(json.dumps({**first, "kind": "judge"}))
+    elif how == "running":
+        reaped.path.write_text(json.dumps({**first, "state": "running"}))
+    elif how == "no cwd":
+        reaped.path.write_text(json.dumps({**first, "cwd": None}))
+    elif how == "blocked":
+        _wf(reaped.wt, "sweep:\n  blocked_hours: [\"11:00-13:00\"]\n")
+    elif how == "live":
+        (reaped.path.parent / "live.json").write_text(json.dumps({
+            "pid": os.getpid(), "start": suite_guard._proc_stat(os.getpid())[1],
+            "cwd": str(reaped.wt), "kind": "sweep", "state": "running", "since": 2.0}))
+    elif how == "already":
+        suite_guard.mark_requeued(reaped.wt)
+    elif how == "no run":
+        with dispatcher._db() as conn:
+            conn.execute("UPDATE runs SET status='awaiting_review' WHERE task_id='t9'")
+            conn.commit()
+    elif how == "no peer":
+        real = messenger.send_peer
+        monkeypatch.setattr(messenger, "send_peer", lambda wid, *a: (
+            messenger.PeerSendResult(False, None) if wid == "@9" else real(wid, *a)))
+
+
+@pytest.mark.parametrize("how", ["judge", "running", "no cwd", "blocked", "live", "already",
+                                 "no run", "no peer"])
+def test_one_record_that_is_not_re_queued_stops_no_other(reaped, monkeypatch, how):
+    _second_run(reaped)
+    _break_first(reaped, monkeypatch, how)
+    assert dispatcher.requeue_reaped_waiters() == ["t10"]
+    assert [wid for wid, _f, _t in reaped.sent] == ["@10"]
+    assert reaped.path.exists() is (how != "live")
+
+
+def test_every_reaped_waiter_is_re_queued_each_by_its_own_agent(reaped):
+    wt = _second_run(reaped, status="claimed")
+    assert dispatcher.requeue_reaped_waiters() == ["t9", "t10"]
+    assert [wid for wid, _f, _t in reaped.sent] == ["@9", "@10"]
+    assert suite_guard.requeued_recently(reaped.wt) and suite_guard.requeued_recently(wt)
+    assert suite_guard.stopped_batteries() == []
+
+
+def test_two_dead_waiters_in_one_worktree_are_one_re_queue(reaped):
+    again = _stopped(reaped.root, reaped.wt, kind="sweep", name="z")
+    assert dispatcher.requeue_reaped_waiters() == ["t9"]
+    assert len(reaped.sent) == 1 and again.exists()
+
+
+def test_the_re_queue_needs_memory_not_a_free_slot(reaped):
+    """The re-run queues like any other: a box that is busy must not delay it."""
+    fd = _hold_the_slot(reaped.root)
+    assert dispatcher.requeue_reaped_waiters() == ["t9"]
+    os.close(fd)
+
+
+def test_a_live_battery_beside_a_dead_one_does_not_hide_the_resumed_command(reaped):
+    """Listing order must not matter: foreign and dead records come first and last."""
+    d = reaped.path.parent
+    _stopped(reaped.root, reaped.wt, name="zz")
+    (d / "m-other.json").write_text(json.dumps({
+        "pid": os.getpid(), "start": suite_guard._proc_stat(os.getpid())[1],
+        "cwd": "/elsewhere", "kind": "sweep", "state": "running", "since": 2.0}))
+    assert suite_guard.live_battery_in(reaped.wt) is False
+
+
+def _notices(monkeypatch):
+    from chela import inbox
+    monkeypatch.setattr(suite_guard, "resumable", lambda: True)
+    queued = []
+    monkeypatch.setattr(inbox, "enqueue", lambda *a: queued.append(a) or True)
+    return queued
+
+
+def test_a_second_kill_is_announced_outside_the_window(reaped, monkeypatch):
+    queued = _notices(monkeypatch)
+    suite_guard.mark_requeued(reaped.wt)
+    assert dispatcher.requeue_reaped_waiters() == []
+    assert [r["worktree"] for r in dispatcher.notice_stopped_batteries()["runs"]] == ["CMX-9"]
+    assert len(queued) == 1 and not reaped.path.exists()
+
+
+def test_the_notice_holds_back_only_what_its_own_window_holds(reaped, monkeypatch):
+    """At noon: CMX-9's workflow blocks 11-13, CMX-10's does not; a running one is announced."""
+    _notices(monkeypatch)
+    _wf(reaped.wt, "sweep:\n  blocked_hours: [\"11:00-13:00\"]\n")
+    wt = _wf(_second_run(reaped), "sweep:\n  blocked_hours: off\n")
+    _stopped(reaped.root, reaped.wt, state="running", kind="judge", name="run")
+    runs = dispatcher.notice_stopped_batteries()["runs"]
+    assert sorted((r["worktree"], r["kind"]) for r in runs) == [
+        (wt.name, "task-finished"), ("CMX-9", "judge")]
+    assert reaped.path.exists() and [p for p, _r in suite_guard.stopped_batteries()] == [reaped.path]
+
+
+def test_a_blocked_wait_is_a_whole_park(reaped):
+    got = park.slot({"status": "running"}, {"waiting_since": 7, "blocked_until": "04:30"}, [])
+    assert got == {"kind": park.SLOT, "since": 7.0, "at": None, "until": None, "by": "suite slot",
+                   "reason": "waiting for a suite slot: blocked hours until 04:30 "
+                             "(`sweep.blocked_hours`)"}
+    assert park.slot({"status": "done"}, {"waiting_since": 7, "blocked_until": "04:30"}, []) is None
+
+
+@pytest.mark.parametrize("raw", ["{not json", "[1, 2]", json.dumps({"X": "soon"}),
+                                 '{"X": true}', '{"X": null}'])
 def test_an_unreadable_requeue_record_never_buys_a_second_re_queue(one_slot, tmp_path, raw):
     path = one_slot / "suite-slots" / "requeued.json"
     path.parent.mkdir(parents=True, exist_ok=True)
