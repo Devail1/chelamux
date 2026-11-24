@@ -511,8 +511,8 @@ def test_hand_in_battery_reads_the_runs_worktree_and_suite_timeout(tf_run, monke
                         lambda cwd, kind, max_wait=None, rank=None:
                         got.append((cwd, kind, max_wait, rank)))
     dispatcher.hand_in_battery("t9")
-    # 12 x the workflow's 45s; no priority on the row ranks as an unknown hand-in (5)
-    assert got == [(str(tf_run), "task-finished", 540.0, 5)]
+    # 12 x the workflow's 45s; no explicit rank: the worktree's run decides (CMX-494)
+    assert got == [(str(tf_run), "task-finished", 540.0, None)]
 
 
 def test_hand_in_battery_without_a_run_or_workflow_falls_back(tf_run, monkeypatch, tmp_path):

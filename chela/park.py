@@ -91,18 +91,21 @@ def manual(run: dict) -> dict | None:
             "until": run.get("parked_until"), "by": run.get("parked_by")}
 
 
-def slot_reason(holders: list[str]) -> str:
-    return f"waiting for a suite slot (holder: {', '.join(holders) or 'unknown'})"
+def slot_reason(holders: list[str], rank: str | None = None) -> str:
+    """``rank`` (CMX-494): where the run stands in the queue, in words."""
+    ranked = f"rank: {rank}; " if rank else ""
+    return f"waiting for a suite slot ({ranked}holder: {', '.join(holders) or 'unknown'})"
 
 
-def slot(run: dict, wait: dict | None, holders: list[str]) -> dict | None:
+def slot(run: dict, wait: dict | None, holders: list[str],
+         rank: str | None = None) -> dict | None:
     """A suite-slot wait as a park — or None when ``wait`` (``suite_guard.waits_in``) has no
     open wait."""
     since = (wait or {}).get("waiting_since")
     if run.get("status") not in ACTIVE or since is None:
         return None
-    return {"kind": SLOT, "reason": slot_reason(holders), "since": float(since), "at": None,
-            "until": None, "by": "suite slot"}
+    return {"kind": SLOT, "reason": slot_reason(holders, rank), "since": float(since),
+            "at": None, "until": None, "by": "suite slot"}
 
 
 def state(run: dict) -> dict | None:
@@ -113,8 +116,10 @@ def state(run: dict) -> dict | None:
         return park
     from chela import suite_guard
     wait = suite_guard.waits_in(run["worktree_path"])
-    return slot(run, wait, suite_guard.holders()
-                if (wait or {}).get("waiting_since") is not None else [])
+    queued = (wait or {}).get("waiting_since") is not None
+    ranks = suite_guard.wait_rank(run["worktree_path"]) if queued else None
+    return slot(run, wait, suite_guard.holders() if queued else [],
+                suite_guard.rank_label(*ranks) if ranks else None)
 
 
 def overdue(park: dict, now: float, runs_by_id: dict[str, dict], max_s: int) -> str | None:

@@ -1445,6 +1445,16 @@ def stdin_blocked_alert_s() -> int:
     return int(os.environ.get("CHELA_STDIN_BLOCKED_ALERT_S", "300"))
 
 
+def slot_wait_alert_s() -> int:
+    """CMX-494: an Urgent or High task waiting for a suite slot longer than this ⇒ one notice."""
+    return int(os.environ.get("CHELA_SLOT_WAIT_ALERT_S", "1800"))
+
+
+def slot_wait_any_alert_s() -> int:
+    """CMX-494: ANY waiter in the suite-slot queue longer than this ⇒ one notice."""
+    return int(os.environ.get("CHELA_SLOT_WAIT_ANY_ALERT_S", "7200"))
+
+
 def park_max_s() -> int:
     """A run parked by ``chela park`` (CMX-318) is never called STUCK — until it has been
     parked this long (or past its ``--until``); then ONE notice says the park outlived itself."""

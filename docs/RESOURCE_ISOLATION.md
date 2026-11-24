@@ -301,9 +301,16 @@ run never strands a slot.
   first, then to hand-ins by their issue's priority (Urgent, High, Medium, Low, then no
   priority), then to the nightly sweep. Among equals, the oldest waiter goes first: a run
   that frees its slot and takes the next one a moment later waits behind a run already
-  queued. A stopped waiter (a fleet pause) does not hold the line.
+  queued. A stopped waiter (a fleet pause) does not hold the line. Judge rounds queue among
+  themselves by their task's priority (CMX-494).
 - **Visible.** The waiting run prints `⏳ waiting for a suite slot — all 2 busy: <worktree>
   (pid …, 4m), …`. A judge's `chela peek` badge says `⏳ waiting for a suite slot`.
+  `chela slots` lists the holders and the waiters in queue order, with rank and wait time, and
+  `chela dispatch-runs` shows a waiting run's rank.
+- **Reported when long** (CMX-494). An Urgent or High task waiting more than
+  `CHELA_SLOT_WAIT_ALERT_S` (30 min), or any waiter past `CHELA_SLOT_WAIT_ANY_ALERT_S` (2 h),
+  gets one `run_slot_wait` inbox notice naming the holder and the queue, repeated at most once
+  an hour.
 - **Never stuck.** A queued run is waiting, not stuck. The judge watchdog holds a run while
   it waits and leaves the queued time out of its wall. `chela doctor` applies the same rule
   (CMX-445): a queued judge is never reported past its wall, and the time it spent queued is
@@ -348,9 +355,12 @@ re-queue has no time limit: every run ahead of it is bounded by its own budget, 
 would throw away the experiments already measured. A waiting judge therefore gets the slot
 within one experiment. On 11-19 a Medium self-check held the only slot for 2 h 08 m while an
 Urgent judge waited 1 h 13 m. A judge round never yields, because nothing outranks it. The run
-row stores the issue's priority at claim time (`runs.priority`). A standalone
-`chela judge self-check` or `chela judge sweep` has no run row, so it ranks as a hand-in with
-no priority.
+row stores the issue's priority (`runs.priority`) at claim time, and every tick copies a
+changed one onto it. Whatever runs a suite in a run's worktree ranks itself by that row
+(`suite_guard.run_rank`, a local DB read, no tracker call): `chela task-finished`, and since
+CMX-494 a standalone `chela judge sweep` or `chela judge self-check` too. A waiter re-reads it
+every second, so raising an issue to Urgent moves a run that is already queued. A directory no
+run owns ranks as a hand-in with no priority.
 
 **Stopped runs get one notice.** While a battery runs it keeps a record in
 `$CHELA_DIR/suite-slots/batteries/`. A battery that ends, raises or exits removes the record.

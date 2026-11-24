@@ -424,8 +424,9 @@ def test_yield_slot_says_who_it_yields_to(one_slot, monkeypatch, capsys):
 # --- each battery queues at the right rank -------------------------------------------------
 
 @pytest.mark.parametrize("kind,rank,want", [
-    ("judge", None, 0), ("self-check", None, 5), ("sweep", None, 5),
-    ("task-finished", None, 5), ("task-finished", 1, 1), ("sweep", 6, 6), ("judge", 3, 3)])
+    # None (CMX-494): the rank of the run whose worktree this is, resolved while it queues.
+    ("judge", None, 0), ("self-check", None, None), ("sweep", None, None),
+    ("task-finished", None, None), ("task-finished", 1, 1), ("sweep", 6, 6), ("judge", 3, 3)])
 def test_a_battery_queues_by_its_kind_or_its_explicit_rank(one_slot, monkeypatch, kind, rank,
                                                            want):
     got = []
@@ -436,21 +437,20 @@ def test_a_battery_queues_by_its_kind_or_its_explicit_rank(one_slot, monkeypatch
     assert got == [want]
 
 
-def test_hand_in_battery_ranks_by_the_runs_priority(monkeypatch, tmp_path):
-    monkeypatch.setattr(dispatcher, "DB_PATH", tmp_path / "scheduler.db")
-    got = []
-    monkeypatch.setattr(suite_guard, "battery",
-                        lambda cwd, kind, max_wait=None, rank=None: got.append(rank))
+def test_hand_in_battery_ranks_by_the_runs_priority(one_slot, monkeypatch):
+    monkeypatch.setattr(dispatcher, "DB_PATH", one_slot / "scheduler.db")
+    monkeypatch.chdir(one_slot)
     with dispatcher._db() as conn:
         for tid, prio in (("u", 1), ("m", 3), ("n", None), ("z", 0)):
             conn.execute(
                 "INSERT INTO runs (task_id, workflow_path, title, status, window_name, "
                 "worktree_path, branch_name, started_at, attempt, priority) "
                 "VALUES (?, '', 'x', 'running', 'w', ?, 'b', '2026-11-19T00:00:00+00:00', 1, ?)",
-                (tid, str(tmp_path), prio))
-        conn.commit()
+                (tid, str(one_slot / tid), prio))
+    got = []
     for tid in ("u", "m", "n", "z", "missing"):
-        dispatcher.hand_in_battery(tid)
+        with dispatcher.hand_in_battery(tid):
+            got += [h["rank"] for h in suite_guard.held()]
     assert got == [1, 3, 5, 5, 5]
 
 
