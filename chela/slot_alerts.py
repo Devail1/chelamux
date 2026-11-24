@@ -50,8 +50,7 @@ def due(store: dict, holders: list[dict], waiters: list[dict], now: float) -> li
     """The overdue waiters this tick owes a notice, as ``{waiter, waited, text}``. Latches each
     in ``store`` by worktree, so a waiter that restarts inside the hour is not told twice."""
     prev = store.get(STORE_KEY) or {}
-    present = {w["cwd"] for w in waiters}
-    said = {cwd: at for cwd, at in prev.items() if cwd in present or now - at < REPEAT_S}
+    said = {cwd: at for cwd, at in prev.items() if now - at < REPEAT_S}
     out = []
     for w in waiters:
         waited = now - w["since"]
@@ -60,8 +59,7 @@ def due(store: dict, holders: list[dict], waiters: list[dict], now: float) -> li
             limit = min(limit, config.slot_wait_alert_s())
         if w["stopped"] or waited <= limit:
             continue
-        last = said.get(w["cwd"])
-        if last is not None and now - last < REPEAT_S:
+        if w["cwd"] in said:          # within the last REPEAT_S
             continue
         said[w["cwd"]] = now
         others = _labels([o for o in waiters if o is not w])

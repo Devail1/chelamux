@@ -125,6 +125,18 @@ def test_an_unreadable_db_keeps_the_last_known_rank(box, monkeypatch, err):
     assert suite_guard.run_rank(wt) == 1
 
 
+def test_the_last_known_rank_is_the_latest_and_its_own_worktrees(box, monkeypatch):
+    urgent, low = _add_run(box, "CMX-1", priority=1), _add_run(box, "CMX-4", priority=4)
+    assert [suite_guard.run_rank(w) for w in (urgent, low)] == [1, 4]
+    _set_priority("CMX-4", 3)
+    assert suite_guard.run_rank(low) == 3
+
+    def boom(*a, **k):
+        raise sqlite3.OperationalError("locked")
+    monkeypatch.setattr(suite_guard.sqlite3, "connect", boom)
+    assert [suite_guard.run_rank(w) for w in (urgent, low, box / "new")] == [1, 3, 5]
+
+
 def test_a_db_without_the_priority_column_is_unknown(box):
     with sqlite3.connect(box / "scheduler.db") as conn:
         conn.execute("CREATE TABLE runs (task_id TEXT, worktree_path TEXT, started_at TEXT)")
@@ -285,6 +297,138 @@ def test_the_raised_waiter_is_admitted_first(box, busy_slot):
     assert order == ["CMX-473", "CMX-482"]
 
 
+def _admitted(box, busy_slot, starts, before_free=lambda: None):
+    """The order REAL acquirers get the slot in: each is queued before the next one starts, so
+    the first in ``starts`` is always the oldest wait."""
+    order, errors, threads = [], [], []
+
+    def body(wt, kind, rank):
+        try:
+            with suite_guard.battery(wt, kind, max_wait=8, rank=rank):
+                order.append(wt.name)
+        except BaseException as e:   # noqa: BLE001
+            errors.append(e)
+    for wt, kind, rank in starts:
+        threads.append(threading.Thread(target=body, args=(wt, kind, rank), daemon=True))
+        threads[-1].start()
+        _until(lambda: _ledger_of(box, wt), f"{wt.name}'s wait ledger")
+    before_free()
+    busy_slot.free()
+    for t in threads:
+        t.join(20)
+    assert not errors
+    return order
+
+
+def test_judge_rounds_are_admitted_by_their_tasks_rank(box, busy_slot):
+    """Through the real acquirer, oldest wait last in rank: the order is never arrival's."""
+    low, medium, urgent = (_add_run(box, f"CMX-{p}", priority=p) for p in (4, 3, 1))
+    sweeper = _add_run(box, "CMX-9", priority=1)
+    assert _admitted(box, busy_slot, [
+        (sweeper, "sweep", suite_guard.RANK_SWEEP), (low, "judge", None),
+        (medium, "judge", None), (urgent, "judge", None)]) == ["CMX-1", "CMX-3", "CMX-4", "CMX-9"]
+
+
+def test_equal_judge_rounds_are_admitted_oldest_first(box, busy_slot):
+    a, b = (_add_run(box, t, priority=2) for t in ("CMX-2", "CMX-1"))
+    assert _admitted(box, busy_slot, [(a, "judge", None), (b, "judge", None)]) == [
+        "CMX-2", "CMX-1"]
+
+
+def test_a_raised_judge_round_is_admitted_first(box, busy_slot):
+    high, raised = _add_run(box, "CMX-2", priority=2), _add_run(box, "CMX-4", priority=4)
+
+    def re_rank():
+        _set_priority("CMX-4", 1)
+        _until(lambda: _ledger_of(box, raised)["task_rank"] == 1, "the re-rank")
+    assert _admitted(box, busy_slot, [(high, "judge", None), (raised, "judge", None)],
+                     re_rank) == ["CMX-4", "CMX-2"]
+
+
+@pytest.mark.parametrize("kind,rank,priority,want,says", [
+    ("judge", None, 1, (0, 1), "judge, Urgent"), ("judge", None, 4, (0, 4), "judge, Low"),
+    ("judge", None, None, (0, 5), "judge, no priority"), ("sweep", None, 1, (1, 1), "Urgent"),
+    ("sweep", 6, 1, (6, 6), "nightly sweep")])
+def test_a_real_holders_record_says_whose_rank_it_holds_at(box, kind, rank, priority, want,
+                                                           says):
+    """The record the ACQUIRER wrote, read back by every surface that names the holder."""
+    wt = _add_run(box, priority=priority)
+    before = time.time()
+    with suite_guard.battery(wt, kind, max_wait=5, rank=rank):
+        [h] = suite_guard.held()
+    assert before <= h.pop("since") <= time.time()
+    assert h == {"name": "CMX-473", "cwd": str(wt), "pid": os.getpid(), "rank": want[0],
+                 "task_rank": want[1]}
+    assert slot_alerts.label(h) == f"CMX-473 ({says})"
+
+
+def test_a_holder_that_queued_records_the_rank_it_was_re_ranked_to(box, busy_slot):
+    wt = _add_run(box, priority=4)
+    got = []
+
+    def body():
+        with suite_guard.battery(wt, "judge", max_wait=8):
+            got.extend(suite_guard.held())
+    t = threading.Thread(target=body, daemon=True)
+    t.start()
+    _until(lambda: _ledger_of(box, wt), "a wait ledger")
+    _set_priority("CMX-473", 2)
+    _until(lambda: _ledger_of(box, wt)["task_rank"] == 2, "the re-rank")
+    busy_slot.free()
+    t.join(10)
+    assert [(h["rank"], h["task_rank"]) for h in got] == [(0, 2)]
+
+
+def test_a_yielded_holder_re_queues_at_its_runs_rank_and_claim(box, monkeypatch):
+    """The slot it takes back, and the wait in between, are both at the rank it has NOW."""
+    wt = _add_run(box, priority=4)
+    judged = _add_run(box, "CMX-1", priority=1)
+    seen = {}
+    release = threading.Event()
+
+    def judge_body():
+        with suite_guard.battery(judged, "judge", max_wait=8):
+            release.wait(8)
+    t = threading.Thread(target=judge_body, daemon=True)
+
+    def watch():
+        seen["wait"] = _until(lambda: _ledger_of(box, wt), "the yielded wait")
+        _set_priority("CMX-473", 2)
+        _until(lambda: _ledger_of(box, wt)["rank"] == 2, "the re-rank")
+        seen["queued"] = suite_guard.queued()
+        release.set()
+    w = threading.Thread(target=watch, daemon=True)
+    try:
+        with suite_guard.battery(wt, "self-check", max_wait=8):
+            held_since = time.time()
+            time.sleep(0.05)
+            t.start()
+            _until(lambda: _ledger_of(box, judged), "the judge's wait ledger")
+            w.start()
+            assert suite_guard.yield_slot() == "CMX-1"
+            [h] = suite_guard.held()
+    finally:
+        release.set()
+    t.join(10)
+    w.join(10)
+    assert (seen["wait"]["rank"], h["name"], h["rank"], h["task_rank"]) == (4, "CMX-473", 2, 2)
+    assert seen["wait"]["waiting_since"] <= held_since            # its place: the claim
+    [q] = seen["queued"]
+    assert q["since"] > held_since                                # its wait: from the yield
+
+
+@pytest.mark.parametrize("kind,rank,want", [
+    ("judge", None, 0), ("sweep", 6, 6), ("self-check", None, 4)])
+def test_a_holder_yields_by_its_queue_rank_not_its_tasks(box, monkeypatch, kind, rank, want):
+    """A Low task's judge never yields to an Urgent hand-in; the nightly sweep always does."""
+    wt = _add_run(box, priority=4)
+    asked = []
+    monkeypatch.setattr(suite_guard, "outranking", lambda rank, **k: asked.append(rank) or [])
+    with suite_guard.battery(wt, kind, max_wait=5, rank=rank):
+        assert suite_guard.yield_slot() == ""
+    assert asked == [want]
+
+
 def test_a_holder_yields_by_the_rank_its_run_has_now(box, monkeypatch):
     wt = _add_run(box, priority=4)
     asked = []
@@ -397,6 +541,18 @@ def test_dispatch_runs_shows_the_rank_next_to_the_slot_wait(box, busy_slot, caps
     _write_ledger(box, "x", 1, time.time() - 60, cwd=str(wt))
     main._print_park({"task_id": "CMX-473", "status": "running", "worktree_path": str(wt)})
     assert "waiting for a suite slot (rank: Urgent; holder: CMX-482)" in capsys.readouterr().out
+
+
+def test_dispatch_runs_names_a_judge_waiters_task_rank(box, busy_slot, capsys):
+    """Queue rank and task rank differ only for a judge; the worktree asked for is a symlink."""
+    (box / "suite-slots" / "slot-0").write_text(json.dumps({"cwd": "/wts/CMX-482"}))
+    wt = _add_run(box, priority=2)
+    (box / "link").symlink_to(wt)
+    _write_ledger(box, "x", 0, time.time() - 60, task_rank=2, cwd=str(wt))
+    assert suite_guard.wait_rank(box / "link") == (0, 2)
+    main._print_park({"task_id": "CMX-473", "status": "running",
+                      "worktree_path": str(box / "link")})
+    assert "(rank: judge, High; holder: CMX-482)" in capsys.readouterr().out
 
 
 def test_a_wait_that_ended_mid_read_shows_no_rank(monkeypatch):
@@ -546,6 +702,52 @@ def test_the_event_names_the_waiters_run(name, cwd, found):
                      "holders": ["CMX-482"], "queued": [name]}
 
 
+# (the run row's recorded window, the live tmux epoch) -> the window the notice belongs to
+WID_CASES = [
+    ({"window_id": "@5"}, None, "@5"),                                  # recorded at spawn
+    ({"window_id": "@5", "window_epoch": "E2"}, "E2", "@5"),            # ...in this server
+    ({"window_id": "@5", "window_epoch": "E1"}, "E2", "@9"),            # dead server: by name
+    ({"window_id": "@5", "window_epoch": "E1", "window_name": "gone"}, "E2", None),
+    ({"window_id": None}, "E2", "@9")]
+
+
+@pytest.mark.parametrize("row,now_epoch,want", WID_CASES)
+@pytest.mark.parametrize("name", ["CMX-473", "judge-CMX-473"])
+def test_the_event_is_attributed_to_the_waiting_runs_window(row, now_epoch, want, name):
+    runs = [_run("CMX-1", window_id="@3"), _run(**{"window_name": "cmx-473", **row})]
+    [e] = inbox.slot_wait_events(runs, inbox._empty(), [], [_entry(name, 1, NOW - 31 * MIN)],
+                                 NOW, windows={"@9": "cmx-473", "@3": "cmx-1"},
+                                 now_epoch=now_epoch)
+    assert e["wid"] == want
+
+
+def test_a_waiter_no_run_owns_belongs_to_no_window():
+    [e] = inbox.slot_wait_events([_run(window_name="nightly")], inbox._empty(), [],
+                                 [_entry("nightly", 1, NOW - 31 * MIN)], NOW,
+                                 windows={"@9": "nightly"}, now_epoch="E2")
+    assert e["wid"] is None
+
+
+def test_each_event_carries_its_own_waiters_facts():
+    """Two overdue waiters whose every field differs, one of them a judge (rank != task rank)."""
+    waiters = [_entry("judge-CMX-1", 0, NOW - 40 * MIN, task_rank=2),
+               _entry("CMX-473", 1, NOW - 31 * MIN), _entry("CMX-7", 5, NOW)]
+    holders = [_entry("CMX-482", 2, NOW), _entry("CMX-8", 3, NOW)]
+    pr = "https://github.com/o/r/pull/5"
+    events = inbox.slot_wait_events([_run("CMX-1", window_id="@1", pr_url=pr), _run()],
+                                    inbox._empty(), holders, waiters, NOW)
+    everyone = {"holders": ["CMX-482", "CMX-8"], "queued": ["judge-CMX-1", "CMX-473", "CMX-7"],
+                "run_status": "running", "branch_name": "cmx-473", "pr_head_sha": None}
+    assert [(e["wid"], e["payload"]) for e in events] == [
+        ("@1", {"task_id": "CMX-1", "worktree": "/wts/judge-CMX-1", "waited_s": 2400, "rank": 0,
+                "task_rank": 2, "pr_url": pr, "window_id": "@1", **everyone}),
+        ("@5", {"task_id": "CMX-473", "worktree": "/wts/CMX-473", "waited_s": 1860, "rank": 1,
+                "task_rank": 1, "pr_url": None, "window_id": "@5", **everyone})]
+    assert [e["summary"].split(" has ")[0].split(" ", 1)[1] for e in events] == [
+        inbox.sanitize_prompt("judge-CMX-1 (judge, High)"),
+        inbox.sanitize_prompt("CMX-473 (Urgent)")]
+
+
 def test_a_queued_notice_whose_wait_is_over_is_dropped():
     store = inbox._empty()
     gone = inbox._event("run_slot_wait", "x", {"worktree": "/wts/CMX-1"})
@@ -574,21 +776,30 @@ def test_the_notice_is_never_held_for_the_digest():
     assert digest.route("run_slot_wait", digest.rules({"enabled": True})) == "interrupt"
 
 
-def test_a_daemon_tick_queues_the_notice(box, busy_slot, monkeypatch):
-    """End to end: the 11-23 shape — an Urgent waiter, 4 h in, behind a High holder."""
+def test_the_digest_names_the_notice_in_words():
+    e = {"type": "run_slot_wait", "payload": {"task_id": "CMX-473"}, "summary": "x y z"}
+    assert digest._what(e, {}) == "waits too long for a suite slot"
+
+
+@pytest.mark.parametrize("row,now_epoch,want", WID_CASES)
+def test_a_daemon_tick_queues_the_notice(box, busy_slot, monkeypatch, row, now_epoch, want):
+    """End to end: the 11-23 shape — an Urgent waiter, 4 h in, behind a High holder — filed
+    under the waiter's window, through the windows and tmux epoch the TICK read."""
     monkeypatch.setenv("CHELA_INBOX_FILE", str(box / "inbox.json"))
     monkeypatch.setenv("CHELA_EVENTS_FILE", str(box / "events.jsonl"))
     monkeypatch.setenv("CHELA_ORCHESTRATOR_WID", "@1")
     monkeypatch.setattr(inbox, "INBOX_ENABLED", True)
     monkeypatch.setattr(inbox.agent_manager, "status_by_wid", lambda: {"@1": inbox.WAITING})
-    monkeypatch.setattr(inbox.discovery, "get_windows_by_id", lambda: {"@1": "orchestrator"})
+    monkeypatch.setattr(inbox.discovery, "get_windows_by_id", lambda: {"@1": "orchestrator", "@9": "cmx-473"})
+    monkeypatch.setattr(inbox.epoch, "current", lambda: now_epoch)
     monkeypatch.setattr(inbox.messenger, "send_tmux", lambda wid, text: False)
     (box / "suite-slots" / "slot-0").write_text(json.dumps(
         {"pid": 11, "cwd": "/wts/CMX-482", "since": time.time(), "rank": 2}))
     _write_ledger(box, "CMX-473", 1, time.time() - 4 * HOUR)
     for _ in range(2):                                             # the second tick adds none
-        inbox.tick({}, runs=[_run()])
+        inbox.tick({}, runs=[_run(**{"window_name": "cmx-473", **row})])
     [e] = [e for e in inbox.load()["queue"] if e["kind"] == "run_slot_wait"]
+    assert e["wid"] == want
     assert "CMX-473" in e["summary"] and "has waited 4h00m for the suite slot" in e["summary"]
     assert e["payload"]["holders"] == ["CMX-482"]
 
