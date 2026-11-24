@@ -127,7 +127,8 @@ from contextlib import contextmanager
 from pathlib import Path
 
 from chela import agent_manager, discovery, epoch, event_log, hooks, judge, messenger, notify, sessions, transcripts
-from chela import config, digest, park, risktier, stall_alerts, stdin_blocked, suite_guard
+from chela import (
+    config, digest, park, risktier, slot_alerts, stall_alerts, stdin_blocked, suite_guard)
 from chela.config import INBOX_ENABLED
 from chela.hold import human_duration
 from chela.tui_text import sanitize_prompt
@@ -250,6 +251,8 @@ def _empty() -> dict:
             # released, CI red, PR conflicting, agent stuck / marker unread.
             "expected_edges": {}, "review_wait": {}, "hold_seen": None, "hold_ended": None,
             "ci_red_seen": {}, "conflict_seen": {}, "stuck": {},
+            # CMX-494: when each suite-slot waiter was last reported (chela.slot_alerts).
+            "slot_waits": {},
             # CMX-155: the event-log cursor of the classifier-denial scan, and the per-run
             # cooldown latch of its notice (`denied_events`). CMX-184: the tool_use ids of the
             # denials already judged, so the Mod's direct post and the event-log copy of ONE
@@ -1849,7 +1852,7 @@ MARKERS = {".chela-task-finished-request.json": "task-finished",
            ".chela-push-request.json": "push-request"}
 
 _CMX86_KINDS = ("run_judge_not_started", "run_ci_red", "run_pr_conflicting", "run_stuck",
-                "run_marker_unread", "run_selfcheck_long", "run_park_overdue")
+                "run_marker_unread", "run_selfcheck_long", "run_park_overdue", slot_alerts.KIND)
 
 
 def caller_is_orchestrator(store: dict | None = None) -> bool:
@@ -2681,6 +2684,32 @@ def stuck_events(runs: list[dict], store: dict, probes: dict[str, dict], now: fl
                     stdin_blocked_comm=stuck_on["comm"] if stuck_on else None), wid=wid))
         nxt[task] = entry
     store["stuck"] = nxt
+    return out
+
+
+def slot_wait_events(runs: list[dict], store: dict, holders: list[dict], waiters: list[dict],
+                     now: float, *, windows: dict | None = None,
+                     now_epoch: str | None = None) -> list[dict]:
+    """⏳ CMX-494: one ``run_slot_wait`` per waiter overdue for a suite slot
+    (:func:`chela.slot_alerts.due`). A queued-but-undelivered one whose worktree no longer
+    waits is dropped: the wait it reports is over, and it would ask for nothing."""
+    waiting = {w["cwd"] for w in waiters}
+    store["queue"] = [e for e in store["queue"] if e.get("kind") != slot_alerts.KIND
+                      or (e.get("payload") or {}).get("worktree") in waiting]
+    out = []
+    for d in slot_alerts.due(store, holders, waiters, now):
+        w = d["waiter"]
+        cwd = Path(w["cwd"])
+        run = next((r for r in runs if r.get("worktree_path")
+                    and Path(r["worktree_path"]) in (cwd, *cwd.parents)), None)
+        run = run or next((r for r in runs if r.get("task_id")
+                           and w["name"] == suite_guard.JUDGE_DIR_PREFIX + r["task_id"]), None)
+        facts = {"worktree": w["cwd"], "waited_s": int(d["waited"]), "rank": w["rank"],
+                 "task_rank": w["task_rank"], "holders": [h["name"] for h in holders],
+                 "queued": [o["name"] for o in waiters]}
+        out.append(_event(slot_alerts.KIND, d["text"],
+                          _run_payload(run, **facts) if run else facts,
+                          wid=run_wid(run, windows, now_epoch) if run else None))
     return out
 
 
@@ -3693,6 +3722,7 @@ def tick(prev: dict[str, str], runs: list[dict] | None = None) -> dict[str, str]
     # the daemon's uptime — all I/O, so all read here, outside the lock.
     probes = stuck_probes(runs)
     tiers = review_tiers(runs)          # CMX-312: git, so outside the lock too
+    slot_holders, slot_waiters = suite_guard.held(), suite_guard.queued()   # CMX-494
     from chela import hold
     held, released = hold.read(), hold.last_release()
     now = time.time()
@@ -3724,6 +3754,8 @@ def tick(prev: dict[str, str], runs: list[dict] | None = None) -> dict[str, str]
         events += stuck_events(runs, store, probes, now, uptime, windows=windows,
                                now_epoch=now_epoch, daemon=daemon,
                                held=held is not None and not held.expired(now))
+        events += slot_wait_events(runs, store, slot_holders, slot_waiters, now,
+                                   windows=windows, now_epoch=now_epoch)
         # CMX-478: the same cursor carries the permission prompts; each goes to its own scan
         events += denied_events([d for d in denials if d.get("type") != PROMPT_TYPE],
                                 runs, store, now, windows=windows, now_epoch=now_epoch)

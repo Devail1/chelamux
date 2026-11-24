@@ -334,6 +334,67 @@ def test_a_waiter_still_queued_after_the_window_holds_its_place_again(one_slot, 
     assert _ledger(one_slot)["blocked_until"] is None
 
 
+@pytest.mark.parametrize("until,at,held", [
+    ("04:30", (4, 29), True), ("04:30", (4, 30), False), ("04:30", (4, 34), False),
+    ("04:30", (4, 35), True), ("23:58", (0, 2), False), ("23:58", (0, 3), True),
+    ("00:00", (23, 59), True), ("00:00", (0, 0), False),
+    ("soon", (4, 30), True), ("a:b:c", (4, 30), True), (None, (4, 0), False)])
+def test_a_window_that_just_ended_hides_no_waiter(one_slot, clock, until, at, held):
+    """Whoever polls first at 04:30 must not pass a better-ranked one still saying blocked."""
+    waits = one_slot / "suite-slots" / "waits"
+    waits.mkdir(parents=True)
+    (waits / "a.json").write_text(json.dumps({
+        "pid": os.getpid(), "start": suite_guard._proc_stat(os.getpid())[1], "cwd": "/w/A",
+        "waiting_since": 1.0, "waited": 0, "rank": 1, "blocked_until": until}))
+    clock.now = datetime(2026, 11, 23, *at)
+    assert suite_guard._must_queue(waits / "me.json", 2.0, 3) is not held
+    assert suite_guard.outranking(3) == ([] if held else ["A"])
+
+
+def test_a_waiter_raised_inside_the_window_is_re_ranked_before_it_ends(one_slot, clock,
+                                                                      monkeypatch):
+    rank = {"now": 5}
+    monkeypatch.setattr(suite_guard, "run_rank", lambda cwd: rank["now"])
+    seen = []
+
+    def poll(new, h, m):
+        def step():
+            seen.append((_ledger(one_slot)["rank"], _ledger(one_slot)["blocked_until"]))
+            rank["now"] = new
+            clock.now = datetime(2026, 11, 23, h, m)
+        return step
+
+    _script_sleeps(monkeypatch, clock, [poll(1, 4, 0), poll(1, 4, 30)])
+    with suite_guard.slot(one_slot / "CMX-1"):
+        assert suite_guard.held()[0]["rank"] == 1
+    assert seen == [(5, "04:30"), (1, "04:30")]
+
+
+def test_the_blocked_stretch_is_not_part_of_a_reported_wait(one_slot, clock, monkeypatch):
+    """Queued 60 s before the window, blocked 5400 s, 60 s after it: a 120 s wait."""
+    fd = _hold_the_slot(one_slot)
+    clock.now = datetime(2026, 11, 23, 2, 59)
+    real = {"t": 1000.0}
+    monkeypatch.setattr(suite_guard.time, "time", lambda: real["t"])
+    monkeypatch.setattr(suite_guard.time, "monotonic", lambda: real["t"])
+    waited = []
+
+    def after(seconds, h, m, free=False):
+        def step():
+            waited.append(real["t"] - suite_guard.queued()[0]["since"])
+            real["t"] += seconds
+            clock.now = datetime(2026, 11, 23, h, m)
+            if free:
+                os.close(fd)
+        return step
+
+    _script_sleeps(monkeypatch, clock, [after(60, 3, 0), after(5400, 4, 30), after(60, 4, 31),
+                                        after(0, 4, 31, free=True)])
+    with suite_guard.slot(one_slot / "CMX-1"):
+        pass
+    assert waited == [0, 60, 60, 120]
+
+
 def test_after_the_window_the_slot_timeout_still_runs(one_slot, clock, monkeypatch):
     """Only the blocked stretch is excused: once it ends, a slot that stays busy times out."""
     fd = _hold_the_slot(one_slot)

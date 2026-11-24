@@ -1537,9 +1537,10 @@ def ensure_schema(conn: sqlite3.Connection) -> sqlite3.Connection:
         # before this, an adopted PR) reads as `normal` via `sources.run_risk`.
         ("risk", "ALTER TABLE runs ADD COLUMN risk TEXT"),
         ("risk_reason", "ALTER TABLE runs ADD COLUMN risk_reason TEXT"),
-        # ⏳ CMX-445. The tracker's priority number at claim time (Linear: 1 Urgent … 4 Low,
-        # 0 none); NULL for a tracker without one. Orders this run's hand-in in the suite
-        # slot queue (`hand_in_battery`, `suite_guard.handin_rank`).
+        # ⏳ CMX-445. The tracker's priority number (Linear: 1 Urgent … 4 Low, 0 none); NULL
+        # for a tracker without one. Stored at claim, refreshed every tick
+        # (`_refresh_priorities`). Orders whatever runs a suite in this run's worktree in the
+        # slot queue (`suite_guard.run_rank`).
         ("priority", "ALTER TABLE runs ADD COLUMN priority INTEGER"),
         # 🧊 CMX-336. `_blocked_race_resolved` (chela/runtime_truth.py) clears a
         # `J_BLOCKED_RACE` row on exactly one condition — `judge_sha != pr_head_sha`, i.e.
@@ -3353,12 +3354,10 @@ def hand_in_battery(task_id: str):
             log.warning("hand-in slot: %s could not be read (%s) — waiting at most %d "
                         "default suite timeouts", row["workflow_path"], e,
                         suite_guard.BATTERY_WAIT_TIMEOUTS)
-    # ⏳ CMX-445: the hand-in queues by its issue's priority (Urgent first), behind any judge.
-    keys = row.keys() if row is not None else ()
-    priority = row["priority"] if "priority" in keys else None
+    # ⏳ CMX-494: no `rank` — like every other battery, it queues by the priority the run DB
+    # has for its worktree, re-read while it waits (`suite_guard.run_rank`).
     return suite_guard.battery(worktree, "task-finished",
-                               max_wait=suite_guard.battery_max_wait(timeout),
-                               rank=suite_guard.handin_rank(priority))
+                               max_wait=suite_guard.battery_max_wait(timeout))
 
 
 STOPPED_BATTERIES_KIND = "suite_runs_stopped"
@@ -6243,6 +6242,27 @@ def _tracker_gone(source, workflow_path: str, ids, open_tasks, read_failed: bool
     return ids - still_open
 
 
+def _refresh_priorities(conn: sqlite3.Connection, workflow_path: str, open_tasks) -> int:
+    """⏳ CMX-494: copy each open task's priority, as THIS tick read it, onto its unfinished
+    run row — what a suite-slot waiter in that run's worktree ranks itself by
+    (:func:`chela.suite_guard.run_rank`). Returns the rows changed. A task that carries no
+    priority number (another tracker, an unreadable field) changes nothing."""
+    changed = 0
+    for t in open_tasks:
+        priority = getattr(t, "priority", None)
+        if priority is None:
+            continue
+        row = conn.execute("SELECT status, priority FROM runs WHERE task_id=? AND "
+                           "workflow_path=?", (t.id, workflow_path)).fetchone()
+        if row is None or row["status"] in TERMINAL_STATUSES or row["priority"] == priority:
+            continue
+        conn.execute("UPDATE runs SET priority=? WHERE task_id=? AND workflow_path=?",
+                     (priority, t.id, workflow_path))
+        log.info("%s: priority %s -> %s", t.id, row["priority"], priority)
+        changed += 1
+    return changed
+
+
 def _rekey_legacy_raw_ids(conn: sqlite3.Connection, workflow_path: str, mapping: dict[str, str]) -> int:
     """CMX-384 migration: move each ``runs`` row keyed by a still-open task's OLD raw-line id
     onto its bare-title id, in ONE transaction. Returns the number of rows re-keyed.
@@ -6398,6 +6418,12 @@ def tick(workflow_path: str | Path) -> dict:
         if legacy is not None and not tracker_read_failed and str(wf.path) not in _rekeyed:
             _rekey_legacy_raw_ids(conn, str(wf.path), legacy(open_tasks))
             _rekeyed.add(str(wf.path))
+
+        # ⏳ CMX-494: an issue re-prioritized after its claim re-ranks its suite-slot waiters.
+        # Committed at once: the write lock is never held across the `gh` calls below.
+        if not tracker_read_failed:
+            _refresh_priorities(conn, str(wf.path), open_tasks)
+            conn.commit()
 
         # 0. Refresh pr_state + pr_mergeable for any row whose PR could still
         # change. Skips rows whose pr_state is already terminal

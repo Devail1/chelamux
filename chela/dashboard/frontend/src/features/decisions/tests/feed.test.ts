@@ -38,6 +38,7 @@ test.each([
   ['run_marker_unread', 'run'],
   ['run_selfcheck_long', 'run'],
   ['run_park_overdue', 'run'],
+  ['run_slot_wait', 'run'],
   ['dispatch_hold_expired', 'lifecycle'],
   ['dispatch_hold_released', 'lifecycle'],
   ['daemon_start', 'lifecycle'],
