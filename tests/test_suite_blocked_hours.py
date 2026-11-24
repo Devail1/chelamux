@@ -263,6 +263,138 @@ def test_a_blocked_waiter_holds_no_line_for_a_repo_that_is_not_blocked(one_slot)
     assert suite_guard.outranking(3) == []
 
 
+def _script_sleeps(monkeypatch, clock, steps):
+    """Each slot poll runs the next of ``steps`` (a callable); one poll too many fails."""
+    todo = iter(steps)
+
+    def sleep(_s):
+        step = next(todo, None)
+        assert step is not None, f"still polling at {clock.now}: the wait never ended"
+        step()
+
+    monkeypatch.setattr(suite_guard.time, "sleep", sleep)
+
+
+def _hold_the_slot(root: Path) -> int:
+    d = root / "suite-slots"
+    d.mkdir(parents=True, exist_ok=True)
+    fd = suite_guard._take(d, 1)
+    assert fd is not None
+    return fd
+
+
+def test_a_waiter_queued_before_the_window_is_held_by_it_too(one_slot, clock, monkeypatch):
+    """Queued behind a holder at 02:55, the holder leaves at 03:05 — inside the window — and
+    the free slot is still not granted before 04:30; then it is, and then a second window."""
+    fd = _hold_the_slot(one_slot)
+    clock.now = datetime(2026, 11, 23, 2, 55)
+    seen = []
+
+    def to(h, m, free=False):
+        def step():
+            seen.append((clock.now.strftime("%H:%M"), _ledger(one_slot)["blocked_until"]))
+            clock.now = datetime(2026, 11, 23, h, m)
+            if free:
+                os.close(fd)
+        return step
+
+    _script_sleeps(monkeypatch, clock, [to(3, 5, free=True), to(4, 29), to(4, 30)])
+    with suite_guard.slot(one_slot / "CMX-1"):
+        assert clock.now == datetime(2026, 11, 23, 4, 30)
+    assert seen == [("02:55", None), ("03:05", "04:30"), ("04:29", "04:30")]
+
+
+def test_a_waiter_still_queued_after_the_window_holds_its_place_again(one_slot, clock,
+                                                                     monkeypatch):
+    """The slot is still taken at 04:30: the waiter's ledger stops saying blocked, so a
+    later arrival queues behind it and a lower-ranked holder sees it; a second window
+    (the next night's) says blocked again."""
+    fd = _hold_the_slot(one_slot)
+    seen = []
+
+    def step(day, h, m, free=False):
+        def run():
+            rec = _ledger(one_slot)
+            assert rec["waiting_since"] is not None
+            other = one_slot / "suite-slots" / "waits" / "later.json"
+            seen.append((rec["blocked_until"],
+                         suite_guard._must_queue(other, rec["waiting_since"] + 1, 3),
+                         suite_guard.outranking(3)))
+            clock.now = datetime(2026, 11, day, h, m)
+            if free:
+                os.close(fd)
+        return run
+
+    _script_sleeps(monkeypatch, clock, [step(23, 4, 30), step(24, 3, 0),
+                                        step(24, 4, 30, free=True)])
+    with suite_guard.slot(one_slot / "CMX-1", rank=0):
+        pass
+    held, queued = ("04:30", False, []), (None, True, ["CMX-1"])
+    assert seen == [held, queued, held]
+    assert _ledger(one_slot)["blocked_until"] is None
+
+
+def test_after_the_window_the_slot_timeout_still_runs(one_slot, clock, monkeypatch):
+    """Only the blocked stretch is excused: once it ends, a slot that stays busy times out."""
+    fd = _hold_the_slot(one_slot)
+    real = {"t": 1000.0}
+    monkeypatch.setattr(suite_guard.time, "time", lambda: real["t"])
+    monkeypatch.setattr(suite_guard.time, "monotonic", lambda: real["t"])
+
+    def after(seconds, h, m):
+        def step():
+            real["t"] += seconds
+            clock.now = datetime(2026, 11, 23, h, m)
+        return step
+
+    _script_sleeps(monkeypatch, clock, [after(4800, 4, 30), after(59, 4, 31), after(1, 4, 32)])
+    with pytest.raises(suite_guard.SlotTimeout):
+        with suite_guard.slot(one_slot / "CMX-1", max_wait=60):
+            pass
+    assert clock.now == datetime(2026, 11, 23, 4, 32)
+    os.close(fd)
+
+
+def test_a_wait_interrupted_inside_the_window_leaves_no_blocked_ledger(one_slot, clock,
+                                                                       monkeypatch):
+    def interrupt(_s):
+        assert _ledger(one_slot)["blocked_until"] == "04:30"
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(suite_guard.time, "sleep", interrupt)
+    with pytest.raises(KeyboardInterrupt):
+        with suite_guard.slot(one_slot / "CMX-1"):
+            pass
+    rec = _ledger(one_slot)
+    assert (rec["blocked_until"], rec["waiting_since"]) == (None, None)
+
+
+def test_a_holder_yields_to_the_window_whoever_is_waiting_and_every_night(one_slot, clock,
+                                                                         monkeypatch):
+    """The window decides even with a better-ranked waiter in the line, and again the next
+    night; a holder that never waited and one that already yielded both give way."""
+    clock.now = datetime(2026, 11, 23, 2, 55)
+    waits = one_slot / "suite-slots" / "waits"
+    waits.mkdir(parents=True)
+    peer = waits / "peer.json"
+    rec = {"pid": os.getpid(), "start": suite_guard._proc_stat(os.getpid())[1], "cwd": "/w/A",
+           "waiting_since": 1.0, "waited": 0, "rank": 0, "blocked_until": None}
+    real = clock.sleep
+
+    def sleep(s):
+        peer.unlink(missing_ok=True)
+        real(s)
+
+    with suite_guard.slot(one_slot / "CMX-7", rank=3):
+        monkeypatch.setattr(suite_guard.time, "sleep", sleep)
+        for day in (23, 24):
+            clock.now = datetime(2026, 11, day, 3, 0)
+            peer.write_text(json.dumps(rec))
+            assert suite_guard.outranking(3) == ["A"]
+            assert suite_guard.yield_slot() == "blocked hours until 04:30"
+            assert clock.now == datetime(2026, 11, day, 4, 30)
+
+
 def test_the_judge_yields_between_experiments_never_before_the_first(monkeypatch, tmp_path):
     calls = []
     monkeypatch.setattr(suite_guard, "yield_slot", lambda: calls.append(1) or "")
@@ -484,10 +616,29 @@ def test_the_re_queue_never_raises(one_slot, monkeypatch, caplog):
     assert "could not re-queue the reaped suite waiters" in caplog.text
 
 
-def test_the_tick_re_queues_before_it_announces():
-    import inspect
-    src = inspect.getsource(dispatcher)
-    assert src.index("    requeue_reaped_waiters()") < src.index("    notice_stopped_batteries()  ")
+def test_every_tick_re_queues_before_it_announces(monkeypatch, tmp_path):
+    """Driven, not read: on a healthy tick and on one running on the last good config."""
+    calls = []
+    monkeypatch.setattr(dispatcher, "requeue_reaped_waiters", lambda: calls.append("requeue"))
+    monkeypatch.setattr(dispatcher, "notice_stopped_batteries", lambda: calls.append("announce"))
+
+    class Stop(Exception):
+        pass
+
+    def stop(_wf):
+        raise Stop
+
+    monkeypatch.setattr(dispatcher, "get_source", stop)
+    wf = tmp_path / "WORKFLOW.md"
+    good = (f"---\nproject_key: TEST\nworkspace:\n  root: {tmp_path / '.chela' / 'wts'}\n"
+            "---\nbody\n")
+    for n, (text, healthy) in enumerate([(good, True), (good, True),
+                                         ("---\nproject_key: [unclosed\n", False)], start=1):
+        wf.write_text(text)
+        assert (dispatcher.load_workflow_cached(wf).error is None) is healthy
+        with pytest.raises(Stop):
+            dispatcher.tick(wf)
+        assert calls == ["requeue", "announce"] * n
 
 
 # --- once means once ------------------------------------------------------------------------
