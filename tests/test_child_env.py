@@ -247,7 +247,7 @@ def test_judge_parse_check_node_check_gets_the_sanitised_env(monkeypatch, tmp_pa
 def test_spawn_window_new_window_gets_the_sanitised_env(monkeypatch, tmp_path, leaky_env):
     from chela import agent_manager, discovery, spawn
 
-    monkeypatch.setattr(discovery, "ensure_session", lambda *a, **k: True)
+    monkeypatch.setattr(discovery, "session_exists", lambda *a, **k: True)
     monkeypatch.setattr(discovery, "get_all_windows", lambda: {})
     monkeypatch.setattr(agent_manager, "lock_window_name", lambda *a, **k: None)
     seen: list[tuple] = []
@@ -263,21 +263,20 @@ def test_spawn_window_new_window_gets_the_sanitised_env(monkeypatch, tmp_path, l
     _assert_clean(_effective(nw[0]))
 
 
-def test_ensure_session_new_session_gets_the_sanitised_env(monkeypatch, leaky_env):
-    """The call that can START the tmux server — whose env every later window inherits."""
+def test_open_window_new_session_gets_the_sanitised_env(monkeypatch, leaky_env):
+    """The call that can START the tmux server — whose env every later window inherits.
+    CMX-473: that is now the spawn's own `new-session` (no anchor), so it gets the scrub."""
     from chela import discovery
 
-    state = {"exists": False}
-    monkeypatch.setattr(discovery, "session_exists", lambda s: state["exists"])
+    monkeypatch.setattr(discovery, "session_exists", lambda s: False)
     seen: list[tuple] = []
 
     def fake_run(argv, **k):
         seen.append((argv, k))
-        state["exists"] = True
-        return SimpleNamespace(stdout="", stderr="", returncode=0)
+        return SimpleNamespace(stdout="@1\n", stderr="", returncode=0, args=argv)
 
     monkeypatch.setattr(discovery.subprocess, "run", fake_run)
-    assert discovery.ensure_session("chela-test")
+    assert discovery.open_window("w", "/", session="chela-test").returncode == 0
     ns = [k for argv, k in seen if argv[:2] == ["tmux", "new-session"]]
     assert len(ns) == 1
     _assert_clean(_effective(ns[0]))

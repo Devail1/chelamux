@@ -62,7 +62,7 @@ import subprocess
 import time
 from pathlib import Path
 
-from chela import config, envutil, event_log, inbox, rc_rename
+from chela import config, discovery, envutil, event_log, inbox, rc_rename
 from chela.config import TMUX_SESSION
 from chela.messenger import messaging_socket_launch_arg
 from chela.personas import ORCHESTRATOR_PROMPT, lease
@@ -246,11 +246,9 @@ def _spawn_orchestrator_window(repo_dir: str) -> str:
     subprocess.run(["tmux", "kill-window", "-t", config.window_target(WINDOW_NAME, TMUX_SESSION)],
                    capture_output=True)  # best-effort: clear any stale same-name window first
     envutil.scrub_tmux_secrets()    # CMX-425: the window inherits the server's global env
-    out = subprocess.run(
-        ["tmux", "new-window", "-t", config.window_target("", TMUX_SESSION), "-n", WINDOW_NAME,
-         "-c", repo_dir, "-P", "-F", "#{window_id}"],
-        check=True, capture_output=True, text=True, env=envutil.child_env(),
-    )
+    # CMX-473: creates the session with this window first when it is missing.
+    out = discovery.open_window(WINDOW_NAME, repo_dir, session=TMUX_SESSION, check=True,
+                              timeout=None)   # as before: no timeout, only CalledProcessError
     wid = out.stdout.strip() if isinstance(out.stdout, str) else ""
     target = wid if re.fullmatch(r"@\d+", wid) else WINDOW_NAME
     if re.fullmatch(r"@\d+", target):

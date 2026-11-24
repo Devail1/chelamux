@@ -22,6 +22,7 @@ them are load-bearing in their own right:
 from __future__ import annotations
 
 import sqlite3
+import subprocess
 from pathlib import Path
 from unittest.mock import patch
 
@@ -237,7 +238,8 @@ def _spawn(wf: WorkflowDef, tmp_path: Path, conn: sqlite3.Connection,
            task: Task | None = None):
     worktree = tmp_path / "wt"
     with patch.object(dispatcher, "ensure_worktree", return_value=(worktree, True)), \
-         patch.object(dispatcher.subprocess, "run"), \
+         patch.object(dispatcher.subprocess, "run",   # a succeeding tmux (CMX-473)
+                      return_value=subprocess.CompletedProcess([], 0, "", "")), \
          patch.object(dispatcher, "send_tmux", return_value=True), \
          patch.object(dispatcher, "_wait_for_ready", return_value=True):
         return dispatcher._spawn(wf, task or _task(tmp_path), attempt=1, conn=conn)

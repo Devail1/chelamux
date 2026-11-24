@@ -30,7 +30,7 @@ def pm2_parent(monkeypatch):
 def test_spawn_window_hands_tmux_an_env_without_pm2_app_keys(monkeypatch, tmp_path, pm2_parent):
     from chela import agent_manager, discovery, spawn
 
-    monkeypatch.setattr(discovery, "ensure_session", lambda *a, **k: True)
+    monkeypatch.setattr(discovery, "session_exists", lambda *a, **k: True)
     monkeypatch.setattr(discovery, "get_all_windows", lambda: {})
     monkeypatch.setattr(agent_manager, "lock_window_name", lambda *a, **k: None)
     seen: list[tuple] = []

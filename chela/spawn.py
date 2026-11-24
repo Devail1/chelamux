@@ -242,14 +242,12 @@ def spawn_window(cwd: str | os.PathLike, *, command: str | None = None,
 
     * resolve ``cwd`` (``~`` + symlinks) and require it exists — else a ``no such directory``
       failure result (never a raised exception into a request/update queue);
-    * ensure the chela session exists — a missing session is an expected boot-ordering
-      condition, so create it rather than fail (:func:`chela.discovery.ensure_session`);
-      only tmux being wholly unreachable fails the spawn;
+    * a missing chela session is an expected condition (a fresh boot, or its last window
+      closed), so the spawn creates it with THIS window as its first one, never an empty
+      anchor shell (:func:`chela.discovery.open_window`, CMX-473);
     * name the window after its folder — ``<cwd basename>``, ``<login>`` for the home dir,
       collision-safe ``-N`` (:func:`chela.agent_manager.window_name_for_cwd`) — and open the window with ``-P -F '#{window_id}'``
-      so the spawn is addressable by id, targeting ``<session>:`` (trailing ``:`` forces
-      session resolution — a bare session name is ambiguous to tmux when a *window* shares
-      it);
+      so the spawn is addressable by id;
     * pin the name against BOTH ``allow-rename`` (OSC) and ``automatic-rename`` (command
       follow) so a launched ``claude`` never flickers the window — and its bound topic — to
       "claude" (:func:`chela.agent_manager.lock_window_name`);
@@ -299,13 +297,9 @@ def spawn_window(cwd: str | os.PathLike, *, command: str | None = None,
     if not os.path.isdir(real):
         return SpawnResult(ok=False, error=f"no such directory: {cwd}")
 
-    # The session may not exist yet (fresh boot, or a `wsl --shutdown` that took the tmux
-    # server with it). It's chela's own session, so create it rather than fail the spawn with
-    # a raw "error connecting to /tmp/tmux-1000/default" the user can do nothing about.
-    # Idempotent + race-safe; only tmux being unreachable fails.
-    if not discovery.ensure_session():
-        return SpawnResult(
-            ok=False, error="tmux is unreachable — cannot create the chela session")
+    # The session may not exist (fresh boot, a `wsl --shutdown`, or its last window was
+    # closed). It's chela's own session, so this spawn creates it, with THIS window as its
+    # first one (CMX-473: no empty anchor shell) — `discovery.open_window`.
     envutil.scrub_tmux_secrets()    # CMX-425: the window inherits the server's global env
 
     session = config.current_session()
@@ -318,11 +312,7 @@ def spawn_window(cwd: str | os.PathLike, *, command: str | None = None,
         return SpawnResult(ok=False, error=f"invalid window name: {name}")
     target = config.window_target(name, session)
     try:
-        proc = subprocess.run(
-            ["tmux", "new-window", "-t", config.window_target("", session), "-n", name, "-c", real,
-             "-P", "-F", "#{window_id}"],
-            capture_output=True, text=True, timeout=10, env=envutil.child_env(),
-        )
+        proc = discovery.open_window(name, real, session=session)
     except (FileNotFoundError, subprocess.TimeoutExpired) as e:
         return SpawnResult(ok=False, error=str(e))
     if proc.returncode != 0:
@@ -405,9 +395,6 @@ def spawn_sandbox_window(cwd: str | os.PathLike, net: str = "none") -> SpawnResu
     why = share_sandbox.preflight(real, net)
     if why:
         return SpawnResult(ok=False, error=why)
-    if not discovery.ensure_session():
-        return SpawnResult(
-            ok=False, error="tmux is unreachable — cannot create the chela session")
     envutil.scrub_tmux_secrets()    # CMX-425: the window inherits the server's global env
     session = config.current_session()
     name = next_sandbox_name(set(discovery.get_all_windows()),
@@ -416,11 +403,8 @@ def spawn_sandbox_window(cwd: str | os.PathLike, net: str = "none") -> SpawnResu
         return SpawnResult(ok=False, error=f"invalid window name: {name}")
     argv = share_sandbox.launcher_argv(share_sandbox.new_session_id(), real, net)
     try:
-        proc = subprocess.run(
-            ["tmux", "new-window", "-t", config.window_target("", session), "-n", name, "-c", real,
-             "-P", "-F", "#{window_id}", "--", *argv],
-            capture_output=True, text=True, timeout=10, env=envutil.child_env(),
-        )
+        # CMX-473: creates the session with this window first when it is missing.
+        proc = discovery.open_window(name, real, argv, session=session)
     except (FileNotFoundError, subprocess.TimeoutExpired) as e:
         return SpawnResult(ok=False, error=str(e))
     if proc.returncode != 0:

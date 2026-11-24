@@ -444,7 +444,7 @@ def test_spawn_sandbox_window_execs_the_launcher_with_no_shell(monkeypatch, tmp_
         returncode, stdout, stderr = 0, "@17\n", ""
 
     monkeypatch.setattr(share_sandbox, "preflight", lambda cwd, net="none": None)
-    monkeypatch.setattr(spawn.discovery, "ensure_session", lambda: True)
+    monkeypatch.setattr(spawn.discovery, "session_exists", lambda *a, **k: True)
     monkeypatch.setattr(spawn.discovery, "get_all_windows", lambda: ["sandbox-1"])
     monkeypatch.setattr(spawn.agent_manager, "lock_window_name", lambda t: None)
     monkeypatch.setattr(spawn, "_send", lambda *a: calls.append(("send",) + a))

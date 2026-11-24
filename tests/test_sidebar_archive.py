@@ -262,7 +262,7 @@ def test_resolve_session_id_needs_a_transcript_on_disk(monkeypatch):
 # --- spawn: same name, Remote Control restored -------------------------------------------
 
 def test_spawn_window_reuses_the_archived_name_and_remote_control_name(monkeypatch, tmp_path):
-    monkeypatch.setattr(spawn_mod.discovery, "ensure_session", lambda: True)
+    monkeypatch.setattr(spawn_mod.discovery, "session_exists", lambda *a, **k: True)
     monkeypatch.setattr(spawn_mod.discovery, "get_all_windows", lambda: {"other": "@2"})
     monkeypatch.setattr(spawn_mod.envutil, "scrub_tmux_secrets", lambda: None)
     monkeypatch.setattr(spawn_mod.agent_manager, "lock_window_name", lambda *a, **kw: None)
@@ -282,7 +282,7 @@ def test_spawn_window_reuses_the_archived_name_and_remote_control_name(monkeypat
 
 
 def _stub_spawn(monkeypatch, windows):
-    monkeypatch.setattr(spawn_mod.discovery, "ensure_session", lambda: True)
+    monkeypatch.setattr(spawn_mod.discovery, "session_exists", lambda *a, **k: True)
     monkeypatch.setattr(spawn_mod.discovery, "get_all_windows", lambda: windows)
     monkeypatch.setattr(spawn_mod.envutil, "scrub_tmux_secrets", lambda: None)
     monkeypatch.setattr(spawn_mod.agent_manager, "lock_window_name", lambda *a, **kw: None)
