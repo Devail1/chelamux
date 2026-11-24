@@ -25,6 +25,10 @@ from chela.workflow import WorkflowDef
 # hook can target the freshly-created worktree path.
 _HOOK = "echo {{workspace_path}}"
 
+# A succeeding tmux call. Since CMX-473 the window is opened by `discovery.open_window`,
+# which checks the return code itself; a bare MagicMock's returncode is not 0.
+_OK = subprocess.CompletedProcess([], 0, "", "")
+
 
 def _conn() -> sqlite3.Connection:
     # The PRODUCTION schema, not a hand-copy of it — a copy drifts, and a drifted
@@ -66,7 +70,7 @@ def test_after_create_fires_once_in_worktree_on_fresh_creation(tmp_path):
     wf = _wf(tmp_path, after_create=_HOOK)
     worktree = tmp_path / "wt"
     with patch.object(dispatcher, "ensure_worktree", return_value=(worktree, True)), \
-         patch.object(dispatcher.subprocess, "run") as run, \
+         patch.object(dispatcher.subprocess, "run", return_value=_OK) as run, \
          patch.object(dispatcher, "send_tmux", return_value=True), \
          patch.object(dispatcher, "_wait_for_ready", return_value=True):
         dispatcher._spawn(wf, _task(tmp_path), attempt=1, conn=_conn())
@@ -84,7 +88,7 @@ def test_after_create_skipped_on_worktree_reuse(tmp_path):
     wf = _wf(tmp_path, after_create=_HOOK)
     worktree = tmp_path / "wt"
     with patch.object(dispatcher, "ensure_worktree", return_value=(worktree, False)), \
-         patch.object(dispatcher.subprocess, "run") as run, \
+         patch.object(dispatcher.subprocess, "run", return_value=_OK) as run, \
          patch.object(dispatcher, "send_tmux", return_value=True), \
          patch.object(dispatcher, "_wait_for_ready", return_value=True):
         dispatcher._spawn(wf, _task(tmp_path), attempt=2, conn=_conn())
@@ -123,7 +127,7 @@ def test_after_create_unset_is_noop(tmp_path):
     wf = _wf(tmp_path, after_create=None)
     worktree = tmp_path / "wt"
     with patch.object(dispatcher, "ensure_worktree", return_value=(worktree, True)), \
-         patch.object(dispatcher.subprocess, "run") as run, \
+         patch.object(dispatcher.subprocess, "run", return_value=_OK) as run, \
          patch.object(dispatcher, "send_tmux", return_value=True), \
          patch.object(dispatcher, "_wait_for_ready", return_value=True):
         dispatcher._spawn(wf, _task(tmp_path), attempt=1, conn=_conn())

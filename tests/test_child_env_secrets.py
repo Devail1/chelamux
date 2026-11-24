@@ -222,7 +222,7 @@ def test_suite_run_carries_no_secret(monkeypatch, tmp_path, secret_env):
 def test_human_spawn_window_scrubs_tmux_secrets(monkeypatch, tmp_path, secret_env):
     from chela import agent_manager, discovery, spawn
 
-    monkeypatch.setattr(discovery, "ensure_session", lambda *a, **k: True)
+    monkeypatch.setattr(discovery, "session_exists", lambda *a, **k: True)
     monkeypatch.setattr(discovery, "get_all_windows", lambda: {})
     monkeypatch.setattr(agent_manager, "lock_window_name", lambda *a, **k: None)
     calls = _fake_tmux(monkeypatch, spawn)
@@ -236,7 +236,7 @@ def test_share_sandbox_window_scrubs_tmux_secrets(monkeypatch, tmp_path, secret_
 
     monkeypatch.setattr(share_sandbox, "preflight", lambda real, net="none": "")
     monkeypatch.setattr(share_sandbox, "launcher_argv", lambda sid, real, *a, **k: ["docker", "run"])
-    monkeypatch.setattr(discovery, "ensure_session", lambda *a, **k: True)
+    monkeypatch.setattr(discovery, "session_exists", lambda *a, **k: True)
     monkeypatch.setattr(discovery, "get_all_windows", lambda: {})
     monkeypatch.setattr(agent_manager, "lock_window_name", lambda *a, **k: None)
     calls = _fake_tmux(monkeypatch, spawn)

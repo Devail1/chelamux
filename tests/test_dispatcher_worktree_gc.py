@@ -456,7 +456,8 @@ def test_tick_removes_the_worktree_when_the_tracker_line_is_struck_by_hand(ticki
 
 
 @pytest.mark.parametrize("seeded_status", dispatcher.REVIEW_STATUSES)
-def test_tick_does_not_reconcile_a_review_row_when_the_tracker_read_fails(ticking, seeded_status):
+def test_tick_does_not_reconcile_a_review_row_when_the_tracker_read_fails(
+        ticking, seeded_status, monkeypatch):
     """🔴 GUARD (CMX-363, Symphony SPEC 11.1): a FAILED tracker read must not be read
     as an EMPTY queue. Before this, deleting TODO.md (its gitignored-local-queue
     accident — a `git clean -xdf` — see MarkdownSource.list_open_tasks) made `alpha`
@@ -482,6 +483,12 @@ def test_tick_does_not_reconcile_a_review_row_when_the_tracker_read_fails(tickin
     assert wt_path.is_dir()
 
     (repo / "TODO.md").unlink()  # simulate the blip: the tracker file is just gone
+
+    # A changes_requested row is re-dispatched: its window must not open for real. The stub
+    # fails as the missing session used to; since CMX-473 a spawn would CREATE it.
+    def no_window(name, cwd):
+        raise subprocess.CalledProcessError(1, ["tmux", "new-window"])
+    monkeypatch.setattr(dispatcher, "_new_window", no_window)
 
     summary = dispatcher.tick(wf_path)
 

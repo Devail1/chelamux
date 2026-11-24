@@ -164,6 +164,14 @@ export function flush() {
     return new Promise(resolve => setTimeout(resolve, 0));
 }
 
+/** CMX-495: wait (up to `ms`) until `cond()` is truthy. React commits a state set from a
+ * promise on its own scheduler's turn, which one flush() can beat on a loaded runner. It never
+ * throws on a timeout: the assertion after it decides, with its own message. */
+export async function waitFor(cond, ms = 5000) {
+    const end = Date.now() + ms;
+    while (!cond() && Date.now() < end) await new Promise(resolve => setTimeout(resolve, 5));
+}
+
 /**
  * Boot the real dashboard module graph against a real jsdom `window`, wired the
  * same way every hand-rolled copy of this bootstrap did it. The entry is what

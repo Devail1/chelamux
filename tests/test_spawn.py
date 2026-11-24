@@ -2,7 +2,7 @@
 and ``--remote-control`` insertion (CMX-375; bare since CMX-34).
 
 No tmux: ``spawn_window``'s own tmux calls (``subprocess.run``, ``_send``) and its
-collaborators (``discovery.ensure_session``, ``discovery.get_all_windows``,
+collaborators (``discovery.session_exists``, ``discovery.get_all_windows``,
 ``agent_manager.lock_window_name``) are all stubbed, so this exercises exactly the
 wiring slice 2a adds — the uuid pinned into the sent command versus the id recorded
 in the dedicated session-id store — without depending on a real tmux server (see
@@ -61,7 +61,7 @@ def _patch_tmux(monkeypatch, wid="@42", *, remote_control=False):
     undisturbed by a second flag landing in the same sent command; the CMX-375 tests
     turn it on explicitly.
     """
-    monkeypatch.setattr(spawn.discovery, "ensure_session", lambda: True)
+    monkeypatch.setattr(spawn.discovery, "session_exists", lambda *a, **k: True)
     monkeypatch.setattr(spawn.discovery, "get_all_windows", lambda: {})
     monkeypatch.setattr(spawn.agent_manager, "lock_window_name", lambda *a, **kw: None)
     monkeypatch.setattr(spawn.subprocess, "run", lambda *a, **kw: _Proc(wid))
