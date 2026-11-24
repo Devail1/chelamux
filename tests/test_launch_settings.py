@@ -348,7 +348,7 @@ def _spy_tmux(monkeypatch, wid="@12", remote_control=True):
     recorded. Returns the list of sent lines (setup line excluded)."""
     sent: list[str] = []
     runs: list[list[str]] = []
-    monkeypatch.setattr(spawn.discovery, "ensure_session", lambda: True)
+    monkeypatch.setattr(spawn.discovery, "session_exists", lambda *a, **k: True)
     monkeypatch.setattr(spawn.discovery, "get_all_windows", lambda: {})
     monkeypatch.setattr(spawn.envutil, "scrub_tmux_secrets", lambda: [])
     monkeypatch.setattr(spawn.agent_manager, "lock_window_name", lambda *a, **k: None)

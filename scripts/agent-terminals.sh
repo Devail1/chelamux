@@ -246,7 +246,8 @@ write_map() {
 # TMUX_TMPDIR pointing nowhere — and tmux silently FALLS BACK TO THE DEFAULT SOCKET, so it
 # re-created the LIVE server from its own env (a dead-port HTTPS_PROXY, a parent Claude
 # session's markers): every pane after it was broken. So:
-#   - a missing TMUX_TMPDIR dir is never healed against (ensure_session refuses, loudly);
+#   - a missing TMUX_TMPDIR dir is never asked at all (session_present refuses it), and
+#     since CMX-473 nothing here creates a session anyway;
 #   - a supervisor whose cwd was deleted, or that is orphaned (PPID 1, not under pm2) with
 #     its TMUX_TMPDIR gone, has lost what it was started to serve: it EXITS.
 tmux_tmpdir_missing() { [[ -n "${TMUX_TMPDIR:-}" && ! -d "${TMUX_TMPDIR}" ]]; }
@@ -322,97 +323,29 @@ case "$(printf '%s' "${TERMINALS_ENABLED}" | tr '[:upper:]' '[:lower:]')" in
         ;;
 esac
 
-# SELF-HEAL, NEVER EXIT. This used to be `has-session || { echo error; exit 1; }`,
-# which made a missing session FATAL. It isn't: the session is chela's own, nothing
-# outside chela recreates it, and after a reboot (or `wsl --shutdown`, which takes the
-# whole tmux server with it) we simply come up before it exists. Under a process
-# manager with autorestart, exiting instantly means being restarted instantly — on
-# 2026-07-13 that hot-looped 14,501 times in a few hours, spamming ~14.7k identical
-# error lines and burning CPU, while the dashboard just showed "Spawn failed: error
-# connecting to /tmp/tmux-1000/default". A recoverable boot-ordering condition must
-# never be a crash-loop source, so:
-#   - session missing  -> CREATE it (idempotent, race-safe) and carry on;
-#   - tmux unreachable -> WAIT with capped exponential backoff, still never exiting.
-# Mirrors chela.discovery.ensure_session() (the dashboard's spawn path uses that).
-BACKOFF_MAX="${CHELA_TERM_BACKOFF_MAX:-30}"
-ANCHOR_WINDOW="shell-1"   # a session needs >=1 window; match the wall's shell-N scheme
-
-# CREATE-ONLY, NEVER CLOBBER. This function runs every poll tick against the session
-# the user's live agents are sitting in, so it must be impossible for it to destroy
-# one. Two rules keep it that way:
+# NO SESSION = NO WINDOWS, NEVER EXIT, NEVER CREATE (CMX-473). This used to be
+# `has-session || { echo error; exit 1; }`, which made a missing session FATAL: under a
+# process manager with autorestart, exiting instantly means being restarted instantly — on
+# 2026-07-13 that hot-looped 14,501 times in a few hours. Then it HEALED (created the
+# session with an empty `shell-1` anchor window), and that anchor showed up as a stray
+# "Shell" session on the sidebar, the Wall and Telegram. Chela has no anchor any more: a
+# spawn (chela.discovery.open_window) creates the session with the window it opens as the
+# session's first one, and closing the last window ends the session. So this supervisor
+# only READS: a missing session (or an unreachable tmux, which looks the same) is simply
+# an empty window set — every ttyd is reaped, the map is emptied, and the next tick looks
+# again. It never exits over it and never creates the session: it is reachable from
+# anything that runs chela's CLI, and a create from there once put a test's "can never
+# exist" session on the operator's LIVE tmux server (2026-11-22, CMX-469).
 #
-#   1. `-A` (attach-or-create) is the ONLY safe create primitive. Plain `new-session
-#      -s X` on a live X fails with "duplicate session"; `-A` makes it a genuine
-#      no-op instead (verified headless: session id and window list unchanged). So
-#      even if the has-session gate below false-negatives — a transient client error,
-#      a busy server — the worst case is a no-op, never a recreate. Belt AND braces:
-#      the gate is an optimisation, `-A` is the guarantee.
-#   2. We touch NOTHING that already exists. No set-window-option, no kill, no rename
-#      of a window we didn't just create: `-n` alone already turns automatic-rename
-#      off for the anchor window (tmux does this whenever the name is given), so the
-#      tile stays pinned without us ever reaching into a live session.
-#
-# `-A -d` on an EXISTING session exits NONZERO in a daemon ("open terminal failed:
-# not a terminal" — with -A, tmux treats -d as attach-session's -d and there is no
-# tty to attach). That is a success, not a failure, so the exit code is deliberately
-# ignored: has-session alone decides. That also makes the create race-safe — whoever
-# wins, we agree the session is there.
-#
-# CMX-21: the CREATE itself goes through chela.discovery.ensure_session — the one place
-# that starts the server from a scrubbed env (chela.envutil.server_env: no Claude session
-# markers, proxies, PERF_*/H) and `set-environment -gu`s the same set once it exists, so
-# the list lives in one file. A missing TMUX_TMPDIR dir is refused BEFORE any tmux call:
-# even has-session would fall back to the default socket from there.
-# CHELA_TERM_HEAL=false: never CREATE the session, only wait for it (CMX-469). `chela
-# agent-terminals` always runs this way. That command is reachable from anything that calls
-# chela's CLI (a test, a mutated dispatch line in a judge sweep), and a heal from there
-# created a test's "can never exist" session on the operator's LIVE tmux server
-# (2026-11-22). Started directly (the PM2 ecosystem entry) the heal stays on, per the
-# crash-loop note above.
-heal_enabled() {
-    case "$(printf '%s' "${CHELA_TERM_HEAL:-true}" | tr '[:upper:]' '[:lower:]')" in
-        false|0|no|off) return 1 ;;
-    esac
-    return 0
-}
+# It never touches a session that exists either: no set-window-option, no kill, no rename.
 
-ensure_session() {
-    if tmux_tmpdir_missing; then
-        echo "agent-terminals: REFUSING to heal: TMUX_TMPDIR=${TMUX_TMPDIR} does not exist, and tmux would silently fall back to the DEFAULT socket (the live server)" >&2
-        return 1
-    fi
-    tmux has-session -t "=${TMUX_SESSION}" 2>/dev/null && return 0
-    if ! heal_enabled; then
-        echo "agent-terminals: tmux session '${TMUX_SESSION}' does not exist; waiting for it (CHELA_TERM_HEAL=${CHELA_TERM_HEAL}); start it with: tmux new-session -d -s '${TMUX_SESSION}'" >&2
-        return 1
-    fi
-    "${PYTHON}" -c 'import sys
-from chela import discovery
-sys.exit(0 if discovery.ensure_session(sys.argv[1]) else 1)' "${TMUX_SESSION}" </dev/null >/dev/null
-    if tmux has-session -t "=${TMUX_SESSION}" 2>/dev/null; then
-        echo "agent-terminals: tmux session '${TMUX_SESSION}' was missing — created it"
-        return 0
-    fi
-    return 1   # tmux itself is unreachable (no binary / unwritable socket dir)
+# True only when the session is there right now. `=` makes the match exact, so a
+# `chela-services` session never answers for `chela`. A missing TMUX_TMPDIR dir is never
+# asked at all: tmux would fall back to the DEFAULT socket (the live server) — CMX-21.
+session_present() {
+    tmux_tmpdir_missing && return 1
+    tmux has-session -t "=${TMUX_SESSION}" 2>/dev/null
 }
-
-# Block until the session is there. Backs off 1s -> BACKOFF_MAX so an unreachable
-# tmux costs one log line per 30s instead of a hot loop, and returns the instant it
-# heals. Called on startup AND on every poll tick, so a `tmux kill-server` under a
-# running supervisor is recovered from too (not just a cold boot).
-wait_for_session() {
-    local delay=1
-    exit_if_stranded
-    until ensure_session; do
-        echo "agent-terminals: tmux unreachable, cannot create session '${TMUX_SESSION}'; retrying in ${delay}s" >&2
-        nap "${delay}"
-        exit_if_stranded
-        delay=$(( delay * 2 ))
-        (( delay > BACKOFF_MAX )) && delay="${BACKOFF_MAX}"
-    done
-}
-
-wait_for_session
 
 echo "agent-terminals: dynamic supervisor (poll ${POLL}s, base port ${BASE_PORT})"
 
@@ -430,26 +363,43 @@ write_map               # write an (empty) map even before any agent is seen
 # keepalive: a failed ping raises in the proxy pumps, ttyd drops the client, and
 # tmux detaches it — which frees the slot. --max-clients headroom absorbs the rest.
 CUR=""          # this tick's live wids, space-separated
+SESSION_STATE="" # present | absent: last tick's answer, so a transition is logged once
+ABSENT_TICKS=0   # consecutive ticks the session was absent; reap only from the 2nd
 while :; do
-    # The session can vanish under us (tmux kill-server, a crashed server). Heal it
-    # BEFORE discovery, so the tick that follows sees the fresh session rather than
-    # an empty window set — otherwise the "discovery returned empty" guard below
-    # would hold the stale ttyd set forever and the wall would never come back.
-    wait_for_session
+    exit_if_stranded
 
     # snapshot the live window set, keyed by stable window id
     for wid in ${CUR}; do at_del NAME "$wid"; done
     CUR=""
-    while IFS=$'\t' read -r wid name; do
-        [[ -z "$wid" ]] && continue
-        in_list "$wid" "${CUR}" || CUR="${CUR:+${CUR} }${wid}"
-        at_put NAME "$wid" "$name"
-    done < <(list_windows)
+    if session_present; then
+        [[ "${SESSION_STATE}" == absent ]] && \
+            echo "agent-terminals: tmux session '${TMUX_SESSION}' is back"
+        SESSION_STATE=present
+        ABSENT_TICKS=0
+        while IFS=$'\t' read -r wid name; do
+            [[ -z "$wid" ]] && continue
+            in_list "$wid" "${CUR}" || CUR="${CUR:+${CUR} }${wid}"
+            at_put NAME "$wid" "$name"
+        done < <(list_windows)
+    else
+        # No session = no windows (CMX-473): its last window was closed, or nothing has
+        # been started yet. CUR stays empty, so every ttyd is reaped below. Logged once
+        # per transition, not every tick.
+        if [[ "${SESSION_STATE}" != absent ]]; then
+            tmux_tmpdir_missing && \
+                echo "agent-terminals: REFUSING to ask tmux: TMUX_TMPDIR=${TMUX_TMPDIR} does not exist, and tmux would silently fall back to the DEFAULT socket (the live server)" >&2
+            echo "agent-terminals: no tmux session '${TMUX_SESSION}' — no windows; the next spawn creates it"
+        fi
+        SESSION_STATE=absent
+        ABSENT_TICKS=$(( ABSENT_TICKS + 1 ))
+    fi
 
-    # Guard: an empty result while we have running ttyds is almost certainly a
-    # transient discovery hiccup (python import / tmux mid-write), not
-    # "every agent vanished" — skip this tick rather than nuke everything.
-    if [[ -z "${CUR}" && -n "${TRACKED}" ]]; then
+    # Guard: an empty result while we have running ttyds is almost certainly a transient
+    # hiccup (python import / tmux mid-write, one has-session that failed on a busy
+    # server), not "every agent vanished" — skip this tick rather than nuke everything.
+    # A session that is STILL absent on the next tick is really gone: its ttyds are reaped
+    # then, never held forever (CMX-473).
+    if [[ -z "${CUR}" && -n "${TRACKED}" && ( "${SESSION_STATE}" == present || ABSENT_TICKS -lt 2 ) ]]; then
         echo "agent-terminals: discovery returned empty; keeping current set"
         nap "${POLL}"; continue
     fi

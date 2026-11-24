@@ -135,10 +135,11 @@ def _layout(tmp: Path) -> dict:
           f'echo $$ > "{tmp}/pids/$port"\n'
           "exec sleep 1000\n")
     (tmp / "pids").mkdir()
-    # python: list_windows reads the windows file; an ensure_session heal is logged and
-    # "creates" the session.
+    # python: list_windows reads the windows file. A snippet that names a session create
+    # (the old `ensure_session` heal, or `open_window`) is logged to py.log and "creates"
+    # the session, so a test can prove the supervisor never runs one (CMX-473).
     _stub(bin_ / "py",
-          f'case "$2" in *ensure_session*) echo "ensure_session $3" >> "{tmp}/py.log"; '
+          f'case "$2" in *ensure_session*|*open_window*) echo "create $3" >> "{tmp}/py.log"; '
           f': > "{tmp}/session"; exit 0 ;; esac\n'
           f'cat "{tmp}/windows"\n')
     chela_dir = tmp / "chela"
@@ -269,12 +270,16 @@ def test_an_exported_value_beats_chela_env(shell, tmp_path):
 
 
 @pytest.mark.parametrize("shell", list(_shells()))
-def test_with_heal_off_a_missing_session_is_waited_for_never_created(shell, tmp_path):
-    """CMX-469: `chela agent-terminals` runs the script with CHELA_TERM_HEAL=false. A missing
-    session is then never created (no ensure_session, no `tmux new-session`); the supervisor
-    waits, and serves the session once something else starts it."""
+@pytest.mark.parametrize("heal", [None, "true"])
+def test_a_missing_session_is_no_windows_and_is_never_created(shell, heal, tmp_path):
+    """CMX-473: the supervisor never creates the tmux session — not even with the retired
+    CHELA_TERM_HEAL=true left in an env. A missing session reads as NO windows: it keeps
+    polling (never exits), serves the session once a spawn creates it, and when the
+    session ends (its last window closed) it reaps every ttyd and empties the map instead
+    of holding the stale set."""
     env = _layout(tmp_path)
-    env["CHELA_TERM_HEAL"] = "False"          # any case of a false word
+    if heal is not None:
+        env["CHELA_TERM_HEAL"] = heal
     (tmp_path / "session").unlink()
     _windows(tmp_path, "@5")
     proc = _start(shell, tmp_path, env)
@@ -284,32 +289,113 @@ def test_with_heal_off_a_missing_session_is_waited_for_never_created(shell, tmp_
         while not (log.exists() and log.read_text().count("has-session") >= 3):
             assert time.monotonic() < deadline, "the supervisor never polled for the session"
             time.sleep(0.2)
+        assert proc.poll() is None, "a missing session made the supervisor exit"
         assert not (tmp_path / "py.log").exists()
         assert "new-session" not in log.read_text()
-        assert not (tmp_path / "chela" / "agent_terminals.json").exists()
-        (tmp_path / "session").write_text("")      # someone else starts it
+        _wait_map(tmp_path, {})
+        (tmp_path / "session").write_text("")      # a spawn creates it
         _wait_map(tmp_path, {"@5": 6200})
+        pid = int((tmp_path / "pids" / "6200").read_text())
+        (tmp_path / "session").unlink()            # its last window closed
+        _wait_map(tmp_path, {})
+        deadline = time.monotonic() + 10
+        while _alive(pid):
+            assert time.monotonic() < deadline, "the ended session's ttyd was never reaped"
+            time.sleep(0.2)
     finally:
         proc.send_signal(signal.SIGTERM)
         out, _ = proc.communicate(timeout=30)
-    assert "tmux session 'chela' does not exist; waiting for it" in out, out
-    assert "tmux new-session -d -s 'chela'" in out, out
+    assert out.count("no tmux session 'chela' — no windows") == 2, out   # once per transition
+    assert "tmux session 'chela' is back" in out, out
+    assert "- @5 (window gone)" in out, out
     assert not (tmp_path / "py.log").exists()
+    assert "new-session" not in (tmp_path / "tmux.log").read_text()
 
 
-@pytest.mark.parametrize("heal", [None, "true"])
-def test_with_heal_on_a_missing_session_is_created(heal, tmp_path):
-    """Started directly (the PM2 entry), the self-heal still creates the session."""
+def test_one_failed_session_check_does_not_reap_the_wall(tmp_path):
+    """A single has-session failure (a busy server) must not tear every tile down: the set
+    is kept for that tick and only a session still absent on the next tick is reaped."""
     env = _layout(tmp_path)
-    if heal is not None:
-        env["CHELA_TERM_HEAL"] = heal
-    (tmp_path / "session").unlink()
-    _windows(tmp_path, "@6")
+    _windows(tmp_path, "@8")
     proc = _start("host", tmp_path, env)
     try:
-        _wait_map(tmp_path, {"@6": 6200})
+        _wait_map(tmp_path, {"@8": 6200})
+        pid = int((tmp_path / "pids" / "6200").read_text())
+        log = tmp_path / "tmux.log"
+        (tmp_path / "session").unlink()
+        n = log.read_text().count("has-session")
+        deadline = time.monotonic() + 10
+        while log.read_text().count("has-session") < n + 1:
+            assert time.monotonic() < deadline
+            time.sleep(0.05)
+        (tmp_path / "session").write_text("")     # back before the second check
+        time.sleep(3)
+        assert _alive(pid), "one failed session check reaped a live tile"
+        assert json.loads((tmp_path / "chela" / "agent_terminals.json").read_text()) == {"@8": 6200}
     finally:
         proc.send_signal(signal.SIGTERM)
         out, _ = proc.communicate(timeout=30)
-    assert (tmp_path / "py.log").read_text() == "ensure_session chela\n"
-    assert "tmux session 'chela' was missing" in out, out
+    assert "- @8 (window gone)" not in out, out
+
+
+def test_only_consecutive_failed_session_checks_reap_the_wall(tmp_path):
+    """Two failed has-session checks with a good one BETWEEN them are two separate hiccups:
+    the present tick resets the count, so the second one reaps nothing either. Each blip is
+    one-shot (the stub consumes `blip` and fails exactly that call), so no tick is timed."""
+    env = _layout(tmp_path)
+    log = tmp_path / "tmux.log"
+    blip = tmp_path / "blip"
+    _stub(tmp_path / "bin" / "tmux",
+          f'if [ "$1" = has-session ]; then\n'
+          f'  if [ -e "{blip}" ]; then rm "{blip}"; echo blipped >> "{log}"; exit 1; fi\n'
+          f'  echo has-session >> "{log}"\n'
+          "fi\nexit 0\n")
+
+    def wait(pred, what):
+        deadline = time.monotonic() + 30
+        while not pred():
+            assert time.monotonic() < deadline, what
+            time.sleep(0.05)
+
+    _windows(tmp_path, "@8")
+    proc = _start("host", tmp_path, env)
+    try:
+        _wait_map(tmp_path, {"@8": 6200})
+        pid = int((tmp_path / "pids" / "6200").read_text())
+        for _ in range(2):
+            blip.write_text("")
+            wait(lambda: not blip.exists(), "the supervisor never checked the session")
+            n = log.read_text().count("has-session")
+            # two good checks: the blip's tick is over and a present tick ran in full
+            wait(lambda: log.read_text().count("has-session") >= n + 2, "it stopped polling")
+        assert _alive(pid), "two isolated session-check failures reaped a live tile"
+        assert int((tmp_path / "pids" / "6200").read_text()) == pid
+    finally:
+        proc.send_signal(signal.SIGTERM)
+        out, _ = proc.communicate(timeout=30)
+    assert log.read_text().count("blipped") == 2
+    assert out.count("no tmux session 'chela' — no windows") == 2, out   # both were seen
+    assert out.count("discovery returned empty; keeping current set") == 2, out
+    assert "- @8 (window gone)" not in out, out
+
+
+def test_negative_control_the_old_empty_guard_held_a_dead_sessions_ttyds(tmp_path):
+    """The guard that skips an empty tick while ttyds run must NOT apply when the session is
+    absent: with it applied (the old reading), the ended session's ttyd is held forever."""
+    env = _layout(tmp_path)
+    script = tmp_path / "scripts" / "agent-terminals.sh"
+    text = script.read_text()
+    held = text.replace('( "${SESSION_STATE}" == present || ABSENT_TICKS -lt 2 )',
+                        'true')
+    assert held != text
+    script.write_text(held)
+    _windows(tmp_path, "@7")
+    proc = _start("host", tmp_path, env)
+    try:
+        _wait_map(tmp_path, {"@7": 6200})
+        (tmp_path / "session").unlink()
+        with pytest.raises(AssertionError, match="map never became"):
+            _wait_map(tmp_path, {}, timeout=4)
+    finally:
+        proc.send_signal(signal.SIGTERM)
+        proc.communicate(timeout=30)

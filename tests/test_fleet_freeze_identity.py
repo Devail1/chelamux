@@ -101,7 +101,14 @@ def test_an_unreadable_answer_resolves_to_none(monkeypatch, rc, out):
 def test_real_tmux_falls_back_and_the_resolver_refuses_it(tmp_path, monkeypatch):
     """⭐ The negative control on a real, private tmux server: a raw ``display-message -t``
     on a missing window DOES answer with another window, and the resolver does not."""
-    monkeypatch.setenv("TMUX_TMPDIR", str(tmp_path))
+    # An explicit `-L` through a PATH shim: the fence refuses a bare `new-session` (CMX-473).
+    real = shutil.which("tmux")
+    shim = tmp_path / "shim"
+    shim.mkdir()
+    (shim / "tmux").write_text(f'#!/bin/sh\nexec {real} -L chela-cmx340-{os.getpid()} "$@"\n')
+    (shim / "tmux").chmod(0o755)
+    monkeypatch.setenv("PATH", f"{shim}:{os.environ['PATH']}")
+    monkeypatch.delenv("TMUX_TMPDIR", raising=False)
     monkeypatch.delenv("TMUX", raising=False)
     monkeypatch.setenv("CHELA_TMUX_SESSION", "cmx340")
     env = {**os.environ}

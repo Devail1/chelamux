@@ -47,7 +47,7 @@ class _Proc:
 def tmux_spawn(monkeypatch, tmp_path):
     """The REAL ``spawn_window`` with only its tmux touchpoints stubbed; records what it
     types into the new window. The launcher store is redirected to ``tmp_path``."""
-    monkeypatch.setattr(spawn.discovery, "ensure_session", lambda: True)
+    monkeypatch.setattr(spawn.discovery, "session_exists", lambda *a, **k: True)
     monkeypatch.setattr(spawn.discovery, "get_all_windows", lambda: {})
     monkeypatch.setattr(spawn.envutil, "scrub_tmux_secrets", lambda: None)
     monkeypatch.setattr(spawn.agent_manager, "lock_window_name", lambda *a, **kw: None)

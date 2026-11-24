@@ -35,7 +35,7 @@ class _Proc:
 
 def _spawn_launch(monkeypatch, tmp_path) -> str:
     """Run the real ``spawn_window`` with tmux stubbed; return the sent claude command."""
-    monkeypatch.setattr(spawn.discovery, "ensure_session", lambda: True)
+    monkeypatch.setattr(spawn.discovery, "session_exists", lambda *a, **k: True)
     monkeypatch.setattr(spawn.discovery, "get_all_windows", lambda: {})
     monkeypatch.setattr(spawn.agent_manager, "lock_window_name", lambda *a, **kw: None)
     monkeypatch.setattr(spawn.subprocess, "run", lambda *a, **kw: _Proc())
