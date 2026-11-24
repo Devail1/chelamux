@@ -116,10 +116,9 @@ def state(run: dict) -> dict | None:
         return park
     from chela import suite_guard
     wait = suite_guard.waits_in(run["worktree_path"])
-    if (wait or {}).get("waiting_since") is None:
-        return None
-    ranks = suite_guard.wait_rank(run["worktree_path"])
-    return slot(run, wait, suite_guard.holders(),
+    queued = (wait or {}).get("waiting_since") is not None
+    ranks = suite_guard.wait_rank(run["worktree_path"]) if queued else None
+    return slot(run, wait, suite_guard.holders() if queued else [],
                 suite_guard.rank_label(*ranks) if ranks else None)
 
 

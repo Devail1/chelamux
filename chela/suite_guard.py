@@ -246,10 +246,8 @@ def _run_row(cwd: str | Path) -> dict | None:
     """The run whose worktree holds ``cwd`` — its own worktree, or its judge's checkout beside
     it — as ``{task_id, priority}``, or None when no run does. A LOCAL read of the run DB (the
     dispatcher keeps ``runs.priority`` current), never a tracker call. Raises ``sqlite3.Error``
-    / ``OSError`` when the DB cannot be read: that is not "no run"."""
+    / ``OSError`` when the DB cannot be read (or is not there): that is not "no run"."""
     db = config.CHELA_DIR / "scheduler.db"
-    if not db.exists():
-        return None
     dirs: list[Path] = []             # the deepest first
     for here in (Path(cwd).absolute(), Path(cwd).resolve()):
         dirs += [d for d in (here, *here.parents) if d not in dirs]
@@ -528,14 +526,12 @@ def queued() -> list[dict]:
     the line."""
     out = []
     for path, rec in _ledgers():
-        if rec.get("waiting_since") is None:
-            continue
         rank = _rank(rec.get("rank"))
         try:
-            claimed = float(rec["waiting_since"])
+            claimed = float(rec.get("waiting_since"))
             since = float(rec.get("opened") or claimed)
         except (TypeError, ValueError):
-            continue
+            continue              # None: it holds a slot now, it is not asking
         cwd = str(rec.get("cwd") or "?")
         out.append((queue_key(rank, claimed, path.name, rec.get("task_rank")), {
             "name": Path(cwd).name, "cwd": cwd, "pid": rec.get("pid"), "rank": rank,
