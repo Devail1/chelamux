@@ -10,6 +10,40 @@ history lives in `git log`.
 
 ## [Unreleased]
 
+## [0.20.2] — 2026-11-24
+
+### Changed
+
+- **No empty "Shell" session at startup.** Chela used to create its tmux session with a
+  placeholder window, `shell-1`, which showed up on the sidebar, on the Wall and as a
+  Telegram topic before you had started anything. Now the session is created by the first
+  spawn (the dashboard launcher, Telegram `/new`, restore, a dispatched agent, the
+  orchestrator), with the window it opens as the session's first window. Closing the last
+  window ends the session, and the next spawn creates it again. The terminal wall never
+  creates the session: a missing one just means no windows. `CHELA_TERM_HEAL` and
+  `CHELA_TERM_BACKOFF_MAX` are gone with it. An existing `shell-1` is an ordinary shell you
+  can close. (CMX-473)
+
+### Added
+
+- **`chela install-mod`: the 5h/7d limits, context and cost without a status line.** It installs
+  the `chela-measure` mod, which is part of the package, so a PyPI install has it. The mod
+  copies to `~/.claude/skills/` and does not edit `settings.json`. On every `session.measure`
+  (after each turn, and whenever a limit moves a whole point) it writes the status line's own
+  figures to `$CHELA_DIR/context/mod/<session>.json`, tagged `source: "mod"`. It draws nothing
+  and shares no state with other mods. The context bar and the limit bars take whichever is
+  fresher, this snapshot or the statusLine's. With neither, the bars read unknown, never 0%.
+  `chela doctor` (`usage.sources`) names the producer feeding each session and each limit,
+  and warns when the installed mod points at another `CHELA_DIR` or is out of date. The spike
+  with the payload, firing rules and org-policy facts is in `docs/spikes/SESSION_MEASURE.md`.
+  (CMX-477)
+
+### Fixed
+
+- **Flaky `tests/diff_modal_wiring.test.mjs`.** The suite read the diff modal's file rows after
+  one event-loop turn, which React's scheduler can miss on a loaded runner. It now waits, with
+  a bound, for the rows, and checks that they are the clicked session's. (CMX-495)
+
 ## [0.20.1] — 2026-11-23
 
 ### Added
