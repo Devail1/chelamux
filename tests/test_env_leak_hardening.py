@@ -183,23 +183,25 @@ def test_tmux_scrub_names_keeps_a_forwarded_marker_or_hazard():
     assert set(envutil.tmux_scrub_names(out, forward=frozenset())) >= fwd
 
 
-# --- Ask 2: heal-create from a polluted env yields a clean global env --------------------
+# --- Ask 2: the session create (a spawn's, CMX-473) from a polluted env is clean --------
 
 @needs_tmux
-def test_python_heal_create_from_a_polluted_env_is_clean(env, sock):
+def test_spawn_create_from_a_polluted_env_is_clean(env, sock):
     """🔴 GUARD: create from `child_env()` instead of `server_env()`, or drop the scrub after
-    the create, and the new server's global env carries the proxy / markers / TMUX_TMPDIR."""
+    the create, and the new server's global env carries the proxy / markers / TMUX_TMPDIR.
+    CMX-473: the create is the spawn's own `new-session` (no anchor), so it is the spawned
+    window itself that is born from the server's env."""
     with patch.dict(os.environ, {**env, **POLLUTION}, clear=True):
-        assert discovery.ensure_session() is True
+        assert discovery.open_window("first", "/").returncode == 0
     assert _has_session(env, sock)
     leaked = set(_global_env(env, sock)) & (set(POLLUTION) | {"TMUX_TMPDIR"})
-    assert not leaked, f"heal-create handed every window: {sorted(leaked)}"
-    # The anchor window is born BEFORE the post-create scrub, from the env the server
+    assert not leaked, f"the create handed every window: {sorted(leaked)}"
+    # The first window is born BEFORE the post-create scrub, from the env the server
     # started with — so only server_env() keeps it clean.
-    anchor = _proc_env(_tmux(env, sock, "display", "-p", "-t", f"{SESSION}:",
-                             "#{pane_pid}").stdout.strip())
-    leaked = set(anchor) & set(POLLUTION)
-    assert not leaked, f"the anchor pane was born with {sorted(leaked)}"
+    first = _proc_env(_tmux(env, sock, "display", "-p", "-t", f"{SESSION}:",
+                            "#{pane_pid}").stdout.strip())
+    leaked = set(first) & set(POLLUTION)
+    assert not leaked, f"the first pane was born with {sorted(leaked)}"
 
 
 @needs_tmux
@@ -212,59 +214,56 @@ def test_negative_control_a_plain_create_from_that_env_is_polluted(env, sock):
 
 
 @needs_tmux
-def test_supervisor_heal_create_from_a_polluted_env_is_clean(env, sock):
-    """The bash half: agent-terminals.sh's heal goes through the same scrubbed create."""
+def test_supervisor_never_creates_the_session_from_a_polluted_env(env, sock):
+    """The bash half: since CMX-473 the supervisor never creates the session at all, so
+    there is no create of its own to pollute the server."""
     proc = subprocess.Popen([str(SCRIPT)], env={**env, **POLLUTION},
                             stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
     try:
-        assert _wait(lambda: _has_session(env, sock)), "supervisor never healed"
-
-        # The session exists the instant ensure_session's create runs, a beat BEFORE its
-        # `set-environment -gu` scrub (CMX-83: reading here raced it, ~1 run in 3). Wait
-        # for the heal to settle; a scrub that never runs still leaves the leak and fails.
-        def _leaked():
-            return set(_global_env(env, sock)) & (set(POLLUTION) | {"TMUX_TMPDIR"})
-        _wait(lambda: not _leaked(), timeout=5.0)
-        leaked = _leaked()
-        assert not leaked, f"supervisor heal handed every window: {sorted(leaked)}"
+        time.sleep(3)
+        assert proc.poll() is None
+        assert not _has_session(env, sock), "the supervisor created the session"
     finally:
         _reap(proc)
 
 
-# --- Ask 2: refuse to heal on a missing TMUX_TMPDIR dir ----------------------------------
+# --- Ask 2: refuse tmux on a missing TMUX_TMPDIR dir -------------------------------------
 
 @needs_tmux
-def test_python_heal_refuses_on_a_missing_tmux_tmpdir(env, sock, caplog):
+def test_open_window_refuses_on_a_missing_tmux_tmpdir(env, sock, caplog):
     """🔴 GUARD: drop the refusal and tmux falls back to the default socket — the 2026-10-06
     orphan's exact move. Here the shim keeps even that on the scratch socket name."""
     gone = env["TMUX_TMPDIR"] + "-deleted"
     with patch.dict(os.environ, {**env, "TMUX_TMPDIR": gone}, clear=True):
         with patch("chela.discovery.subprocess.run",
                    side_effect=AssertionError("tmux must not be called")):
-            assert discovery.ensure_session() is False
+            proc = discovery.open_window("w", "/")
+    assert proc.returncode == 1
+    assert "TMUX_TMPDIR" in proc.stderr
     assert "REFUSING" in caplog.text
 
 
 @needs_tmux
-def test_negative_control_heal_creates_when_the_dir_exists(env, sock):
+def test_negative_control_open_window_creates_when_the_dir_exists(env, sock):
     with patch.dict(os.environ, env, clear=True):
-        assert discovery.ensure_session() is True
+        assert discovery.open_window("w", "/").returncode == 0
     assert _has_session(env, sock)
 
 
 @needs_tmux
-def test_supervisor_refuses_to_heal_on_a_missing_tmux_tmpdir(env, sock):
+def test_supervisor_refuses_tmux_on_a_missing_tmux_tmpdir(env, sock):
     gone = env["TMUX_TMPDIR"] + "-deleted"
     proc = subprocess.Popen([str(SCRIPT)], env={**env, "TMUX_TMPDIR": gone},
                             stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
     try:
         time.sleep(3)
-        assert proc.poll() is None, "not orphaned: it must back off, not exit"
+        assert proc.poll() is None, "not orphaned: it must keep polling, not exit"
     finally:
         _reap(proc)
     out = proc.stdout.read()
-    # the supervisor's OWN refusal, before any tmux call — not the Python heal's log line
-    assert "agent-terminals: REFUSING to heal" in out, out
+    # the supervisor's OWN refusal, before any tmux call
+    assert "agent-terminals: REFUSING to ask tmux" in out, out
+    assert out.count("REFUSING") == 1, out            # once, not every tick
     assert not _has_session(env, sock)
     assert not os.path.exists(gone)
 
@@ -272,7 +271,7 @@ def test_supervisor_refuses_to_heal_on_a_missing_tmux_tmpdir(env, sock):
 @needs_tmux
 def test_supervisor_exits_once_its_cwd_is_deleted(env, sock, tmp_path):
     """The 2026-10-06 orphan outlived the harness dir it ran from. A supervisor whose cwd is
-    gone EXITS instead of healing; one whose cwd is intact keeps backing off (control)."""
+    gone EXITS; one whose cwd is intact keeps polling (control)."""
     repo = SCRIPT.parent.parent
     copy = Path(tempfile.mkdtemp(prefix="cmx21", dir="/tmp"))
     shutil.copytree(repo / "scripts", copy / "scripts")
@@ -331,7 +330,8 @@ def test_negative_control_supervisor_cleanup_reaps_its_own_webterms(env, sock):
     proc = subprocess.Popen([str(SCRIPT)], env=env,
                             stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
     try:
-        assert _wait(lambda: _has_session(env, sock))
+        # CMX-473: the supervisor no longer creates the session; wait until it is up.
+        assert _wait(lambda: "dynamic supervisor" in (proc.stdout.readline() or ""))
     finally:
         # Generous: a SIGKILL fallback skips the EXIT trap, so no reap would ever come.
         _reap(proc, timeout=30)
@@ -387,11 +387,12 @@ def test_orphaned_supervisor_with_its_tmux_tmpdir_gone_exits(env, sock, tmp_path
 
 @needs_tmux
 def test_negative_control_an_orphan_with_its_dir_intact_keeps_serving(env, sock, tmp_path):
-    """⭐ Orphaned alone is not stranded: with its TMUX_TMPDIR present it heals and stays."""
+    """⭐ Orphaned alone is not stranded: with its TMUX_TMPDIR present it stays up."""
     out = tmp_path / "orphan-ok.log"
     pid = _orphan(env, out)
     try:
-        assert _wait(lambda: _has_session(env, sock)), out.read_text()
+        assert _wait(lambda: out.exists() and "dynamic supervisor" in out.read_text()), \
+            out.read_text() if out.exists() else "no log"
         time.sleep(2)
         assert not _gone(pid), out.read_text()
     finally:
@@ -401,7 +402,7 @@ def test_negative_control_an_orphan_with_its_dir_intact_keeps_serving(env, sock,
 @needs_tmux
 def test_negative_control_a_pm2_child_with_its_dir_gone_is_not_an_orphan(env, sock, tmp_path):
     """⭐ The 'not under pm2' half: the same reparented supervisor, but carrying pm2's
-    `pm_id`, is pm2's to restart — it backs off (refusing to heal), it does not exit."""
+    `pm_id`, is pm2's to restart — it keeps polling (refusing to ask tmux), it does not exit."""
     out = tmp_path / "pm2-child.log"
     pid = _orphan({**env, "TMUX_TMPDIR": env["TMUX_TMPDIR"] + "-deleted", "pm_id": "7"}, out)
     try:
@@ -410,7 +411,7 @@ def test_negative_control_a_pm2_child_with_its_dir_gone_is_not_an_orphan(env, so
     finally:
         _kill(pid)
     text = out.read_text()
-    assert "REFUSING to heal" in text and "orphaned" not in text, text
+    assert "REFUSING to ask tmux" in text and "orphaned" not in text, text
 
 
 # --- Ask 3: an agent launch env lacks the markers ----------------------------------------

@@ -443,13 +443,26 @@ def test_real_tmux_despawn_never_kills_a_prefix_sibling_viewer(scratch_tmux):
     (["chela"], True),
 ])
 @needs_tmux
-def test_real_tmux_ensure_session_has_session_is_exact(scratch_tmux, present, ok):
-    """With heal off, ensure_session only ASKS — and must not take `chela-services` for
-    `chela`."""
+def test_real_tmux_session_present_is_exact(scratch_tmux, present, ok):
+    """session_present only ASKS (CMX-473: the supervisor never creates the session) — and
+    must not take `chela-services` for `chela`."""
     for name in present:
         scratch_tmux("new-session", "-d", "-s", name)
-    body = (_sh_functions("tmux_tmpdir_missing", "heal_enabled", "ensure_session")
-            + "\nensure_session\n")
-    r = _run_sh(body, TMUX_SESSION="chela", CHELA_TERM_HEAL="false")
+    body = (_sh_functions("tmux_tmpdir_missing", "session_present")
+            + "\nsession_present\n")
+    r = _run_sh(body, TMUX_SESSION="chela")
     assert (r.returncode == 0) is ok, r.stderr
-    assert _sessions(scratch_tmux) == set(present)   # heal off: never created anything
+    assert _sessions(scratch_tmux) == set(present)   # never created anything
+
+
+@needs_tmux
+def test_real_tmux_session_present_never_asks_with_tmux_tmpdir_gone(scratch_tmux, tmp_path):
+    """CMX-21: with TMUX_TMPDIR pointing at a deleted dir, tmux falls back to the DEFAULT
+    socket dir — where this scratch server (and, live, the operator's) actually is. So the
+    session there must NOT answer: session_present refuses before asking."""
+    scratch_tmux("new-session", "-d", "-s", "chela")
+    body = (_sh_functions("tmux_tmpdir_missing", "session_present")
+            + "\nsession_present\n")
+    assert _run_sh(body, TMUX_SESSION="chela").returncode == 0          # control
+    r = _run_sh(body, TMUX_SESSION="chela", TMUX_TMPDIR=str(tmp_path / "gone"))
+    assert r.returncode != 0, "asked tmux through the fallback socket"

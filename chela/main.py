@@ -1804,10 +1804,8 @@ def cmd_agent_terminals(args) -> None:
     # follow that pane's session instead of $CHELA_TMUX_SESSION.
     env = {k: v for k, v in os.environ.items() if k not in ("TMUX", "TMUX_PANE")}
     env["PYTHON"] = sys.executable
-    # Never CREATE the tmux session from here, only wait for it: this command is one argv
-    # away from any code that runs chela's CLI, and its heal once created a test's
-    # never-exists session on the live server (see heal_enabled in the script).
-    env["CHELA_TERM_HEAL"] = "false"
+    # The script never creates the tmux session (CMX-473: a missing one is "no windows";
+    # only a spawn creates it), so there is no heal switch to pin off any more.
     os.execve(bash, [bash, str(script)], env)
 
 
