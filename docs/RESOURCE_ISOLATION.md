@@ -326,8 +326,10 @@ run never strands a slot.
   cron took the box to 2.7 GB available and Claude Code's low-memory reaper killed three
   agents' runs that were only *waiting* for the slot. Six real waiters
   measured on 11-24 peaked at 38-45 MB (113 MB for one resumed mid-battery). The reaper is
-  Claude Code's own and was not observed, but at that size there is little to trim, so chela
-  recovers instead. A battery now records itself before it waits (`state: "waiting"`, also
+  Claude Code's own: its notice says it stops background shells when memory is critically low
+  while the session is idle, whatever the command itself uses. There is little to trim, so
+  chela recovers instead. The re-queue relies on the agent accepting chela's message as the
+  ask to restart (the notice forbids an unasked one). A battery now records itself before it waits (`state: "waiting"`, also
   while it waits after a yield). Once its blocked hours are over and one suite's peak of memory is
   available, the daemon asks that run's own agent, over the peer socket, to re-run its
   `chela task-finished` / `chela judge sweep` / `chela judge self-check` once. The re-run
