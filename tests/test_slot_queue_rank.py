@@ -12,6 +12,7 @@ import sqlite3
 import sys
 import threading
 import time
+from datetime import datetime
 from pathlib import Path
 from unittest.mock import patch
 
@@ -485,7 +486,7 @@ def test_queued_lists_open_waits_in_the_order_they_are_served(box, monkeypatch):
     got = suite_guard.queued()
     assert [w["name"] for w in got] == ["urgent-old", "urgent", "high", "sweep"]
     assert got[1] == {"name": "urgent", "cwd": "/wts/urgent", "pid": os.getpid(), "rank": 1,
-                      "task_rank": 1, "since": 50.0, "stopped": False}
+                      "task_rank": 1, "since": 50.0, "stopped": False, "blocked_until": None}
     assert got[2]["since"] == 5.0                                  # a legacy ledger: its claim
 
 
@@ -563,9 +564,10 @@ def test_a_wait_that_ended_mid_read_shows_no_rank(monkeypatch):
     assert got["reason"] == "waiting for a suite slot (holder: CMX-7)"
 
 
-def _entry(name, rank, since, *, task_rank=None, pid=7, stopped=False):
+def _entry(name, rank, since, *, task_rank=None, pid=7, stopped=False, blocked_until=None):
     return {"name": name, "cwd": f"/wts/{name}", "pid": pid, "since": since, "rank": rank,
-            "task_rank": rank if task_rank is None else task_rank, "stopped": stopped}
+            "task_rank": rank if task_rank is None else task_rank, "stopped": stopped,
+            "blocked_until": blocked_until}
 
 
 def test_the_slots_lines():
@@ -633,6 +635,20 @@ def test_the_any_limit_caps_the_urgent_one(monkeypatch):
 
 def test_a_stopped_waiter_is_never_reported():
     assert _due(_entry("CMX-1", 1, NOW - 9 * HOUR, stopped=True)) == []
+
+
+def test_a_waiter_in_its_blocked_hours_is_listed_as_such_and_never_reported():
+    w = _entry("CMX-1", 1, NOW - 9 * HOUR, blocked_until="04:30")
+    assert _due(w) == []
+    assert slot_alerts.lines(1, [], [w], NOW)[1].endswith(
+        "waiting 9h00m  (blocked hours until 04:30)")
+
+
+def test_queued_carries_blocked_until_only_while_it_still_holds(box, monkeypatch):
+    _write_ledger(box, "urgent", 1, 1.0, blocked_until="04:30")
+    for minute, want in ((29, "04:30"), (30, None)):
+        monkeypatch.setattr(suite_guard, "_local_now", lambda m=minute: datetime(2026, 11, 23, 4, m))
+        assert [w["blocked_until"] for w in suite_guard.queued()] == [want]
 
 
 def test_the_notice_names_the_waiter_the_holder_and_the_rest_of_the_queue():

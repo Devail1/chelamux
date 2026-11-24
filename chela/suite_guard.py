@@ -30,6 +30,13 @@ this is what that one choke point wraps it in.
    A self-check or hand-in sweep gives its slot up between two experiments when a better
    waiter is queued, and takes it back after (:func:`yield_slot`). On 11-19 a Medium
    self-check held the only slot for 2 h 08 m while an Urgent judge waited 1 h 13 m.
+6. **No slot inside blocked hours** (CMX-479) — the worktree's ``sweep.blocked_hours``
+   (default 03:00-04:30, the host's nautilus crons). A waiter is told "blocked hours until
+   04:30" and takes its turn, in queue order, when the window ends; a holder finishes its
+   current experiment, then gives the slot up the same way (:func:`yield_slot`). On 11-23 the
+   03:30 cron starved the box and the low-memory reaper killed three agents' WAITING runs.
+   A battery's record is written before it waits, so a waiter killed anyway is found too
+   (:func:`stopped_batteries`, ``state: "waiting"``) and its agent is asked to re-run it once.
 
 ⛔ Never fix an OOM by raising the ceiling blindly: a fatter ceiling is a fatter target.
 """
@@ -49,6 +56,7 @@ import threading
 import time
 import uuid
 from collections.abc import Mapping
+from datetime import datetime
 from pathlib import Path
 
 from chela import config, memcap
@@ -395,6 +403,7 @@ class _Ledger:
         # When THIS wait began: ``waiting_since`` is the CLAIM time, which for a battery that
         # yielded its slot is before it first held it.
         self.opened = time.time()
+        self.blocked_until: str | None = None    # CMX-479: "04:30" while blocked hours hold it
         stat = _proc_stat(os.getpid())
         self.start = stat[1] if stat else None
 
@@ -406,10 +415,19 @@ class _Ledger:
                                        "cwd": self.cwd, "waiting_since": waiting_since,
                                        "waited": self.waited, "rank": self.rank,
                                        "task_rank": self.task_rank,
-                                       "opened": self.opened}))
+                                       "opened": self.opened,
+                                       "blocked_until": self.blocked_until}))
             tmp.replace(self.path)
         except OSError:
             log.debug("suite_guard: could not publish the slot wait", exc_info=True)
+
+    def re_rank(self, rank: int | None, since: float) -> None:
+        """CMX-494: publish the rank the acquirer has NOW, when it changed. Also while blocked
+        hours hold it (CMX-479): the line must be right the moment they end."""
+        now_ranked = _ranks(self.cwd, rank)
+        if now_ranked != (self.rank, self.task_rank):
+            self.rank, self.task_rank = now_ranked
+            self.write(since)
 
 
 def _ledgers() -> list[tuple[Path, dict]]:
@@ -440,15 +458,36 @@ def queue_key(rank: int, since: float, name: str, task_rank=None) -> tuple:
     return (rank, _task_rank(rank, task_rank), since, name)
 
 
+# A waiter whose blocked hours ended this recently is back in line even if it has not polled
+# since: whoever polls first at 04:30 must not pass a better-ranked one by seconds (CMX-479).
+BLOCKED_STALE_MINUTES = 5
+
+
+def _blocked(rec: dict) -> bool:
+    """Is this waiter's record held by its own blocked hours NOW? One whose ``blocked_until``
+    has just passed is not; one that is no time at all still is."""
+    until = rec.get("blocked_until")
+    if not until:
+        return False
+    try:
+        hours, minutes = str(until).split(":")
+        ends = int(hours) * 60 + int(minutes)
+    except ValueError:
+        return True
+    now = _local_now()
+    return (now.hour * 60 + now.minute - ends) % (24 * 60) >= BLOCKED_STALE_MINUTES
+
+
 def _must_queue(me: Path, since: float, rank: int = RANK_UNKNOWN, task_rank=None) -> bool:
     """Is a waiter AHEAD of us (:func:`queue_key`) still queued? Then it goes first: a
     battery that frees its slot and takes the next one a millisecond later must not starve a
     run already waiting, and a Medium hand-in must not take the slot an Urgent judge is
-    queued for (CMX-445). A stopped waiter (a fleet pause, ``T``) does not hold the line."""
+    queued for (CMX-445). A stopped waiter (a fleet pause, ``T``) does not hold the line, nor
+    one its own blocked hours hold (:func:`_blocked`, CMX-479): another repo may have none."""
     mine = queue_key(rank, since, me.name, task_rank)
     for path, rec in _ledgers():
         opened = rec.get("waiting_since")
-        if path == me or opened is None or rec["state"] in ("T", "t"):
+        if path == me or opened is None or rec["state"] in ("T", "t") or _blocked(rec):
             continue
         try:
             theirs = queue_key(_rank(rec.get("rank")), float(opened), path.name,
@@ -468,6 +507,8 @@ def outranking(rank: int, exclude_pid: int | None = None) -> list[str]:
         opened = rec.get("waiting_since")
         if opened is None or rec["state"] in ("T", "t") or rec.get("pid") == exclude_pid:
             continue
+        if _blocked(rec):
+            continue         # CMX-479: its own blocked hours hold it — it cannot take a slot
         theirs = _rank(rec.get("rank"))
         if theirs >= rank:
             continue
@@ -479,14 +520,15 @@ def outranking(rank: int, exclude_pid: int | None = None) -> list[str]:
 
 
 def waits_in(worktree: str | Path) -> dict | None:
-    """``{"waiting_since": epoch|None, "waited": seconds}`` over every live process that
-    waited for a suite slot inside ``worktree`` (the earliest open wait; the summed total),
-    or None when none did."""
+    """``{"waiting_since": epoch|None, "waited": seconds, "blocked_until": "HH:MM"|None}``
+    over every live process that waited for a suite slot inside ``worktree`` (the earliest
+    open wait; the summed total; CMX-479: when an open wait is held by blocked hours, when
+    they end), or None when none did."""
     try:
         root = Path(worktree).resolve()
     except OSError:
         return None
-    found, since, hit = 0.0, None, False
+    found, since, hit, until = 0.0, None, False, None
     for _path, rec in _ledgers():
         try:
             cwd, waited = Path(rec["cwd"]), float(rec.get("waited") or 0.0)
@@ -499,7 +541,9 @@ def waits_in(worktree: str | Path) -> dict | None:
         hit, found = True, found + waited
         if opened is not None:
             since = opened if since is None else min(since, opened)
-    return {"waiting_since": since, "waited": found} if hit else None
+            if isinstance(rec.get("blocked_until"), str):
+                until = rec["blocked_until"]
+    return {"waiting_since": since, "waited": found, "blocked_until": until} if hit else None
 
 
 def waiters(exclude_pid: int | None = None) -> list[str]:
@@ -521,9 +565,9 @@ def waiters(exclude_pid: int | None = None) -> list[str]:
 
 def queued() -> list[dict]:
     """⏳ CMX-494: every open slot wait in the order it will be served — ``{name, cwd, pid,
-    rank, task_rank, since, stopped}``, ``since`` being when THIS wait began (a yielded
-    battery's earlier hold is not a wait). ``stopped``: a paused waiter, which does not hold
-    the line."""
+    rank, task_rank, since, stopped, blocked_until}``, ``since`` being when THIS wait began (a
+    yielded battery's earlier hold is not a wait). ``stopped``: a paused waiter, which does not
+    hold the line; nor does one with ``blocked_until`` (CMX-479: when its blocked hours end)."""
     out = []
     for path, rec in _ledgers():
         rank = _rank(rec.get("rank"))
@@ -536,7 +580,8 @@ def queued() -> list[dict]:
         out.append((queue_key(rank, claimed, path.name, rec.get("task_rank")), {
             "name": Path(cwd).name, "cwd": cwd, "pid": rec.get("pid"), "rank": rank,
             "task_rank": _task_rank(rank, rec.get("task_rank")), "since": since,
-            "stopped": rec["state"] in ("T", "t")}))
+            "stopped": rec["state"] in ("T", "t"),
+            "blocked_until": rec["blocked_until"] if _blocked(rec) else None}))
     return [w for _key, w in sorted(out, key=lambda kw: kw[0])]
 
 
@@ -649,20 +694,98 @@ class SlotTimeout(TimeoutError):
     suite that could not be run — CANNOT VERIFY, never a pass."""
 
 
+# --- blocked hours: no slot is granted inside them (CMX-479) ------------------------------
+
+WORKFLOW_FILE = "WORKFLOW.md"
+
+
+def _local_now() -> datetime:
+    """The local wall clock blocked hours are read against — what a test fakes."""
+    return datetime.now()
+
+
+def blocked_windows(cwd: str | Path) -> list[tuple[int, int]]:
+    """⏳ CMX-479: the ``sweep.blocked_hours`` that hold the suite slot for a run in ``cwd`` —
+    the windows of the ``WORKFLOW.md`` at ``cwd`` (the worktree root), as ``(start, end)``
+    minutes since midnight. No WORKFLOW.md there is the default (03:00-04:30): the window is
+    the HOST's (its nautilus crons), not one repo's. A WORKFLOW.md that cannot be read is the
+    default too, said in the log — a broken file must not unblock the box's heaviest hours."""
+    from chela import sweep_nightly
+    from chela.workflow import load_workflow
+
+    default = [sweep_nightly._parse_span(w) for w in sweep_nightly.DEFAULT_BLOCKED_HOURS]
+    path = Path(cwd) / WORKFLOW_FILE
+    try:
+        wf = load_workflow(path)
+    except FileNotFoundError:
+        return default
+    except Exception as e:          # a WORKFLOW.md that does not parse
+        log.warning("suite_guard: %s could not be read (%s) — the suite slot keeps the default "
+                    "blocked hours %s", path, e, list(sweep_nightly.DEFAULT_BLOCKED_HOURS))
+        return default
+    return sweep_nightly.blocked_hours(wf)
+
+
+def blocked_until(windows: list[tuple[int, int]], now: datetime | None = None) -> str:
+    """``"HH:MM"`` — when the blocked window ``now`` (local; default :func:`_local_now`) is
+    in ends; ``""`` when ``now`` is in none of ``windows``."""
+    from chela import sweep_nightly
+
+    now = _local_now() if now is None else now
+    minute = now.hour * 60 + now.minute
+    for w in windows:
+        if sweep_nightly._inside(w, minute):
+            return "%02d:%02d" % divmod(w[1] % sweep_nightly.DAY_MINUTES, 60)
+    return ""
+
+
+def _blocked_line(until: str, verb: str) -> str:
+    return (f"⏳ blocked hours until {until} — {verb} (`sweep.blocked_hours`, CMX-479); "
+            "it starts by itself, in queue order, when they end")
+
+
 def _acquire(d: Path, k: int, cwd: str, rank: int | None, on_wait, max_wait: float | None,
-             poll: float, since: float | None = None) -> int:
+             poll: float, since: float | None = None,
+             windows: list[tuple[int, int]] | None = None) -> int:
     """Wait (visibly, in :func:`queue_key` order) for one of the ``k`` slots and return its
     fd, at most ``max_wait`` seconds (:class:`SlotTimeout`); the wait is credited. ``since``
     is where it stands among equals (default: now). ``rank`` None is the run's own
     (:func:`run_rank`), re-read every poll: raising the issue's priority re-ranks a waiter
-    that is already queued (CMX-494)."""
+    that is already queued (CMX-494).
+
+    ⏳ CMX-479: no slot is taken while the local time is inside one of ``windows`` (blocked
+    hours): the ledger says until when, and that time does not count toward ``max_wait`` —
+    a run queued at 03:10 must not time out because the box was held on purpose."""
     global _waited
     ledger = _Ledger(cwd, *_ranks(cwd, rank))
     opened = ledger.opened
     since = opened if since is None else since
     started, fd = None, None
+    blocked_at, blocked_total = None, 0.0
     try:
         while True:
+            until = blocked_until(windows) if windows else ""
+            if until:
+                if blocked_at is None:
+                    blocked_at = time.monotonic()
+                if ledger.blocked_until != until:
+                    ledger.blocked_until = until
+                    ledger.write(since)
+                    print(_blocked_line(until, "the suite slot is not granted inside them"),
+                          file=sys.stderr, flush=True)
+                    if started is None:
+                        started = time.monotonic()
+                        if on_wait is not None:
+                            on_wait(since)
+                time.sleep(poll)
+                ledger.re_rank(rank, since)
+                continue
+            if blocked_at is not None:
+                blocked_total += time.monotonic() - blocked_at
+                ledger.opened = opened + blocked_total    # held on purpose is not overdue
+                blocked_at = None
+                ledger.blocked_until = None
+                ledger.write(since)
             if (not _must_queue(ledger.path, since, ledger.rank, ledger.task_rank)
                     and (fd := _take(d, k)) is not None):
                 break
@@ -673,14 +796,12 @@ def _acquire(d: Path, k: int, cwd: str, rank: int | None, on_wait, max_wait: flo
                       f"(CMX-119; CHELA_SUITE_SLOTS)", file=sys.stderr, flush=True)
                 if on_wait is not None:
                     on_wait(since)
-            elif max_wait is not None and time.time() - opened >= max_wait:
+            elif (max_wait is not None
+                  and time.time() - opened - blocked_total >= max_wait):
                 raise SlotTimeout(f"no suite slot came free in {max_wait:.0f}s "
                                   f"(all {k} busy: {_holders(d, k)})")
             time.sleep(poll)
-            now_ranked = _ranks(cwd, rank)
-            if now_ranked != (ledger.rank, ledger.task_rank):
-                ledger.rank, ledger.task_rank = now_ranked
-                ledger.write(since)
+            ledger.re_rank(rank, since)
     finally:
         if started is not None:
             spent = time.monotonic() - started
@@ -688,6 +809,7 @@ def _acquire(d: Path, k: int, cwd: str, rank: int | None, on_wait, max_wait: flo
                 _waited += spent
             ledger.waited += spent
             _thread_waited[(threading.get_ident(), ledger.cwd)] = ledger.waited
+            ledger.blocked_until = None
             ledger.write(None)      # kept: what the stuck probes credit, while we live
             if on_wait is not None:
                 on_wait(None)
@@ -735,8 +857,9 @@ def slot(cwd: str | Path, on_wait=None, max_wait: float | None = None,
     d = config.CHELA_DIR / SLOTS_DIRNAME
     d.mkdir(parents=True, exist_ok=True)
     claimed = time.time()
-    _held.fd = _acquire(d, k, str(cwd), rank, on_wait, max_wait, poll, claimed)
-    _held.hold = (d, k, str(cwd), rank, on_wait, claimed, poll)
+    windows = blocked_windows(cwd)
+    _held.fd = _acquire(d, k, str(cwd), rank, on_wait, max_wait, poll, claimed, windows)
+    _held.hold = (d, k, str(cwd), rank, on_wait, claimed, poll, windows)
     try:
         _held.depth = 1
         yield
@@ -753,6 +876,9 @@ def yield_slot() -> str:
     self-check — free the slot, queue for it again at this hold's own rank, and return once
     it is back. Returns who it yielded to (``""``: nobody outranked it, the slot was kept).
 
+    ⏳ CMX-479: inside blocked hours it yields too, whoever is waiting, and returns
+    ``"blocked hours until HH:MM"`` once the window is over and the slot is back.
+
     It queues again at its ORIGINAL claim time, so only a strictly better rank — never an
     equal that came after it — goes ahead, and it waits for the slot without a bound: every
     run ahead of it is bounded by its own budget, and a timeout here would throw away the
@@ -761,16 +887,27 @@ def yield_slot() -> str:
     hold, fd = getattr(_held, "hold", None), getattr(_held, "fd", None)
     if hold is None or fd is None:
         return ""
-    d, k, cwd, rank, on_wait, claimed, poll = hold
-    better = outranking(_ranks(cwd, rank)[0])     # its rank NOW: a raised issue stays put
-    if not better:
+    d, k, cwd, rank, on_wait, claimed, poll, windows = hold
+    until = blocked_until(windows) if windows else ""
+    # By its rank NOW (CMX-494): a raised issue stays put.
+    better = [] if until else outranking(_ranks(cwd, rank)[0])
+    if until:
+        names = f"blocked hours until {until}"
+        print(_blocked_line(until, "yielding the suite slot after this experiment"),
+              file=sys.stderr, flush=True)
+    elif better:
+        names = ", ".join(better)
+        print(f"⏳ yielding the suite slot to {names} — it outranks this run (CMX-445); "
+              "resuming once it is free again", file=sys.stderr, flush=True)
+    else:
         return ""
-    names = ", ".join(better)
-    print(f"⏳ yielding the suite slot to {names} — it outranks this run (CMX-445); "
-          "resuming once it is free again", file=sys.stderr, flush=True)
+    # ⏳ CMX-479: between two experiments no file is mutated — killed in THIS wait, the
+    # battery is a reaped waiter like any other.
+    _set_battery_state(WAITING)
     _held.fd = None
     os.close(fd)
-    _held.fd = _acquire(d, k, cwd, rank, on_wait, None, poll, claimed)
+    _held.fd = _acquire(d, k, cwd, rank, on_wait, None, poll, claimed, windows)
+    _set_battery_state(RUNNING)
     return names
 
 
@@ -796,8 +933,9 @@ def battery(cwd: str | Path, kind: str, on_wait=None, max_wait: float | None = N
     one, so no other battery can run a suite between two of ours. A nested ``battery`` (the
     sweep inside ``task-finished``) re-enters too and keeps the outer record.
 
-    The record (``batteries/<pid>-<tid>.json``) is removed when the battery ends — by
-    returning, raising, or ``sys.exit`` — and KEPT when a signal stops it (an exception that
+    The record (``batteries/<pid>-<tid>.json``) is written BEFORE the slot wait (``state``
+    ``"waiting"``, then ``"running"`` once the slot is held — CMX-479), removed when the
+    battery ends — by returning, raising, or ``sys.exit`` — and KEPT when a signal stops it (an exception that
     is not an ``Exception``/``SystemExit``, e.g. the sweep's own ``_Interrupted``) or nothing
     runs at all (SIGKILL). A record whose process is gone is a stopped run:
     :func:`stopped_batteries`.
@@ -807,29 +945,68 @@ def battery(cwd: str | Path, kind: str, on_wait=None, max_wait: float | None = N
     (CMX-494, :func:`run_rank`), whichever command started it."""
     nested = bool(getattr(_held, "depth", 0))
     rank = _KIND_RANKS.get(kind) if rank is None else rank
-    with slot(cwd, on_wait=on_wait, max_wait=max_wait, poll=poll, rank=rank):
-        if nested:
+    if nested:
+        with slot(cwd, on_wait=on_wait, max_wait=max_wait, poll=poll, rank=rank):
             yield
-            return
-        rec = _battery_record(cwd, kind)
-        try:
+        return
+    # ⏳ CMX-479: recorded BEFORE the wait — on 11-23 the reaper killed three runs that were
+    # only waiting, and a record written once the slot was held never saw them.
+    rec = _battery_record(cwd, kind, WAITING)
+    _held.battery = (cwd, kind, rec)
+    try:
+        with slot(cwd, on_wait=on_wait, max_wait=max_wait, poll=poll, rank=rank):
+            _set_battery_state(RUNNING)
             yield
-        except (Exception, SystemExit):
-            _drop(rec)
-            raise
-        except BaseException:
-            raise              # stopped by a signal — the record says so once we are gone
+    except (Exception, SystemExit):
+        _drop(rec)
+        raise
+    except BaseException:
+        raise              # stopped by a signal — the record says so once we are gone
+    finally:
+        _held.battery = None
+    _drop(rec)
+
+
+# A battery record's ``state``: queued for the slot (no file mutated), or holding it.
+WAITING, RUNNING = "waiting", "running"
+
+
+def _set_battery_state(state: str) -> None:
+    """Rewrite this thread's battery record as ``state``. One that cannot be rewritten is
+    dropped: a stale ``"waiting"`` would call a run killed mid-mutation untouched."""
+    cwd, kind, rec = getattr(_held, "battery", None) or (None, None, None)
+    if rec is not None and _battery_record(cwd, kind, state) is None:
         _drop(rec)
 
 
-def _battery_record(cwd: str | Path, kind: str) -> Path | None:
+def live_battery_in(worktree: str | Path) -> bool:
+    """Is a live battery recorded in ``worktree`` now (waiting or running)?"""
+    dead = {path for path, _rec in stopped_batteries()}
+    try:
+        root, files = Path(worktree).resolve(), list(_batteries_dir().glob("*.json"))
+    except OSError:
+        return False
+    for path in files:
+        if path in dead:
+            continue
+        try:
+            here = Path(json.loads(path.read_text())["cwd"]).resolve()
+        except (OSError, ValueError, KeyError, TypeError):
+            continue
+        if here == root or root in here.parents:
+            return True
+    return False
+
+
+def _battery_record(cwd: str | Path, kind: str, state: str = RUNNING) -> Path | None:
     stat = _proc_stat(os.getpid())
     path = _batteries_dir() / f"{os.getpid()}-{threading.get_ident()}.json"
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
         tmp = path.with_suffix(".tmp")
         tmp.write_text(json.dumps({"pid": os.getpid(), "start": stat[1] if stat else None,
-                                   "cwd": str(cwd), "kind": kind, "since": time.time()}))
+                                   "cwd": str(cwd), "kind": kind, "state": state,
+                                   "since": time.time()}))
         tmp.replace(path)
     except OSError:
         log.debug("suite_guard: could not record the battery", exc_info=True)
@@ -882,3 +1059,58 @@ def resumable(locks: Path = Path("/proc/locks"),
     of memory available. Memory that cannot be read is NOT safe — unknown never resumes."""
     avail = mem_available_bytes(meminfo)
     return not holders(locks) and avail is not None and avail >= RESUME_MEM_BYTES
+
+
+# --- a waiter the reaper killed is re-queued ONCE (CMX-479) -------------------------------
+
+REQUEUED_FILENAME = "requeued.json"
+# A worktree re-queued within this long is not re-queued again — its next kill is announced
+# instead. Longer than any one night's blocked window plus a queue, shorter than a day.
+REQUEUE_ONCE_SECONDS = 12 * 3600
+
+
+def _requeued_path() -> Path:
+    return config.CHELA_DIR / SLOTS_DIRNAME / REQUEUED_FILENAME
+
+
+def _requeued() -> dict:
+    try:
+        data = json.loads(_requeued_path().read_text())
+    except FileNotFoundError:
+        return {}
+    except (OSError, ValueError):
+        return {"?": time.time()}     # unreadable: treat as "already re-queued" (below)
+    return data if isinstance(data, dict) else {"?": time.time()}
+
+
+def requeued_recently(cwd: str | Path, now: float | None = None) -> bool:
+    """Was a reaped waiter in ``cwd`` already re-queued within :data:`REQUEUE_ONCE_SECONDS`?
+    A record that cannot be read says YES — unknown never buys a second re-queue."""
+    now = time.time() if now is None else now
+    data = _requeued()
+    if "?" in data:
+        return True
+    key = str(Path(cwd).resolve())
+    if key not in data:
+        return False
+    at = data[key]
+    if isinstance(at, bool) or not isinstance(at, (int, float)):
+        return True
+    return now - at < REQUEUE_ONCE_SECONDS
+
+
+def mark_requeued(cwd: str | Path, now: float | None = None) -> None:
+    """Remember that ``cwd``'s reaped waiter was re-queued (:func:`requeued_recently`);
+    entries older than :data:`REQUEUE_ONCE_SECONDS` are dropped on the way."""
+    now = time.time() if now is None else now
+    data = {k: v for k, v in _requeued().items()
+            if k != "?" and isinstance(v, (int, float)) and now - v < REQUEUE_ONCE_SECONDS}
+    data[str(Path(cwd).resolve())] = now
+    path = _requeued_path()
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_suffix(".tmp")
+        tmp.write_text(json.dumps(data))
+        tmp.replace(path)
+    except OSError:
+        log.warning("suite_guard: could not record the re-queue of %s", cwd, exc_info=True)

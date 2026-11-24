@@ -2018,6 +2018,10 @@ def _apply_each(
             heartbeat("outcome", verdict=outcome.verdict)
 
     for n, raw_exp in enumerate(items):
+        if n:
+            # ⏳ CMX-479: between two experiments (the last one restored), blocked hours that
+            # opened meanwhile take the slot back until they end; this resumes after.
+            suite_guard.yield_slot()
         if progress is not None:
             progress(n, len(items))
         if heartbeat is not None:

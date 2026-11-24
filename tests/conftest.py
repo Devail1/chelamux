@@ -455,6 +455,18 @@ def reaper_kills(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _suite_slot_clock_at_noon(monkeypatch):
+    """⏳ CMX-479: the suite slot is not granted inside blocked hours (default 03:00-04:30,
+    local). A test that takes a slot must not hang because the suite happens to run at
+    03:30 — the slot's clock reads noon unless a test sets its own."""
+    from datetime import datetime
+
+    from chela import suite_guard
+
+    monkeypatch.setattr(suite_guard, "_local_now", lambda: datetime(2026, 11, 23, 12, 0))
+
+
+@pytest.fixture(autouse=True)
 def _fresh_linear_caches():
     """CMX-193: the Linear source's per-process caches start empty for every test.
 
@@ -479,8 +491,10 @@ def _fresh_linear_caches():
 def _no_default_sweep_blocked_hours(request, monkeypatch):
     """CMX-436: the nightly sweep's default ``sweep.blocked_hours`` (03:00-04:30) would hold off
     any test that drives the sweep at the REAL wall-clock time — a suite run at 03:xx would go
-    red. Off everywhere but the module that tests the default itself."""
-    if request.module.__name__.rsplit(".", 1)[-1] == "test_sweep_nightly_hold":
+    red. Off everywhere but the modules that test the default itself (CMX-479: the suite slot
+    reads it too)."""
+    if request.module.__name__.rsplit(".", 1)[-1] in ("test_sweep_nightly_hold",
+                                                      "test_suite_blocked_hours"):
         return
     from chela import sweep_nightly
     monkeypatch.setattr(sweep_nightly, "DEFAULT_BLOCKED_HOURS", ())

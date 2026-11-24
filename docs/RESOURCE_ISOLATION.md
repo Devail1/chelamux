@@ -320,6 +320,29 @@ run never strands a slot.
   either.
 - **Bounded.** A run waits at most 4 of its own suite timeouts. After that it is CANNOT
   VERIFY ("no suite slot came free in …"), never a pass.
+- **Not inside blocked hours** (CMX-479). No slot is granted while the local time is inside
+  the worktree's `sweep.blocked_hours` (its `WORKFLOW.md`; no `WORKFLOW.md` is the default
+  `03:00-04:30`). This holds for every run: a hand-in, a self-check, an agent's sweep and a
+  judge round. The waiter prints `⏳ blocked hours until 04:30 …`, its park says
+  "waiting for a suite slot: blocked hours until 04:30", and time spent blocked does not
+  count toward the 4-timeout bound. A battery already running when the window opens finishes
+  its current experiment and gives the slot up the same way. When the window ends, the queue
+  resumes in its usual order with no restart. `suite_slots: 0` (admission control off) is
+  not gated.
+- **A waiter the reaper killed is re-queued once** (CMX-479). On 11-23 the 03:30 nautilus
+  cron took the box to 2.7 GB available and Claude Code's low-memory reaper killed three
+  agents' runs that were only *waiting* for the slot. Six real waiters
+  measured on 11-24 peaked at 38-45 MB (113 MB for one resumed mid-battery). The reaper is
+  Claude Code's own: its notice says it stops background shells when memory is critically low
+  while the session is idle, whatever the command itself uses. There is little to trim, so
+  chela recovers instead. The re-queue relies on the agent accepting chela's message as the
+  ask to restart (the notice forbids an unasked one). A battery now records itself before it waits (`state: "waiting"`, also
+  while it waits after a yield). Once its blocked hours are over and one suite's peak of memory is
+  available, the daemon asks that run's own agent, over the peer socket, to re-run its
+  `chela task-finished` / `chela judge sweep` / `chela judge self-check` once. The re-run
+  happens in the agent's session, never in the daemon. A worktree is re-queued at most once
+  in 12 hours; a second kill, or a run with no live agent to ask, goes to the
+  stopped-runs notice below.
 
 Every `run_suite` call takes a slot, including a judge's targeted subset runs, which are
 smaller than a full suite. That is the safe side of the trade.
@@ -429,6 +452,8 @@ between two mutations exactly as it does for an agent (the rest is owed):
 The notice says which: "skipped — dispatch paused …", "skipped — inside blocked hours
 03:00-04:30 …", "yielded: dispatch paused", "yielded: blocked hours 03:00-04:30". A hand run
 (`chela judge nightly-sweep` without `--trigger`) is not held off: someone asked for it.
+Since CMX-479 it still cannot take the suite slot inside blocked hours, so it waits to start;
+one already running when the window opens runs on.
 
 **Throughput.** The notice rates the battery (mutations/hour) only above a minimum sample, 10
 mutations or 10 minutes; below it, it says "too few to rate".

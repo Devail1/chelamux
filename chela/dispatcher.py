@@ -3362,6 +3362,86 @@ def hand_in_battery(task_id: str):
 
 STOPPED_BATTERIES_KIND = "suite_runs_stopped"
 
+# ⏳ CMX-479: the batteries an agent runs itself, and the command it re-runs. Fixed text,
+# never the record's: a record lives in a directory every agent can write.
+REQUEUE_COMMANDS = {"sweep": "chela judge sweep", "self-check": "chela judge self-check",
+                    "task-finished": "chela task-finished"}
+REQUEUE_PROMPT = (
+    "🧠 chela: your `{cmd}` was killed (most likely by the low-memory reaper) while it was "
+    "WAITING for the suite slot, with no file mutated. It is outside blocked hours and memory "
+    "is back: unless you stopped it on purpose, check `git diff`, then run that same command "
+    "again now, once, exactly as you ran it (run_in_background). This is its one automatic "
+    "re-queue; if it is killed again, stop and report.")
+
+
+def _active_run_in(cwd: str) -> sqlite3.Row | None:
+    """The claimed/running run whose worktree holds ``cwd`` — None when none does."""
+    try:
+        here = Path(cwd).resolve()
+    except (OSError, RuntimeError):
+        return None
+    with _db() as conn:
+        rows = conn.execute(
+            f"SELECT * FROM runs WHERE status IN ({','.join('?' * len(ACTIVE_STATUSES))})",
+            ACTIVE_STATUSES).fetchall()
+    for row in rows:
+        if not row["worktree_path"]:
+            continue
+        wt = Path(row["worktree_path"]).resolve()
+        if here == wt or wt in here.parents:
+            return row
+    return None
+
+
+def requeue_reaped_waiters() -> list[str]:
+    """⏳ CMX-479: re-queue, ONCE, every agent battery (:data:`REQUEUE_COMMANDS`) that was
+    killed while only WAITING for the suite slot — on 11-23 the reaper took three such
+    waiters inside the nautilus window, and each sat stopped until a manual restart.
+
+    Only outside its worktree's blocked hours and with one suite's peak of memory available
+    (re-queued any earlier, the waiter would only be reaped again). The run's own agent is
+    asked to re-run its command over the peer socket, so the re-run happens in that agent's
+    session, never in this daemon's. A worktree already re-queued recently
+    (:func:`chela.suite_guard.requeued_recently`), a record without a live run or window, or
+    a send that does not land is left for :func:`notice_stopped_batteries`. Returns the
+    task ids re-queued; never raises."""
+    from chela import messenger, suite_guard
+
+    done: list[str] = []
+    try:
+        avail = suite_guard.mem_available_bytes()
+        if avail is None or avail < suite_guard.RESUME_MEM_BYTES:
+            return done
+        for path, rec in suite_guard.stopped_batteries():
+            cmd = REQUEUE_COMMANDS.get(rec.get("kind"))
+            cwd = rec.get("cwd")
+            if rec.get("state") != suite_guard.WAITING or cmd is None or not isinstance(cwd, str):
+                continue
+            if suite_guard.blocked_until(suite_guard.blocked_windows(cwd)):
+                continue
+            if suite_guard.live_battery_in(cwd):
+                path.unlink(missing_ok=True)      # its agent already re-ran it
+                continue
+            if suite_guard.requeued_recently(cwd):
+                continue
+            row = _active_run_in(cwd)
+            if row is None or not row["window_id"]:
+                continue
+            sent = messenger.send_peer(row["window_id"], "chela", REQUEUE_PROMPT.format(cmd=cmd))
+            if not sent.handed_off or sent.status in messenger.ADVERSE_RECEIPT_STATUSES:
+                log.warning("could not re-queue %s's reaped %s (%s)", row["task_id"], cmd,
+                            sent.status or "no peer socket")
+                continue
+            suite_guard.mark_requeued(cwd)
+            path.unlink(missing_ok=True)
+            done.append(row["task_id"])
+            log.warning("re-queued %s's %s — killed while waiting for the suite slot",
+                        row["task_id"], cmd)
+    except Exception:
+        log.exception("could not re-queue the reaped suite waiters")
+    return done
+
+
 
 def notice_stopped_batteries() -> dict | None:
     """🧠 CMX-393: ONE inbox notice naming every battery (sweep, self-check, judge,
@@ -3375,7 +3455,12 @@ def notice_stopped_batteries() -> dict | None:
     from chela import inbox, suite_guard
 
     try:
-        stopped = suite_guard.stopped_batteries()
+        # ⏳ CMX-479: a waiter killed inside blocked hours is not announced yet —
+        # :func:`requeue_reaped_waiters` re-queues it once they end.
+        stopped = [(path, rec) for path, rec in suite_guard.stopped_batteries()
+                   if not (rec.get("state") == suite_guard.WAITING
+                           and suite_guard.blocked_until(
+                               suite_guard.blocked_windows(str(rec.get("cwd") or "."))))]
         if not stopped or not suite_guard.resumable():
             return None
         runs = [{"worktree": Path(str(rec.get("cwd") or "?")).name,
@@ -6265,6 +6350,7 @@ def tick(workflow_path: str | Path) -> dict:
         wf.path, [wf.get("workspace", "base_branch", default=None) or "dev"],
         env={"CHELA_DIR": str(CHELA_DIR)},
     )
+    requeue_reaped_waiters()       # ⏳ CMX-479: a reaped waiter is re-queued once, first
     notice_stopped_batteries()     # 🧠 CMX-393: box-wide, so any workflow's tick may post it
     blocked = status.error is not None
     source = get_source(wf)

@@ -11,6 +11,7 @@ in the order they will be served):
   :func:`chela.config.slot_wait_any_alert_s`, repeated at most once per :data:`REPEAT_S`.
 
 A stopped waiter (a fleet pause) is listed but never reported: the operator stopped it.
+Nor is one held by its blocked hours (CMX-479): nothing is wrong, and it starts when they end.
 """
 from __future__ import annotations
 
@@ -42,7 +43,8 @@ def lines(slots: int, holders: list[dict], waiters: list[dict], now: float) -> l
     out += [f"  ▶ {label(h)}  pid {h['pid'] if h['pid'] is not None else '?'}  "
             f"held {age(h['since'])}" for h in holders]
     out += [f"  {i}. {label(w)}  rank {w['rank']}  pid {w['pid']}  waiting {age(w['since'])}"
-            + ("  (stopped)" if w["stopped"] else "") for i, w in enumerate(waiters, 1)]
+            + ("  (stopped)" if w["stopped"] else "")
+            + (f"  (blocked hours until {w['blocked_until']})" if w["blocked_until"] else "") for i, w in enumerate(waiters, 1)]
     return out
 
 
@@ -57,7 +59,7 @@ def due(store: dict, holders: list[dict], waiters: list[dict], now: float) -> li
         limit = config.slot_wait_any_alert_s()
         if w["task_rank"] in (suite_guard.RANK_URGENT, suite_guard.RANK_HIGH):
             limit = min(limit, config.slot_wait_alert_s())
-        if w["stopped"] or waited <= limit:
+        if w["stopped"] or w["blocked_until"] or waited <= limit:
             continue
         if w["cwd"] in said:          # within the last REPEAT_S
             continue
