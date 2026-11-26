@@ -383,9 +383,10 @@ def archive_tree(wid: str, *, orch_wid: str | None, dispatched: set[str],
     back."""
     first = archive_window(wid, orch_wid=orch_wid, dispatched=dispatched, pinned=pinned)
     out = [(wid, first)]
-    root = (first.record or {}).get("session_id") if first.ok else None
-    if not root:
+    if not first.ok:
         return out
+    # a success always carries the record it wrote, keyed by the session it archived
+    root = first.record["session_id"]
     kids = _children(parents)
     todo = list(kids.get(root, []))
     seen = {root}
