@@ -9,7 +9,7 @@ import logging
 import subprocess
 from collections.abc import Sequence
 
-from chela import config, envutil, probecache
+from chela import config, envutil, probecache, winsize
 from chela.config import IGNORE_WINDOWS
 
 log = logging.getLogger(__name__)
@@ -132,6 +132,7 @@ def open_window(name: str, cwd: str, command: Sequence[str] = (), *,
             if proc.returncode == 0:
                 log.info("Created tmux session '%s' with window %s", session, name)
                 envutil.scrub_tmux_secrets()   # CMX-21: and TMUX_TMPDIR, which server_env kept
+                winsize.install_gate()         # CMX-503: no client sizes a window unreadable
             elif session_exists(session):
                 proc = None    # lost the create race: the session is there now
     if proc is None:

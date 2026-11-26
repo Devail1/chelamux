@@ -29,7 +29,7 @@ from flask import abort, Flask, jsonify, render_template, request, Response, sen
 
 from chela import config
 from chela.config import DISPATCH_WORKFLOWS, CHELA_DIR, TMUX_SESSION, NOTIFY_INTERVAL
-from chela import agent_manager, capabilities, claude_account, collab, concurrency, collab_host, collab_stream, context, diffsurface, discovery, dismissed_sessions, dispatcher, epoch, event_log, fleet, gateanswer, hold, hooks, inbox, install, judge, launcher, messenger, notify, okf, parentage, park, personas, pr_status, probecache, rc_rename, restart, restore, rooms, sandbox_status, scheduler, session_names, sessionids, share_requests, share_sandbox, share_store, sidebar_archive, sidebar_layout, spawn, starter, suggest_names, tasklists, transcripts, update, usage, userconfig
+from chela import agent_manager, capabilities, claude_account, collab, concurrency, collab_host, collab_stream, context, diffsurface, discovery, dismissed_sessions, dispatcher, epoch, event_log, fleet, gateanswer, hold, hooks, inbox, install, judge, launcher, messenger, notify, okf, parentage, park, personas, pr_status, probecache, rc_rename, restart, restore, rooms, sandbox_status, scheduler, session_names, sessionids, share_requests, share_sandbox, share_store, sidebar_archive, sidebar_layout, spawn, starter, suggest_names, tasklists, transcripts, update, usage, userconfig, winsize
 from chela.dashboard import humanproof, identity, pwa, resources, term_fonts, term_themes
 from chela import topic_ledger as tg_topics
 from chela.personas import autolaunch, lease
@@ -1973,6 +1973,10 @@ def _pin_grid(wid: str, cols: int, rows: int) -> None:
     dims — so all viewers share one PTY size; each letterboxes it client-side."""
     subprocess.run(["tmux", "set-window-option", "-t", wid, "window-size", "manual"],
                    check=True, timeout=5)
+    # CMX-503: the pin is the presenter's now, not the size gate's — a client attaching must
+    # not lift it as if it were the gate's own.
+    subprocess.run(["tmux", "set-window-option", "-t", wid, "-u", "@chela-min-pin"],
+                   check=False, timeout=5)
     subprocess.run(["tmux", "resize-window", "-t", wid, "-x", str(cols), "-y", str(rows)],
                    check=True, timeout=5)
 
@@ -6958,6 +6962,9 @@ def main():
     # (and so an account switch is noticed while no dashboard is open).
     claude_account.start_background_refresh()
     collab.start()  # P3: publish running agents as presence peers (to shared viewers)
+    if config.TERMINALS_ENABLED:
+        # CMX-503: a minimized Wall tile is a one-row tmux client — never let it size a window.
+        winsize.install_gate()
     _start_share_restore()
     atexit.register(_shutdown_hosted_shares)
 

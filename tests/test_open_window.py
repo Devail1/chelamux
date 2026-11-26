@@ -120,6 +120,22 @@ def test_a_failed_create_with_the_session_still_missing_fails(tmux):
         discovery.open_window("agent", "/work", session=SESSION, check=True)
 
 
+@pytest.mark.parametrize("exists, create_rc, gates", [
+    ([False], 0, 1),            # this spawn created the session (and maybe the server)
+    ([True], 0, 0),             # a live session: its server was gated when it was made
+    ([False, True], 1, 0),      # lost the create race: the winner gates it
+])
+def test_creating_the_session_installs_the_size_gate(tmux, monkeypatch, exists, create_rc,
+                                                     gates):
+    """CMX-503: the server that holds the session never lets a tiny client size a window."""
+    from chela import winsize
+    installed = []
+    monkeypatch.setattr(winsize, "install_gate", lambda: installed.append(1) or True)
+    tmux(exists=exists, create_rc=create_rc)
+    discovery.open_window("agent", "/work", session=SESSION)
+    assert len(installed) == gates
+
+
 def test_a_missing_tmux_tmpdir_refuses_before_any_tmux_call(tmux, monkeypatch, tmp_path):
     rec = tmux(exists=[False])
     monkeypatch.setenv("TMUX_TMPDIR", str(tmp_path / "gone"))
