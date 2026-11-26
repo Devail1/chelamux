@@ -219,6 +219,20 @@ def maintenance_tick(last_capture: float, now: float,
     return now
 
 
+def restore_session_names() -> None:
+    """CMX-450: one tick of putting manual names and queued titles back by session id.
+
+    Says what it restored (one INFO line, only when there was something) and never raises:
+    a failure is logged and the daemon's tick goes on."""
+    try:
+        from chela import session_names
+        restored = session_names.restore_tick()
+        if restored:
+            log.info("Restored session names/titles: %s", "; ".join(restored))
+    except Exception:
+        log.exception("Session name/title restore failed")
+
+
 def _restore_gather() -> tuple[list, list[dict]]:
     """``(verdicts, runs)`` for :func:`chela.restore.boot_pass`, read as ``cmd_restore`` does."""
     from chela.telegram.bindings import BindingRegistry
@@ -365,13 +379,7 @@ def cmd_run(args) -> None:
             # CMX-450: a manual name and a queued title are kept by SESSION id; put them
             # back on the window a restored session now runs in (before the flush below,
             # so a re-queued title is tried on this same tick).
-            try:
-                from chela import session_names
-                restored = session_names.restore_tick()
-                if restored:
-                    log.info("Restored session names/titles: %s", "; ".join(restored))
-            except Exception:
-                log.exception("Session name/title restore failed")
+            restore_session_names()
             # CMX-434: retry every title "Suggest names" queued (a busy or blocked session):
             # typed only into an idle Claude pane with no dialog and an empty prompt.
             try:
