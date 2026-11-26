@@ -110,6 +110,30 @@ def test_negative_control_without_the_startup_restore_the_agent_starts_on_the_mu
         sweep.marker_path(root).unlink(missing_ok=True)
 
 
+def test_a_restore_before_launch_is_recorded_and_a_clean_launch_records_nothing(
+        tmp_path, monkeypatch):
+    """CMX-501: the dispatcher's ``if restored:`` — a restore before the launch leaves ONE
+    ``sweep_mutation_restored`` event naming the task; a clean worktree leaves none."""
+    (tmp_path / "wf-home").mkdir()
+    events: list[tuple] = []
+    monkeypatch.setattr(dispatcher.event_log, "append",
+                        lambda type, summary="", payload=None, **k:
+                        events.append((type, summary, payload)))
+    clean = _repo(tmp_path / "clean")
+    assert _respawn(monkeypatch, tmp_path, clean) == FEAT
+    assert [e for e in events if e[0] == "sweep_mutation_restored"] == []
+
+    root = _repo(tmp_path / "r")
+    (root / "feat.py").write_text(MUTATED)
+    _dead_marker(root)
+    assert _respawn(monkeypatch, tmp_path, root) == FEAT
+    restored = [e for e in events if e[0] == "sweep_mutation_restored"]
+    assert len(restored) == 1
+    _type, summary, payload = restored[0]
+    assert summary.startswith("t1: ") and "feat.py" in summary
+    assert payload == {"task_id": "t1", "worktree": str(root)}
+
+
 def test_a_three_way_state_refuses_the_launch_and_writes_nothing(tmp_path, monkeypatch):
     (tmp_path / "wf-home").mkdir()
     root = _repo(tmp_path / "r")

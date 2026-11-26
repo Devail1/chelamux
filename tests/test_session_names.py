@@ -7,6 +7,7 @@ per-window options; session resolution is stubbed at its seams.
 """
 from __future__ import annotations
 
+import inspect
 import json
 import subprocess
 import types
@@ -14,7 +15,7 @@ import types
 import pytest
 
 from chela import agent_manager, config, discovery, rc_rename, session_names, sessions, sessionids
-from chela import suggest_names, transcripts
+from chela import main, suggest_names, transcripts
 from chela.dashboard import app as dash
 from tests.test_suggest_names import EMPTY, _Fleet
 
@@ -404,6 +405,52 @@ def test_the_manual_flag_is_what_stops_a_second_rename(monkeypatch, tmux, rc):
     assert _tick(monkeypatch, panes, {"@7": "swim-proto"}, {SID: "@7"})
     panes["@7"] = _pane("@7", manual=True)
     assert _tick(monkeypatch, panes, {"@7": "something-else"}, {SID: "@7"}) == []
+
+
+# ---------------------------------------------------------------------------
+# The daemon's tick step (CMX-501: its `if restored:` survived the nightly sweep)
+# ---------------------------------------------------------------------------
+
+_SAID = "Restored session names/titles: "
+
+
+def test_the_daemon_step_says_what_it_restored(monkeypatch, caplog):
+    monkeypatch.setattr(session_names, "restore_tick",
+                        lambda: ["@7 name swim-proto -> tapparty", "@9 title queued 'X'"])
+    with caplog.at_level("INFO", logger=main.log.name):
+        main.restore_session_names()
+    said = [r for r in caplog.records if r.getMessage().startswith(_SAID)]
+    assert [(r.levelname, r.getMessage()) for r in said] == [
+        ("INFO", "Restored session names/titles: @7 name swim-proto -> tapparty; "
+                 "@9 title queued 'X'")]
+
+
+def test_the_daemon_step_is_silent_when_nothing_was_restored(monkeypatch, caplog):
+    monkeypatch.setattr(session_names, "restore_tick", lambda: [])
+    with caplog.at_level("DEBUG", logger=main.log.name):
+        main.restore_session_names()
+    assert [r for r in caplog.records if r.name == main.log.name] == []
+
+
+def test_the_daemon_step_logs_a_failure_and_never_raises(monkeypatch, caplog):
+    def boom():
+        raise RuntimeError("tmux gone")
+
+    monkeypatch.setattr(session_names, "restore_tick", boom)
+    with caplog.at_level("INFO", logger=main.log.name):
+        main.restore_session_names()                 # must not raise
+    assert [(r.levelname, r.getMessage()) for r in caplog.records] == [
+        ("ERROR", "Session name/title restore failed")]
+    assert "tmux gone" in caplog.text
+
+
+def test_the_daemon_tick_runs_the_restore_before_the_title_flush():
+    """Wired into ``cmd_run``'s loop, before the suggested-title flush, so a re-queued title
+    is tried on the same tick."""
+    src = inspect.getsource(main.cmd_run)
+    loop = src.index("    while not stop.stopping:")
+    call = src.index("            restore_session_names()\n")
+    assert loop < call < src.index("suggest_names.flush_pending()")
 
 
 def test_transcripts_custom_title_is_the_applied_check(monkeypatch, tmp_path):
