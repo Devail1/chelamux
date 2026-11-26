@@ -97,6 +97,54 @@ test('the toggle includes dispatched runs and judges: a fresh request', async ()
   expect(screen.getByText('No live sessions to name.')).toBeTruthy();
 });
 
+test('a reply to a superseded request is dropped: flipping the toggle mid-read ignores the old answer', async () => {
+  render(<SuggestNames />);
+  act(() => openSuggestNames());
+  fireEvent.click(screen.getByRole('switch', { name: 'Include dispatched runs and judges' }));
+  expect(pending.map(p => p.body)).toEqual([{ wids: ['@1', '@2'] }, { wids: ['@1', '@2', '@3'] }]);
+  // the first (stale) request answers late, with rows: none of them may land
+  await answer(SUGGEST, { ok: true, rows: ROWS, error: null });
+  expect(screen.getByText('Reading each session…')).toBeTruthy();
+  expect(screen.queryByRole('textbox', { name: 'New name for tetris' })).toBeNull();
+  // the current request's answer is what shows
+  await answer(SUGGEST, { ok: true, rows: [], error: null });
+  expect(screen.getByText('No live sessions to name.')).toBeTruthy();
+  expect(screen.queryByRole('textbox', { name: 'New name for tetris' })).toBeNull();
+});
+
+test('a stale request\'s failure is dropped: the current read still shows its rows', async () => {
+  render(<SuggestNames />);
+  act(() => openSuggestNames());
+  fireEvent.click(screen.getByRole('switch', { name: 'Include dispatched runs and judges' }));
+  expect(pending).toHaveLength(2);
+  const stale = pending.shift();
+  if (!stale) throw new Error('no stale request');
+  await act(async () => {
+    stale.reject(new Error('down'));
+  });
+  expect(screen.queryByRole('alert')).toBeNull();
+  expect(screen.getByText('Reading each session…')).toBeTruthy();
+  await answer(SUGGEST, { ok: true, rows: ROWS, error: null });
+  expect(input('New name for tetris').value).toBe('tipstack');
+});
+
+test('an edit touches only its own row: name, title and the apply toggle', async () => {
+  await openWith();
+  type('New name for tetris', 'blocks');
+  type('New title for tetris', 'Blocks game');
+  expect(input('New name for tetris').value).toBe('blocks');
+  expect(input('New title for tetris').value).toBe('Blocks game');
+  expect(input('New name for Mine').value).toBe('mine-api');
+  expect(input('New title for Mine').value).toBe('Mine API');
+  // checking Mine leaves tetris checked; unchecking tetris leaves Mine checked
+  const sw = (name: string) => screen.getByRole('switch', { name }).getAttribute('aria-checked');
+  fireEvent.click(screen.getByRole('switch', { name: 'Apply to Mine' }));
+  expect([sw('Apply to tetris'), sw('Apply to Mine')]).toEqual(['true', 'true']);
+  fireEvent.click(screen.getByRole('switch', { name: 'Apply to tetris' }));
+  expect([sw('Apply to tetris'), sw('Apply to Mine')]).toEqual(['false', 'true']);
+  expect(button('Apply selected (1)').disabled).toBe(false);
+});
+
 test('a duplicate name is rejected inline and blocks the apply; fixing it unblocks', async () => {
   await openWith();
   type('New name for tetris', 'cmx-9');   // the dispatched window's name, listed or not
