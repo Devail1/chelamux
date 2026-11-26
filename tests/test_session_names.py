@@ -83,6 +83,19 @@ def test_no_session_id_records_nothing():
     assert session_names.entries() == {}
 
 
+@pytest.mark.parametrize("sid", [None, ""])
+def test_no_session_id_has_no_stored_name(sid):
+    """CMX-505: a missing session id reads no name, even when the store holds a row keyed by
+    the empty string (a hand-edited or foreign file: a JSON key can be ``""``). Without the
+    guard ``name_for("")`` would hand that row's name to a restore that has no session."""
+    path = config.CHELA_DIR / "session-names.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({"": {"name": "stray", "ts": 1.0}, SID: {"name": "mine"}}))
+    assert session_names.entries()[""]["name"] == "stray"     # the row really is readable
+    assert session_names.name_for(SID) == "mine"
+    assert session_names.name_for(sid) is None
+
+
 def test_forgetting_what_was_never_stored_writes_nothing():
     assert session_names.record_title(SID, None) is True
     assert not (config.CHELA_DIR / "session-names.json").exists()
