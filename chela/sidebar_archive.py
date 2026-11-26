@@ -335,7 +335,13 @@ def archive_window(wid: str, *, orch_wid: str | None, dispatched: set[str],
                               "closing it could not be undone, so it is not archived", 409)
     if session_key(sid) in pinned:
         return Outcome(False, f"{wid} ({name}) is pinned: unpin to archive", 409)
-    cwd = (pane.origin if pane is not None else None) or discovery.get_window_cwd_by_id(wid)
+    # CMX-508: the session's OWN record of where it runs comes first — its transcript's cwd,
+    # the directory `claude --resume` looks the session up from. A live pane read is only the
+    # fallback: tmux can report a just-opened pane's path before its process has moved into
+    # the project (the server's own cwd), and a pane path moves whenever its shell `cd`s.
+    cwd = (sessions.cwd_for_session(sid)
+           or (pane.origin if pane is not None else None)
+           or discovery.get_window_cwd_by_id(wid))
     if not cwd:
         return Outcome(False, f"{wid} ({name}): its working directory cannot be read — "
                               "not archived", 409)

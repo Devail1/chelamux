@@ -32,6 +32,7 @@ from chela import sidebar_archive as sa
 from chela import spawn as spawn_mod
 from chela.telegram.bindings import BindingRegistry
 from chela.telegram.reconcile import reconcile_bindings
+from chela.transcripts import encode_cwd
 
 REPO = Path(__file__).resolve().parent.parent
 TMUX_BIN = shutil.which("tmux")
@@ -92,7 +93,17 @@ def live(tmp_path):
         CHELA_ENV_FILE="",
         CHELA_TELEGRAM_BINDINGS=str(chela_dir / "telegram-bindings.json"),
         PYTHONPATH=str(REPO),
+        # the transcript tree the archive reads a session's cwd from — never the real ~/.claude
+        CLAUDE_CONFIG_DIR=str(tmp_path / "claude-config"),
     )
+
+    def transcript(sid, cwd):
+        """What Claude Code writes for a session launched in ``cwd``: its transcript, in the
+        project dir ``cwd`` encodes to, every record carrying that ``cwd``."""
+        d = tmp_path / "claude-config" / "projects" / encode_cwd(str(cwd))
+        d.mkdir(parents=True, exist_ok=True)
+        (d / f"{sid}.jsonl").write_text(json.dumps(
+            {"type": "user", "sessionId": sid, "cwd": str(cwd)}) + "\n")
 
     def tmux(*args, check=True):
         return subprocess.run([TMUX_BIN, "-L", sock, *args], env=env,
@@ -118,6 +129,7 @@ def live(tmp_path):
                "-P", "-F", "#{window_id}", "sleep 600").stdout.strip()
     ns = type("Live", (), {})()
     ns.tmux, ns.run, ns.windows, ns.wid = tmux, run, windows, wid
+    ns.transcript, ns.tmp = transcript, tmp_path
     ns.chela_dir, ns.project, ns.launches = chela_dir, project, launches
     yield ns
     tmux("kill-server", check=False)
@@ -131,6 +143,7 @@ def _store(chela_dir: Path) -> dict:
 def test_archive_closes_an_idle_session_and_unarchive_resumes_it_in_a_new_window(live):
     (live.chela_dir / "telegram-bindings.json").write_text(json.dumps(
         {"chat_id": "1", "bindings": {live.wid: "77"}}))
+    live.transcript(SID, live.project)
 
     out = live.run("archive", live.wid, SID)
     assert out["ok"], out
@@ -143,17 +156,19 @@ def test_archive_closes_an_idle_session_and_unarchive_resumes_it_in_a_new_window
 
     back = live.run("unarchive", f"s:{SID}")
     assert back["ok"], back
-    new = {w: (n, p) for w, n, p in live.windows()}
-    assert back["wid"] in new and back["wid"] != live.wid
-    name, path = new[back["wid"]]
-    assert name == "mywin", "same window name"
-    assert os.path.realpath(path) == os.path.realpath(live.project), "same cwd"
+    # CMX-508: wait on the STATE — the resumed claude has launched — never on timing. Until
+    # then tmux may report the new pane's path before its process has moved into the project.
     deadline = time.time() + 10
     while time.time() < deadline and not (live.launches.exists() and live.launches.read_text()):
         time.sleep(0.1)
     if not live.launches.exists():
         pane = live.tmux("capture-pane", "-p", "-t", back["wid"]).stdout
         raise AssertionError(f"claude never launched; pane:\n{pane}")
+    new = {w: (n, p) for w, n, p in live.windows()}
+    assert back["wid"] in new and back["wid"] != live.wid
+    name, path = new[back["wid"]]
+    assert name == "mywin", "same window name"
+    assert os.path.realpath(path) == os.path.realpath(live.project), "same cwd"
     launched = live.launches.read_text().strip().splitlines()
     assert len(launched) == 1, launched
     cwd, argv = launched[0].split("|", 1)
@@ -176,6 +191,29 @@ def test_archive_with_no_resolvable_session_id_is_refused_and_the_window_is_unto
         not _store(live.chela_dir)["sessions"], "no resume record for a refused archive"
 
 
+def test_archive_records_the_transcripts_cwd_while_the_pane_has_not_reached_the_project(live):
+    """CMX-508 negative control: a pane whose process has NOT yet moved into the project —
+    it starts in another folder (as the tmux server's own cwd would show) and only ``cd``s
+    after a delay — must still be archived under the project the session's transcript names.
+    Reading the live pane path, the archive recorded the other folder and the resume would
+    have relaunched the session where its transcript cannot be found."""
+    elsewhere = live.tmp / "checkout"
+    elsewhere.mkdir()
+    wid = live.tmux("new-window", "-t", f"{SESSION}:", "-n", "late", "-c", str(elsewhere),
+                    "-P", "-F", "#{window_id}",
+                    f"sleep 300; cd {shlex.quote(str(live.project))} && exec sleep 600"
+                    ).stdout.strip()
+    live.transcript(SID2, live.project)
+    paths = {w: p for w, _, p in live.windows()}
+    assert os.path.realpath(paths[wid]) == os.path.realpath(elsewhere), \
+        "precondition: the pane still reports the folder it started in"
+
+    out = live.run("archive", wid, SID2)
+    assert out["ok"], out
+    rec = _store(live.chela_dir)["sessions"][f"s:{SID2}"]
+    assert os.path.realpath(rec["cwd"]) == os.path.realpath(live.project)
+
+
 # --- the refusals, in-process ------------------------------------------------------------
 
 @pytest.fixture
@@ -187,6 +225,8 @@ def facts(monkeypatch, tmp_path):
     monkeypatch.setattr(discovery, "get_windows_by_id", lambda: {"@5": "proj", "@1": "orch"})
     monkeypatch.setattr(discovery, "get_window_cwd_by_id", lambda wid: str(tmp_path))
     monkeypatch.setattr(sessions, "panes", lambda force=False: {})
+    # no transcript names a cwd (and the real ~/.claude is never read)
+    monkeypatch.setattr(sessions, "cwd_for_session", lambda sid, base=None: None)
     monkeypatch.setattr(sa, "window_status", lambda wid: (True, "idle"))
     monkeypatch.setattr(sa, "resolve_session_id", lambda wid, pane=None: SID)
     monkeypatch.setattr(sa, "_rc_name", lambda wid, name: None)
@@ -729,6 +769,33 @@ def test_the_archive_route_sweeps_out_a_session_resumed_by_hand(client, monkeypa
 def test_a_window_that_is_not_live_is_refused(facts):
     out = sa.archive_window("@99", orch_wid="@1", dispatched=set())
     assert not out.ok and out.status == 404 and facts == [] and _no_record()
+
+
+def test_the_archived_cwd_is_the_transcripts_then_the_panes_origin_then_the_live_path(
+        facts, monkeypatch, tmp_path):
+    """CMX-508: the session's own transcript names its cwd first; the pane's origin and then
+    the live ``#{pane_current_path}`` read are fallbacks, each only when the one above says
+    nothing."""
+    from chela import discovery, sessions
+
+    asked: list[str] = []
+    transcript, origin, live_path = (str(tmp_path / d) for d in ("t", "o", "l"))
+    monkeypatch.setattr(sessions, "cwd_for_session",
+                        lambda sid, base=None: asked.append(sid) or transcript)
+    monkeypatch.setattr(sessions, "panes", lambda force=False: {
+        "@5": sessions.Pane("@5", path=origin)})
+    monkeypatch.setattr(discovery, "get_window_cwd_by_id", lambda wid: live_path)
+
+    assert sa.archive_window("@5", orch_wid="@1", dispatched=set()).record["cwd"] == transcript
+    assert asked == [SID], "the transcript asked about is the archived session's own"
+
+    sa._save({"sessions": {}, "hidden": {}})
+    monkeypatch.setattr(sessions, "cwd_for_session", lambda sid, base=None: None)
+    assert sa.archive_window("@5", orch_wid="@1", dispatched=set()).record["cwd"] == origin
+
+    sa._save({"sessions": {}, "hidden": {}})
+    monkeypatch.setattr(sessions, "panes", lambda force=False: {})
+    assert sa.archive_window("@5", orch_wid="@1", dispatched=set()).record["cwd"] == live_path
 
 
 def test_an_unreadable_working_directory_is_refused(facts, monkeypatch):
