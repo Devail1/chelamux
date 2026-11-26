@@ -294,6 +294,35 @@ def test_an_unsent_draft_or_an_unreadable_prompt_is_never_typed_over(draft, why)
     assert (r.outcome, r.detail, f.keys, f.relaunched) == ("refused", why, [], [])
 
 
+def test_a_window_too_small_to_read_is_refused_saying_how_tall_it_is():
+    """CMX-503: not just "could not be read" — the operator is told the window is 1 row."""
+    f = _one()
+    asked = []
+    ops = f.ops()
+    ops.readable = lambda w: asked.append(w) or "window is 1 row tall (66x1), and 1 attached client keeps it that size"
+    ops.draft = lambda w: asked.append(("draft", w)) or ""
+    r = restart.restart_one("@3", ops)
+    assert (r.outcome, r.detail) == (
+        "refused", "its prompt could not be read: window is 1 row tall (66x1), and 1 attached "
+                   "client keeps it that size — not typing /exit blind")
+    assert (f.keys, f.relaunched, asked) == ([], [], ["@3"])   # never read, never typed
+
+
+def test_the_window_is_made_readable_before_its_prompt_is_read():
+    f = _one()
+    order = []
+    ops = f.ops()
+    ops.readable = lambda w: order.append(("readable", w)) or None
+    ops.draft = lambda w: order.append(("draft", w)) or ""
+    r = restart.restart_one("@3", ops)
+    assert r.outcome == "restarted"
+    assert order == [("readable", "@3"), ("draft", "@3")]
+
+
+def test_the_default_readable_seam_lets_the_prompt_decide():
+    assert restart.Ops.__dataclass_fields__["readable"].default("@3") is None
+
+
 def test_the_draft_is_read_with_escapes_so_ghost_text_reads_empty(monkeypatch):
     from chela import messenger
     seen = []
@@ -646,6 +675,8 @@ def test_live_ops_wires_restore_s_relaunch_core_and_inbox_register(monkeypatch):
     assert ops.relaunch is restore.relaunch_session
     assert ops.kill_window is restore._default_kill_window
     assert (ops.draft, ops.exited, ops.status) == (restart._draft, restart._exited, restart._native_status)
+    from chela import winsize
+    assert ops.readable is winsize.ensure_readable     # CMX-503
     assert ops.orchestrator() == "@2"
     ops.register_orchestrator("@90")
     assert calls == [("@90", "restart")]

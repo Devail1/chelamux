@@ -396,6 +396,10 @@ def test_a_yielded_holder_re_queues_at_its_runs_rank_and_claim(box, monkeypatch)
         seen["wait"] = _until(lambda: _ledger_of(box, wt), "the yielded wait")
         _set_priority("CMX-473", 2)
         _until(lambda: _ledger_of(box, wt)["rank"] == 2, "the re-rank")
+        # CMX-507: the yield hands the slot over, but the judge claims it on its own thread —
+        # on a slow runner it is still an open wait here. Snapshot once it holds the slot.
+        _until(lambda: _ledger_of(box, judged) is None
+               and [h["name"] for h in suite_guard.held()] == ["CMX-1"], "the judge's claim")
         seen["queued"] = suite_guard.queued()
         release.set()
     w = threading.Thread(target=watch, daemon=True)
