@@ -2032,13 +2032,26 @@ def test_the_run_record_keeps_other_workflows_and_replaces_a_torn_one(tmp_path):
     runs = chela / "sweep-nightly" / "runs.json"
     runs.parent.mkdir(parents=True)
     runs.write_text(json.dumps({"/other/WORKFLOW.md": {"at": 1.0}}))
-    _run(repo, chela, Filer(), now=5.0)
+    now = 2_000_000_000.0     # a real clock (CMX-499), long after every commit
+    _run(repo, chela, Filer(), now=now)
     key = str((repo / "WORKFLOW.md").resolve())
     assert _runs(chela) == {"/other/WORKFLOW.md": {"at": 1.0},
-                            key: {"at": 5.0, "status": "skipped", "reason": "no_merges"}}
+                            key: {"at": now, "status": "skipped", "reason": "no_merges"}}
     runs.write_text("torn{")
-    _run(repo, chela, Filer(), now=6.0)
-    assert _runs(chela) == {key: {"at": 6.0, "status": "skipped", "reason": "no_merges"}}
+    _run(repo, chela, Filer(), now=now + 1)
+    assert _runs(chela) == {key: {"at": now + 1, "status": "skipped", "reason": "no_merges"}}
+
+
+@pytest.mark.parametrize("now", [5.0, 100_000_000 + sweep_nightly.WINDOW_SECONDS - 1])
+def test_a_clock_before_1973_is_cannot_verify_not_no_merges(tmp_path, now):
+    """CMX-499: a window starting below git's epoch floor can't be read — git would take
+    `--since=@N` as a fuzzy date. Unknown is not "no merges"."""
+    repo, chela = _repo(tmp_path), tmp_path / "chela"
+    filer = Filer()
+    res = _run(repo, chela, filer, now=now)
+    assert (res["status"], filer.calls) == ("cannot_verify", [])
+    assert res["why"] == (f"could not read origin/dev: since={now - 86400!r} is below "
+                          "100000000: git would not read --since=@N as epoch seconds")
 
 
 def test_a_run_record_that_cannot_be_written_is_logged_never_raised(tmp_path, monkeypatch,

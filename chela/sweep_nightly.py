@@ -1659,7 +1659,7 @@ def _run(wf, now: float, chela_dir: Path, filer: Filer | None, result: dict,
         head = _git(repo, "rev-parse", "--verify", f"{ref}^{{commit}}").strip()
         since = window_start(wf, now, chela_dir)
         commits = merged_commits(repo, head, since, wf)
-    except _Git as e:
+    except (_Git, ValueError) as e:     # ValueError: a clock before git's epoch floor
         result.update(status=CANNOT_VERIFY, why=f"could not read {ref}: {e}")
         return
     standard = [c for c in commits if c["tier"] == risktier.STANDARD]
