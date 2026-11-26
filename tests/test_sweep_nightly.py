@@ -448,8 +448,9 @@ def test_the_log_is_bounded_by_the_window_start(tmp_path, monkeypatch):
     real = sweep_nightly._git
     monkeypatch.setattr(sweep_nightly, "_git", lambda cwd, *a, **k: seen.append(a) or
                         real(cwd, *a, **k))
-    sweep_nightly.merged_commits(repo, "HEAD", 1234.9, load_workflow(repo / "WORKFLOW.md"))
-    assert seen[0] == ("log", "--first-parent", "--since=@1234",
+    sweep_nightly.merged_commits(repo, "HEAD", 1234567890.9,
+                                 load_workflow(repo / "WORKFLOW.md"))
+    assert seen[0] == ("log", "--first-parent", "--since=@1234567890",
                        "--format=%H%x1f%ct%x1f%P%x1f%s", "HEAD", "--")
 
 
@@ -494,10 +495,30 @@ def test_a_root_commit_in_the_window_is_diffed_against_the_empty_tree(tmp_path):
     (root / "pkg").mkdir()
     (root / "pkg" / "b.py").write_text("B = 2\n")
     _git(root, "add", "-A")
-    _git(root, "commit", "-qm", "root (#1)")
-    got = sweep_nightly.merged_commits(root, "HEAD", 0, wf)
+    _git(root, "commit", "-qm", "root (#1)", date=OLD)
+    got = sweep_nightly.merged_commits(root, "HEAD", datetime.fromisoformat(OLD).timestamp(), wf)
     assert len(got) == 1 and sorted(got[0]["files"]) == ["a.py", "pkg/b.py"]
     assert got[0]["introduced"] == [got[0]["sha"]] and got[0]["tier"] == "standard"
+
+
+def test_git_reads_a_small_since_as_a_fuzzy_date_so_merged_commits_refuses_it(tmp_path):
+    """CMX-499: git reads `--since=@0` as NOW, not 1970 — so a commit dated well in the past
+    is missed. ``merged_commits`` refuses such a ``since`` instead of returning nothing."""
+    wf = load_workflow(_repo(tmp_path / "w") / "WORKFLOW.md")
+    repo = tmp_path / "r"
+    repo.mkdir()
+    _git(repo, "init", "-q", "-b", "dev")
+    (repo / "a.py").write_text("A = 1\n")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-qm", "old (#1)", date=OLD)
+    # Negative control: the raw git behaviour the guard exists for.
+    assert _git(repo, "log", "--since=@0", "--format=%s", "HEAD") == ""
+    assert _git(repo, "log", "--since=@100000000", "--format=%s", "HEAD") == "old (#1)"
+    for small in (0, 1, 99_999_999, 99_999_999.9):
+        with pytest.raises(ValueError, match="below 100000000"):
+            sweep_nightly.merged_commits(repo, "HEAD", small, wf)
+    assert [c["subject"] for c in sweep_nightly.merged_commits(repo, "HEAD", 100_000_000, wf)
+            ] == ["old (#1)"]
 
 
 def test_the_empty_tree_constant_is_gits_empty_tree(tmp_path):
@@ -515,7 +536,8 @@ def test_blamed_lines_are_the_final_line_numbers_and_their_origin(tmp_path):
     repo = _repo(tmp_path, prs=prs)
     head = _git(repo, "rev-parse", "HEAD")
     wf = load_workflow(repo / "WORKFLOW.md")
-    commits = sweep_nightly.merged_commits(repo, head, 1, wf)
+    commits = sweep_nightly.merged_commits(
+        repo, head, datetime.fromisoformat(OLD).timestamp() + 1, wf)
     pr1 = [c for c in commits if c["tier"] == risktier.STANDARD and c["sha"] != head]
     assert [c["subject"] for c in pr1] == ["PR 1 (#1)"]
     lines, origin = sweep_nightly.blamed_lines(repo, pr1)
@@ -2010,13 +2032,26 @@ def test_the_run_record_keeps_other_workflows_and_replaces_a_torn_one(tmp_path):
     runs = chela / "sweep-nightly" / "runs.json"
     runs.parent.mkdir(parents=True)
     runs.write_text(json.dumps({"/other/WORKFLOW.md": {"at": 1.0}}))
-    _run(repo, chela, Filer(), now=5.0)
+    now = 2_000_000_000.0     # a real clock (CMX-499), long after every commit
+    _run(repo, chela, Filer(), now=now)
     key = str((repo / "WORKFLOW.md").resolve())
     assert _runs(chela) == {"/other/WORKFLOW.md": {"at": 1.0},
-                            key: {"at": 5.0, "status": "skipped", "reason": "no_merges"}}
+                            key: {"at": now, "status": "skipped", "reason": "no_merges"}}
     runs.write_text("torn{")
-    _run(repo, chela, Filer(), now=6.0)
-    assert _runs(chela) == {key: {"at": 6.0, "status": "skipped", "reason": "no_merges"}}
+    _run(repo, chela, Filer(), now=now + 1)
+    assert _runs(chela) == {key: {"at": now + 1, "status": "skipped", "reason": "no_merges"}}
+
+
+@pytest.mark.parametrize("now", [5.0, 100_000_000 + sweep_nightly.WINDOW_SECONDS - 1])
+def test_a_clock_before_1973_is_cannot_verify_not_no_merges(tmp_path, now):
+    """CMX-499: a window starting below git's epoch floor can't be read — git would take
+    `--since=@N` as a fuzzy date. Unknown is not "no merges"."""
+    repo, chela = _repo(tmp_path), tmp_path / "chela"
+    filer = Filer()
+    res = _run(repo, chela, filer, now=now)
+    assert (res["status"], filer.calls) == ("cannot_verify", [])
+    assert res["why"] == (f"could not read origin/dev: since={now - 86400!r} is below "
+                          "100000000: git would not read --since=@N as epoch seconds")
 
 
 def test_a_run_record_that_cannot_be_written_is_logged_never_raised(tmp_path, monkeypatch,
