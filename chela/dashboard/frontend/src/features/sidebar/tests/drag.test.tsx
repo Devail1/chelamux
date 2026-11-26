@@ -45,6 +45,9 @@ test('placeGroup: Dispatched stays last, never moves, and a drop that changes no
   expect(placeGroup(keys, [], DISPATCHED_KEY, '/a')).toBeNull();
   expect(placeGroup(keys, [], '/a', '/a')).toBeNull();
   expect(placeGroup(keys, [], '/a', '/b')).toBeNull(); // already just before /b
+  // a drop before a group further down lands just above it, not at the top
+  expect(placeGroup(['/a', '/b', '/c', DISPATCHED_KEY], [], '/a', '/c'))
+    .toEqual(['/b', '/a', '/c', DISPATCHED_KEY]);
   expect(placeGroup(['/a', '/b'], [], '/b', null)).toBeNull(); // already last
   expect(placeGroup(keys, [], '/zz', '/a')).toBeNull();
   expect(placeGroup(keys, [], '/a', '/zz')).toBeNull();

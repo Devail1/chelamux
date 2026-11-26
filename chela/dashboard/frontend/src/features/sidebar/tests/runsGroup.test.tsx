@@ -129,6 +129,11 @@ test('placeGroup with Runs on top: a group dropped before Runs lands first below
     .toEqual([DISPATCHED_KEY, customKey('b'), customKey('a'), UNGROUPED_KEY]);
   expect(placeGroup(keys, [], customKey('a'), DISPATCHED_KEY)).toBeNull(); // already first below it
   expect(placeGroup(keys, [], DISPATCHED_KEY, null)).toBeNull();
+  // a drop before a group further down lands just above THAT group, not first below Runs
+  expect(placeGroup(keys, [], customKey('a'), UNGROUPED_KEY))
+    .toEqual([DISPATCHED_KEY, customKey('b'), customKey('a'), UNGROUPED_KEY]);
+  expect(placeGroup([...keys, '/x'], [], '/x', UNGROUPED_KEY))
+    .toEqual([DISPATCHED_KEY, customKey('a'), customKey('b'), '/x', UNGROUPED_KEY]);
   // no pinned group at all: a plain list
   expect(placeGroup(['/a', '/b'], [], '/b', '/a')).toEqual(['/b', '/a']);
 });
