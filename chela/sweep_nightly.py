@@ -150,6 +150,8 @@ STATE_DIR_NAME = "sweep-nightly"
 FLEET_PAUSE_FILE = "fleet-pause.json"      # chela.fleet.STATE_FILE_NAME (CMX-214)
 GIT_TIMEOUT = 120
 EMPTY_TREE = "4b825dc642cb6eb9a060e54bf8d69288fbee4904"
+# The smallest `--since=@N` git reads as epoch seconds (1973-03-03); below it N is a fuzzy date.
+MIN_SINCE = 100_000_000
 KEEP_DAYS = 14            # dated red-baseline evidence dirs kept; older ones are pruned
 
 SURVIVORS, CLEAN, SKIPPED, CANNOT_VERIFY = "survivors", "clean", "skipped", "cannot_verify"
@@ -759,7 +761,13 @@ def _git(cwd: Path, *args: str, ok=(0,)) -> str:
 def merged_commits(repo: Path, ref: str, since: float, wf) -> list[dict]:
     """Each first-parent commit on ``ref`` committed at or after ``since``: ``{sha, subject,
     tier, files, introduced}`` — ``introduced`` is every commit it brought in (itself, or a
-    merge's whole side branch). Raises :class:`_Git` on any read that fails."""
+    merge's whole side branch). Raises :class:`_Git` on any read that fails, and
+    :class:`ValueError` for a ``since`` below :data:`MIN_SINCE`."""
+    if since < MIN_SINCE:
+        # git reads a small `--since=@N` as a fuzzy date, not epoch seconds: `@0` is NOW
+        # (and finds nothing), `@1` is some weeks back (CMX-499). Refuse rather than guess.
+        raise ValueError(f"since={since!r} is below {MIN_SINCE}: git would not read "
+                         "--since=@N as epoch seconds")
     out = []
     log_out = _git(repo, "log", "--first-parent", f"--since=@{int(since)}",
                    "--format=%H%x1f%ct%x1f%P%x1f%s", ref, "--")
