@@ -164,3 +164,31 @@ def test_record_failure_refuses_a_falsy_session_id(resume_state):
     assert resume_state._load() == {}, (
         "a refused call must record nothing at all, not a row keyed on an empty/None id"
     )
+
+
+# --------------------------------------------------------------------------
+# GUARD (CMX-505): the readers and `clear` treat a falsy session id as "no record", even
+# when the store holds a row keyed by the empty string (a hand-edited or foreign file: a
+# JSON key can be ``""``). Without the guards that row would count against, block, or be
+# deleted by a call that names no session at all.
+# --------------------------------------------------------------------------
+
+STRAY = {"": {"tries": 3, "reason": "stray row"}, "sid-1": {"tries": 1, "reason": "mine"}}
+
+
+def test_an_empty_session_id_has_no_tries(resume_state):
+    resume_state._save(STRAY)
+    assert resume_state.tries("sid-1") == 1
+    assert resume_state.tries("") == 0
+
+
+def test_an_empty_session_id_is_never_blocked(resume_state):
+    resume_state._save(STRAY)
+    assert resume_state.blocked_reason("sid-1") == "mine"
+    assert resume_state.blocked_reason("") is None
+
+
+def test_clearing_an_empty_session_id_drops_nothing(resume_state):
+    resume_state._save(STRAY)
+    resume_state.clear("")
+    assert resume_state._load() == STRAY
