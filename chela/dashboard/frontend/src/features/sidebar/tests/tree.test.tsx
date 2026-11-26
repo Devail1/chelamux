@@ -303,6 +303,21 @@ describe('the list', () => {
     expect(box.querySelector('.tree-kids .session-row.nested')?.getAttribute('data-item')).toBe('s:S-C1');
   });
 
+  test('an archived parent wears the chevron, and a click folds its subtree by the SESSION key', () => {
+    const sessions: SessionRecord[] = [
+      { key: 's:S-P', name: 'P', session_id: 'S-P', parent_session_id: null, archived_at: 2 },
+      { key: 's:S-C1', name: 'C1', session_id: 'S-C1', parent_session_id: 'S-P', archived_at: 1 },
+    ];
+    const { el, acts } = draw([win('other')], { sessions, collapsed: ['~archived:open'] });
+    const rec = (k: string) => el.querySelector(`.side-archived .session-row[data-item="${k}"]`) as HTMLElement;
+    const toggle = rec('s:S-P').querySelector('.tree-toggle') as HTMLElement;
+    expect([toggle?.tagName, toggle?.getAttribute('aria-expanded'), toggle?.getAttribute('aria-label'), toggle?.textContent])
+      .toEqual(['BUTTON', 'true', 'Hide 1 child session', '1']);
+    expect(rec('s:S-C1').querySelector('.tree-toggle')).toBeNull();
+    fireEvent.click(toggle);
+    expect(acts.toggleGroup.mock.calls).toEqual([['~tree:s:S-P']]);
+  });
+
   test('visibleRows: a folded parent hides its subtree', () => {
     const m = model(family());
     const roots = m.groups.flatMap(g => g.items);

@@ -364,7 +364,8 @@ def test_a_window_key_routes_to_archive_window_with_the_dispatched_set(client, m
 
     def fake(wid, *, orch_wid, dispatched, pinned=frozenset()):
         seen.update(wid=wid, dispatched=dispatched)
-        return sa.Outcome(True, record={"key": f"s:{SID}"}, wid=wid)
+        # the record archive_window writes always carries the session it archived
+        return sa.Outcome(True, record={"key": f"s:{SID}", "session_id": SID}, wid=wid)
     monkeypatch.setattr(sa, "archive_window", fake)
     body = client.app.test_client().post("/api/sidebar/archive", json={"keys": ["w:@5"]}).get_json()
     assert body["archived"] == [f"s:{SID}"] and body["closed"] == ["@5"]
