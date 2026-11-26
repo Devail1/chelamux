@@ -47,7 +47,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
 
-from chela import config, discovery, dispatcher, restore, sessions
+from chela import config, discovery, dispatcher, restore, sessions, winsize
 
 log = logging.getLogger(__name__)
 
@@ -116,6 +116,9 @@ class Ops:
     register_orchestrator: Callable[[str], dict]
     sleep: Callable[[float], None] = time.sleep
     clock: Callable[[], float] = time.monotonic
+    # CMX-503: wid -> None once the window is big enough to read (an undersized one no client
+    # views is resized first), else why not ("window is 1 row tall (66x1), …").
+    readable: Callable[[str], str | None] = lambda wid: None
 
 
 def claimed_by_run(wid: str, cwd: str | None, runs: list[dict]) -> str | None:
@@ -180,6 +183,12 @@ def restart_one(wid: str, ops: Ops, *, wait_idle: float = 0.0,
 
     # An idle session can still hold a half-typed prompt: `/exit` typed after it would be
     # appended and SUBMITTED as one turn. Unreadable is not "empty" — refuse both.
+    # CMX-503: a window a one-row client left 66x1 shows no prompt at all — size it first,
+    # and when that is not ours to do, say so rather than just "could not be read".
+    too_small = ops.readable(wid)
+    if too_small:
+        res.detail = f"its prompt could not be read: {too_small} — not typing /exit blind"
+        return res
     draft = ops.draft(wid)
     if draft is None or draft:
         res.detail = ("its prompt holds an unsent draft — not typing /exit over it"
@@ -431,6 +440,7 @@ def live_ops() -> Ops:
         draft=_draft,
         orchestrator=lambda: inbox.load().get("orchestrator"),
         register_orchestrator=lambda w: inbox.register(w, source="restart"),
+        readable=winsize.ensure_readable,
     )
 
 
