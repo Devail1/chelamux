@@ -64,6 +64,28 @@ def _nothing_stale(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _no_real_git(monkeypatch):
+    """CMX-509: no test here may read the real checkout. An unstubbed `commits_behind`
+    reads THIS repo's `HEAD..@{u}`, so the answer depends on where the CI checkout's
+    upstream ref happens to stand: dev CI 11-26 saw it 1 commit behind (a PR merged
+    mid-run) and `test_unread_service_freshness_refuses…` took the pull arm, 200 not 503.
+
+    Every git call `chela.update` makes goes through its `_git`, so a stand-in that
+    records and raises makes a forgotten stub fail by name. The teardown check is what
+    makes it loud: a route that catches the raise would otherwise answer 500 or "could
+    not read" and a test asserting a refusal could still pass."""
+    calls = []
+
+    def _refuse(repo, *args, **kwargs):
+        calls.append(args)
+        raise AssertionError(f"real `git {' '.join(args)}` from a test — stub commits_behind")
+
+    monkeypatch.setattr(update, "_git", _refuse)
+    yield
+    assert calls == [], f"a test ran real git against the checkout: {calls}"
+
+
+@pytest.fixture(autouse=True)
 def _reset_lock():
     # The lock (and its start-time sidecar) are process-global module state — start and
     # end every test unlocked/unset regardless of what a previous test's background
@@ -556,7 +578,14 @@ def test_a_readable_checkout_still_succeeds(client, monkeypatch, surface):
 # --- CMX-95: the outcome a page can poll for, and unread is never "up to date" ----------
 
 def test_unread_service_freshness_refuses_instead_of_saying_up_to_date(client, monkeypatch):
-    """Nothing to pull + a freshness check that could not answer: refuse, restart nothing."""
+    """Nothing to pull + a freshness check that could not answer: refuse, restart nothing.
+
+    "Nothing to pull" is stubbed, not read off this checkout (CMX-509): left to the real
+    `HEAD..@{u}`, a CI checkout one commit behind took the pull arm and answered 200."""
+    monkeypatch.setattr(update, "commits_behind",
+                        lambda *a, **k: update.UpdateStatus(ok=True, behind=0, ahead=0, branch="dev"))
+    applied = []
+    monkeypatch.setattr(update, "apply", lambda *a, **k: applied.append("apply"))
     monkeypatch.setattr(update, "services_running_stale_code",
                         lambda *a, **k: update.ServiceFreshness(ok=False, error="pm2 jlist failed"))
     calls = []
@@ -566,6 +595,7 @@ def test_unread_service_freshness_refuses_instead_of_saying_up_to_date(client, m
     assert resp.get_json() == {"ok": False, "error": "could not read which services run old "
                                "code — check `chela doctor` / `pm2 ls`"}
     assert calls == []
+    assert applied == [], "the refusal arm must not pull either"
 
 
 def _wait_status(client, run, timeout=3):
