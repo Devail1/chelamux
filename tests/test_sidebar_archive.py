@@ -194,21 +194,41 @@ def test_archive_with_no_resolvable_session_id_is_refused_and_the_window_is_unto
 def test_archive_records_the_transcripts_cwd_while_the_pane_has_not_reached_the_project(live):
     """CMX-508 negative control: a pane whose process has NOT yet moved into the project —
     it starts in another folder (as the tmux server's own cwd would show) and only ``cd``s
-    after a delay — must still be archived under the project the session's transcript names.
+    once released — must still be archived under the project the session's transcript names.
     Reading the live pane path, the archive recorded the other folder and the resume would
-    have relaunched the session where its transcript cannot be found."""
+    have relaunched the session where its transcript cannot be found.
+
+    CMX-512: no timer. The pane's shell writes a ready marker from the start folder, then
+    blocks opening a FIFO until the test releases it, so the pane provably sits in the start
+    folder for the whole check-and-archive. (Reading the path straight after ``new-window``
+    raced the pane's own fork→chdir, and a slow runner saw the server's cwd instead.)"""
     elsewhere = live.tmp / "checkout"
     elsewhere.mkdir()
+    ready, release = live.tmp / "late.ready", live.tmp / "late.release"
+    os.mkfifo(release)
     wid = live.tmux("new-window", "-t", f"{SESSION}:", "-n", "late", "-c", str(elsewhere),
                     "-P", "-F", "#{window_id}",
-                    f"sleep 300; cd {shlex.quote(str(live.project))} && exec sleep 600"
+                    f": > {shlex.quote(str(ready))}; read _ < {shlex.quote(str(release))}; "
+                    f"cd {shlex.quote(str(live.project))} && exec sleep 600"
                     ).stdout.strip()
     live.transcript(SID2, live.project)
-    paths = {w: p for w, _, p in live.windows()}
-    assert os.path.realpath(paths[wid]) == os.path.realpath(elsewhere), \
-        "precondition: the pane still reports the folder it started in"
+    deadline = time.time() + 10
+    while time.time() < deadline and not ready.exists():
+        time.sleep(0.05)
+    assert ready.exists(), "the pane's shell never started: " + \
+        live.tmux("capture-pane", "-p", "-t", wid, check=False).stdout
+    try:
+        paths = {w: p for w, _, p in live.windows()}
+        assert wid in paths, f"the pane exited before the archive: {paths}"
+        assert os.path.realpath(paths[wid]) == os.path.realpath(elsewhere), \
+            "precondition: the pane still reports the folder it started in"
 
-    out = live.run("archive", wid, SID2)
+        out = live.run("archive", wid, SID2)
+    finally:
+        try:  # release the pane; ENXIO = no reader left, i.e. the archive already closed it
+            os.close(os.open(release, os.O_WRONLY | os.O_NONBLOCK))
+        except OSError:
+            pass
     assert out["ok"], out
     rec = _store(live.chela_dir)["sessions"][f"s:{SID2}"]
     assert os.path.realpath(rec["cwd"]) == os.path.realpath(live.project)
