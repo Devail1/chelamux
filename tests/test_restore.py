@@ -969,6 +969,7 @@ def _resume_kit(**overrides):
     kit["record_resume_failure"] = lambda session_id, reason: 1
     kit["clear_resume_failure"] = lambda session_id: None
     kit["kill_window"] = lambda wid: None
+    kit["windows_running"] = lambda session_id: []     # CMX-511: nothing else runs it
     kit.update(overrides)
     return calls, kit
 

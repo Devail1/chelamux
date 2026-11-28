@@ -451,6 +451,12 @@ def _default_check_resumed(wid: str | None, session_id: str, *,
     return False
 
 
+def _default_windows_running(session_id: str) -> list[str]:
+    """CMX-511: the live windows running ``session_id`` NOW, from a fresh pane read (never
+    the 1s cache, which can predate a ``/resume`` seconds ago)."""
+    return sessions.wids_running_session(session_id, sessions.panes(force=True))
+
+
 def _default_kill_window(wid: str) -> None:
     """Issue #473: close a window :func:`resume` itself just opened, after its liveness
     check concludes ``claude --resume`` never came up alive in it.
@@ -665,6 +671,7 @@ def resume(verdicts: list[Verdict], runs: list[dict] | None = None, *,
            replay_settings=None,
            name_for=None,
            remote_control_on=None,
+           windows_running=None,
            **apply_kwargs) -> list[ApplyResult]:
     """CMX-350/issue #468: actually relaunch a MANUAL row's dead agent — the one write path
     in this module that starts a NEW process rather than editing a JSON store.
@@ -764,9 +771,23 @@ def resume(verdicts: list[Verdict], runs: list[dict] | None = None, *,
     the session is launched once more with ``allow_remote_control=False``: Remote Control
     must never be what keeps a session down either.
 
+    👯 **CMX-511 — a session already live in another window.** :func:`plan`'s verdict is
+    read once, before the launches; a window can ``/resume`` the session inside an
+    already-running Claude after that, and its launch command (``--session-id <other>``)
+    never says so. So right before each launch, ``windows_running``
+    (:func:`chela.sessions.wids_running_session` over a fresh pane read) asks every live
+    window what session it runs NOW; if one runs this session the row is :data:`SKIPPED`
+    "already live at @N" and nothing is spawned. The same question is asked once more after
+    the launch comes up alive, because on 11-28 the other window switched one second after
+    the spawn: a session now live in a window OTHER than the one just opened gets that new
+    window closed (by its exact id) and is reported :data:`SKIPPED` the same way, its row
+    left as it was.
+
     Returns one :class:`ApplyResult` per input verdict, same order, same contract as
     :func:`apply`/:func:`retire_empty`.
     """
+    if windows_running is None:
+        windows_running = _default_windows_running
     if launch_settings_for is None:
         launch_settings_for = launch_settings.for_session
     if replay_settings is None:
@@ -836,6 +857,11 @@ def resume(verdicts: list[Verdict], runs: list[dict] | None = None, *,
                             f"retrying: {blocked}")
             continue
 
+        live_at = windows_running(v.session_id)
+        if live_at:
+            resumed_by_id[id(v)] = ApplyResult(v, SKIPPED, f"already live at {live_at[0]}")
+            continue
+
         r = relaunch_session(v.session_id, v.cwd, spawn_window=spawn_window,
                              check_resumed=check_resumed, kill_window=kill_window,
                              launch_settings_for=launch_settings_for,
@@ -853,6 +879,19 @@ def resume(verdicts: list[Verdict], runs: list[dict] | None = None, *,
             # issue #473: the window this call just opened never came up alive —
             # relaunch_session already closed it (see its docstring).
             resumed_by_id[id(v)] = ApplyResult(v, RESUME_FAILED, reason)
+            continue
+
+        # Without the new window's id there is nothing to tell apart or close by exact id.
+        others = ([w for w in windows_running(v.session_id) if w != result.wid]
+                  if result.wid else [])
+        if others:
+            # CMX-511: another window switched to this session while it was being launched.
+            # Keep that one (a human is in it) and close the duplicate this call opened.
+            kill_window(result.wid)
+            resumed_by_id[id(v)] = ApplyResult(
+                v, SKIPPED, f"already live at {others[0]}; it switched to this session "
+                            f"while restore launched it, so the duplicate at {result.wid} "
+                            "was closed")
             continue
 
         resumed_sessions.add(dedup_key)
