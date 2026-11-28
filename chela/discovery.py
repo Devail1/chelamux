@@ -119,7 +119,8 @@ def ensure_server(*, timeout: float = 10) -> str:
     """
     missing = envutil.tmux_tmpdir_missing()
     if missing:
-        log.error("REFUSING to start a tmux server: TMUX_TMPDIR=%s does not exist, and tmux "
+        # Debug only: the daemon calls this every tick and warns once per change itself.
+        log.debug("Not starting a tmux server: TMUX_TMPDIR=%s does not exist, and tmux "
                   "would silently fall back to the DEFAULT socket.", missing)
         return SERVER_REFUSED
     try:
@@ -140,7 +141,7 @@ def ensure_server(*, timeout: float = 10) -> str:
     except (subprocess.TimeoutExpired, FileNotFoundError):
         return SERVER_FAILED
     if proc.returncode != 0:
-        log.warning("Could not start a tmux server: %s", (proc.stderr or "").strip())
+        log.debug("Could not start a tmux server: %s", (proc.stderr or "").strip())
         return SERVER_FAILED
     log.info("Started an empty tmux server (no server was running): the restore boot pass "
              "can now see a tmux epoch")

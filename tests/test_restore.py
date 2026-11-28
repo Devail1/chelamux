@@ -1046,9 +1046,9 @@ def test_resume_reports_but_does_not_crash_when_orchestrator_reregistration_fail
 
     results = resume([v], [], **kit)
 
-    # CMX-510: the session came back — a failed re-registration is said, not "not resumed".
+    # CMX-510 keeps this one RACED: an unregistered orchestrator must stay on "not resumed".
     assert results == [ApplyResult(
-        v, RESUMED, "resumed at @99, but re-registering the orchestrator failed")]
+        v, RACED, "resumed at @99, but re-registering the orchestrator failed")]
 
 
 def test_resume_never_reregisters_when_the_launch_returns_no_wid():
@@ -1068,7 +1068,7 @@ def test_resume_never_reregisters_when_the_launch_returns_no_wid():
         "register_orchestrator must never be called when the launch returned no wid"
     )
     assert results == [ApplyResult(
-        v, RESUMED, "resumed at ?, but re-registering the orchestrator failed")]
+        v, RACED, "resumed at ?, but re-registering the orchestrator failed")]
 
 
 def test_resume_reports_RESUMED_when_remove_session_declines_and_says_the_row_was_left():
