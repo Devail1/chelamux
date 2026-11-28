@@ -303,17 +303,20 @@ def test_supervisor_follows_windows_and_reaps_on_sigterm(shell, tmp_path):
     proc = _start(shell, tmp_path, env)
     try:
         _wait_map(tmp_path, {"@1": 6200, "@2": 6201})
+        pid_of_1 = _read_pid(tmp_path / "pids" / "6200")
         # @1 closes, @3 opens in one tick. Additions run before removals, so @3 takes the
         # next free port; once @1 is gone, @4 gets its port back (the lowest free one).
         _windows(tmp_path, "@2", "@3")
         _wait_map(tmp_path, {"@2": 6201, "@3": 6202})
         _windows(tmp_path, "@2", "@3", "@4")
         _wait_map(tmp_path, {"@2": 6201, "@3": 6202, "@4": 6200})
+        # The map can land before @4's ttyd rewrites pids/6200, which still holds @1's pid.
+        pid_of_4 = _wait_respawn(tmp_path / "pids" / "6200", pid_of_1)
         # A ttyd that dies is respawned on the port it had.
         first = _read_pid(tmp_path / "pids" / "6201")
         os.kill(first, signal.SIGKILL)
-        _wait_respawn(tmp_path / "pids" / "6201", first)
-        pids = [_read_pid(tmp_path / "pids" / p) for p in ("6200", "6201", "6202")]
+        respawned = _wait_respawn(tmp_path / "pids" / "6201", first)
+        pids = [pid_of_4, respawned, _read_pid(tmp_path / "pids" / "6202")]
         assert all(_alive(p) for p in pids)
     finally:
         proc.send_signal(signal.SIGTERM)
