@@ -18,6 +18,7 @@ import re
 import shutil
 import signal
 import subprocess
+import threading
 import time
 from pathlib import Path
 
@@ -110,6 +111,79 @@ def test_the_guard_passes_bash32_code(snippet):
 
 # --- the supervisor, end to end under stubs ------------------------------------------------
 
+PID_WRITE_PAUSE = 0.5   # seconds the ttyd stub leaves its pid file empty
+
+
+def _pid_text(path: Path) -> str:
+    try:
+        return path.read_text().strip()
+    except FileNotFoundError:
+        return ""
+
+
+def _read_pid(path: Path, timeout: float = 10) -> int:
+    """The pid in `path`, waiting while the file is missing or empty (mid-rewrite)."""
+    deadline = time.monotonic() + timeout
+    while not (text := _pid_text(path)):
+        assert time.monotonic() < deadline, f"{path} was never written"
+        time.sleep(0.05)
+    return int(text)
+
+
+def _wait_respawn(path: Path, first: int, timeout: float = 30) -> int:
+    """The pid of the process that replaced `first` in `path`. An empty file is a rewrite
+    in progress, not a new pid."""
+    deadline = time.monotonic() + timeout
+    while True:
+        text = _pid_text(path)
+        if text and int(text) != first:
+            return int(text)
+        assert time.monotonic() < deadline, "the dead ttyd was never respawned"
+        time.sleep(0.05)
+
+
+def _write_later(path: Path, text: str, delay: float = 0.3) -> threading.Thread:
+    t = threading.Thread(target=lambda: (time.sleep(delay), path.write_text(text)))
+    t.start()
+    return t
+
+
+def test_read_pid_waits_out_a_missing_then_empty_file(tmp_path):
+    path = tmp_path / "6200"
+    t = _write_later(path, "", delay=0.1)
+    t2 = _write_later(path, "4321\n", delay=0.4)
+    assert _read_pid(path) == 4321
+    t.join()
+    t2.join()
+
+
+def test_read_pid_fails_closed_on_a_file_never_written(tmp_path):
+    path = tmp_path / "6200"
+    path.write_text("")
+    with pytest.raises(AssertionError, match="was never written"):
+        _read_pid(path, timeout=0.3)
+
+
+def test_an_empty_pid_file_is_a_rewrite_not_a_respawn(tmp_path):
+    """CMX-513: the old loop read an empty file as pid 0, which differs from `first`, so it
+    called a rewrite in progress a respawn and the next bare `int()` raised."""
+    path = tmp_path / "6201"
+    path.write_text("")
+    t = _write_later(path, "999\n")
+    assert _wait_respawn(path, first=111) == 999
+    t.join()
+
+
+def test_the_old_pid_is_not_a_respawn(tmp_path):
+    path = tmp_path / "6201"
+    path.write_text("111\n")
+    t = _write_later(path, "222\n")
+    assert _wait_respawn(path, first=111) == 222
+    t.join()
+    with pytest.raises(AssertionError, match="never respawned"):
+        _wait_respawn(path, first=222, timeout=0.3)
+
+
 def _stub(path: Path, body: str) -> None:
     path.write_text("#!/bin/sh\n" + body)
     path.chmod(0o755)
@@ -129,9 +203,14 @@ def _layout(tmp: Path) -> dict:
           f'echo "$*" >> "{tmp}/tmux.log"\n'
           f'[ "$1" = has-session ] && {{ [ -e "{tmp}/session" ]; exit $?; }}\n'
           "exit 0\n")
-    # ttyd: record its port and pid, then idle until killed.
+    # ttyd: record its port and pid, then idle until killed. The pid file is truncated and
+    # written in two steps with a pause between them, on purpose (CMX-513): a respawn
+    # rewrites a file the test may be reading, so every read must go through `_read_pid` /
+    # `_wait_respawn`, which treat an empty file as "not written yet". The pause makes that
+    # window wide enough that a bare `int(read_text())` fails every run, not once in a while.
     _stub(bin_ / "ttyd",
           'while [ $# -gt 0 ]; do [ "$1" = --port ] && port="$2"; shift; done\n'
+          f': > "{tmp}/pids/$port"; sleep {PID_WRITE_PAUSE}\n'
           f'echo $$ > "{tmp}/pids/$port"\n'
           "exec sleep 1000\n")
     (tmp / "pids").mkdir()
@@ -224,20 +303,20 @@ def test_supervisor_follows_windows_and_reaps_on_sigterm(shell, tmp_path):
     proc = _start(shell, tmp_path, env)
     try:
         _wait_map(tmp_path, {"@1": 6200, "@2": 6201})
+        pid_of_1 = _read_pid(tmp_path / "pids" / "6200")
         # @1 closes, @3 opens in one tick. Additions run before removals, so @3 takes the
         # next free port; once @1 is gone, @4 gets its port back (the lowest free one).
         _windows(tmp_path, "@2", "@3")
         _wait_map(tmp_path, {"@2": 6201, "@3": 6202})
         _windows(tmp_path, "@2", "@3", "@4")
         _wait_map(tmp_path, {"@2": 6201, "@3": 6202, "@4": 6200})
+        # The map can land before @4's ttyd rewrites pids/6200, which still holds @1's pid.
+        pid_of_4 = _wait_respawn(tmp_path / "pids" / "6200", pid_of_1)
         # A ttyd that dies is respawned on the port it had.
-        first = int((tmp_path / "pids" / "6201").read_text())
+        first = _read_pid(tmp_path / "pids" / "6201")
         os.kill(first, signal.SIGKILL)
-        deadline = time.monotonic() + 30
-        while int((tmp_path / "pids" / "6201").read_text() or 0) == first:
-            assert time.monotonic() < deadline, "the dead ttyd was never respawned"
-            time.sleep(0.2)
-        pids = [int((tmp_path / "pids" / p).read_text()) for p in ("6200", "6201", "6202")]
+        respawned = _wait_respawn(tmp_path / "pids" / "6201", first)
+        pids = [pid_of_4, respawned, _read_pid(tmp_path / "pids" / "6202")]
         assert all(_alive(p) for p in pids)
     finally:
         proc.send_signal(signal.SIGTERM)
@@ -295,7 +374,7 @@ def test_a_missing_session_is_no_windows_and_is_never_created(shell, heal, tmp_p
         _wait_map(tmp_path, {})
         (tmp_path / "session").write_text("")      # a spawn creates it
         _wait_map(tmp_path, {"@5": 6200})
-        pid = int((tmp_path / "pids" / "6200").read_text())
+        pid = _read_pid(tmp_path / "pids" / "6200")
         (tmp_path / "session").unlink()            # its last window closed
         _wait_map(tmp_path, {})
         deadline = time.monotonic() + 10
@@ -320,7 +399,7 @@ def test_one_failed_session_check_does_not_reap_the_wall(tmp_path):
     proc = _start("host", tmp_path, env)
     try:
         _wait_map(tmp_path, {"@8": 6200})
-        pid = int((tmp_path / "pids" / "6200").read_text())
+        pid = _read_pid(tmp_path / "pids" / "6200")
         log = tmp_path / "tmux.log"
         (tmp_path / "session").unlink()
         n = log.read_text().count("has-session")
@@ -361,7 +440,7 @@ def test_only_consecutive_failed_session_checks_reap_the_wall(tmp_path):
     proc = _start("host", tmp_path, env)
     try:
         _wait_map(tmp_path, {"@8": 6200})
-        pid = int((tmp_path / "pids" / "6200").read_text())
+        pid = _read_pid(tmp_path / "pids" / "6200")
         for _ in range(2):
             blip.write_text("")
             wait(lambda: not blip.exists(), "the supervisor never checked the session")
@@ -369,7 +448,7 @@ def test_only_consecutive_failed_session_checks_reap_the_wall(tmp_path):
             # two good checks: the blip's tick is over and a present tick ran in full
             wait(lambda: log.read_text().count("has-session") >= n + 2, "it stopped polling")
         assert _alive(pid), "two isolated session-check failures reaped a live tile"
-        assert int((tmp_path / "pids" / "6200").read_text()) == pid
+        assert _read_pid(tmp_path / "pids" / "6200") == pid
     finally:
         proc.send_signal(signal.SIGTERM)
         out, _ = proc.communicate(timeout=30)
