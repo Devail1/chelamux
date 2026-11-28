@@ -1046,8 +1046,9 @@ def test_resume_reports_but_does_not_crash_when_orchestrator_reregistration_fail
 
     results = resume([v], [], **kit)
 
-    assert results[0].action == RACED
-    assert "re-registering the orchestrator failed" in results[0].detail
+    # CMX-510 keeps this one RACED: an unregistered orchestrator must stay on "not resumed".
+    assert results == [ApplyResult(
+        v, RACED, "resumed at @99, but re-registering the orchestrator failed")]
 
 
 def test_resume_never_reregisters_when_the_launch_returns_no_wid():
@@ -1066,24 +1067,37 @@ def test_resume_never_reregisters_when_the_launch_returns_no_wid():
     assert not any(c[0] == "register" for c in calls), (
         "register_orchestrator must never be called when the launch returned no wid"
     )
-    assert results[0].action == RACED
+    assert results == [ApplyResult(
+        v, RACED, "resumed at ?, but re-registering the orchestrator failed")]
 
 
-def test_resume_reports_RACED_not_RESUMED_when_remove_session_declines():
-    """A session-ids row's own `remove_session` can decline exactly like `apply()`'s does
-    (the row moved on since `plan()` computed it) — the launch already happened, so this
-    must NOT report RESUMED (which would tell an operator the row is now clean) while the
-    row is still sitting in session-ids.json."""
+def test_resume_reports_RESUMED_when_remove_session_declines_and_says_the_row_was_left():
+    """CMX-510: a session-ids row's own `remove_session` can decline exactly like
+    `apply()`'s does (the row moved on since `plan()` computed it). The session is verified
+    ALIVE by then, so it is RESUMED — 11-28 filed four sessions resumed at @12-@15 under
+    "not resumed" because the new session had already rewritten its own dead row at the
+    same @N. The declined removal is said in the detail, and the row is left as is."""
     calls, kit = _resume_kit(remove_session=lambda wid, sid, stamped: (
         calls.append(("remove", wid, sid, stamped)), False)[1])
     v = _launchable(store="session-ids", wid="@5")
 
     results = resume([v], [], **kit)
 
-    assert results[0].action == RACED, (
-        f"remove_session declining must report RACED, not RESUMED — got {results[0].action}"
-    )
-    assert "row moved on" in results[0].detail
+    assert results == [ApplyResult(
+        v, RESUMED, "resumed at @99; its old session-ids row had already moved on, left as is")]
+    assert [c[0] for c in calls] == ["spawn", "archive", "remove"]
+
+
+def test_resume_reports_RESUME_FAILED_not_RESUMED_when_the_session_never_came_up():
+    """The other side of CMX-510: "not resumed" is kept for a session that really did not
+    come back — a window that opened but whose session never went live."""
+    calls, kit = _resume_kit(check_resumed=lambda wid, sid: False)
+    v = _launchable(store="session-ids", wid="@5")
+
+    results = resume([v], [], **kit)
+
+    assert results[0].action == RESUME_FAILED
+    assert not any(c[0] in ("archive", "remove") for c in calls)
 
 
 def test_resume_skips_a_session_id_that_does_not_look_like_one():

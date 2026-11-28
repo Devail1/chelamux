@@ -858,17 +858,24 @@ def resume(verdicts: list[Verdict], runs: list[dict] | None = None, *,
         resumed_sessions.add(dedup_key)
         clear_resume_failure(v.session_id)
         archive(_archive_entry(v))
+        # CMX-510: the session is verified ALIVE at this point. A session-ids row whose
+        # removal declines is still RESUMED, with the decline said in the detail (11-28:
+        # four sessions resumed at @12-@15 were reported not resumed because the new
+        # session had already rewritten its dead row at the same @N). An orchestrator
+        # that came back UNREGISTERED stays RACED: the inbox is not armed, and that must
+        # stay on the "not resumed" list where an operator looks.
+        ok = True
         if v.store == "inbox.orchestrator":
             ok = bool(result.wid) and bool(register_orchestrator(result.wid).get("ok"))
             detail = (f"resumed at {result.wid}, orchestrator re-registered" if ok else
                       f"resumed at {result.wid or '?'}, but re-registering the "
                       "orchestrator failed")
         elif v.store == CARRIED:        # owed by the boot marker — no store row to remove
-            ok, detail = True, f"resumed at {result.wid or '?'}"
+            detail = f"resumed at {result.wid or '?'}"
         else:
-            ok = remove_session(v.wid, v.session_id, v.stamped_epoch)
+            removed = remove_session(v.wid, v.session_id, v.stamped_epoch)
             detail = f"resumed at {result.wid or '?'}" + (
-                "" if ok else " (row moved on before it could be removed)")
+                "" if removed else "; its old session-ids row had already moved on, left as is")
         resumed_by_id[id(v)] = ApplyResult(v, RESUMED if ok else RACED, detail + settings_note)
 
     out: list[ApplyResult] = []
