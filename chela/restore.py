@@ -881,7 +881,9 @@ def resume(verdicts: list[Verdict], runs: list[dict] | None = None, *,
             resumed_by_id[id(v)] = ApplyResult(v, RESUME_FAILED, reason)
             continue
 
-        others = [w for w in windows_running(v.session_id) if w != result.wid]
+        # Without the new window's id there is nothing to tell apart or close by exact id.
+        others = ([w for w in windows_running(v.session_id) if w != result.wid]
+                  if result.wid else [])
         if others:
             # CMX-511: another window switched to this session while it was being launched.
             # Keep that one (a human is in it) and close the duplicate this call opened.

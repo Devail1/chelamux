@@ -168,6 +168,22 @@ def test_the_launched_window_itself_is_not_a_duplicate(fleet):
     assert results == [ApplyResult(_row(), RESUMED, "resumed at @99")]
 
 
+def test_a_live_launch_with_NO_window_id_never_closes_anything(fleet):
+    """A tmux that echoes no id still opened a window; the post-check cannot tell it apart,
+    so it must not call ``kill_window(None)`` or skip a session that did come back."""
+    seen = iter([[], ["@0"]])
+    calls = []
+
+    results = resume([_row()], [], **_kit(
+        calls, windows_running=lambda sid: next(seen),
+        spawn_window=lambda cwd, command=None, **kw: (
+            calls.append(("spawn", cwd, command)),
+            SpawnResult(ok=True, name="x", wid=None, cwd=cwd))[1]))
+
+    assert not any(c[0] == "kill" for c in calls)
+    assert results[0].action == RESUMED
+
+
 def test_the_default_post_check_reads_live_windows_through_a_fresh_pane_read(fleet):
     """End to end through the default seam: @0 switches to S after the pre-check, and the
     spawned @99 runs S by its command line. The duplicate is closed, @0 is kept."""
