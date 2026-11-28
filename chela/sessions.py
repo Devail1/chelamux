@@ -1021,6 +1021,23 @@ def wid_for_session(session_id: str | None,
     return None
 
 
+def wids_running_session(session_id: str | None,
+                         pane_map: dict[str, Pane] | None = None) -> list[str]:
+    """CMX-511: every live window whose CURRENT session is ``session_id``, in tmux order.
+
+    Asks each window what it is running NOW (:func:`session_of_window`: the event log
+    bounded by the process's start, then Claude Code's own registry, which a ``/resume``
+    inside the window rewrites), and falls back to the launch command line only for a
+    window neither can speak for. So a window launched with ``--session-id A`` that then
+    ``/resume``d into ``session_id`` counts, and one launched ``--resume <session_id>`` that
+    has since moved on does not. ``[]`` when nothing live runs it, or the id is malformed.
+    """
+    if not session_id or not SESSION_RE.match(session_id):
+        return []
+    pane_map = panes() if pane_map is None else pane_map
+    return [wid for wid in pane_map if session_of_window(wid, pane_map) == session_id]
+
+
 # --- session → transcript -----------------------------------------------------------
 
 def transcript_for_session(session_id: str | None, base: Path | None = None) -> Path | None:

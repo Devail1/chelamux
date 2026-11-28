@@ -29,7 +29,7 @@ def _resume_fn(spawned):
         check_resumed=lambda wid, sid: True, resume_blocked=lambda sid: None,
         clear_resume_failure=lambda sid: None, record_resume_failure=lambda *a: None,
         kill_window=lambda wid: None, archive=lambda entry: None,
-        remove_session=lambda *a: True)
+        remove_session=lambda *a: True, windows_running=lambda sid: [])
 
 
 def _boot(tmp_path, now, store, entries):
