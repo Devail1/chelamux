@@ -81,6 +81,73 @@ def list_sessions() -> list[str] | None:
     return [line.strip() for line in r.stdout.splitlines() if line.strip()]
 
 
+SERVER_RUNNING = "running"
+SERVER_STARTED = "started"
+SERVER_REFUSED = "refused"
+SERVER_FAILED = "failed"
+
+
+def ensure_server(*, timeout: float = 10) -> str:
+    """CMX-510: make sure a tmux server is running, so a headless boot gets a tmux epoch.
+
+    After a reboot PM2 starts every chela service, but nothing starts tmux: the restore
+    boot pass (:func:`chela.restore.boot_pass`) keys on a NEW epoch, and with no server
+    there is no epoch at all, so no session came back until a human opened a terminal
+    (2026-11-28: 6 h 27 min). The daemon calls this every tick.
+
+    Returns one of:
+
+    * :data:`SERVER_RUNNING` — tmux answered ``list-sessions``. Nothing is created and
+      nothing is set: a live server is never touched.
+    * :data:`SERVER_STARTED` — there was no server; one was started EMPTY (``start-server``
+      with ``exit-empty off``, so it outlives having no session) and its global env table
+      scrubbed (:func:`chela.envutil.scrub_tmux_secrets`).
+    * :data:`SERVER_REFUSED` — ``TMUX_TMPDIR`` names a directory that does not exist: tmux
+      would fall back to the default socket (see :func:`open_window`). No tmux call is made.
+    * :data:`SERVER_FAILED` — no tmux binary, a timeout, or tmux refused the start.
+
+    ⚖️ It starts a SERVER, never a session or a window. CMX-473 made "no session" mean "no
+    windows", with :func:`open_window` the only thing that ever creates the session — born
+    WITH the window being spawned. A placeholder shell created here would show up on the
+    sidebar, the Wall and Telegram as an agent. So the restore that follows is what creates
+    the ``chela`` session: its first relaunch goes through :func:`open_window`.
+
+    The server is started from :func:`chela.envutil.server_env` with the session pinned
+    (``CHELA_TMUX_SESSION``) and no ``TMUX``/``TMUX_PANE``: the server copies its starting
+    env into the global table every window inherits, and a leaked pane would aim a window's
+    chela at a mirror session.
+    """
+    missing = envutil.tmux_tmpdir_missing()
+    if missing:
+        log.error("REFUSING to start a tmux server: TMUX_TMPDIR=%s does not exist, and tmux "
+                  "would silently fall back to the DEFAULT socket.", missing)
+        return SERVER_REFUSED
+    try:
+        probe = subprocess.run(["tmux", "list-sessions", "-F", "#{session_name}"],
+                               capture_output=True, text=True, timeout=timeout)
+    except (subprocess.TimeoutExpired, FileNotFoundError):
+        return SERVER_FAILED
+    if probe.returncode == 0:
+        return SERVER_RUNNING
+    env = envutil.server_env()
+    env.pop("TMUX", None)
+    env.pop("TMUX_PANE", None)
+    env["CHELA_TMUX_SESSION"] = config.current_session()
+    try:
+        proc = subprocess.run(["tmux", "start-server", ";", "set-option", "-g",
+                               "exit-empty", "off"],
+                              capture_output=True, text=True, timeout=timeout, env=env)
+    except (subprocess.TimeoutExpired, FileNotFoundError):
+        return SERVER_FAILED
+    if proc.returncode != 0:
+        log.warning("Could not start a tmux server: %s", (proc.stderr or "").strip())
+        return SERVER_FAILED
+    log.info("Started an empty tmux server (no server was running): the restore boot pass "
+             "can now see a tmux epoch")
+    envutil.scrub_tmux_secrets()
+    return SERVER_STARTED
+
+
 def open_window(name: str, cwd: str, command: Sequence[str] = (), *,
                 session: str | None = None, timeout: float | None = 10,
                 check: bool = False) -> subprocess.CompletedProcess:

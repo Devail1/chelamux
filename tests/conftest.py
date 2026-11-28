@@ -846,6 +846,9 @@ _TMUX_MUTATING_SUBCOMMANDS = frozenset({
     "new-window", "new-session",
     "send-keys", "rename-window",
     "respawn-window", "respawn-pane",
+    # CMX-510: the daemon starts an empty server when none runs (`discovery.ensure_server`);
+    # on a box with no server, a test reaching it would boot one on the default socket.
+    "start-server",
 })
 
 # Captured at import, before any test can shadow `tmux` on `$PATH` — the fixed point
@@ -918,6 +921,17 @@ def _tmux_violation(argv: list, env: dict | None) -> str | None:
         "seam that issues it (e.g. `monkeypatch.setattr(restore_mod, "
         "'_default_kill_window', lambda wid: None)`)."
     )
+
+
+@pytest.fixture(autouse=True)
+def _no_tmux_server_start(monkeypatch):
+    """CMX-510: every daemon-loop test (``cmd_run``) ticks ``discovery.ensure_server``,
+    which STARTS a tmux server when none answers — on CI, the default socket. Stubbed to
+    "a server is running" for every test; ``tests/test_tmux_server_ensure.py`` restores
+    the real one and drives it against a scratch socket."""
+    from chela import discovery
+    monkeypatch.setattr(discovery, "ensure_server",
+                        lambda **kw: discovery.SERVER_RUNNING)
 
 
 @pytest.fixture(autouse=True)

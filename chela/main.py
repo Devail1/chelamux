@@ -233,6 +233,21 @@ def restore_session_names() -> None:
         log.exception("Session name/title restore failed")
 
 
+def ensure_tmux_server(previous: str | None) -> str | None:
+    """CMX-510: one daemon tick's :func:`chela.discovery.ensure_server`, logged only when its
+    outcome changes from ``previous`` (a missing tmux binary must not log every 30 s).
+    Returns the outcome, or ``previous`` when the call raised (logged, never fatal)."""
+    try:
+        state = discovery.ensure_server()
+    except Exception:
+        log.exception("Ensuring a tmux server failed")
+        return previous
+    if state != previous and state in (discovery.SERVER_FAILED, discovery.SERVER_REFUSED):
+        log.warning("No tmux server and none could be started (%s): sessions are not "
+                    "restored until one runs", state)
+    return state
+
+
 def _restore_gather() -> tuple[list, list[dict]]:
     """``(verdicts, runs)`` for :func:`chela.restore.boot_pass`, read as ``cmd_restore`` does."""
     from chela.telegram.bindings import BindingRegistry
@@ -340,6 +355,7 @@ def cmd_run(args) -> None:
     last_prune = 0.0
     # CMX-83: {window_id: folder} seen moved last tick — the rename waits one tick.
     folder_moves: dict[str, str] = {}
+    server_state: str | None = None   # CMX-510: the last ensure_tmux_server outcome
     stop = GracefulShutdown("chela daemon").install()
     # CMX-263: a signal mid-tick lets the launch in progress finish, then launches nothing new.
     dispatcher.set_shutdown_check(lambda: stop.stopping)
@@ -396,6 +412,9 @@ def cmd_run(args) -> None:
             except Exception:
                 log.exception("Override request sweep failed")
 
+            # CMX-510: a headless boot has no tmux server, so no epoch and no restore —
+            # start an EMPTY one (never a session: the restore's first relaunch creates it).
+            server_state = ensure_tmux_server(server_state)
             # CMX-125: a NEW tmux epoch (reboot, OOM) brings the human sessions back —
             # once per epoch; every other tick this is one marker read and a no-op.
             try:
